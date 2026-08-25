@@ -1169,7 +1169,7 @@
       "title": "Port trusted event component lifecycle manager",
       "createdAt": "2026-08-25",
       "sourcePR": null,
-      "sourceCommit": "ca760294f5ea4f207052c39c2218e1195103bc2a",
+      "sourceCommit": "1072cbe68bb8c9cb470d1b124c464da66c52831b",
       "tsPaths": ["src/ax/event/components.ts"],
       "portableSurface": "axprogram",
       "impact": "TypeScript exposes a trusted process-local event integration manager with stable component IDs and versions, dependency ordering, scoped reverse disposers, transactional activation rollback, serialized transitions, cooperative abort, inspectable diagnostics, and manager-visible hot replacement. Generated Python, Java, C++, Go, and Rust event runtimes retain their existing source lifecycle but do not expose this generic host component API.",
