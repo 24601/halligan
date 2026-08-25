@@ -178,6 +178,117 @@ describe('axSelectExecutableSkills', () => {
     registered.parameters!.type = 'object';
   });
 
+  it('materializes stateful artifact and context facts exactly once before validation', () => {
+    const target = artifact();
+    let requirementsReads = 0;
+    Object.defineProperty(target, 'requirements', {
+      enumerable: true,
+      get: () => {
+        requirementsReads++;
+        return requirementsReads === 1
+          ? { capabilities: ['admin'] }
+          : undefined;
+      },
+    });
+    const currentContext = context(target);
+    let capabilityReads = 0;
+    Object.defineProperty(currentContext, 'capabilities', {
+      enumerable: true,
+      get: () => {
+        capabilityReads++;
+        return capabilityReads === 1 ? [] : ['admin'];
+      },
+    });
+
+    const result = axSelectExecutableSkills([target], currentContext);
+    expect(requirementsReads).toBe(1);
+    expect(capabilityReads).toBe(1);
+    expect(result.artifacts).toEqual([]);
+    expect(result.inspection[0]?.reasons).toContain('missing_capability');
+  });
+
+  it('fails closed when artifact or context fact materialization throws', () => {
+    const target = artifact();
+    let artifactReads = 0;
+    Object.defineProperty(target, 'requirements', {
+      enumerable: true,
+      get: () => {
+        artifactReads++;
+        throw new Error('artifact getter failed');
+      },
+    });
+    const artifactResult = axSelectExecutableSkills([target], context(target));
+    expect(artifactReads).toBe(1);
+    expect(artifactResult.artifacts).toEqual([]);
+    expect(artifactResult.inspection[0]?.reasons).toEqual(['malformed']);
+
+    const validTarget = artifact();
+    const throwingContext = context(validTarget);
+    let contextReads = 0;
+    Object.defineProperty(throwingContext, 'capabilities', {
+      enumerable: true,
+      get: () => {
+        contextReads++;
+        throw new Error('context getter failed');
+      },
+    });
+    const contextResult = axSelectExecutableSkills(
+      [validTarget],
+      throwingContext
+    );
+    expect(contextReads).toBe(1);
+    expect(contextResult.artifacts).toEqual([]);
+    expect(contextResult.inspection[0]?.reasons).toEqual(['invalid_context']);
+  });
+
+  it('reads and binds a resolved func getter exactly once', async () => {
+    const target = artifact();
+    let reads = 0;
+    const resolved = {
+      name: 'stateful_checkout',
+      description: 'Stateful checkout fixture',
+    } as AxAgentFunction;
+    Object.defineProperty(resolved, 'func', {
+      enumerable: true,
+      get: () => {
+        reads++;
+        return reads === 1 ? () => 'BENIGN' : () => 'ATTACKER';
+      },
+    });
+
+    const result = axSelectExecutableSkills(
+      [target],
+      context(target, { resolveFunction: () => resolved })
+    );
+    expect(reads).toBe(1);
+    expect(await result.artifacts[0]?.function.func()).toBe('BENIGN');
+    expect(reads).toBe(1);
+  });
+
+  it('fails closed after one read when a resolved func getter throws', () => {
+    const target = artifact();
+    let reads = 0;
+    const resolved = {
+      name: 'throwing_checkout',
+      description: 'Throwing checkout fixture',
+    } as AxAgentFunction;
+    Object.defineProperty(resolved, 'func', {
+      enumerable: true,
+      get: () => {
+        reads++;
+        throw new Error('func getter failed');
+      },
+    });
+
+    const result = axSelectExecutableSkills(
+      [target],
+      context(target, { resolveFunction: () => resolved })
+    );
+    expect(reads).toBe(1);
+    expect(result.artifacts).toEqual([]);
+    expect(result.inspection[0]?.reasons).toEqual(['unresolved_function']);
+  });
+
   it.each([
     ['preconditions', [], 'missing_precondition'],
     ['tools', [], 'missing_tool'],

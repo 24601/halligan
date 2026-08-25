@@ -477,6 +477,10 @@ authority, capability, and receipt facts, and retain evaluation records outside
 Ax. `resolveFunction` is the trusted registry boundary; selected metadata and
 function schemas are copied and frozen, and the selected handler is bound to the
 resolved handler value so later registry-object mutation cannot swap it.
+Catalog, artifact, context, and option facts are detached and frozen before
+validation and then never reread from caller objects. Function resolution reads
+`func` exactly once, validates that exact value, and snapshots other function
+metadata without touching `func` again; throwing or cyclic getters fail closed.
 Select immediately before registration/invocation and select again whenever host
 principal, authority, capability, receipt, or compatibility facts change.
 `provenance` is informational and must never be populated from model output as

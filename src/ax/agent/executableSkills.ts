@@ -476,25 +476,112 @@ function missingAny(
   return required?.some((item) => !available.has(item)) ?? false;
 }
 
-function cloneAndFreeze<T>(value: T): T {
+function materializeDetached(
+  value: unknown,
+  copies = new WeakMap<object, unknown>(),
+  visiting = new WeakSet<object>(),
+  arrayLimit = MAX_LIST_ENTRIES
+): unknown {
+  if (!value || typeof value !== 'object') return value;
+  if (visiting.has(value)) throw new TypeError('cyclic metadata');
+  const existing = copies.get(value);
+  if (existing !== undefined) return existing;
+
+  visiting.add(value);
   if (Array.isArray(value)) {
-    return Object.freeze(value.map(cloneAndFreeze)) as T;
+    const length = value.length;
+    if (length > arrayLimit)
+      throw new TypeError('array metadata exceeds limit');
+    const keys = Reflect.ownKeys(value);
+    if (
+      keys.some(
+        (key) =>
+          typeof key !== 'string' ||
+          (key !== 'length' && !/^(0|[1-9]\d*)$/.test(key))
+      )
+    )
+      throw new TypeError('unsupported array metadata');
+    const copy: unknown[] = [];
+    copies.set(value, copy);
+    for (let index = 0; index < length; index++) {
+      copy[index] = materializeDetached(value[index], copies, visiting);
+    }
+    visiting.delete(value);
+    return Object.freeze(copy);
   }
-  if (value && typeof value === 'object') {
-    const copy = Object.fromEntries(
-      Object.entries(value).map(([key, entry]) => [key, cloneAndFreeze(entry)])
-    );
-    return Object.freeze(copy) as T;
+
+  const copy: Record<string, unknown> = {};
+  copies.set(value, copy);
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== 'string')
+      throw new TypeError('symbol metadata is unsupported');
+    Object.defineProperty(copy, key, {
+      value: materializeDetached(
+        (value as Record<string, unknown>)[key],
+        copies,
+        visiting
+      ),
+      enumerable: true,
+    });
   }
-  return value;
+  visiting.delete(value);
+  return Object.freeze(copy);
 }
 
-function snapshotFunction(fn: AxAgentFunction): Readonly<AxAgentFunction> {
-  const handler = fn.func;
-  return Object.freeze({
-    ...cloneAndFreeze({ ...fn, func: undefined }),
-    func: (args, extra) => handler(args, extra),
-  }) as Readonly<AxAgentFunction>;
+function tryMaterializeDetached(
+  value: unknown,
+  rootArrayLimit = MAX_LIST_ENTRIES
+): { ok: true; value: unknown } | { ok: false } {
+  try {
+    return {
+      ok: true,
+      value: materializeDetached(
+        value,
+        new WeakMap(),
+        new WeakSet(),
+        rootArrayLimit
+      ),
+    };
+  } catch {
+    return { ok: false };
+  }
+}
+
+function snapshotFunction(
+  value: unknown
+): Readonly<AxAgentFunction> | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  try {
+    // This is the only read of `func`. Metadata copying below explicitly omits it.
+    const handler = (value as AxAgentFunction).func;
+    if (typeof handler !== 'function') return undefined;
+
+    const metadata: Record<string, unknown> = {};
+    const copies = new WeakMap<object, unknown>([[value, metadata]]);
+    const visiting = new WeakSet<object>([value]);
+    for (const key of Reflect.ownKeys(value)) {
+      if (typeof key !== 'string') return undefined;
+      if (key === 'func') continue;
+      Object.defineProperty(metadata, key, {
+        value: materializeDetached(
+          (value as Record<string, unknown>)[key],
+          copies,
+          visiting
+        ),
+        enumerable: true,
+      });
+    }
+    visiting.delete(value);
+    const boundHandler: AxAgentFunction['func'] = (args, extra) =>
+      handler(args, extra);
+    const snapshot = {
+      ...metadata,
+      func: boundHandler,
+    } as unknown as AxAgentFunction;
+    return Object.freeze(snapshot);
+  } catch {
+    return undefined;
+  }
 }
 
 function uniqueSearchTerms(value: string): string {
@@ -559,7 +646,31 @@ export function axSelectExecutableSkills(
       ],
     };
   }
-  if (!isValidContext(context)) {
+  const catalogSnapshotResult = tryMaterializeDetached(
+    catalog,
+    MAX_CATALOG_ENTRIES
+  );
+  if (
+    !catalogSnapshotResult.ok ||
+    !Array.isArray(catalogSnapshotResult.value)
+  ) {
+    return {
+      artifacts: [],
+      inspection: [
+        {
+          eligible: false,
+          selected: false,
+          reasons: ['malformed'],
+        },
+      ],
+    };
+  }
+  const catalogSnapshot = catalogSnapshotResult.value;
+  const contextSnapshotResult = tryMaterializeDetached(context);
+  if (
+    !contextSnapshotResult.ok ||
+    !isValidContext(contextSnapshotResult.value)
+  ) {
     return {
       artifacts: [],
       inspection: [
@@ -571,7 +682,12 @@ export function axSelectExecutableSkills(
       ],
     };
   }
-  if (!isValidOptions(options)) {
+  const contextSnapshot = contextSnapshotResult.value;
+  const optionsSnapshotResult = tryMaterializeDetached(options);
+  if (
+    !optionsSnapshotResult.ok ||
+    !isValidOptions(optionsSnapshotResult.value)
+  ) {
     return {
       artifacts: [],
       inspection: [
@@ -583,18 +699,19 @@ export function axSelectExecutableSkills(
       ],
     };
   }
+  const optionsSnapshot = optionsSnapshotResult.value;
 
-  const admitted = new Set(context.admittedArtifacts.map(refKey));
-  const preconditions = new Set(context.preconditions ?? []);
-  const tools = new Set(context.tools ?? []);
-  const protocols = new Set(context.protocols ?? []);
-  const capabilities = new Set(context.capabilities ?? []);
+  const admitted = new Set(contextSnapshot.admittedArtifacts.map(refKey));
+  const preconditions = new Set(contextSnapshot.preconditions ?? []);
+  const tools = new Set(contextSnapshot.tools ?? []);
+  const protocols = new Set(contextSnapshot.protocols ?? []);
+  const capabilities = new Set(contextSnapshot.capabilities ?? []);
   const authorities = new Set(
-    (context.grantedAuthorities ?? []).map(authorityKey)
+    (contextSnapshot.grantedAuthorities ?? []).map(authorityKey)
   );
-  const now = Date.parse(context.now);
+  const now = Date.parse(contextSnapshot.now);
   const refCounts = new Map<string, number>();
-  for (const value of catalog) {
+  for (const value of catalogSnapshot) {
     if (!isValidArtifact(value)) continue;
     const key = refKey(value);
     refCounts.set(key, (refCounts.get(key) ?? 0) + 1);
@@ -607,7 +724,7 @@ export function axSelectExecutableSkills(
   }> = [];
   const inspection: AxExecutableSkillInspection[] = [];
 
-  for (const value of catalog) {
+  for (const value of catalogSnapshot) {
     if (!isValidArtifact(value)) {
       inspection.push({
         eligible: false,
@@ -620,7 +737,7 @@ export function axSelectExecutableSkills(
     const key = refKey(ref);
     const requirements = value.requirements;
     const reasons: AxExecutableSkillExclusionReason[] = [];
-    const receipt = matchingReceipt(value, context, now);
+    const receipt = matchingReceipt(value, contextSnapshot, now);
 
     if ((refCounts.get(key) ?? 0) > 1) reasons.push('duplicate_ref');
     if (!admitted.has(key)) reasons.push('not_admitted');
@@ -637,8 +754,8 @@ export function axSelectExecutableSkills(
     if (missingAny(requirements?.tools, tools)) reasons.push('missing_tool');
     if (
       requirements?.environments?.length &&
-      (!context.environment ||
-        !requirements.environments.includes(context.environment))
+      (!contextSnapshot.environment ||
+        !requirements.environments.includes(contextSnapshot.environment))
     )
       reasons.push('incompatible_environment');
     if (missingAny(requirements?.protocols, protocols))
@@ -648,8 +765,8 @@ export function axSelectExecutableSkills(
     if (
       requirements?.authorities?.some(
         (authority) =>
-          authority.principal !== context.principal ||
-          authority.audience !== context.audience ||
+          authority.principal !== contextSnapshot.principal ||
+          authority.audience !== contextSnapshot.audience ||
           !authorities.has(authorityKey(authority))
       )
     )
@@ -670,7 +787,7 @@ export function axSelectExecutableSkills(
   }
 
   const candidates = valid.filter((entry) => entry.inspection.eligible);
-  const query = options.query;
+  const query = optionsSnapshot.query;
   const ranked = query
     ? rankDocuments(
         query,
@@ -683,7 +800,7 @@ export function axSelectExecutableSkills(
           ],
         })),
         {
-          topK: options.topK ?? 3,
+          topK: optionsSnapshot.topK ?? 3,
           minScore: 0,
           marginRatio: 0,
           minDocs: 1,
@@ -692,7 +809,7 @@ export function axSelectExecutableSkills(
     : candidates
         .map(({ artifact }) => refKey(artifact))
         .sort()
-        .slice(0, options.topK ?? candidates.length);
+        .slice(0, optionsSnapshot.topK ?? candidates.length);
   const selectedKeys = new Set(ranked);
   const artifacts: AxSelectedExecutableSkill[] = [];
 
@@ -702,17 +819,17 @@ export function axSelectExecutableSkills(
       ranked.indexOf(refKey(right.artifact))
   )) {
     if (!selectedKeys.has(refKey(candidate.artifact))) continue;
-    const artifactSnapshot = cloneAndFreeze(candidate.artifact);
     let resolved: AxAgentFunction | undefined;
     try {
-      resolved = context.resolveFunction(
-        artifactSnapshot.functionRef,
-        axExecutableSkillRef(artifactSnapshot)
+      resolved = contextSnapshot.resolveFunction(
+        candidate.artifact.functionRef,
+        axExecutableSkillRef(candidate.artifact)
       );
     } catch {
       resolved = undefined;
     }
-    if (!resolved || typeof resolved.func !== 'function') {
+    const functionSnapshot = snapshotFunction(resolved);
+    if (!functionSnapshot) {
       candidate.inspection.eligible = false;
       candidate.inspection.reasons = ['unresolved_function'];
       continue;
@@ -720,8 +837,8 @@ export function axSelectExecutableSkills(
     candidate.inspection.selected = true;
     artifacts.push(
       Object.freeze({
-        artifact: artifactSnapshot,
-        function: snapshotFunction(resolved),
+        artifact: candidate.artifact,
+        function: functionSnapshot,
         ...(candidate.receipt
           ? { matchedVerifierReceiptRef: candidate.receipt.ref }
           : {}),
