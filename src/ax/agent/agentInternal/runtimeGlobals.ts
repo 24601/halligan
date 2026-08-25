@@ -4,6 +4,8 @@ import type {
   AxFunction,
   AxFunctionJSONSchema,
 } from '../../ai/types.js';
+import { setJSRuntimeHostFunctionSpeculationAdapter } from '../../funcs/jsRuntimeHostFunction.js';
+import { mergeAbortSignals } from '../../util/abort.js';
 import { AxAgentProtocolCompletionSignal } from '../completion.js';
 import { serializeForEval } from '../optimize.js';
 import { DISCOVERY_DISCOVER_NAME, MEMORIES_LOAD_NAME } from '../runtime.js';
@@ -137,7 +139,11 @@ export function wrapFunction(
   onFunctionCall?: AxAgentOnFunctionCall,
   eventContext?: import('../../event/types.js').AxEventContext
 ): (...args: unknown[]) => Promise<unknown> {
-  return async (...args: unknown[]) => {
+  const normalizedQualifiedName = qualifiedName ?? fn.name;
+
+  const normalizeCallArgs = (
+    args: readonly unknown[]
+  ): Record<string, unknown> => {
     let callArgs: Record<string, unknown>;
 
     if (
@@ -158,9 +164,10 @@ export function wrapFunction(
         }
       });
     }
+    return callArgs;
+  };
 
-    const normalizedQualifiedName = qualifiedName ?? fn.name;
-    const protocol = protocolForTrigger?.(normalizedQualifiedName);
+  const observeCall = async (callArgs: Record<string, unknown>) => {
     if (onFunctionCall) {
       try {
         await onFunctionCall({
@@ -171,20 +178,21 @@ export function wrapFunction(
         });
       } catch {}
     }
+  };
+
+  const observeResult = async (
+    callArgs: Record<string, unknown>,
+    result: Promise<unknown>
+  ): Promise<unknown> => {
     try {
-      const result = await fn.func(callArgs, {
-        abortSignal,
-        ai,
-        protocol,
-        eventContext,
-      });
+      const value = await result;
       functionCallRecorder?.({
         qualifiedName: normalizedQualifiedName,
         name: fn.name,
         arguments: serializeForEval(callArgs),
-        result: serializeForEval(result),
+        result: serializeForEval(value),
       });
-      return result;
+      return value;
     } catch (err) {
       if (err instanceof AxAgentProtocolCompletionSignal) {
         functionCallRecorder?.({
@@ -203,6 +211,54 @@ export function wrapFunction(
       throw err;
     }
   };
+
+  const launch = (
+    callArgs: Record<string, unknown>,
+    invocationSignal: AbortSignal | undefined,
+    includeCompletionProtocol = true
+  ): Promise<unknown> => {
+    try {
+      return Promise.resolve(
+        fn.func(callArgs, {
+          abortSignal: invocationSignal,
+          ai,
+          protocol: includeCompletionProtocol
+            ? protocolForTrigger?.(normalizedQualifiedName)
+            : undefined,
+          eventContext,
+        })
+      );
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  };
+
+  const wrapped = async (...args: unknown[]): Promise<unknown> => {
+    const callArgs = normalizeCallArgs(args);
+    await observeCall(callArgs);
+    return observeResult(callArgs, launch(callArgs, abortSignal));
+  };
+
+  // Child agents are intentionally excluded: their nested tools and budgets
+  // do not have a proven pure-call contract. External AxFunction/MCP/UCP
+  // callables still require an exact AxJSRuntime speculation allowlist entry.
+  if (kind === 'external') {
+    setJSRuntimeHostFunctionSpeculationAdapter(wrapped, {
+      launch: (args, signal) =>
+        launch(
+          normalizeCallArgs(args),
+          mergeAbortSignals(abortSignal, signal),
+          false
+        ),
+      commit: async (args, result) => {
+        const callArgs = normalizeCallArgs(args);
+        await observeCall(callArgs);
+        return observeResult(callArgs, result);
+      },
+    });
+  }
+
+  return wrapped;
 }
 
 /**

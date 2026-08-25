@@ -2,6 +2,7 @@ import type { AxAIService } from '../../ai/types.js';
 import { AxGen } from '../../dsp/generate.js';
 import type { AxSignature } from '../../dsp/sig.js';
 import type { AxFieldValue, AxProgramForwardOptions } from '../../dsp/types.js';
+import { setJSRuntimeHostFunctionSpeculationAdapter } from '../../funcs/jsRuntimeHostFunction.js';
 import { axMCPChildExecutionOptions } from '../../mcp/execution.js';
 import { mergeAbortSignals } from '../../util/abort.js';
 import { AxAIServiceAbortedError } from '../../util/apicall.js';
@@ -67,12 +68,13 @@ export function buildLlmQueryBindings(
       recursionForwardOptions
     );
 
-  const llmQuery = async (
+  const runLlmQuery = async (
     queryOrQueries:
       | string
       | { query: string; context?: unknown }
       | readonly { query: string; context?: unknown }[],
-    ctx?: unknown
+    ctx?: unknown,
+    invocationAbortSignal: AbortSignal | undefined = effectiveAbortSignal
   ): Promise<string | string[]> => {
     if (
       !Array.isArray(queryOrQueries) &&
@@ -80,14 +82,18 @@ export function buildLlmQueryBindings(
       queryOrQueries !== null &&
       'query' in queryOrQueries
     ) {
-      return llmQuery(queryOrQueries.query, queryOrQueries.context ?? ctx);
+      return runLlmQuery(
+        queryOrQueries.query,
+        queryOrQueries.context ?? ctx,
+        invocationAbortSignal
+      );
     }
 
-    if (effectiveAbortSignal?.aborted) {
+    if (invocationAbortSignal?.aborted) {
       throw new AxAIServiceAbortedError(
         'rlm-llm-query',
-        effectiveAbortSignal.reason
-          ? String(effectiveAbortSignal.reason)
+        invocationAbortSignal.reason
+          ? String(invocationAbortSignal.reason)
           : 'Aborted'
       );
     }
@@ -115,7 +121,7 @@ export function buildLlmQueryBindings(
     const runSingleLlmQuery = async (
       singleQuery: string,
       singleCtx?: unknown,
-      abortSignal: AbortSignal | undefined = effectiveAbortSignal
+      abortSignal: AbortSignal | undefined = invocationAbortSignal
     ): Promise<string> => {
       if (abortSignal?.aborted) {
         throw new AxAIServiceAbortedError(
@@ -253,7 +259,7 @@ export function buildLlmQueryBindings(
     if (Array.isArray(queryOrQueries)) {
       const batchAbortController = new AbortController();
       const batchAbortSignal =
-        mergeAbortSignals(effectiveAbortSignal, batchAbortController.signal) ??
+        mergeAbortSignals(invocationAbortSignal, batchAbortController.signal) ??
         batchAbortController.signal;
       let terminalBatchError:
         | AxAgentClarificationError
@@ -315,6 +321,18 @@ export function buildLlmQueryBindings(
     }
     return result;
   };
+
+  const llmQuery: LlmQueryBindings['llmQuery'] = (queryOrQueries, ctx) =>
+    runLlmQuery(queryOrQueries, ctx);
+  setJSRuntimeHostFunctionSpeculationAdapter(llmQuery, {
+    launch: (args, signal) =>
+      runLlmQuery(
+        args[0] as Parameters<LlmQueryBindings['llmQuery']>[0],
+        args[1],
+        mergeAbortSignals(effectiveAbortSignal, signal)
+      ),
+    commit: (_args, result) => result,
+  });
 
   return { llmQuery };
 }

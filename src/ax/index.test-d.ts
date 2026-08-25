@@ -14,6 +14,8 @@ import {
   type AxAIService,
   type AxFunction,
   type AxFunctionHandler,
+  AxJSRuntime,
+  type AxJSRuntimeSpeculationEvent,
   type AxParetoResult,
   type AxProgrammable,
   ax,
@@ -23,6 +25,28 @@ import {
   optimize,
 } from './index.js';
 import type { Equal, Expect, Flatten } from './util/typetest.js';
+
+// === AxJSRuntime speculation public surface ===
+const speculationEvents: AxJSRuntimeSpeculationEvent[] = [];
+new AxJSRuntime({
+  speculation: {
+    callables: {
+      'tools.lookup': { purity: 'pure', deterministic: true },
+      llmQuery: { purity: 'pure', deterministic: false },
+    },
+    maxConcurrency: 4,
+    maxCallsPerExecution: 16,
+    onEvent: (event) => speculationEvents.push(event),
+  },
+});
+new AxJSRuntime({
+  speculation: {
+    callables: {
+      // @ts-expect-error speculation requires an explicit pure attestation
+      'tools.write': { purity: 'impure', deterministic: true },
+    },
+  },
+});
 
 // Extract (and flatten) the inferred field objects from an AxSignature so they
 // can be compared against plain object literals with Equal.

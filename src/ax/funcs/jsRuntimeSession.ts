@@ -14,6 +14,7 @@ export const splitGlobalsForWorker = (
 ) => {
   const serializableGlobals: Record<string, unknown> = {};
   const fnMap = new Map<string, (...args: unknown[]) => unknown>();
+  const fnPathToRef = new Map<string, string>();
   let nextFnId = 0;
   const seen = new WeakMap<object, unknown>();
 
@@ -22,6 +23,7 @@ export const splitGlobalsForWorker = (
       const refId = options?.nextFnId ? options.nextFnId() : ++nextFnId;
       const ref = `fn_${refId}_${path || 'root'}`;
       fnMap.set(ref, value as (...args: unknown[]) => unknown);
+      fnPathToRef.set(path || 'root', ref);
       return { [FUNCTION_REF_KEY]: ref };
     }
 
@@ -63,7 +65,7 @@ export const splitGlobalsForWorker = (
     }
   }
 
-  return { serializableGlobals, fnMap };
+  return { serializableGlobals, fnMap, fnPathToRef };
 };
 
 export const validateSerializableGlobals = (

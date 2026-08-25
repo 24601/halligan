@@ -1654,6 +1654,59 @@ describe('AxAgent.test()', () => {
     ).rejects.toThrow(/AI service is required to use llmQuery/);
   });
 
+  it('speculates explicitly authorized independent llmQuery calls', async () => {
+    const events: Array<{ kind: string }> = [];
+    let active = 0;
+    let maxActive = 0;
+    let calls = 0;
+    const testMockAI = new AxMockAIService({
+      features: { functions: false, streaming: false },
+      chatResponse: async (req) => {
+        calls++;
+        active++;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        active--;
+        const prompt = req.chatPrompt
+          .map((message) => String(message.content ?? ''))
+          .join('\n');
+        return {
+          results: [
+            {
+              index: 0,
+              content: prompt.includes('Task: one')
+                ? 'Answer: ONE'
+                : 'Answer: TWO',
+              finishReason: 'stop',
+            },
+          ],
+          modelUsage: makeModelUsage(),
+        };
+      },
+    });
+    const testAgent = agent('query:string -> answer:string', {
+      ai: testMockAI,
+      contextFields: [],
+      runtime: new AxJSRuntime({
+        speculation: {
+          callables: {
+            llmQuery: { purity: 'pure', deterministic: false },
+          },
+          onEvent: (event) => events.push(event),
+        },
+      }),
+    });
+
+    await expect(
+      testAgent.test(
+        'const one = await llmQuery("one"); const two = await llmQuery("two"); console.log(JSON.stringify([one, two]));'
+      )
+    ).resolves.toBe('["ONE","TWO"]');
+    expect(calls).toBe(2);
+    expect(maxActive).toBe(2);
+    expect(events.filter((event) => event.kind === 'hit')).toHaveLength(2);
+  });
+
   it('exposes inspectRuntime when enabled by context policy', async () => {
     const testAgent = agent('query:string -> answer:string', {
       contextFields: [],
