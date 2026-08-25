@@ -1162,6 +1162,28 @@
       "completedAt": "2026-08-22",
       "completedByCommit": "040f954bce9c7dca44f7fd3436886d036f9e358b",
       "verification": "TS-derived native-image routing fixture; five-language AxIR dev verifier; npm run axir:check-packages; go test ./internal/axir; focused TypeScript router tests"
+    },
+    {
+      "id": "axir-2026-08-25-port-host-owned-executable-skill-compatibility-and-retirement-se",
+      "status": "open",
+      "title": "Port host-owned executable skill compatibility and retirement selection",
+      "createdAt": "2026-08-25",
+      "sourcePR": null,
+      "sourceCommit": "ca760294f5ea4f207052c39c2218e1195103bc2a",
+      "tsPaths": [
+        "src/ax/agent/executableSkills.test.ts",
+        "src/ax/agent/executableSkills.ts"
+      ],
+      "portableSurface": "axagent",
+      "impact": "TypeScript hosts can gate reusable AxAgentFunction artifacts by admission, compatibility, authority, verifier receipts, and lifecycle before registration; generated Ax agent packages do not yet expose the same optional selector contract.",
+      "suggestedAxirWork": [
+        "Add or update the TS-derived conformance fixture.",
+        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
+        "Run npm run axir:conformance:check and npm run test:axir."
+      ],
+      "completedAt": null,
+      "completedByCommit": null,
+      "verification": null
     }
   ],
   "nonPortableExemptions": [

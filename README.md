@@ -524,6 +524,7 @@ const result = await optimizer.compile(
 | Context map | `contextMap`, `AxAgentContextMap` | persistent orientation cache for recurring long context |
 | Memories | `onMemoriesSearch`, `recall(...)` | vector/BM25-backed context loader |
 | Skills | `onSkillsSearch`, `consult(...)` | on-demand prompt-section loader |
+| Executable skill artifacts | `axSelectExecutableSkills` | host-owned compatibility, authority, receipt, and retirement gate for existing functions |
 | Sandboxed JS runtime | `AxJSRuntime`, `AxJSRuntimePermission` | TypeScript runtime for Node, Bun, Deno, browser |
 | Recursive runtime (RLM) | `agent({ runtime, contextFields })` | long-context REPL with checkpointed replay |
 | Deployment profiles | `ai({ name: ... })` | 46 named native, router/cloud, hosted-inference, and configurable-runtime deployments |
@@ -596,7 +597,7 @@ providers, and read credentials from `.env`. Internal generated-package fixtures
 remain under `packages/<language>/examples` for AxIR verification, but the public
 catalog and website are generated only from `src/examples/<language>/`.
 
-Highlights: `extract.ts`, `react.ts`, `agent.ts`, `streaming1.ts`, `multi-modal.ts`, `audio-chat.ts`, `audio-batch-and-agent.ts`, `standard-schema.ts`, `rlm-memories-and-skills.ts`, `rlm-discovery.ts`, `gepa-flow.ts`, `openai-compatible.ts`, `ax-flow-enhanced-demo.ts`, `ax-flow-mermaid.ts`. [Browse all examples →](src/examples/)
+Highlights: `extract.ts`, `react.ts`, `agent.ts`, `streaming1.ts`, `multi-modal.ts`, `audio-chat.ts`, `audio-batch-and-agent.ts`, `standard-schema.ts`, `rlm-memories-and-skills.ts`, `executable-skill-compatibility-eval.ts`, `rlm-discovery.ts`, `gepa-flow.ts`, `openai-compatible.ts`, `ax-flow-enhanced-demo.ts`, `ax-flow-mermaid.ts`. [Browse all examples →](src/examples/)
 
 ## Community
 

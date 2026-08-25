@@ -12,11 +12,15 @@ import {
   type AxAIOpenAIResponsesConfig,
   type AxAIOpenAIResponsesRequest,
   type AxAIService,
+  type AxExecutableSkillArtifact,
+  type AxExecutableSkillSelection,
   type AxFunction,
   type AxFunctionHandler,
   type AxParetoResult,
   type AxProgrammable,
   ax,
+  axExecutableSkillRef,
+  axSelectExecutableSkills,
   f,
   flow,
   fn,
@@ -577,3 +581,32 @@ const responsesConfigMaxEffort: AxAIOpenAIResponsesConfig<
   string
 >['reasoningEffort'] = 'max';
 void responsesConfigMaxEffort;
+
+// === Host-owned executable skill selection ===
+const executableSkill: AxExecutableSkillArtifact = {
+  id: 'report-export',
+  version: '2',
+  name: 'Report export',
+  description: 'Export an authorized report',
+  function: {
+    name: 'export_report',
+    description: 'Export report',
+    func: () => 'report',
+  },
+  requirements: { capabilities: ['report.read'] },
+};
+const executableSkillSelection: AxExecutableSkillSelection =
+  axSelectExecutableSkills(
+    [executableSkill],
+    {
+      admittedArtifacts: [axExecutableSkillRef(executableSkill)],
+      capabilities: ['report.read'],
+    },
+    { query: 'export report', topK: 1 }
+  );
+const selectedExecutableFunction: AxAgentFunction | undefined =
+  executableSkillSelection.artifacts[0]?.function;
+void selectedExecutableFunction;
+
+// @ts-expect-error host admission is mandatory
+axSelectExecutableSkills([executableSkill], { capabilities: ['report.read'] });

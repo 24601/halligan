@@ -339,6 +339,102 @@ await releaseAgent.forward(
 
 You can use `skills` without setting `onSkillsSearch` at all. That is useful for static guides where the actor never needs to fetch more.
 
+## Host-Owned Executable Skill Artifacts
+
+`skills`, `skillsCatalog`, and `onSkillsSearch` load opaque Markdown guidance;
+they are not executable-skill registries. When a host has already built an
+`AxAgentFunction` and needs a compatibility/retirement gate before registering
+it, wrap it in `AxExecutableSkillArtifact` and call
+`axSelectExecutableSkills(...)`:
+
+```typescript
+import {
+  agent,
+  axExecutableSkillRef,
+  axSelectExecutableSkills,
+  type AxExecutableSkillArtifact,
+} from '@ax-llm/ax';
+
+const artifacts: AxExecutableSkillArtifact[] = [
+  {
+    id: 'browser-checkout',
+    version: '2',
+    name: 'Browser checkout',
+    description: 'Complete checkout in the current web store',
+    function: checkoutFunction,
+    requirements: {
+      preconditions: ['authenticated'],
+      tools: ['browser.navigate@2'],
+      environments: ['web-store@2026-08'],
+      protocols: ['commerce@1'],
+      capabilities: ['browser'],
+      authorities: ['purchase'],
+    },
+    verifierReceiptRefs: ['eval://checkout/2'],
+    provenance: { source: 'host-registry' },
+    knownFailureModes: ['Does not handle split shipment'],
+  },
+];
+
+const selection = axSelectExecutableSkills(
+  artifacts,
+  {
+    // Admission and accepted receipts are host-owned facts. Artifact metadata
+    // cannot add itself to either list.
+    admittedArtifacts: artifacts.map(axExecutableSkillRef),
+    preconditions: ['authenticated'],
+    tools: ['browser.navigate@2'],
+    environment: 'web-store@2026-08',
+    protocols: ['commerce@1'],
+    capabilities: ['browser'],
+    authorities: ['purchase'],
+    acceptedVerifierReceiptRefs: ['eval://checkout/2'],
+    now: new Date().toISOString(),
+  },
+  { query: 'complete checkout', topK: 1 }
+);
+
+const assistant = agent('task:string -> answer:string', {
+  contextFields: [],
+  functions: selection.artifacts.map((artifact) => artifact.function),
+});
+
+// Inactive/incompatible/malformed entries never enter `artifacts`; inspect
+// their exact exclusion reasons without exposing their functions to the agent.
+console.log(selection.inspection);
+```
+
+Requirements use exact host-canonicalized IDs. Include versions in tool,
+environment, and protocol IDs when compatibility depends on a version; Ax does
+not guess semver compatibility. Every requirement is all-of except
+`environments`, where any listed environment may match. `expiresAt`,
+`deprecatedAt`, `lifecycle`, and `supersededBy` exclude revisions by default.
+Malformed and duplicate references fail closed but remain in `inspection`.
+
+This is only a selection and audit boundary. It does not load files, install
+packages, execute artifact code, sandbox functions, verify receipt contents, or
+provide security isolation. The host must validate artifact and receipt sources,
+admit exact `id@version` references, supply current authority/capability facts,
+and retain evaluation records outside Ax. `provenance` is informational and
+must never be populated from model output as proof of trust. Legacy prompt skills
+are unchanged; rollback is removing the selector and passing ordinary functions
+directly.
+
+The deterministic zero-cost evaluation is:
+
+```bash
+node --import=tsx src/examples/executable-skill-compatibility-eval.ts
+```
+
+It compares naive lexical retrieval with compatibility-aware retrieval over
+held-out tool/environment/protocol changes, missing capability/authority,
+unaccepted and forged receipt metadata, malformed legacy input, expiry,
+deprecation, supersession, and a no-benefit control. It reports exact retrieval,
+false application, serialized artifact/context bytes, prompt bytes (zero), and
+wall-clock selector latency. This fixture measures retrieval mechanics only,
+not model answer quality, function safety, verifier correctness, or real-world
+latency.
+
 ## Advisory Relevance Hints (`relevanceRanking`)
 
 `relevanceRanking` is ON by default — leave it unset; set `relevanceRanking: false` to opt out. The default was flipped after its A/B gate passed (substance-judged, 49 runs per variant per model: small-model first-lookup precision 24%→90% and answer accuracy 14%→29%; frontier-model control accuracy 63%→88% with fewer turns). The generated language ports implement the same advisory hint contract through AxIR Core.

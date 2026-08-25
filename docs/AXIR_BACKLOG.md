@@ -18,7 +18,12 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
 
 ## Open
 
-No entries.
+- `axir-2026-08-25-port-host-owned-executable-skill-compatibility-and-retirement-se` [axagent] Port host-owned executable skill compatibility and retirement selection
+  - Status: open
+  - Source commit: `ca760294f5ea4f207052c39c2218e1195103bc2a`
+  - TS paths: `src/ax/agent/executableSkills.test.ts`, `src/ax/agent/executableSkills.ts`
+  - Impact: TypeScript hosts can gate reusable AxAgentFunction artifacts by admission, compatibility, authority, verifier receipts, and lifecycle before registration; generated Ax agent packages do not yet expose the same optional selector contract.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 
 ## Done
 

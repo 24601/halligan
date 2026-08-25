@@ -176,6 +176,18 @@ import type {
   AxResolvedAutoUpgrade,
   AxResolvedCitations,
 } from './agent/config.js';
+import {
+  type AxExecutableSkillArtifact,
+  type AxExecutableSkillContext,
+  type AxExecutableSkillExclusionReason,
+  type AxExecutableSkillInspection,
+  type AxExecutableSkillLifecycle,
+  type AxExecutableSkillRequirements,
+  type AxExecutableSkillSelection,
+  type AxSelectExecutableSkillsOptions,
+  axExecutableSkillRef,
+  axSelectExecutableSkills,
+} from './agent/executableSkills.js';
 import type {
   AxAgentPlaybookConfig,
   AxAgentPlaybookLearnOptions,
@@ -1503,6 +1515,7 @@ export { axEventMatches };
 export { axEventScopedCorrelationKey };
 export { axEventScopedDedupeKey };
 export { axEventSizeBytes };
+export { axExecutableSkillRef };
 export { axFetchJsonSpeech };
 export { axFetchMultipartTranscription };
 export { axGetAIProfile };
@@ -1569,6 +1582,7 @@ export { axResolveOpenAIChatAudioConfig };
 export { axResolveOpenAIRealtimeAudioConfig };
 export { axRuntimePrimitives };
 export { axScoreProvidersForRequest };
+export { axSelectExecutableSkills };
 export { axSelectOptimalProvider };
 export { axSerializeOptimizedProgram };
 export { axShouldUseGeminiLiveAudio };
@@ -2034,6 +2048,13 @@ export type { AxEventValue };
 export type { AxEvidenceDescriptor };
 export type { AxExample };
 export type { AxExamples };
+export type { AxExecutableSkillArtifact };
+export type { AxExecutableSkillContext };
+export type { AxExecutableSkillExclusionReason };
+export type { AxExecutableSkillInspection };
+export type { AxExecutableSkillLifecycle };
+export type { AxExecutableSkillRequirements };
+export type { AxExecutableSkillSelection };
 export type { AxExecutorModelPolicy };
 export type { AxExecutorModelPolicyEntry };
 export type { AxField };
@@ -2336,6 +2357,7 @@ export type { AxRuntimePrimitiveOverrideMap };
 export type { AxRuntimePrimitiveSignature };
 export type { AxRuntimePrimitiveStage };
 export type { AxSamplePickerOptions };
+export type { AxSelectExecutableSkillsOptions };
 export type { AxSelfTuningConfig };
 export type { AxSerializedOptimizedProgram };
 export type { AxSetExamplesOptions };
