@@ -366,6 +366,60 @@ describe('axSelectCodeRuntime', () => {
     ).toThrow(/security requirements require schemaVersion/);
   });
 
+  it('rejects stateful authority accessors before admission gating', () => {
+    let authorityReads = 0;
+    const requirements = {
+      schemaVersion: axRuntimeCapabilityRequirementsVersion,
+      get authority() {
+        authorityReads++;
+        return authorityReads === 1 ? { host: 'denied' as const } : undefined;
+      },
+    };
+
+    expect(() =>
+      axSelectCodeRuntime([runtime(capabilities())], requirements)
+    ).toThrow(/authority must be an own data property/);
+    expect(authorityReads).toBe(0);
+  });
+
+  it('rejects proxied resource requirements before admission gating', () => {
+    let resourceReads = 0;
+    const requirements = new Proxy(
+      {
+        schemaVersion: axRuntimeCapabilityRequirementsVersion,
+        resources: { maxTimeoutMs: 100 },
+      },
+      {
+        get(target, key, receiver) {
+          if (key === 'resources') {
+            resourceReads++;
+            return resourceReads === 1 ? target.resources : undefined;
+          }
+          return Reflect.get(target, key, receiver);
+        },
+      }
+    );
+
+    expect(() =>
+      axSelectCodeRuntime([runtime(capabilities())], requirements)
+    ).toThrow(/unable to create an immutable data snapshot/);
+    expect(resourceReads).toBe(0);
+  });
+
+  it('rejects non-enumerable security requirements before cloning', () => {
+    const requirements = {
+      schemaVersion: axRuntimeCapabilityRequirementsVersion,
+    } as Record<string, unknown>;
+    Object.defineProperty(requirements, 'authority', {
+      value: { host: 'denied' },
+      enumerable: false,
+    });
+
+    expect(() =>
+      axSelectCodeRuntime([runtime(capabilities())], requirements as never)
+    ).toThrow(/authority must be enumerable/);
+  });
+
   it.each([
     ['requirements', { inspect: true, futureCapability: true }],
     [

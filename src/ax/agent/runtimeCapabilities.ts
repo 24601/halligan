@@ -180,6 +180,34 @@ const platformAuthorityKeys: readonly (keyof AxRuntimePlatformAuthority)[] = [
   'nativeAddons',
   'wasi',
 ];
+const requirementObjectKeys: Readonly<Record<string, readonly string[]>> = {
+  requirements: [
+    'schemaVersion',
+    'inspect',
+    'snapshot',
+    'patch',
+    'abort',
+    'language',
+    'platform',
+    'protocol',
+    'persistence',
+    'resources',
+    'authority',
+  ],
+  'requirements.protocol': ['name', 'version'],
+  'requirements.persistence': ['session', 'restart'],
+  'requirements.resources': [
+    'maxTimeoutMs',
+    'timeoutEnforcement',
+    'maxMemoryMb',
+  ],
+  'requirements.authority': ['host', 'modules', 'network', 'platform'],
+  'requirements.authority.platform': platformAuthorityKeys,
+};
+const requirementArrayPaths = new Set([
+  'requirements.language',
+  'requirements.platform',
+]);
 const admissionReceipts = new WeakSet<object>();
 const admittedImplementations = new WeakMap<
   AxRuntimeAdmissionReceipt,
@@ -416,6 +444,100 @@ function snapshotDeclaration(
       : null;
   } catch {
     return null;
+  }
+}
+
+function assertRequirementDataTree(
+  value: unknown,
+  path: string,
+  seen: WeakSet<object>
+): void {
+  if (value === null || typeof value !== 'object') return;
+  if (seen.has(value)) {
+    throw new Error(`${path} must not contain cycles`);
+  }
+  seen.add(value);
+  const isArray = Array.isArray(value);
+  const prototype = Object.getPrototypeOf(value);
+  if (
+    (isArray && prototype !== Array.prototype) ||
+    (!isArray && prototype !== Object.prototype && prototype !== null)
+  ) {
+    throw new Error(`${path} must contain only plain objects and arrays`);
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const allowedKeys = isArray ? undefined : requirementObjectKeys[path];
+  if (!isArray && !allowedKeys) {
+    throw new Error(`${path} has an unsupported object value`);
+  }
+  if (isArray && !requirementArrayPaths.has(path)) {
+    throw new Error(`${path} has an unsupported array value`);
+  }
+  for (const key of Reflect.ownKeys(descriptors)) {
+    if (typeof key !== 'string') {
+      throw new Error(`${path} contains unsupported symbol fields`);
+    }
+    if (isArray && key === 'length') continue;
+    if (
+      (isArray && !/^(0|[1-9]\d*)$/.test(key)) ||
+      (!isArray && !allowedKeys?.includes(key))
+    ) {
+      throw new Error(`${path} contains unsupported field ${key}`);
+    }
+    const descriptor = descriptors[key];
+    if (!descriptor || !('value' in descriptor)) {
+      throw new Error(`${path}.${key} must be an own data property`);
+    }
+    if (!descriptor.enumerable) {
+      throw new Error(`${path}.${key} must be enumerable`);
+    }
+    assertRequirementDataTree(descriptor.value, `${path}.${key}`, seen);
+  }
+  if (isArray) {
+    const length = descriptors.length?.value;
+    for (let index = 0; index < length; index++) {
+      if (!descriptors[index]) {
+        throw new Error(`${path} must not contain sparse entries`);
+      }
+    }
+  }
+  seen.delete(value);
+}
+
+function freezeRequirementTree(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return Object.freeze(value.map(freezeRequirementTree));
+  }
+  if (value && typeof value === 'object') {
+    return Object.freeze(
+      Object.fromEntries(
+        Object.entries(value).map(([key, child]) => [
+          key,
+          freezeRequirementTree(child),
+        ])
+      )
+    );
+  }
+  return value;
+}
+
+function snapshotRequirements(
+  requirements: AxRuntimeCapabilityRequirements
+): AxRuntimeCapabilityRequirements {
+  try {
+    // Accessors are rejected before structuredClone can invoke them. The clone
+    // also rejects Proxy exotic objects, functions, and other non-data input.
+    assertRequirementDataTree(requirements, 'requirements', new WeakSet());
+    return freezeRequirementTree(
+      structuredClone(requirements)
+    ) as AxRuntimeCapabilityRequirements;
+  } catch (error) {
+    throw new Error(
+      `Invalid runtime capability requirements: unable to create an immutable data snapshot${
+        error instanceof Error ? `: ${error.message}` : ''
+      }`,
+      { cause: error }
+    );
   }
 }
 
@@ -823,8 +945,10 @@ export function axSelectCodeRuntime(
       rejected: [],
     };
   }
-  validateRequirements(requirements);
-  const needsAdmission = !!requirements.resources || !!requirements.authority;
+  const requirementSnapshot = snapshotRequirements(requirements);
+  validateRequirements(requirementSnapshot);
+  const needsAdmission =
+    !!requirementSnapshot.resources || !!requirementSnapshot.authority;
   const rejected: { index: number; reasons: string[] }[] = [];
   for (const [index, runtime] of runtimes.entries()) {
     const capabilities = snapshotDeclaration(runtime);
@@ -841,7 +965,7 @@ export function axSelectCodeRuntime(
     const reasons = capabilityRejectionReasons(
       runtime,
       capabilities,
-      requirements,
+      requirementSnapshot,
       admission.receipt,
       admission.stale
     );

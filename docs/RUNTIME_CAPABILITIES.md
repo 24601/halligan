@@ -45,6 +45,14 @@ positive safe integers, throw before candidates are considered. Unknown fields
 are never interpreted as satisfied. Missing, malformed, contradictory, and
 insufficient declarations are rejected.
 
+At selector ingress, requirements are accepted only as plain objects and dense
+arrays with enumerable own-data properties: accessors, symbols, hidden fields,
+cycles, exotic objects, and proxies are rejected. The selector then creates one
+deeply frozen plain snapshot and uses only that snapshot for schema validation,
+admission gating, and matching. This prevents a getter or proxy from changing a
+security requirement between those steps; it does not treat freezing as
+security proof.
+
 Inspect/snapshot/patch/abort, language, platform, protocol, and persistence may
 be matched against the immutable declaration snapshot. Authority and resource
 requirements are different: the selector refuses to satisfy them from a
