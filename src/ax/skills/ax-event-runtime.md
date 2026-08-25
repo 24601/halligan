@@ -83,6 +83,11 @@ await source.publish({ event, identity, trust: 'authenticated' });
   single-flights a scoped key with per-waiter cancellation and bounded pending
   keys/bytes; distributed hosts need reservations for callback-level
   exactly-once behavior.
+- Timed-out or cancelled callback promises retain a `maxInFlight` reservation
+  until they settle. Use a terminable worker/process boundary if capacity must
+  be recoverable from an abort-ignoring callback.
+- Observe options and scope fields are captured once. Provenance polarity is
+  limited to `supports`, `contradicts`, or `neutral`.
 - Detector latency metrics are finite and nonnegative. Extreme or reversing
   clocks clamp to the safe-integer range and set `detectorLatencyCapped`; do not
   treat capped samples as exact durations.

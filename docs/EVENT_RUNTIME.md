@@ -150,7 +150,11 @@ timestamps. Evidence beyond the configured future-skew allowance (five minutes
 by default) is ignored. Detector and grant callbacks are abortable and bounded
 to 30 seconds by default. A timeout is retained as fail-closed uncertainty;
 caller or runtime cancellation rejects the observation and is never converted
-into successful evidence.
+into successful evidence. Timeout or cancellation does not release the
+underlying callback reservation: an abort-ignoring promise remains charged
+against `maxInFlight` until it actually settles. Capacity exhaustion rejects new
+work. Hosts that must recover that capacity need an actually terminable worker
+or process boundary.
 
 Recorded detector latency is always finite and nonnegative. Clock reversal,
 overflow, or a duration above `Number.MAX_SAFE_INTEGER` milliseconds is clamped
@@ -181,6 +185,12 @@ observation needs a new host-selected key. Expiry prevents a proposal from
 remaining current, not an event from remaining deduplicated. Duplicate receipts
 are explicitly `historical: true`; hosts must never treat a prior grant state as
 current authority.
+
+Observe options, the scope container, and each scope field are captured once,
+preventing getter-backed options from combining unrelated route, instance, or
+principal values. Provenance polarity accepts only `supports`, `contradicts`,
+or `neutral`; malformed host polarity rejects before detection, while malformed
+detector polarity becomes explicit invalid-detector uncertainty.
 
 Run the deterministic mechanism evaluation with:
 

@@ -516,6 +516,41 @@ describe('AxDemandBoundary', () => {
     expect((await cancellable.list()).records).toHaveLength(0);
   });
 
+  it('keeps timed-out callback work charged until the underlying promise settles', async () => {
+    let active = 0;
+    const releases: Array<() => void> = [];
+    const detect = vi.fn(
+      () =>
+        new Promise<AxDemandDetection>((resolve) => {
+          active++;
+          releases.push(() => {
+            active--;
+            resolve(detection());
+          });
+        })
+    );
+    const value = new AxDemandBoundary({
+      detector: { id: 'capacity-detector', version: '1', detect },
+      now: () => now,
+      policy: { callbackTimeoutMs: 100, maxInFlight: 1 },
+    });
+    const timedOut = await value.observe(observation('capacity-timeout'));
+    expect(timedOut.record.detection.reasonCode).toBe('detector_timeout');
+    expect(active).toBe(1);
+    await expect(
+      value.observe(observation('capacity-blocked'))
+    ).rejects.toThrow('callback capacity was exhausted');
+    expect(detect).toHaveBeenCalledOnce();
+    expect(active).toBe(1);
+
+    releases[0]?.();
+    await vi.waitFor(() => expect(active).toBe(0));
+    const afterSettlement = value.observe(observation('capacity-restored'));
+    await vi.waitFor(() => expect(detect).toHaveBeenCalledTimes(2));
+    releases[1]?.();
+    expect((await afterSettlement).record.detection.outcome).toBe('demand');
+  });
+
   it('rejects invalid host observations explicitly before detection', async () => {
     const { value, detect } = boundary(detection(), {
       policy: { maxObservationBytes: 100 },
@@ -700,6 +735,62 @@ describe('AxDemandBoundary', () => {
     ).rejects.toThrow('AxDemandScope exceeds');
   });
 
+  it('snapshots observe options, scope container, and scope fields once', async () => {
+    let signalReads = 0;
+    let scopeReads = 0;
+    let routeReads = 0;
+    let instanceReads = 0;
+    let principalReads = 0;
+    const signal = new AbortController().signal;
+    const rawScope = {
+      get routeId() {
+        routeReads++;
+        return routeReads === 1 ? 'route-a' : 'route-changed';
+      },
+      get instanceKey() {
+        instanceReads++;
+        return instanceReads === 1 ? 'instance-a' : 'instance-changed';
+      },
+      get principalScope() {
+        principalReads++;
+        return principalReads === 1 ? 'principal-a' : 'principal-changed';
+      },
+    };
+    const options = {
+      get signal() {
+        signalReads++;
+        return signal;
+      },
+      get scope() {
+        scopeReads++;
+        return rawScope;
+      },
+    };
+    const value = boundary(detection());
+    const record = (
+      await value.value.observe(observation('scoped-options'), options)
+    ).record;
+    expect({
+      signalReads,
+      scopeReads,
+      routeReads,
+      instanceReads,
+      principalReads,
+    }).toEqual({
+      signalReads: 1,
+      scopeReads: 1,
+      routeReads: 1,
+      instanceReads: 1,
+      principalReads: 1,
+    });
+    expect(record.scope).toEqual({
+      boundaryId: 'fixture-detector@1',
+      routeId: 'route-a',
+      instanceKey: 'instance-a',
+      principalScope: 'principal-a',
+    });
+  });
+
   it('bounds in-memory retention by records, scopes, bytes, and age', async () => {
     let clock = now;
     const store = new AxInMemoryDemandStore({
@@ -775,6 +866,44 @@ describe('AxDemandBoundary', () => {
     expect(saturatedReceipt.record.proposal.expiresAt).toBe(
       Number.MAX_SAFE_INTEGER
     );
+  });
+
+  it('rejects malformed host polarity and invalidates detector polarity', async () => {
+    const host = boundary(detection());
+    await expect(
+      host.value.observe(
+        observation('bad-host-polarity', {
+          provenance: [
+            {
+              source: 'synthetic-host',
+              reference: 'bad-host-polarity',
+              observedAt: now,
+              polarity: 'fabricated' as 'supports',
+            },
+          ],
+        })
+      )
+    ).rejects.toThrow('observation.provenance[0].polarity is invalid');
+    expect(host.detect).not.toHaveBeenCalled();
+
+    const detector = boundary(
+      detection({
+        requestedDisposition: 'notify',
+        evidence: [
+          {
+            source: 'synthetic-detector',
+            reference: 'bad-detector-polarity',
+            observedAt: now,
+            polarity: 'fabricated' as 'supports',
+          },
+        ],
+      })
+    );
+    const record = (
+      await detector.value.observe(observation('bad-detector-polarity'))
+    ).record;
+    expect(record.detection.reasonCode).toBe('detector_invalid');
+    expect(record.proposal.disposition).toBe('annotate');
   });
 
   it('keeps store cursors safe at capacity', async () => {

@@ -384,6 +384,12 @@ function validateProvenance(
     nonEmpty(item.source, `${label}[${index}].source`);
     nonEmpty(item.reference, `${label}[${index}].reference`);
     finiteTimestamp(item.observedAt, `${label}[${index}].observedAt`);
+    if (
+      item.polarity !== undefined &&
+      !['supports', 'contradicts', 'neutral'].includes(item.polarity)
+    ) {
+      throw new Error(`${label}[${index}].polarity is invalid`);
+    }
   }
 }
 
@@ -458,6 +464,13 @@ class AxDemandCallbackTimeoutError extends Error {
   }
 }
 
+class AxDemandCallbackCapacityError extends Error {
+  constructor() {
+    super('AxDemandBoundary callback capacity was exhausted');
+    this.name = 'AxDemandCallbackCapacityError';
+  }
+}
+
 class AxDemandCancelledError extends Error {
   constructor(readonly reason: unknown) {
     super('Ax demand observation was cancelled');
@@ -468,9 +481,11 @@ class AxDemandCancelledError extends Error {
 async function runBoundedCallback<T>(
   callback: (signal: AbortSignal) => T | Promise<T>,
   signal: AbortSignal | undefined,
-  timeoutMs: number
+  timeoutMs: number,
+  reserve: () => () => void
 ): Promise<T> {
   if (signal?.aborted) throw new AxDemandCancelledError(signal.reason);
+  const release = reserve();
   const controller = new AbortController();
   let timeout: ReturnType<typeof setTimeout> | undefined;
   let onAbort: (() => void) | undefined;
@@ -489,7 +504,18 @@ async function runBoundedCallback<T>(
       reject(error);
     }, timeoutMs);
   });
-  const operation = Promise.resolve().then(() => callback(controller.signal));
+  const operation = Promise.resolve()
+    .then(() => callback(controller.signal))
+    .then(
+      (value) => {
+        release();
+        return value;
+      },
+      (error) => {
+        release();
+        throw error;
+      }
+    );
   try {
     return await Promise.race([operation, cancellation, deadline]);
   } finally {
@@ -756,6 +782,7 @@ export class AxDemandBoundary {
     }
   >();
   private inFlightBytes = 0;
+  private activeCallbacks = 0;
 
   constructor(options: Readonly<AxDemandBoundaryOptions>) {
     const rawDetector = options.detector;
@@ -847,8 +874,10 @@ export class AxDemandBoundary {
       scope?: Readonly<Partial<Omit<AxDemandScope, 'boundaryId'>>>;
     }> = {}
   ): Promise<Readonly<AxDemandReceipt>> {
-    if (options.signal?.aborted) {
-      throw new AxDemandCancelledError(options.signal.reason);
+    const signal = options.signal;
+    const rawScope = options.scope;
+    if (signal?.aborted) {
+      throw new AxDemandCancelledError(signal.reason);
     }
     const observation = deepFreeze(snapshotObservation(rawObservation));
     validateObservation(observation);
@@ -858,11 +887,20 @@ export class AxDemandBoundary {
         `AxDemandObservation is ${observationBytes} bytes; maximum is ${this.policy.maxObservationBytes}`
       );
     }
+    if (
+      rawScope !== undefined &&
+      (typeof rawScope !== 'object' || rawScope === null)
+    ) {
+      throw new Error('AxDemandScope must be an object');
+    }
+    const routeId = rawScope?.routeId;
+    const instanceKey = rawScope?.instanceKey;
+    const principalScope = rawScope?.principalScope;
     const scope = deepFreeze({
       boundaryId: this.id,
-      routeId: options.scope?.routeId ?? 'direct',
-      instanceKey: options.scope?.instanceKey ?? 'default',
-      principalScope: options.scope?.principalScope ?? 'anonymous',
+      routeId: routeId ?? 'direct',
+      instanceKey: instanceKey ?? 'default',
+      principalScope: principalScope ?? 'anonymous',
     });
     nonEmpty(scope.routeId, 'AxDemandScope.routeId');
     nonEmpty(scope.instanceKey, 'AxDemandScope.instanceKey');
@@ -914,7 +952,7 @@ export class AxDemandBoundary {
     }
     pending.waiters++;
     try {
-      const receipt = await waitForSharedWork(pending.promise, options.signal);
+      const receipt = await waitForSharedWork(pending.promise, signal);
       return duplicate
         ? { ...receipt, duplicate: true, historical: true }
         : receipt;
@@ -946,7 +984,8 @@ export class AxDemandBoundary {
             Object.freeze({ signal: callbackSignal, scope: frozenClone(scope) })
           ),
         signal,
-        this.policy.callbackTimeoutMs
+        this.policy.callbackTimeoutMs,
+        () => this.reserveCallback()
       );
       const candidateSnapshot = snapshotDetection(candidate);
       validateDetection(candidateSnapshot);
@@ -958,7 +997,12 @@ export class AxDemandBoundary {
       }
       detection = deepFreeze(candidateSnapshot);
     } catch (error) {
-      if (error instanceof AxDemandCancelledError) throw error;
+      if (
+        error instanceof AxDemandCancelledError ||
+        error instanceof AxDemandCallbackCapacityError
+      ) {
+        throw error;
+      }
       detection = uncertainDetection(
         error instanceof AxDemandCallbackTimeoutError
           ? 'detector_timeout'
@@ -1089,10 +1133,16 @@ export class AxDemandBoundary {
                 })
               ) ?? 'unknown',
             signal,
-            this.policy.callbackTimeoutMs
+            this.policy.callbackTimeoutMs,
+            () => this.reserveCallback()
           );
         } catch (error) {
-          if (error instanceof AxDemandCancelledError) throw error;
+          if (
+            error instanceof AxDemandCancelledError ||
+            error instanceof AxDemandCallbackCapacityError
+          ) {
+            throw error;
+          }
           standingGrantState = 'unknown';
         }
       }
@@ -1128,6 +1178,19 @@ export class AxDemandBoundary {
       // cannot suppress another observation by emitting a shared key.
       dedupeKey: fallbackDedupeKey,
     });
+  }
+
+  private reserveCallback(): () => void {
+    if (this.activeCallbacks >= this.policy.maxInFlight) {
+      throw new AxDemandCallbackCapacityError();
+    }
+    this.activeCallbacks++;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.activeCallbacks--;
+    };
   }
 }
 
