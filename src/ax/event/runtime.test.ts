@@ -14,6 +14,17 @@ import {
 
 const ai = {} as any;
 
+function deferred(): {
+  promise: Promise<void>;
+  resolve: () => void;
+} {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 function program(
   forward: (input: any, options?: any) => unknown | Promise<unknown>,
   id = 'test-program',
@@ -469,6 +480,63 @@ describe('AxEventRuntime', () => {
     });
     await expect(failing.start()).rejects.toThrow('broken:failed');
     expect(lifecycle).toEqual(['first:start', 'broken:start', 'first:close']);
+  });
+
+  it('fences and cleans source startup that overlaps close', async () => {
+    const startupGate = deferred();
+    const firstStarted = deferred();
+    const lifecycle: string[] = [];
+    let liveSources = 0;
+    const runtime = new AxEventRuntime({
+      routes: [],
+      sources: [
+        {
+          id: 'first',
+          start: async ({ signal }) => {
+            lifecycle.push('first:start');
+            firstStarted.resolve();
+            await startupGate.promise;
+            liveSources++;
+            return {
+              close: () => {
+                expect(signal.aborted).toBe(true);
+                liveSources--;
+                lifecycle.push('first:close');
+              },
+            };
+          },
+        },
+        {
+          id: 'second',
+          start: () => {
+            liveSources++;
+            lifecycle.push('second:start');
+            return {
+              close: () => {
+                liveSources--;
+                lifecycle.push('second:close');
+              },
+            };
+          },
+        },
+      ],
+    });
+
+    const starting = runtime.start();
+    await firstStarted.promise;
+    const closing = runtime.close({ drain: false });
+    startupGate.resolve();
+    const [startResult, closeResult] = await Promise.allSettled([
+      starting,
+      closing,
+    ]);
+
+    expect(startResult.status).toBe('rejected');
+    expect(closeResult.status).toBe('fulfilled');
+    expect(lifecycle).toEqual(['first:start', 'first:close']);
+    expect(liveSources).toBe(0);
+    await Promise.resolve();
+    expect(lifecycle).toEqual(['first:start', 'first:close']);
   });
 
   it('refuses durable sources on the volatile store by default', async () => {

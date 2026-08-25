@@ -129,6 +129,61 @@ describe('AxEventComponentManager', () => {
     });
   });
 
+  it('rejects late teardown registration without starting untracked cleanup', async () => {
+    const lifecycle: string[] = [];
+    let activations = 0;
+    let lateDisposals = 0;
+    let teardownOpen = false;
+    let overlapped = false;
+    const manager = new AxEventComponentManager();
+    await manager.define({
+      id: 'late-registration',
+      version: '1',
+      activate: (context) => {
+        activations++;
+        overlapped ||= teardownOpen;
+        lifecycle.push(`activate:${activations}`);
+        context.addDisposer('registered', () => {
+          teardownOpen = true;
+          lifecycle.push('teardown:start');
+          try {
+            context.addDisposer('late', async () => {
+              lateDisposals++;
+            });
+          } finally {
+            teardownOpen = false;
+            lifecycle.push('teardown:end');
+          }
+        });
+      },
+    });
+    await manager.activate();
+
+    const deactivation = manager.deactivate();
+    const reactivation = manager.activate();
+    const [deactivationResult, reactivationResult] = await Promise.allSettled([
+      deactivation,
+      reactivation,
+    ]);
+
+    expect(deactivationResult.status).toBe('rejected');
+    expect(reactivationResult.status).toBe('fulfilled');
+    expect(lifecycle).toEqual([
+      'activate:1',
+      'teardown:start',
+      'teardown:end',
+      'activate:2',
+    ]);
+    expect(lateDisposals).toBe(0);
+    expect(overlapped).toBe(false);
+    expect(manager.inspect('late-registration')).toMatchObject({
+      state: 'active',
+      diagnostics: expect.arrayContaining([
+        expect.objectContaining({ code: 'late-disposer' }),
+      ]),
+    });
+  });
+
   it('switches to a successful replacement only after candidate activation', async () => {
     const lifecycle: string[] = [];
     const manager = new AxEventComponentManager();
@@ -156,6 +211,69 @@ describe('AxEventComponentManager', () => {
 
     expect(manager.get('adapter')).toBe('v2');
     expect(lifecycle).toEqual(['v1:activate', 'v2:activate', 'v1:dispose']);
+  });
+
+  it('keeps defined and failed replacements inactive until explicit activation', async () => {
+    let definedCandidateActivations = 0;
+    const defined = new AxEventComponentManager();
+    await defined.define({
+      id: 'defined-adapter',
+      version: '1',
+      activate: () => 'v1',
+    });
+    await defined.replace({
+      id: 'defined-adapter',
+      version: '2',
+      activate: () => {
+        definedCandidateActivations++;
+        return 'v2';
+      },
+    });
+    expect(defined.inspect('defined-adapter')).toMatchObject({
+      version: '2',
+      state: 'defined',
+    });
+    expect(definedCandidateActivations).toBe(0);
+    await defined.activate();
+    expect(defined.get('defined-adapter')).toBe('v2');
+    expect(definedCandidateActivations).toBe(1);
+
+    let failedCandidateActivations = 0;
+    const failed = new AxEventComponentManager();
+    await failed.define({
+      id: 'failed-adapter',
+      version: '1',
+      activate: () => {
+        throw new Error('v1 failed');
+      },
+    });
+    await expect(failed.activate()).rejects.toThrow();
+    expect(failed.inspect('failed-adapter')?.state).toBe('failed');
+    await failed.replace({
+      id: 'failed-adapter',
+      version: '2',
+      activate: () => {
+        failedCandidateActivations++;
+        return 'v2';
+      },
+    });
+    expect(failed.inspect('failed-adapter')).toMatchObject({
+      version: '2',
+      state: 'defined',
+    });
+    expect(failedCandidateActivations).toBe(0);
+    await failed.activate();
+    expect(failed.get('failed-adapter')).toBe('v2');
+    expect(failedCandidateActivations).toBe(1);
+
+    await failed.dispose();
+    await expect(
+      failed.replace({
+        id: 'failed-adapter',
+        version: '3',
+        activate: () => 'v3',
+      })
+    ).rejects.toThrow('disposed');
   });
 
   it('keeps the prior component active when a replacement candidate fails', async () => {
@@ -319,6 +437,43 @@ describe('AxEventComponentManager', () => {
     expect(manager.inspect('listener')?.state).toBe('defined');
   });
 
+  it('disposes the complete transitive dependent definition closure', async () => {
+    const lifecycle: string[] = [];
+    const manager = new AxEventComponentManager();
+    await manager.define({
+      id: 'provider',
+      version: '1',
+      activate: (context) => {
+        context.addDisposer('provider', () => lifecycle.push('provider'));
+      },
+    });
+    await manager.define({
+      id: 'child',
+      version: '1',
+      dependencies: ['provider'],
+      activate: (context) => {
+        context.addDisposer('child', () => lifecycle.push('child'));
+      },
+    });
+    await manager.define({
+      id: 'inactive-grandchild',
+      version: '1',
+      dependencies: ['child'],
+      activate: () => undefined,
+    });
+    await manager.activate('child');
+
+    await manager.dispose('provider');
+
+    expect(lifecycle).toEqual(['child', 'provider']);
+    expect(manager.inspect('provider')?.state).toBe('disposed');
+    expect(manager.inspect('child')?.state).toBe('disposed');
+    expect(manager.inspect('inactive-grandchild')?.state).toBe('disposed');
+    await expect(manager.activate('child')).rejects.toThrow(
+      'Event component child is disposed'
+    );
+  });
+
   it('makes repeated lifecycle calls idempotent', async () => {
     const activate = vi.fn();
     const dispose = vi.fn();
@@ -372,6 +527,28 @@ describe('AxEventComponentManager', () => {
     await expect(activation).rejects.toThrow('activation transaction failed');
     expect(dispose).toHaveBeenCalledOnce();
     expect(manager.inspect('abortable')?.state).toBe('failed');
+  });
+
+  it('detaches the transition abort signal after activation commits', async () => {
+    const controller = new AbortController();
+    let lifetimeSignal: AbortSignal | undefined;
+    const manager = new AxEventComponentManager();
+    await manager.define({
+      id: 'committed',
+      version: '1',
+      activate: (context) => {
+        lifetimeSignal = context.signal;
+        context.addDisposer('committed', () => undefined);
+      },
+    });
+
+    await manager.activate(undefined, { signal: controller.signal });
+    controller.abort(new Error('transition already committed'));
+
+    expect(lifetimeSignal?.aborted).toBe(false);
+    expect(manager.inspect('committed')?.state).toBe('active');
+    await manager.deactivate();
+    expect(lifetimeSignal?.aborted).toBe(true);
   });
 
   it('diagnoses acquisitions that fail to return a disposer', async () => {

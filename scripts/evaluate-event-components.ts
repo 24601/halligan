@@ -1,4 +1,5 @@
 import { AxEventComponentManager } from '../src/ax/event/components.js';
+import { AxEventRuntime } from '../src/ax/event/runtime.js';
 
 type FaultResult = {
   manual: Record<string, boolean | number>;
@@ -17,17 +18,21 @@ const representative = {
 };
 
 const results = {
-  kind: 'deterministic lifecycle fault/stress evaluation',
+  kind: 'deterministic lifecycle mechanism demonstration and adversarial boundary matrix',
   iterations,
+  interpretation:
+    'The manual baseline is intentionally unmanaged and not semantics-equivalent; its purpose is to expose the mechanism each registered manager case adds, not to claim superiority over correct handwritten transactions.',
   ...representative,
-  faultStress: await faultStress(iterations),
+  adversarialBoundaries: await adversarialBoundaryMatrix(),
+  mechanismRepetitions: await mechanismRepetitions(iterations),
   transitionTiming: await transitionTiming(iterations),
   nonGuarantees: [
     'Unregistered effects are invisible and cannot be reversed or diagnosed.',
     'Disposers are compensating cleanup, not rollback of arbitrary external I/O.',
     'Abort is cooperative; activation code that ignores its signal can delay the serialized transition queue.',
     'Replacement is atomic only for the manager-visible binding; candidate setup effects must be staged by the host when external visibility matters.',
-    'Timing is descriptive process-local overhead, not a stable performance threshold.',
+    'Repeated deterministic cases are not schedule exploration, fuzzing, or model checking.',
+    'Timing compares a minimal manual call pair with a full manager define/activate/deactivate cycle; it is descriptive overhead, not a semantics-equivalent benchmark or stable performance threshold.',
   ],
 };
 
@@ -391,13 +396,445 @@ async function unmanagedEffect(): Promise<FaultResult> {
   };
 }
 
-async function faultStress(count: number): Promise<{
-  runsPerScenario: number;
+async function adversarialBoundaryMatrix() {
+  return {
+    runtimeStartCloseOverlap: await runtimeStartCloseOverlapBoundary(),
+    lateTeardownRegistration: await lateTeardownRegistrationBoundary(),
+    inactiveReplacement: await inactiveReplacementBoundary(),
+    partialDisposal: await partialDisposalBoundary(),
+    dependencySnapshot: await dependencySnapshotBoundary(),
+    abortBoundaries: await abortBoundaryMatrix(),
+    sourceHandleAndFailureBoundaries: await sourceHandleAndFailureBoundaries(),
+  };
+}
+
+async function runtimeStartCloseOverlapBoundary() {
+  const startupGate = deferred();
+  const firstStarted = deferred();
+  const lifecycle: string[] = [];
+  let liveSources = 0;
+  const runtime = new AxEventRuntime({
+    routes: [],
+    sources: [
+      {
+        id: 'boundary-first',
+        start: async ({ signal }) => {
+          lifecycle.push('first:start');
+          firstStarted.resolve();
+          await startupGate.promise;
+          liveSources++;
+          return {
+            close: () => {
+              if (!signal.aborted)
+                throw new Error('source signal was not aborted');
+              liveSources--;
+              lifecycle.push('first:close');
+            },
+          };
+        },
+      },
+      {
+        id: 'boundary-second',
+        start: () => {
+          liveSources++;
+          lifecycle.push('second:start');
+          return {
+            close: () => {
+              liveSources--;
+              lifecycle.push('second:close');
+            },
+          };
+        },
+      },
+    ],
+  });
+  const starting = runtime.start();
+  await firstStarted.promise;
+  const closing = runtime.close({ drain: false });
+  startupGate.resolve();
+  const [startResult, closeResult] = await Promise.allSettled([
+    starting,
+    closing,
+  ]);
+  return {
+    startRejected: startResult.status === 'rejected',
+    closeFulfilled: closeResult.status === 'fulfilled',
+    noLaterSourceStarted: !lifecycle.includes('second:start'),
+    lateHandleClosed: lifecycle.join(',') === 'first:start,first:close',
+    liveSources,
+  };
+}
+
+async function lateTeardownRegistrationBoundary() {
+  let activations = 0;
+  let teardownOpen = false;
+  let queuedActivationOverlapped = false;
+  let lateDisposerInvocations = 0;
+  const manager = new AxEventComponentManager();
+  await manager.define({
+    id: 'boundary-late-registration',
+    version: '1',
+    activate: (context) => {
+      activations++;
+      queuedActivationOverlapped ||= teardownOpen;
+      context.addDisposer('registered', () => {
+        teardownOpen = true;
+        try {
+          context.addDisposer('late', async () => {
+            lateDisposerInvocations++;
+          });
+        } finally {
+          teardownOpen = false;
+        }
+      });
+    },
+  });
+  await manager.activate();
+  const [deactivation, reactivation] = await Promise.allSettled([
+    manager.deactivate(),
+    manager.activate(),
+  ]);
+  return {
+    deactivationRejected: deactivation.status === 'rejected',
+    queuedActivationFulfilled: reactivation.status === 'fulfilled',
+    activationCount: activations,
+    queuedActivationOverlapped,
+    lateDisposerInvocations,
+    lateRegistrationDiagnosed:
+      manager
+        .inspect('boundary-late-registration')
+        ?.diagnostics.some(({ code }) => code === 'late-disposer') ?? false,
+  };
+}
+
+async function inactiveReplacementBoundary() {
+  let definedCandidateActivations = 0;
+  const defined = new AxEventComponentManager();
+  await defined.define({
+    id: 'boundary-defined',
+    version: '1',
+    activate: () => 'v1',
+  });
+  await defined.replace({
+    id: 'boundary-defined',
+    version: '2',
+    activate: () => {
+      definedCandidateActivations++;
+      return 'v2';
+    },
+  });
+
+  let failedCandidateActivations = 0;
+  const failed = new AxEventComponentManager();
+  await failed.define({
+    id: 'boundary-failed',
+    version: '1',
+    activate: () => {
+      throw new Error('expected activation failure');
+    },
+  });
+  await failed.activate().catch(() => undefined);
+  await failed.replace({
+    id: 'boundary-failed',
+    version: '2',
+    activate: () => {
+      failedCandidateActivations++;
+      return 'v2';
+    },
+  });
+
+  return {
+    definedCandidateActivations,
+    definedReplacementState:
+      defined.inspect('boundary-defined')?.state === 'defined',
+    failedCandidateActivations,
+    failedReplacementState:
+      failed.inspect('boundary-failed')?.state === 'defined',
+  };
+}
+
+async function partialDisposalBoundary() {
+  const manager = new AxEventComponentManager();
+  await manager.define({
+    id: 'boundary-provider',
+    version: '1',
+    activate: (context) => context.addDisposer('provider', () => undefined),
+  });
+  await manager.define({
+    id: 'boundary-child',
+    version: '1',
+    dependencies: ['boundary-provider'],
+    activate: (context) => context.addDisposer('child', () => undefined),
+  });
+  await manager.define({
+    id: 'boundary-inactive-grandchild',
+    version: '1',
+    dependencies: ['boundary-child'],
+    activate: () => undefined,
+  });
+  await manager.activate('boundary-child');
+  await manager.dispose('boundary-provider');
+  let reactivationRejected = false;
+  await manager.activate('boundary-child').catch(() => {
+    reactivationRejected = true;
+  });
+  return {
+    providerDisposed:
+      manager.inspect('boundary-provider')?.state === 'disposed',
+    activeChildDisposed:
+      manager.inspect('boundary-child')?.state === 'disposed',
+    inactiveGrandchildDisposed:
+      manager.inspect('boundary-inactive-grandchild')?.state === 'disposed',
+    reactivationRejected,
+  };
+}
+
+async function dependencySnapshotBoundary() {
+  const cleanupSnapshots: string[] = [];
+  const manager = new AxEventComponentManager();
+  await manager.define({
+    id: 'boundary-snapshot-provider',
+    version: '1',
+    activate: () => 'v1',
+  });
+  await manager.define({
+    id: 'boundary-snapshot-consumer',
+    version: '1',
+    dependencies: ['boundary-snapshot-provider'],
+    activate: (context) => {
+      const provider = context.dependency<string>('boundary-snapshot-provider');
+      context.addDisposer('consumer', () => {
+        cleanupSnapshots.push(
+          context.dependency<string>('boundary-snapshot-provider')
+        );
+      });
+      return provider;
+    },
+  });
+  await manager.activate();
+  await manager.replace({
+    id: 'boundary-snapshot-provider',
+    version: '2',
+    activate: () => 'v2',
+  });
+  const newProvider = manager.get<string>('boundary-snapshot-provider');
+  const newConsumer = manager.get<string>('boundary-snapshot-consumer');
+  await manager.dispose();
+  return {
+    retiredCleanupSawPriorDependency: cleanupSnapshots[0] === 'v1',
+    stagedConsumerSawCandidate: newProvider === 'v2' && newConsumer === 'v2',
+  };
+}
+
+async function abortBoundaryMatrix() {
+  let preActivationCalls = 0;
+  const before = new AxEventComponentManager();
+  await before.define({
+    id: 'abort-before',
+    version: '1',
+    activate: () => {
+      preActivationCalls++;
+    },
+  });
+  const beforeController = new AbortController();
+  beforeController.abort(new Error('before activation'));
+  await before
+    .activate(undefined, { signal: beforeController.signal })
+    .catch(() => undefined);
+
+  let duringResources = 0;
+  const duringStarted = deferred();
+  const during = new AxEventComponentManager();
+  await during.define({
+    id: 'abort-during',
+    version: '1',
+    activate: async (context) => {
+      duringResources++;
+      context.addDisposer('during', () => {
+        duringResources--;
+      });
+      duringStarted.resolve();
+      await waitForAbort(context.signal);
+    },
+  });
+  const duringController = new AbortController();
+  const duringActivation = during
+    .activate(undefined, { signal: duringController.signal })
+    .catch(() => undefined);
+  await duringStarted.promise;
+  duringController.abort(new Error('during activation'));
+  await duringActivation;
+
+  let acquiredResources = 0;
+  const acquired = deferred();
+  const releaseAfterAcquire = deferred();
+  const afterAcquire = new AxEventComponentManager();
+  await afterAcquire.define({
+    id: 'abort-after-acquire',
+    version: '1',
+    activate: async (context) => {
+      await context.acquire('after-acquire', () => {
+        acquiredResources++;
+        return {
+          value: undefined,
+          dispose: () => {
+            acquiredResources--;
+          },
+        };
+      });
+      acquired.resolve();
+      await releaseAfterAcquire.promise;
+    },
+  });
+  const afterAcquireController = new AbortController();
+  const afterAcquireActivation = afterAcquire
+    .activate(undefined, { signal: afterAcquireController.signal })
+    .catch(() => undefined);
+  await acquired.promise;
+  afterAcquireController.abort(new Error('after acquisition'));
+  releaseAfterAcquire.resolve();
+  await afterAcquireActivation;
+
+  let committedSignal: AbortSignal | undefined;
+  const afterCommit = new AxEventComponentManager();
+  await afterCommit.define({
+    id: 'abort-after-commit',
+    version: '1',
+    activate: (context) => {
+      committedSignal = context.signal;
+      context.addDisposer('committed', () => undefined);
+    },
+  });
+  const afterCommitController = new AbortController();
+  await afterCommit.activate(undefined, {
+    signal: afterCommitController.signal,
+  });
+  afterCommitController.abort(new Error('after commit'));
+  const activeAfterTransitionAbort =
+    afterCommit.inspect('abort-after-commit')?.state === 'active' &&
+    committedSignal?.aborted === false;
+  await afterCommit.deactivate();
+
+  return {
+    beforeActivationSkipped:
+      preActivationCalls === 0 &&
+      before.inspect('abort-before')?.state === 'defined',
+    duringActivationRolledBack:
+      duringResources === 0 &&
+      during.inspect('abort-during')?.state === 'failed',
+    afterAcquireRolledBack:
+      acquiredResources === 0 &&
+      afterAcquire.inspect('abort-after-acquire')?.state === 'failed',
+    activeAfterTransitionAbort,
+    lifetimeAbortedOnDeactivate: committedSignal?.aborted === true,
+  };
+}
+
+async function sourceHandleAndFailureBoundaries() {
+  let undefinedStarts = 0;
+  const undefinedHandle = new AxEventRuntime({
+    routes: [],
+    sources: [
+      {
+        id: 'undefined-handle',
+        start: () => {
+          undefinedStarts++;
+        },
+      },
+    ],
+  });
+  await undefinedHandle.start();
+  await undefinedHandle.close({ drain: false });
+
+  let startupResources = 0;
+  const startupFailure = new AxEventRuntime({
+    routes: [],
+    sources: [
+      {
+        id: 'startup-first',
+        start: () => {
+          startupResources++;
+          return { close: () => startupResources-- };
+        },
+      },
+      {
+        id: 'startup-failure',
+        start: () => {
+          throw new Error('expected startup failure');
+        },
+      },
+    ],
+  });
+  let startupRejected = false;
+  await startupFailure.start().catch(() => {
+    startupRejected = true;
+  });
+
+  let cleanupResources = 0;
+  let cleanupContinued = false;
+  const cleanupFailure = new AxEventRuntime({
+    routes: [],
+    sources: [
+      {
+        id: 'cleanup-continued',
+        start: () => {
+          cleanupResources++;
+          return {
+            close: () => {
+              cleanupResources--;
+              cleanupContinued = true;
+            },
+          };
+        },
+      },
+      {
+        id: 'cleanup-failure',
+        start: () => {
+          cleanupResources++;
+          return {
+            close: () => {
+              throw new Error('expected cleanup failure');
+            },
+          };
+        },
+      },
+    ],
+  });
+  await cleanupFailure.start();
+  await cleanupFailure.close({ drain: false });
+
+  const malformedHandle = new AxEventRuntime({
+    routes: [],
+    sources: [
+      {
+        id: 'malformed-handle',
+        start: () => ({ close: undefined }) as any,
+      },
+    ],
+  });
+  await malformedHandle.start();
+  const malformedClose = await Promise.allSettled([
+    malformedHandle.close({ drain: false }),
+  ]);
+
+  return {
+    undefinedHandleAccepted: undefinedStarts === 1,
+    startupFailureRejected: startupRejected,
+    startupRollbackClosedPrior: startupResources === 0,
+    cleanupContinuedAfterFailure: cleanupContinued,
+    failedDisposerResourceRemains: cleanupResources === 1,
+    malformedHandleCloseContained: malformedClose[0]?.status === 'fulfilled',
+    malformedHandleReversible: false,
+  };
+}
+
+async function mechanismRepetitions(count: number): Promise<{
+  runsPerCase: number;
   totalRuns: number;
-  managedInvariantFailures: number;
-  manualFaultsObserved: number;
+  managerInvariantFailures: number;
+  unmanagedExpectedOutcomes: number;
   totalMs: number;
-  meanScenarioMs: number;
+  meanCaseMs: number;
 }> {
   const scenarios = [
     ['activationFailure', activationFailure],
@@ -408,29 +845,30 @@ async function faultStress(count: number): Promise<{
     ['disposalError', disposalError],
     ['unmanagedEffect', unmanagedEffect],
   ] as const;
-  let managedInvariantFailures = 0;
-  let manualFaultsObserved = 0;
+  let managerInvariantFailures = 0;
+  let unmanagedExpectedOutcomes = 0;
   const startedAt = performance.now();
   for (let iteration = 0; iteration < count; iteration++) {
     for (const [name, scenario] of scenarios) {
       const result = await scenario();
-      if (!managedFaultPassed(name, result)) managedInvariantFailures++;
-      if (manualFaultObserved(name, result)) manualFaultsObserved++;
+      if (!managedFaultPassed(name, result)) managerInvariantFailures++;
+      if (unmanagedExpectedOutcome(name, result)) unmanagedExpectedOutcomes++;
     }
   }
   const totalMs = performance.now() - startedAt;
   const totalRuns = count * scenarios.length;
   return {
-    runsPerScenario: count,
+    runsPerCase: count,
     totalRuns,
-    managedInvariantFailures,
-    manualFaultsObserved,
+    managerInvariantFailures,
+    unmanagedExpectedOutcomes,
     totalMs: round(totalMs),
-    meanScenarioMs: round(totalMs / totalRuns),
+    meanCaseMs: round(totalMs / totalRuns),
   };
 }
 
 async function transitionTiming(count: number): Promise<{
+  comparison: string;
   manual: { meanMs: number; p95Ms: number };
   managed: { meanMs: number; p95Ms: number };
   meanOverheadMs: number;
@@ -459,6 +897,8 @@ async function transitionTiming(count: number): Promise<{
   const manualMean = mean(manual);
   const managedMean = mean(managed);
   return {
+    comparison:
+      'Minimal unmanaged disposer assignment/invocation versus manager define/activate/deactivate; not semantics-equivalent.',
     manual: {
       meanMs: round(manualMean),
       p95Ms: round(percentile(manual, 0.95)),
@@ -470,6 +910,14 @@ async function transitionTiming(count: number): Promise<{
     meanOverheadMs: round(managedMean - manualMean),
     overheadRatio: round(managedMean / Math.max(manualMean, 0.000_001)),
   };
+}
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
 }
 
 function waitForAbort(signal: AbortSignal): Promise<never> {
@@ -549,7 +997,7 @@ function managedFaultPassed(name: string, result: FaultResult): boolean {
   }
 }
 
-function manualFaultObserved(name: string, result: FaultResult): boolean {
+function unmanagedExpectedOutcome(name: string, result: FaultResult): boolean {
   if (name === 'unmanagedEffect') {
     return (
       result.manual.leakedResources === 1 && result.manual.reversible === false
@@ -561,6 +1009,7 @@ function manualFaultObserved(name: string, result: FaultResult): boolean {
 }
 
 function assertManagedResults(result: typeof results): void {
+  const boundaries = result.adversarialBoundaries;
   const failures = [
     result.activationFailure.managed.leakedResources !== 0,
     result.activationFailure.managed.reverseRollback !== true,
@@ -573,7 +1022,46 @@ function assertManagedResults(result: typeof results): void {
     result.concurrentTransitions.managed.finalInactive !== true,
     result.disposalError.managed.continuedAfterError !== true,
     result.unmanagedEffect.managed.leakedResources !== 1,
-    result.faultStress.managedInvariantFailures !== 0,
+    result.mechanismRepetitions.managerInvariantFailures !== 0,
+    boundaries.runtimeStartCloseOverlap.startRejected !== true,
+    boundaries.runtimeStartCloseOverlap.closeFulfilled !== true,
+    boundaries.runtimeStartCloseOverlap.noLaterSourceStarted !== true,
+    boundaries.runtimeStartCloseOverlap.lateHandleClosed !== true,
+    boundaries.runtimeStartCloseOverlap.liveSources !== 0,
+    boundaries.lateTeardownRegistration.deactivationRejected !== true,
+    boundaries.lateTeardownRegistration.queuedActivationFulfilled !== true,
+    boundaries.lateTeardownRegistration.activationCount !== 2,
+    boundaries.lateTeardownRegistration.queuedActivationOverlapped !== false,
+    boundaries.lateTeardownRegistration.lateDisposerInvocations !== 0,
+    boundaries.lateTeardownRegistration.lateRegistrationDiagnosed !== true,
+    boundaries.inactiveReplacement.definedCandidateActivations !== 0,
+    boundaries.inactiveReplacement.definedReplacementState !== true,
+    boundaries.inactiveReplacement.failedCandidateActivations !== 0,
+    boundaries.inactiveReplacement.failedReplacementState !== true,
+    boundaries.partialDisposal.providerDisposed !== true,
+    boundaries.partialDisposal.activeChildDisposed !== true,
+    boundaries.partialDisposal.inactiveGrandchildDisposed !== true,
+    boundaries.partialDisposal.reactivationRejected !== true,
+    boundaries.dependencySnapshot.retiredCleanupSawPriorDependency !== true,
+    boundaries.dependencySnapshot.stagedConsumerSawCandidate !== true,
+    boundaries.abortBoundaries.beforeActivationSkipped !== true,
+    boundaries.abortBoundaries.duringActivationRolledBack !== true,
+    boundaries.abortBoundaries.afterAcquireRolledBack !== true,
+    boundaries.abortBoundaries.activeAfterTransitionAbort !== true,
+    boundaries.abortBoundaries.lifetimeAbortedOnDeactivate !== true,
+    boundaries.sourceHandleAndFailureBoundaries.undefinedHandleAccepted !==
+      true,
+    boundaries.sourceHandleAndFailureBoundaries.startupFailureRejected !== true,
+    boundaries.sourceHandleAndFailureBoundaries.startupRollbackClosedPrior !==
+      true,
+    boundaries.sourceHandleAndFailureBoundaries.cleanupContinuedAfterFailure !==
+      true,
+    boundaries.sourceHandleAndFailureBoundaries
+      .failedDisposerResourceRemains !== true,
+    boundaries.sourceHandleAndFailureBoundaries
+      .malformedHandleCloseContained !== true,
+    boundaries.sourceHandleAndFailureBoundaries.malformedHandleReversible !==
+      false,
   ];
   if (failures.some(Boolean)) {
     throw new Error('Managed lifecycle evaluation invariant failed');

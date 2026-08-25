@@ -255,7 +255,9 @@ Activation walks dependencies before dependents. Deactivation walks active
 dependents before dependencies. Within one component, disposers run once in
 reverse registration order; cleanup continues after a disposer error and
 records the error in `inspect()`. Missing dependencies and cycles fail before
-activation code runs.
+activation code runs. Disposing a component permanently disposes its complete
+transitive dependent definition closure, including inactive dependents, so it
+cannot leave a defined component with a permanently disposed dependency.
 
 ```text
 defined / failed -> activating -> active -> deactivating -> defined
@@ -265,10 +267,11 @@ defined / failed -> activating -> active -> deactivating -> defined
 
 All graph-changing calls share one serialized transition queue, so conflicting
 calls have a bounded concurrency of one. Repeated activate, deactivate, and
-dispose calls are idempotent. An activation `AbortSignal` is combined with the
-component lifetime signal; after activation commits, only deactivation or
-disposal aborts that lifetime signal. Teardown that has begun runs to completion
-rather than abandoning registered cleanup.
+dispose calls are idempotent. During activation, a transition `AbortSignal`
+forwards abort into the component lifetime controller. The listener is detached
+when activation commits, so a later transition abort does not terminate an
+active component; deactivation or disposal does. Teardown that has begun runs to
+completion rather than abandoning registered cleanup.
 
 `replace()` stages a new-version candidate and every active transitive dependent
 while the prior graph remains live. Staged dependency lookup prefers the staged
@@ -280,11 +283,22 @@ dependency snapshot. Prior cleanup failures become diagnostics on the
 corresponding active component rather than pretending the switch can be undone
 after retirement began.
 
+Replacement does not implicitly activate an inactive component. Replacing a
+`defined` component swaps its definition and leaves it `defined`; replacing a
+`failed` component installs a fresh `defined` version. Call `activate()`
+explicitly afterward. A `disposed` component cannot be replaced.
+
 Use `context.acquire(label, setup)` for resources: setup must return both the
 value and its disposer. A missing disposer fails activation with an
 `AxEventComponentLeakError` diagnostic. `addDisposer()` supports effects that
 are already represented by a cleanup callback, but the host is responsible for
-registering it before activation completes.
+registering it before activation completes. Registration attempted after that
+boundary is diagnosed and rejected; its callback is not invoked asynchronously.
+
+`AxEventRuntime.close()` synchronously fences further source startup and aborts
+an in-flight source activation before waiting for source cleanup. If a source
+ignores abort and returns a handle later, the activation transaction closes that
+handle before startup rejects; later configured sources are not started.
 
 ### Explicit non-guarantees
 
@@ -301,24 +315,31 @@ registering it before activation completes.
 - Component definitions and state are process-local and intentionally not a
   durable desired-state or auto-deployment system.
 
-### Fault and stress evaluation
+### Fault mechanism and boundary evaluation
 
-Run the deterministic, model-free comparison against a deliberately manual
-lifecycle baseline:
+Run the deterministic, model-free evaluator:
 
 ```bash
 node --import=tsx scripts/evaluate-event-components.ts --iterations=200
 ```
 
-The command repeats activation failure, replacement failure, dependency cycle,
-abort, concurrent transition, disposer-error, and unmanaged-effect scenarios
-200 times each. It fails if a managed invariant regresses and prints JSON with
-resource leaks, prior-state restoration, ordering, total/mean fault-transition
-latency, and manual versus managed mean/p95 lifecycle time and overhead. The
-unmanaged-effect result intentionally reports one leak for both implementations;
-the disposer-error result intentionally reports the resource whose own disposer
-failed while verifying that later cleanup still ran. Timing is descriptive for
-the current process, not a CI performance threshold or model-quality claim.
+The seven manual cases intentionally omit transaction machinery and are not a
+semantics-equivalent handwritten implementation. They demonstrate which narrow
+mechanism each managed case adds; repeating them 200 times checks deterministic
+stability, not schedule exploration, fuzzing, or model checking.
+
+A separate adversarial boundary matrix asserts source `start()`/`close()`
+overlap, late teardown registration followed by queued activation, inactive
+replacement, partial dependency disposal, dependency snapshots, abort before/
+during/after acquisition and after commit, undefined and malformed source
+handles, startup rollback, and cleanup failure continuation. The command fails
+if any exact boundary invariant regresses. It also prints resource leaks,
+restoration and ordering outcomes, and descriptive timing. The timing comparison
+is deliberately asymmetric—a minimal unmanaged disposer call versus full
+manager define/activate/deactivate—and is neither a semantics-equivalent
+benchmark nor a CI threshold or model-quality claim. The unmanaged-effect result
+reports one leak for both implementations; the disposer-error result reports the
+resource whose own disposer failed while verifying that later cleanup ran.
 
 ## Deterministic Tests
 

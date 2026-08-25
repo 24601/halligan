@@ -1,5 +1,3 @@
-import { mergeAbortSignals } from '../util/abort.js';
-
 export type AxEventComponentState =
   | 'defined'
   | 'activating'
@@ -127,22 +125,29 @@ type ComponentRecord = {
 class AxManagedEventComponentContext
   implements AxEventComponentActivationContext
 {
-  private readonly activationSignal: AbortSignal;
   private registrationOpen = true;
-  private activating = true;
   private closed = false;
+  private readonly transitionAbort?: () => void;
 
   constructor(
     private readonly record: ComponentRecord,
     private readonly scope: AbortController,
-    transitionSignal: AbortSignal | undefined,
+    private readonly transitionSignal: AbortSignal | undefined,
     private readonly resolveDependency: <T>(id: string) => T,
     private readonly reportDiagnostic: (
       diagnostic: AxEventComponentDiagnostic
     ) => void
   ) {
-    this.activationSignal =
-      mergeAbortSignals(scope.signal, transitionSignal) ?? scope.signal;
+    if (transitionSignal) {
+      this.transitionAbort = () => scope.abort(transitionSignal.reason);
+      if (transitionSignal.aborted) {
+        this.transitionAbort();
+      } else {
+        transitionSignal.addEventListener('abort', this.transitionAbort, {
+          once: true,
+        });
+      }
+    }
   }
 
   get id(): string {
@@ -154,7 +159,7 @@ class AxManagedEventComponentContext
   }
 
   get signal(): AbortSignal {
-    return this.activating ? this.activationSignal : this.scope.signal;
+    return this.scope.signal;
   }
 
   dependency<T = unknown>(id: string): T {
@@ -186,19 +191,6 @@ class AxManagedEventComponentContext
         at: Date.now(),
         error,
       });
-      void Promise.resolve()
-        .then(disposer)
-        .catch((disposeError) => {
-          this.reportDiagnostic({
-            code: 'disposer-failed',
-            componentId: this.id,
-            phase: 'activate',
-            effect: label,
-            message: `Late disposer ${label} for event component ${this.id} failed`,
-            at: Date.now(),
-            error: disposeError,
-          });
-        });
       throw error;
     }
     this.record.effects.push({
@@ -279,17 +271,23 @@ class AxManagedEventComponentContext
 
   completeActivation(): void {
     this.registrationOpen = false;
-    this.activating = false;
+    this.detachTransitionAbort();
   }
 
   beginCleanup(reason: string): void {
     this.registrationOpen = false;
-    this.activating = false;
+    this.detachTransitionAbort();
     if (!this.scope.signal.aborted) this.scope.abort(reason);
   }
 
   close(): void {
     this.closed = true;
+  }
+
+  private detachTransitionAbort(): void {
+    if (this.transitionAbort) {
+      this.transitionSignal?.removeEventListener('abort', this.transitionAbort);
+    }
   }
 }
 
@@ -410,7 +408,9 @@ export class AxEventComponentManager {
   ): Promise<void> {
     return this.enqueue(async () => {
       throwIfAborted(options.signal);
-      const targets = this.normalizeTargets(ids, true);
+      const targets = this.dependentDefinitionClosure(
+        this.normalizeTargets(ids, true)
+      );
       let teardownError: unknown;
       try {
         await this.deactivateRecords(targets, 'dispose');
@@ -455,6 +455,10 @@ export class AxEventComponentManager {
         scope: undefined,
         lastError: undefined,
       };
+      if (previous.state !== 'active') {
+        this.records.set(normalized.id, candidate);
+        return snapshot(candidate);
+      }
       const previousGraph = this.activeDependentClosure([normalized.id]);
       const staged = new Map<string, ComponentRecord>([
         [normalized.id, candidate],
@@ -713,6 +717,28 @@ export class AxEventComponentManager {
     return this.activeTopologicalOrder().filter((record) =>
       selected.has(record.definition.id)
     );
+  }
+
+  private dependentDefinitionClosure(targets: readonly string[]): string[] {
+    const selected = new Set(targets);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const record of this.records.values()) {
+        if (
+          record.state === 'disposed' ||
+          selected.has(record.definition.id) ||
+          !record.definition.dependencies?.some((dependency) =>
+            selected.has(dependency)
+          )
+        ) {
+          continue;
+        }
+        selected.add(record.definition.id);
+        changed = true;
+      }
+    }
+    return [...selected].sort();
   }
 
   private activeTopologicalOrder(): ComponentRecord[] {

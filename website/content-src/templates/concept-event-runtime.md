@@ -153,14 +153,17 @@ host-defined process-local listeners, adapters, and source registrations. It
 orders declared dependencies, serializes graph transitions, scopes every
 registered disposer, rolls failed activation back in reverse order, and stages
 a replacement candidate plus its active transitive dependents before switching
-all manager-visible bindings together. `AxEventRuntime` uses it internally for
-source handles; caller-created protocol clients remain caller-owned.
+all manager-visible bindings together. Inactive replacements remain inactive,
+and partial disposal includes the transitive dependent definition closure.
+`AxEventRuntime` uses it internally for source handles and fences overlapping
+startup/close; caller-created protocol clients remain caller-owned.
 
 This is not a durable plugin loader or a general transaction system. It does
 not load model-generated code, persist or auto-deploy definitions, reverse
 unregistered or arbitrary external I/O, or make candidate setup externally
-invisible. The TypeScript fault/stress evaluator and full API example are in the
-[Event Runtime maintainer guide](https://github.com/ax-llm/ax/blob/main/docs/EVENT_RUNTIME.md#trusted-live-components).
+invisible. The TypeScript mechanism/boundary evaluator explicitly labels its
+unmanaged baseline and deterministic-schedule limits. Its exact command and the
+full API example are in the [Event Runtime maintainer guide](https://github.com/ax-llm/ax/blob/main/docs/EVENT_RUNTIME.md#trusted-live-components).
 
 ## Generated Languages
 

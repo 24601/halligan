@@ -137,8 +137,11 @@ export class AxEventRuntime {
   private readonly singletonTargetInstances = new Map<string, string>();
   private readonly activeRuns = new Map<string, AbortController>();
   private readonly sourceComponents = new AxEventComponentManager();
+  private readonly sourceStartupController = new AbortController();
   private readonly workerController = new AbortController();
   private workerPromises: Promise<void>[] = [];
+  private startPromise: Promise<void> | undefined;
+  private closePromise: Promise<void> | undefined;
   private started = false;
   private closing = false;
 
@@ -169,6 +172,17 @@ export class AxEventRuntime {
   }
 
   async start(): Promise<void> {
+    if (this.startPromise) return this.startPromise;
+    const operation = this.startInternal();
+    this.startPromise = operation;
+    try {
+      await operation;
+    } finally {
+      if (this.startPromise === operation) this.startPromise = undefined;
+    }
+  }
+
+  private async startInternal(): Promise<void> {
     if (this.started) return;
     if (this.closing) throw new Error('AxEventRuntime is closing');
     const durableRequired = (this.options.sources ?? []).filter(
@@ -205,16 +219,17 @@ export class AxEventRuntime {
         'AxEventRuntime requires 0 < heartbeatMs < leaseMs and leaseMs >= 100'
       );
     }
-    this.started = true;
     const workers = this.options.workerConcurrency ?? 4;
     if (!Number.isInteger(workers) || workers < 1) {
       throw new Error('AxEventRuntime workerConcurrency must be positive');
     }
+    this.started = true;
     this.workerPromises = Array.from({ length: workers }, (_, index) =>
       this.workerLoop(`${this.options.workerId ?? this.id}:${index}`)
     );
     try {
       for (const source of this.options.sources ?? []) {
+        this.throwIfClosing();
         const componentId = `event-source:${source.id}`;
         await this.sourceComponents.define({
           id: componentId,
@@ -235,7 +250,11 @@ export class AxEventRuntime {
               };
             }),
         });
-        await this.sourceComponents.activate(componentId);
+        this.throwIfClosing();
+        await this.sourceComponents.activate(componentId, {
+          signal: this.sourceStartupController.signal,
+        });
+        this.throwIfClosing();
       }
     } catch (error) {
       await this.close({ drain: false });
@@ -375,8 +394,17 @@ export class AxEventRuntime {
   }
 
   async close(options: Readonly<AxEventCloseOptions> = {}): Promise<void> {
-    if (this.closing) return;
+    if (this.closePromise) return this.closePromise;
     this.closing = true;
+    this.sourceStartupController.abort('AxEventRuntime closing');
+    const operation = this.closeInternal(options);
+    this.closePromise = operation;
+    return operation;
+  }
+
+  private async closeInternal(
+    options: Readonly<AxEventCloseOptions>
+  ): Promise<void> {
     await this.sourceComponents.dispose().catch(() => undefined);
     if (options.drain !== false) {
       try {
@@ -393,6 +421,10 @@ export class AxEventRuntime {
     await Promise.allSettled(this.workerPromises);
     await this.store.close?.();
     this.started = false;
+  }
+
+  private throwIfClosing(): void {
+    if (this.closing) throw new Error('AxEventRuntime is closing');
   }
 
   private async routeMatches(

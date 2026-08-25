@@ -93,19 +93,32 @@ deactivates dependents first, rolls failed activation back in reverse order,
 stages and atomically switches the active transitive dependent closure during
 replacement, restores the complete prior graph on staged failure, and exposes
 state, effects, diagnostics, and errors through `inspect()`. Repeated lifecycle
-calls are idempotent. Abort is cooperative; teardown that already began
-finishes all registered cleanup.
+calls are idempotent. Inactive replacement stays inactive until explicit
+activation. Disposal permanently includes the complete transitive dependent
+definition closure. Abort is cooperative and detached after activation commits;
+teardown that already began finishes all registered cleanup. Late disposer
+registration is diagnosed and rejected without invoking an untracked callback.
+
+Runtime close fences source startup before aborting in-flight activation. A
+source handle returned after that abort is closed transactionally, and no later
+configured source starts.
 
 Do not describe this as reversal of arbitrary I/O. Unregistered effects and
 failed disposers can leak, candidate setup is not externally isolated, and the
 manager does not load or execute model-generated code, persist definitions,
 watch files, auto-deploy mutations, or own caller-created protocol clients.
 
-Run the fault/stress comparison with:
+Run the fault-mechanism demonstration and adversarial boundary matrix with:
 
 ```bash
 node --import=tsx scripts/evaluate-event-components.ts --iterations=200
 ```
+
+The manual examples intentionally lack transaction machinery and are not a
+semantics-equivalent benchmark. Repetitions check deterministic stability, not
+schedule exploration; the separate matrix covers startup/close overlap, late
+registration, replacement states, partial disposal, dependency snapshots,
+abort boundaries, source handles, and startup/cleanup failures.
 
 ## Continuation Pattern
 
