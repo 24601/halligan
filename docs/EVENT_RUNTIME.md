@@ -248,14 +248,17 @@ startup-gates verifier routes rather than silently using process-local policy
 state. The transition is fence-checked, idempotent, capacity-aware, and atomic
 for the parent run/delivery, continuation ownership, child delivery, and old
 continuation consumption. Each operation has a deterministic child ID and an
-immutable store journal containing its canonical full request and receipt.
-Conflicting reuse is rejected; a committed operation is read back from the
-journal after lost acknowledgements instead of regressing its parent to
-`outcome_unknown`. Confirmation requires the complete expected request,
-including its parent fence, returns only the minimal receipt, and validates the
-receipt plus deterministic child projection internally; operation IDs alone
-cannot retrieve run or output data. SQLite retains these identity records for
-the lifetime of the database, independently of event/result payload pruning.
+immutable store journal containing SHA-256 commitments to the canonical full
+request and deterministic child projection plus the minimal receipt. The
+journal never duplicates run output, event payload, identity, continuation
+metadata, or verifier evidence. Conflicting reuse is rejected; a committed
+operation is confirmed after lost acknowledgements instead of regressing its
+parent to `outcome_unknown`. Confirmation requires the complete expected
+request, including its parent fence, and returns only the minimal receipt;
+operation IDs alone cannot retrieve run or output data. SQLite retains these
+compact commitments for the database lifetime while ordinary payload pruning
+removes the underlying sensitive data. Schema migration rewrites legacy V2
+full-record journals to commitments and securely deletes the old rows.
 These guarantees do not make arbitrary target or sink I/O exactly once.
 
 ### Deterministic Evaluation

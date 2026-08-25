@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -7,6 +7,7 @@ import {
   type AxProgrammable,
   AxPushEventSource,
   AxUCPWebhookEventSource,
+  axEventCanonicalJson,
   eventPath,
   eventRoute,
   eventTarget,
@@ -216,8 +217,9 @@ describe('AxSQLiteEventStore', () => {
       ...AX_SQLITE_EVENT_STANDARD_RETENTION,
       eventAndResultMs: 1,
     };
+    const filename = join(directory, 'transition-journal.sqlite');
     let store = new AxSQLiteEventStore({
-      filename: join(directory, 'transition-journal.sqlite'),
+      filename,
       retention,
     });
     const transition = store.transitionVerifier.bind(store);
@@ -232,6 +234,7 @@ describe('AxSQLiteEventStore', () => {
       }
     );
     let attempts = 0;
+    const sensitive = 'sensitive-journal-payload-do-not-retain';
     const verify = vi.fn(() =>
       attempts++ === 0
         ? {
@@ -244,7 +247,7 @@ describe('AxSQLiteEventStore', () => {
     const program = {
       getId: () => 'journal-verifier-output',
       getSignature: () => signature,
-      forward: async () => ({ resultText: 'small' }),
+      forward: async () => ({ resultText: sensitive }),
       streamingForward: async function* () {},
     } as unknown as AxProgrammable<any, any>;
     const runtime = new AxEventRuntime({
@@ -273,6 +276,7 @@ describe('AxSQLiteEventStore', () => {
         id: 'journal-event',
         source: 'test://sqlite',
         type: 'journal.verifier',
+        data: { sensitive },
       },
     });
     await runtime.waitForIdle();
@@ -300,6 +304,44 @@ describe('AxSQLiteEventStore', () => {
         },
       })
     ).rejects.toThrow('already owned');
+    const liveDb = (store as any).db;
+    const compactJournal = liveDb
+      .prepare(
+        `SELECT request_commitment, receipt_json, child_delivery_id,
+                child_commitment
+         FROM event_verifier_transitions WHERE operation_id=?`
+      )
+      .get(request.operationId);
+    expect(JSON.stringify(compactJournal)).not.toContain(sensitive);
+
+    const receipt = await confirmTransition(request);
+    const legacyRecord = {
+      request,
+      receipt,
+      child: await store.getDelivery(request.childDeliveryId),
+    };
+    liveDb.exec(`
+      DROP TABLE event_verifier_transitions;
+      CREATE TABLE event_verifier_transitions (
+        operation_id TEXT PRIMARY KEY,
+        request_json TEXT NOT NULL,
+        record_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      PRAGMA user_version = 2;
+    `);
+    liveDb
+      .prepare(
+        `INSERT INTO event_verifier_transitions
+         (operation_id, request_json, record_json, created_at)
+         VALUES(?,?,?,?)`
+      )
+      .run(
+        request.operationId,
+        axEventCanonicalJson(request),
+        JSON.stringify(legacyRecord),
+        Date.now()
+      );
     await runtime.close({ drain: false });
 
     await new Promise((resolve) => setTimeout(resolve, 5));
@@ -311,20 +353,41 @@ describe('AxSQLiteEventStore', () => {
       (await store.confirmVerifierTransition(request))?.deliveryIds
     ).toEqual([request.childDeliveryId]);
     const db = (store as any).db;
-    const row = db
+    const retained = db
       .prepare(
-        'SELECT record_json FROM event_verifier_transitions WHERE operation_id=?'
+        `SELECT request_commitment, receipt_json, child_delivery_id,
+                child_commitment
+         FROM event_verifier_transitions WHERE operation_id=?`
       )
       .get(request.operationId);
-    const corrupted = JSON.parse(row.record_json);
-    corrupted.receipt.deliveryIds = ['corrupted-child'];
+    expect(JSON.stringify(retained)).not.toContain(sensitive);
+    expect(
+      JSON.stringify(
+        db.prepare('SELECT ingress_json FROM event_deliveries').all()
+      )
+    ).not.toContain(sensitive);
+    expect(
+      JSON.stringify(db.prepare('SELECT run_json FROM event_runs').all())
+    ).not.toContain(sensitive);
+    const row = db
+      .prepare(
+        'SELECT receipt_json FROM event_verifier_transitions WHERE operation_id=?'
+      )
+      .get(request.operationId);
+    const corrupted = JSON.parse(row.receipt_json);
+    corrupted.deliveryIds = ['corrupted-child'];
     db.prepare(
-      'UPDATE event_verifier_transitions SET record_json=? WHERE operation_id=?'
+      'UPDATE event_verifier_transitions SET receipt_json=? WHERE operation_id=?'
     ).run(JSON.stringify(corrupted), request.operationId);
     await expect(store.confirmVerifierTransition(request)).rejects.toThrow(
       'already owned'
     );
     await store.close();
+    for (const path of [filename, `${filename}-wal`]) {
+      if (existsSync(path)) {
+        expect(readFileSync(path).includes(Buffer.from(sensitive))).toBe(false);
+      }
+    }
   });
 
   it('persists output before isolated sink retries', async () => {

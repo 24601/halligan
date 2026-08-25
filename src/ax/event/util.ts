@@ -1,3 +1,4 @@
+import { sha256 } from '../util/crypto.js';
 import type {
   AxEventEnvelope,
   AxEventIdentity,
@@ -62,6 +63,10 @@ export function axEventCanonicalJson(value: unknown): string {
     return current;
   };
   return JSON.stringify(normalize(value));
+}
+
+export async function axEventCanonicalDigest(value: unknown): Promise<string> {
+  return sha256(axEventCanonicalJson(value));
 }
 
 function assertPersistable(

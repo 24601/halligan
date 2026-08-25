@@ -596,9 +596,11 @@ export interface AxEventVerifierTransitionRequest {
 }
 
 export interface AxEventVerifierTransitionRecord {
-  request: Readonly<AxEventVerifierTransitionRequest>;
+  operationId: string;
+  requestCommitment: string;
   receipt: Readonly<AxEventPublishReceipt>;
-  child: Readonly<AxEventDelivery>;
+  childDeliveryId: string;
+  childCommitment: string;
 }
 
 export interface AxEventStore {

@@ -985,6 +985,7 @@ import {
   type AxUCPWebhookEventSourceOptions,
 } from './event/ucpSource.js';
 import {
+  axEventCanonicalDigest,
   axEventCanonicalJson,
   axEventErrorMessage,
   axEventId,
@@ -1506,6 +1507,7 @@ export { axDefaultOptimizerLogger };
 export { axDefaultOptimizerMetricsConfig };
 export { axDeserializeOptimizedProgram };
 export { axEmitUsageEvent };
+export { axEventCanonicalDigest };
 export { axEventCanonicalJson };
 export { axEventErrorMessage };
 export { axEventId };

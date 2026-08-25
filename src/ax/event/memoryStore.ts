@@ -17,6 +17,7 @@ import {
   AxSystemEventClock,
 } from './types.js';
 import {
+  axEventCanonicalDigest,
   axEventCanonicalJson,
   axEventId,
   axEventIdentityScope,
@@ -199,9 +200,17 @@ export class AxInMemoryEventStore implements AxEventStore {
   async transitionVerifier(
     request: Readonly<AxEventVerifierTransitionRequest>
   ): Promise<AxEventPublishReceipt> {
+    const requestCommitment = await axEventCanonicalDigest(request);
+    const childProjection = this.verifierChildProjection(request);
+    const childCommitment = await axEventCanonicalDigest(childProjection);
     const committed = this.verifierTransitions.get(request.operationId);
     if (committed) {
-      this.assertVerifierTransition(committed, request);
+      this.assertVerifierTransition(
+        committed,
+        request,
+        requestCommitment,
+        childCommitment
+      );
       return { ...structuredClone(committed.receipt), duplicate: true };
     }
     const dedupeKey = axEventScopedDedupeKey(request.child.ingress);
@@ -317,9 +326,11 @@ export class AxInMemoryEventStore implements AxEventStore {
       deliveryIds: [delivery.id],
     };
     this.verifierTransitions.set(request.operationId, {
-      request: structuredClone(request),
+      operationId: request.operationId,
+      requestCommitment,
       receipt: structuredClone(receipt),
-      child: structuredClone(delivery),
+      childDeliveryId: request.childDeliveryId,
+      childCommitment,
     });
     return receipt;
   }
@@ -327,9 +338,18 @@ export class AxInMemoryEventStore implements AxEventStore {
   async confirmVerifierTransition(
     request: Readonly<AxEventVerifierTransitionRequest>
   ): Promise<Readonly<AxEventPublishReceipt> | undefined> {
+    const requestCommitment = await axEventCanonicalDigest(request);
+    const childCommitment = await axEventCanonicalDigest(
+      this.verifierChildProjection(request)
+    );
     const value = this.verifierTransitions.get(request.operationId);
     if (!value) return;
-    this.assertVerifierTransition(value, request);
+    this.assertVerifierTransition(
+      value,
+      request,
+      requestCommitment,
+      childCommitment
+    );
     return structuredClone(value.receipt);
   }
 
@@ -663,12 +683,15 @@ export class AxInMemoryEventStore implements AxEventStore {
 
   private assertVerifierTransition(
     record: Readonly<AxEventVerifierTransitionRecord>,
-    request: Readonly<AxEventVerifierTransitionRequest>
+    request: Readonly<AxEventVerifierTransitionRequest>,
+    requestCommitment: string,
+    childCommitment: string
   ): void {
-    const descriptor = request.child.deliveries[0]!;
-    const { sequence: _sequence, ...child } = record.child;
     if (
-      axEventCanonicalJson(record.request) !== axEventCanonicalJson(request) ||
+      record.operationId !== request.operationId ||
+      record.requestCommitment !== requestCommitment ||
+      record.childDeliveryId !== request.childDeliveryId ||
+      record.childCommitment !== childCommitment ||
       axEventCanonicalJson(record.receipt) !==
         axEventCanonicalJson({
           eventId: request.child.ingress.event.id,
@@ -676,29 +699,34 @@ export class AxInMemoryEventStore implements AxEventStore {
           duplicate: false,
           durability: 'volatile',
           deliveryIds: [request.childDeliveryId],
-        }) ||
-      axEventCanonicalJson(child) !==
-        axEventCanonicalJson({
-          id: request.childDeliveryId,
-          ingress: request.child.ingress,
-          identityScope: axEventIdentityScope(request.child.ingress.identity),
-          routeId: descriptor.routeId,
-          action: descriptor.action,
-          ...(descriptor.targetId ? { targetId: descriptor.targetId } : {}),
-          instanceKey: descriptor.instanceKey,
-          status: 'queued',
-          attempt: 0,
-          availableAt: descriptor.availableAt ?? request.child.acceptedAt,
-          acceptedAt: request.child.acceptedAt,
-          sizeBytes: descriptor.sizeBytes,
-          retrySafety: descriptor.retrySafety ?? 'unknown',
-          ordering: descriptor.ordering ?? 'strict',
         })
     ) {
       throw new Error(
         `Verifier transition operation is already owned: ${request.operationId}`
       );
     }
+  }
+
+  private verifierChildProjection(
+    request: Readonly<AxEventVerifierTransitionRequest>
+  ): Omit<AxEventDelivery, 'sequence'> {
+    const descriptor = request.child.deliveries[0]!;
+    return {
+      id: request.childDeliveryId,
+      ingress: request.child.ingress,
+      identityScope: axEventIdentityScope(request.child.ingress.identity),
+      routeId: descriptor.routeId,
+      action: descriptor.action,
+      ...(descriptor.targetId ? { targetId: descriptor.targetId } : {}),
+      instanceKey: descriptor.instanceKey,
+      status: 'queued',
+      attempt: 0,
+      availableAt: descriptor.availableAt ?? request.child.acceptedAt,
+      acceptedAt: request.child.acceptedAt,
+      sizeBytes: descriptor.sizeBytes,
+      retrySafety: descriptor.retrySafety ?? 'unknown',
+      ordering: descriptor.ordering ?? 'strict',
+    };
   }
 
   private notify(waiters: Set<Waiter>): void {
