@@ -113,6 +113,10 @@ import type {
   AxAgentPlaybookEvolveProposal,
   AxAgentPlaybookEvolveResult,
   AxAgentPlaybookEvolveRunRecord,
+  AxAgentPlaybookRetentionAnchor,
+  AxAgentPlaybookRetentionPolicy,
+  AxAgentPlaybookRetentionReceipt,
+  AxAgentPlaybookRetentionSlice,
   AxAgentPlaybookWeakness,
 } from './agent/agentInternal/playbookEvolve/playbookEvolveTypes.js';
 import type {
@@ -1884,6 +1888,10 @@ export type { AxAgentPlaybookEvolveResult };
 export type { AxAgentPlaybookEvolveRunRecord };
 export type { AxAgentPlaybookLearnOptions };
 export type { AxAgentPlaybookOptions };
+export type { AxAgentPlaybookRetentionAnchor };
+export type { AxAgentPlaybookRetentionPolicy };
+export type { AxAgentPlaybookRetentionReceipt };
+export type { AxAgentPlaybookRetentionSlice };
 export type { AxAgentPlaybookSkipReason };
 export type { AxAgentPlaybookUpdateResult };
 export type { AxAgentPlaybookUpdateStatus };

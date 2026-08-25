@@ -20,13 +20,18 @@ import type {
   AxAgentJudgeOptions,
 } from '../agentOptimizeTypes.js';
 import { createAgentOptimizeMetric } from '../optimizer.js';
-import type { AxAgentEvalBudget } from './evalHarness.js';
+import type {
+  AxAgentEvalBatchResult,
+  AxAgentEvalBudget,
+} from './evalHarness.js';
 import { runAgentEvalBatch } from './evalHarness.js';
 import { clusterFailures } from './failureClusters.js';
 import type {
   AxAgentPlaybookEvolveOptions,
   AxAgentPlaybookEvolveOutcome,
   AxAgentPlaybookEvolveResult,
+  AxAgentPlaybookRetentionAnchor,
+  AxAgentPlaybookRetentionReceipt,
   AxAgentPlaybookWeakness,
 } from './playbookEvolveTypes.js';
 import type { AxAppliedProposal } from './proposals.js';
@@ -41,6 +46,81 @@ const DEFAULT_MAX_PROPOSALS = 4;
 const DEFAULT_EPSILON = 0.01;
 const DEFAULT_MIN_HELD_IN_GAIN = 0.05;
 const DEFAULT_SCORE_THRESHOLD = 0.7;
+
+function validateRetentionWeights(
+  tasks: readonly { weight?: number }[],
+  label: string
+): void {
+  let total = 0;
+  for (const task of tasks) {
+    const weight = task.weight ?? 1;
+    if (!Number.isFinite(weight) || weight < 0) {
+      throw new Error(
+        `AxAgent.playbook().evolve(): ${label} task weights must be finite and non-negative.`
+      );
+    }
+    total += weight;
+  }
+  if (!Number.isFinite(total) || total <= 0) {
+    throw new Error(
+      `AxAgent.playbook().evolve(): ${label} must have positive finite total weight.`
+    );
+  }
+}
+
+function validateRetentionPolicy(
+  policy: NonNullable<AxAgentPlaybookEvolveOptions['retentionPolicy']>,
+  verify: boolean,
+  currentTasks: readonly { weight?: number }[]
+): void {
+  if (!verify) {
+    throw new Error(
+      'AxAgent.playbook().evolve(): retentionPolicy requires verify: true.'
+    );
+  }
+  if (policy.slices.length === 0) {
+    throw new Error(
+      'AxAgent.playbook().evolve(): retentionPolicy requires at least one slice.'
+    );
+  }
+  const thresholds = [
+    ['minCurrentGain', policy.minCurrentGain],
+    ['maxWorstHistoricalLoss', policy.maxWorstHistoricalLoss],
+    ['maxMeanHistoricalLoss', policy.maxMeanHistoricalLoss],
+  ] as const;
+  for (const [name, value] of thresholds) {
+    if (!Number.isFinite(value) || value < 0) {
+      throw new Error(
+        `AxAgent.playbook().evolve(): retentionPolicy.${name} must be finite and non-negative.`
+      );
+    }
+  }
+  validateRetentionWeights(currentTasks, 'retention current-task set');
+  const identities = new Set<string>();
+  for (const slice of policy.slices) {
+    if (!slice.name.trim() || !slice.version.trim()) {
+      throw new Error(
+        'AxAgent.playbook().evolve(): retention slice name and version must be non-empty.'
+      );
+    }
+    if (slice.tasks.length === 0) {
+      throw new Error(
+        `AxAgent.playbook().evolve(): retention slice ${slice.name}@${slice.version} has no tasks.`
+      );
+    }
+    validateRetentionWeights(
+      slice.tasks,
+      `retention slice ${slice.name}@${slice.version}`
+    );
+    const identity = `${slice.name}\u0000${slice.version}`;
+    if (identities.has(identity)) {
+      throw new Error(
+        `AxAgent.playbook().evolve(): duplicate retention slice ${slice.name}@${slice.version}.`
+      );
+    }
+    identities.add(identity);
+  }
+}
 
 export async function evolveAgentPlaybook<
   IN extends AxGenIn,
@@ -76,13 +156,24 @@ export async function evolveAgentPlaybook<
     options?.metric ?? createAgentOptimizeMetric(self, judgeAI, judgeOptions);
 
   const verify = options?.verify !== false;
+  const retentionPolicy = options?.retentionPolicy;
+  if (retentionPolicy) {
+    validateRetentionPolicy(retentionPolicy, verify, normalized.train);
+  }
   const maxProposals = Math.max(
     1,
     Math.floor(options?.maxProposals ?? DEFAULT_MAX_PROPOSALS)
   );
   const runsPerTask = Math.max(1, Math.floor(options?.runsPerTask ?? 1));
+  const retentionTaskCount =
+    retentionPolicy?.slices.reduce(
+      (sum, slice) => sum + slice.tasks.length,
+      0
+    ) ?? 0;
   const datasetSize =
-    (normalized.train.length + (normalized.validation?.length ?? 0)) *
+    (normalized.train.length +
+      (normalized.validation?.length ?? 0) +
+      retentionTaskCount) *
     runsPerTask;
   const maxMetricCalls = Math.max(
     1,
@@ -92,9 +183,21 @@ export async function evolveAgentPlaybook<
   );
   const epsilon = options?.epsilon ?? DEFAULT_EPSILON;
   const minHeldInGain = options?.minHeldInGain ?? DEFAULT_MIN_HELD_IN_GAIN;
+  const currentGainThreshold = retentionPolicy?.minCurrentGain ?? minHeldInGain;
   const scoreThreshold = options?.scoreThreshold ?? DEFAULT_SCORE_THRESHOLD;
   const budget: AxAgentEvalBudget = { remaining: maxMetricCalls };
   const usedCalls = () => maxMetricCalls - budget.remaining;
+
+  const baselineRequiredCalls =
+    (normalized.train.length +
+      (normalized.validation?.length ?? 0) +
+      retentionTaskCount) *
+    runsPerTask;
+  if (retentionPolicy && maxMetricCalls < baselineRequiredCalls) {
+    throw new Error(
+      `AxAgent.playbook().evolve(): maxMetricCalls ${maxMetricCalls} cannot establish complete retention anchors (requires ${baselineRequiredCalls}).`
+    );
+  }
 
   const progress = (
     phase: 'baseline' | 'mining' | 'proposal' | 'validation' | 'done',
@@ -137,24 +240,69 @@ export async function evolveAgentPlaybook<
     ...batchArgs,
     tasks: normalized.train,
   });
+  if (
+    retentionPolicy &&
+    (baselineTrain.exhausted || !baselineTrain.validEvidence)
+  ) {
+    throw new Error(
+      'AxAgent.playbook().evolve(): retention current-task anchor requires complete, finite evaluator evidence.'
+    );
+  }
   let heldIn = baselineTrain.mean;
   let heldOut: number | undefined;
+  let baselineHeldOutBatch: AxAgentEvalBatchResult<IN, OUT> | undefined;
   if (normalized.validation?.length) {
     progress(
       'baseline',
       `evaluating ${normalized.validation.length} validation tasks`
     );
-    heldOut = (
-      await runAgentEvalBatch<IN, OUT>({
-        ...batchArgs,
-        tasks: normalized.validation,
-      })
-    ).mean;
+    baselineHeldOutBatch = await runAgentEvalBatch<IN, OUT>({
+      ...batchArgs,
+      tasks: normalized.validation,
+    });
+    if (
+      retentionPolicy &&
+      (baselineHeldOutBatch.exhausted || !baselineHeldOutBatch.validEvidence)
+    ) {
+      throw new Error(
+        'AxAgent.playbook().evolve(): retention held-out anchor requires complete, finite evaluator evidence.'
+      );
+    }
+    heldOut = baselineHeldOutBatch.mean;
   }
   const baseline = {
     heldIn,
     ...(heldOut !== undefined ? { heldOut } : {}),
   };
+  const retentionAnchors: AxAgentPlaybookRetentionAnchor[] = [];
+  if (retentionPolicy) {
+    for (const slice of retentionPolicy.slices) {
+      progress(
+        'baseline',
+        `evaluating retention slice ${slice.name}@${slice.version} (${slice.tasks.length} tasks)`
+      );
+      const result = await runAgentEvalBatch<IN, OUT>({
+        ...batchArgs,
+        tasks: slice.tasks,
+      });
+      if (result.exhausted || !result.validEvidence) {
+        throw new Error(
+          `AxAgent.playbook().evolve(): retention slice ${slice.name}@${slice.version} requires complete, finite evaluator evidence.`
+        );
+      }
+      retentionAnchors.push({
+        name: slice.name,
+        version: slice.version,
+        taskCount: slice.tasks.length,
+        score: result.mean,
+        evidence: {
+          executedRuns: result.executedRuns,
+          expectedRuns: result.expectedRuns,
+          complete: true,
+        },
+      });
+    }
+  }
 
   // ---- Mine weaknesses from failure clusters ----
   const clusters = clusterFailures(
@@ -206,7 +354,9 @@ export async function evolveAgentPlaybook<
     }
     const proposal = buildProposal(weakness);
     const requiredCalls =
-      (normalized.train.length + (normalized.validation?.length ?? 0)) *
+      (normalized.train.length +
+        (normalized.validation?.length ?? 0) +
+        retentionTaskCount) *
       runsPerTask;
     if (verify && budget.remaining < requiredCalls) {
       outcomes.push({
@@ -246,59 +396,144 @@ export async function evolveAgentPlaybook<
       continue;
     }
 
-    const revalTrain = await runAgentEvalBatch<IN, OUT>({
-      ...batchArgs,
-      tasks: normalized.train,
-    });
-    let revalHeldOut: number | undefined;
-    let revalHeldOutExhausted = false;
-    if (normalized.validation?.length) {
-      const revalHeldOutBatch = await runAgentEvalBatch<IN, OUT>({
+    let rolledBack = false;
+    try {
+      const revalTrain = await runAgentEvalBatch<IN, OUT>({
         ...batchArgs,
-        tasks: normalized.validation,
+        tasks: normalized.train,
       });
-      revalHeldOut = revalHeldOutBatch.mean;
-      revalHeldOutExhausted = revalHeldOutBatch.exhausted;
-    }
-
-    // A re-eval that exhausted mid-way produced a subset mean — comparing it
-    // to the full-set baseline is apples-to-oranges, so refuse the accept.
-    const revalComplete = !revalTrain.exhausted && !revalHeldOutExhausted;
-    const gainOk = revalComplete && revalTrain.mean - heldIn >= minHeldInGain;
-    const heldOutOk =
-      revalHeldOut === undefined ||
-      heldOut === undefined ||
-      revalHeldOut - heldOut >= -epsilon;
-    const accept = revalComplete && gainOk && heldOutOk;
-
-    outcomes.push({
-      proposal,
-      accepted: accept,
-      reason: !revalComplete
-        ? 'metric_budget exhausted during re-evaluation'
-        : accept
-          ? heldOut === undefined
-            ? 'held-in improved (no held-out set provided — consider one)'
-            : 'held-in improved, held-out non-regressing'
-          : !gainOk
-            ? `held-in gain ${(revalTrain.mean - heldIn).toFixed(3)} below ${minHeldInGain}`
-            : `held-out regressed ${((revalHeldOut ?? 0) - (heldOut ?? 0)).toFixed(3)}`,
-      heldIn: { before: heldIn, after: revalTrain.mean },
-      ...(revalHeldOut !== undefined && heldOut !== undefined
-        ? { heldOut: { before: heldOut, after: revalHeldOut } }
-        : {}),
-    });
-
-    if (accept) {
-      accepted.push(applied);
-      heldIn = revalTrain.mean;
-      if (revalHeldOut !== undefined) {
-        heldOut = revalHeldOut;
+      let revalHeldOut: number | undefined;
+      let revalHeldOutBatch: AxAgentEvalBatchResult<IN, OUT> | undefined;
+      if (normalized.validation?.length) {
+        revalHeldOutBatch = await runAgentEvalBatch<IN, OUT>({
+          ...batchArgs,
+          tasks: normalized.validation,
+        });
+        revalHeldOut = revalHeldOutBatch.mean;
       }
-      progress('validation', `${weakness.id}: ACCEPTED`);
-    } else {
-      applied.rollback();
-      progress('validation', `${weakness.id}: rejected, rolled back`);
+      const candidateRetentionBatches: AxAgentEvalBatchResult<IN, OUT>[] = [];
+      if (retentionPolicy) {
+        for (const slice of retentionPolicy.slices) {
+          candidateRetentionBatches.push(
+            await runAgentEvalBatch<IN, OUT>({
+              ...batchArgs,
+              tasks: slice.tasks,
+            })
+          );
+        }
+      }
+
+      // A re-eval that exhausted mid-way produced a subset mean — comparing it
+      // to the full-set baseline is apples-to-oranges, so refuse the accept.
+      // Retention additionally rejects any evaluator error/non-finite score.
+      const retentionEvidenceInvalid = Boolean(
+        retentionPolicy &&
+          (!revalTrain.validEvidence ||
+            (revalHeldOutBatch && !revalHeldOutBatch.validEvidence) ||
+            candidateRetentionBatches.some((batch) => !batch.validEvidence))
+      );
+      const revalComplete =
+        !revalTrain.exhausted &&
+        !revalHeldOutBatch?.exhausted &&
+        !candidateRetentionBatches.some((batch) => batch.exhausted) &&
+        !retentionEvidenceInvalid;
+      const currentGain = revalTrain.mean - heldIn;
+      const gainOk = revalComplete && currentGain >= currentGainThreshold;
+      const heldOutOk =
+        revalHeldOut === undefined ||
+        heldOut === undefined ||
+        revalHeldOut - heldOut >= -epsilon;
+      let retentionReceipt: AxAgentPlaybookRetentionReceipt | undefined;
+      let retentionOk = true;
+      if (retentionPolicy && revalComplete) {
+        const slices = retentionAnchors.map((anchor, index) => {
+          const candidate = candidateRetentionBatches[index]!;
+          return {
+            name: anchor.name,
+            version: anchor.version,
+            taskCount: anchor.taskCount,
+            anchorScore: anchor.score,
+            candidateScore: candidate.mean,
+            historicalLoss: anchor.score - candidate.mean,
+            anchorEvidence: anchor.evidence,
+            candidateEvidence: {
+              executedRuns: candidate.executedRuns,
+              expectedRuns: candidate.expectedRuns,
+              complete: true as const,
+            },
+          };
+        });
+        const losses = slices.map((slice) => slice.historicalLoss);
+        const worstHistoricalLoss = Math.max(...losses);
+        const meanHistoricalLoss =
+          losses.reduce((sum, loss) => sum + loss, 0) / losses.length;
+        retentionOk =
+          worstHistoricalLoss <= retentionPolicy.maxWorstHistoricalLoss &&
+          meanHistoricalLoss <= retentionPolicy.maxMeanHistoricalLoss;
+        const accepted = gainOk && heldOutOk && retentionOk;
+        retentionReceipt = {
+          currentTask: {
+            before: heldIn,
+            after: revalTrain.mean,
+            gain: currentGain,
+          },
+          slices,
+          worstHistoricalLoss,
+          meanHistoricalLoss,
+          thresholds: {
+            minCurrentGain: retentionPolicy.minCurrentGain,
+            maxWorstHistoricalLoss: retentionPolicy.maxWorstHistoricalLoss,
+            maxMeanHistoricalLoss: retentionPolicy.maxMeanHistoricalLoss,
+          },
+          accepted,
+        };
+      }
+      const accept = revalComplete && gainOk && heldOutOk && retentionOk;
+
+      outcomes.push({
+        proposal,
+        accepted: accept,
+        reason: retentionEvidenceInvalid
+          ? 'retention evaluation produced invalid evaluator evidence'
+          : !revalComplete
+            ? 'metric_budget exhausted during re-evaluation'
+            : accept
+              ? retentionPolicy
+                ? 'current task improved, historical retention thresholds satisfied'
+                : heldOut === undefined
+                  ? 'held-in improved (no held-out set provided — consider one)'
+                  : 'held-in improved, held-out non-regressing'
+              : !gainOk
+                ? retentionPolicy
+                  ? `current-task gain ${currentGain.toFixed(3)} below ${currentGainThreshold}`
+                  : `held-in gain ${currentGain.toFixed(3)} below ${currentGainThreshold}`
+                : !heldOutOk
+                  ? `held-out regressed ${((revalHeldOut ?? 0) - (heldOut ?? 0)).toFixed(3)}`
+                  : `historical loss exceeded retention threshold (worst ${retentionReceipt?.worstHistoricalLoss.toFixed(3)}, mean ${retentionReceipt?.meanHistoricalLoss.toFixed(3)})`,
+        heldIn: { before: heldIn, after: revalTrain.mean },
+        ...(revalHeldOut !== undefined && heldOut !== undefined
+          ? { heldOut: { before: heldOut, after: revalHeldOut } }
+          : {}),
+        ...(retentionReceipt ? { retention: retentionReceipt } : {}),
+      });
+
+      if (accept) {
+        accepted.push(applied);
+        heldIn = revalTrain.mean;
+        if (revalHeldOut !== undefined) {
+          heldOut = revalHeldOut;
+        }
+        progress('validation', `${weakness.id}: ACCEPTED`);
+      } else {
+        applied.rollback();
+        rolledBack = true;
+        progress('validation', `${weakness.id}: rejected, rolled back`);
+      }
+    } catch (err) {
+      if (retentionPolicy && !rolledBack) {
+        applied.rollback();
+      }
+      throw err;
     }
   }
 
@@ -320,6 +555,7 @@ export async function evolveAgentPlaybook<
   return {
     baseline,
     final: { heldIn, ...(heldOut !== undefined ? { heldOut } : {}) },
+    ...(retentionAnchors.length > 0 ? { retentionAnchors } : {}),
     weaknesses,
     outcomes,
     recommendations: weaknesses.flatMap((w) => w.configRecommendations),

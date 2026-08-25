@@ -61,12 +61,83 @@ export type AxAgentPlaybookEvolveProposal = {
   feedback: string;
 };
 
+/** A caller-owned, frozen historical evaluation slice used as a retention anchor. */
+export type AxAgentPlaybookRetentionSlice = {
+  /** Stable human-readable identity, for example `billing-refunds`. */
+  name: string;
+  /** Caller-managed dataset or contract version, for example `2026-08`. */
+  version: string;
+  /** Evaluator-owned tasks. These are scored but never shown to the miner. */
+  tasks: readonly AxAgentEvalTask<any>[];
+};
+
+/**
+ * Optional stability/plasticity gate for verified playbook proposals. All
+ * thresholds are explicit; supplying this policy changes no evaluator and
+ * does not promote or deploy anything outside the existing evolve call.
+ */
+export type AxAgentPlaybookRetentionPolicy = {
+  slices: readonly AxAgentPlaybookRetentionSlice[];
+  /** Plasticity: minimum gain on the current training task set. */
+  minCurrentGain: number;
+  /** Stability: maximum loss on any one historical slice. */
+  maxWorstHistoricalLoss: number;
+  /** Stability: maximum unweighted mean loss across historical slices. */
+  maxMeanHistoricalLoss: number;
+};
+
+/** Immutable anchor score established before any proposal is applied. */
+export type AxAgentPlaybookRetentionAnchor = {
+  name: string;
+  version: string;
+  taskCount: number;
+  score: number;
+  evidence: {
+    executedRuns: number;
+    expectedRuns: number;
+    complete: true;
+  };
+};
+
+/** Per-slice evidence and aggregate accounting for one promotion decision. */
+export type AxAgentPlaybookRetentionReceipt = {
+  currentTask: { before: number; after: number; gain: number };
+  slices: readonly {
+    name: string;
+    version: string;
+    taskCount: number;
+    anchorScore: number;
+    candidateScore: number;
+    historicalLoss: number;
+    anchorEvidence: {
+      executedRuns: number;
+      expectedRuns: number;
+      complete: true;
+    };
+    candidateEvidence: {
+      executedRuns: number;
+      expectedRuns: number;
+      complete: true;
+    };
+  }[];
+  worstHistoricalLoss: number;
+  meanHistoricalLoss: number;
+  thresholds: {
+    minCurrentGain: number;
+    maxWorstHistoricalLoss: number;
+    maxMeanHistoricalLoss: number;
+  };
+  accepted: boolean;
+};
+
 export type AxAgentPlaybookEvolveOutcome = {
   proposal: AxAgentPlaybookEvolveProposal;
   accepted: boolean;
   reason: string;
   heldIn: { before: number; after: number };
   heldOut?: { before: number; after: number };
+  /** Present only when every configured retention slice was evaluated. */
+  retention?: AxAgentPlaybookRetentionReceipt;
 };
 
 export type AxAgentPlaybookEvolveProgressEvent = {
@@ -111,6 +182,12 @@ export type AxAgentPlaybookEvolveOptions = {
   epsilon?: number;
   /** Required held-in improvement to accept a proposal (verify). Default 0.05. */
   minHeldInGain?: number;
+  /**
+   * Optional named/versioned historical anchors and explicit
+   * stability/plasticity thresholds. Requires `verify` (the default). Anchor
+   * tasks consume metric budget and remain hidden from weakness mining.
+   */
+  retentionPolicy?: Readonly<AxAgentPlaybookRetentionPolicy>;
   /** Records scoring below this count as failures for mining. Default 0.7. */
   scoreThreshold?: number;
   /**
@@ -127,6 +204,8 @@ export type AxAgentPlaybookEvolveOptions = {
 export type AxAgentPlaybookEvolveResult<OUT extends AxGenOut = AxGenOut> = {
   baseline: { heldIn: number; heldOut?: number };
   final: { heldIn: number; heldOut?: number };
+  /** Fixed pre-proposal scores for configured historical retention slices. */
+  retentionAnchors?: readonly AxAgentPlaybookRetentionAnchor[];
   weaknesses: readonly AxAgentPlaybookWeakness[];
   outcomes: readonly AxAgentPlaybookEvolveOutcome[];
   /** Config suggestions collected from mined weaknesses; never auto-applied. */

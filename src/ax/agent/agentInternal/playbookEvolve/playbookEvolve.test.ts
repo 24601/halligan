@@ -113,6 +113,48 @@ function makeAgent() {
 const actorPromptOf = (ag: any): string =>
   (ag.executor as any).actorProgram?.getSignature?.().getDescription?.() ?? '';
 
+const RETENTION_TASKS = [
+  {
+    name: 'legacy-refunds',
+    version: '2026-07',
+    tasks: [
+      {
+        input: { question: 'old refund workflow' },
+        criteria: 'preserves the historical workflow',
+        id: 'history-refunds',
+      },
+    ],
+  },
+  {
+    name: 'legacy-routing',
+    version: '3',
+    tasks: [
+      {
+        input: { question: 'old routing workflow' },
+        criteria: 'preserves the historical workflow',
+        id: 'history-routing',
+      },
+    ],
+  },
+] as const;
+
+const retentionMetric =
+  (candidateHistoricalScores: Readonly<Record<string, number>>) =>
+  async ({ example, prediction }: any) => {
+    const fixed = prediction?.output?.answer === 'ok-fixed';
+    if (String(example.id).startsWith('history-')) {
+      return fixed ? (candidateHistoricalScores[example.id] ?? 0) : 1;
+    }
+    return fixed ? 1 : 0.2;
+  };
+
+const retentionPolicy = (stabilityLimit: number) => ({
+  slices: RETENTION_TASKS,
+  minCurrentGain: 0.5,
+  maxWorstHistoricalLoss: stabilityLimit,
+  maxMeanHistoricalLoss: stabilityLimit,
+});
+
 describe('agent.playbook().evolve()', () => {
   it('mines the weakness, accepts a verified playbook bullet, and improves held-in', async () => {
     const { ag } = makeAgent();
@@ -227,5 +269,339 @@ describe('agent.playbook().evolve()', () => {
       ai: undefined as any,
     }) as any;
     expect(() => bare.playbook()).toThrow(/studentAI is required/);
+  });
+
+  describe('retention policy', () => {
+    it('removes a harmful current-only promotion and rolls back exactly', async () => {
+      const metric = retentionMetric({
+        'history-refunds': 0.7,
+        'history-routing': 0.9,
+      });
+      const { ag: baselineAgent } = makeAgent();
+      const baselineStartedAt = performance.now();
+      const currentOnly = await baselineAgent.playbook().evolve(TASKS, {
+        metric,
+        maxProposals: 1,
+      });
+      const baselineMs = performance.now() - baselineStartedAt;
+
+      expect(currentOnly.outcomes[0]?.accepted).toBe(true);
+      expect(currentOnly.metricCallsUsed).toBe(4);
+
+      const { ag } = makeAgent();
+      const before = ag.getPlaybook().toJSON();
+      const retentionStartedAt = performance.now();
+      const result = await ag.playbook().evolve(TASKS, {
+        metric,
+        maxProposals: 1,
+        retentionPolicy: retentionPolicy(0.15),
+      });
+      const retentionMs = performance.now() - retentionStartedAt;
+
+      if (process.env.AX_PRINT_METRICS) {
+        console.log(
+          JSON.stringify({
+            currentOnly: {
+              accepted: true,
+              metricCalls: currentOnly.metricCallsUsed,
+              elapsedMs: Number(baselineMs.toFixed(2)),
+            },
+            stabilityPolicy: {
+              accepted: false,
+              metricCalls: result.metricCallsUsed,
+              elapsedMs: Number(retentionMs.toFixed(2)),
+            },
+            falsePromotions: { currentOnly: 1, stabilityPolicy: 0 },
+            metricCallOverhead:
+              result.metricCallsUsed - currentOnly.metricCallsUsed,
+          })
+        );
+      }
+
+      expect(result.metricCallsUsed).toBe(8);
+      expect(result.retentionAnchors).toEqual([
+        {
+          name: 'legacy-refunds',
+          version: '2026-07',
+          taskCount: 1,
+          score: 1,
+          evidence: { executedRuns: 1, expectedRuns: 1, complete: true },
+        },
+        {
+          name: 'legacy-routing',
+          version: '3',
+          taskCount: 1,
+          score: 1,
+          evidence: { executedRuns: 1, expectedRuns: 1, complete: true },
+        },
+      ]);
+      expect(result.outcomes[0]?.accepted).toBe(false);
+      const receipt = result.outcomes[0]?.retention;
+      expect(receipt).toMatchObject({
+        currentTask: { before: 0.2, after: 1, gain: 0.8 },
+        accepted: false,
+        slices: [
+          {
+            name: 'legacy-refunds',
+            version: '2026-07',
+            anchorScore: 1,
+            candidateScore: 0.7,
+            anchorEvidence: {
+              executedRuns: 1,
+              expectedRuns: 1,
+              complete: true,
+            },
+            candidateEvidence: {
+              executedRuns: 1,
+              expectedRuns: 1,
+              complete: true,
+            },
+          },
+          {
+            name: 'legacy-routing',
+            version: '3',
+            anchorScore: 1,
+            candidateScore: 0.9,
+          },
+        ],
+      });
+      expect(receipt?.worstHistoricalLoss).toBeCloseTo(0.3);
+      expect(receipt?.meanHistoricalLoss).toBeCloseTo(0.2);
+      expect(receipt?.slices[0]?.historicalLoss).toBeCloseTo(0.3);
+      expect(receipt?.slices[1]?.historicalLoss).toBeCloseTo(0.1);
+      expect(ag.getPlaybook().toJSON()).toEqual(before);
+      expect(actorPromptOf(ag)).not.toContain(BULLET_MARKER);
+    });
+
+    it('accepts the same candidate under an explicit plasticity-favoring policy', async () => {
+      const { ag } = makeAgent();
+      const result = await ag.playbook().evolve(TASKS, {
+        metric: retentionMetric({
+          'history-refunds': 0.7,
+          'history-routing': 0.9,
+        }),
+        maxProposals: 1,
+        retentionPolicy: retentionPolicy(0.35),
+      });
+
+      expect(result.outcomes[0]?.accepted).toBe(true);
+      expect(result.outcomes[0]?.retention?.accepted).toBe(true);
+      expect(result.outcomes[0]?.retention?.worstHistoricalLoss).toBeCloseTo(
+        0.3
+      );
+      expect(actorPromptOf(ag)).toContain(BULLET_MARKER);
+    });
+
+    it('enforces the mean historical-loss threshold independently', async () => {
+      const { ag } = makeAgent();
+      const result = await ag.playbook().evolve(TASKS, {
+        metric: retentionMetric({
+          'history-refunds': 0.8,
+          'history-routing': 0.9,
+        }),
+        maxProposals: 1,
+        retentionPolicy: {
+          ...retentionPolicy(0.25),
+          maxMeanHistoricalLoss: 0.1,
+        },
+      });
+
+      expect(result.outcomes[0]?.retention?.worstHistoricalLoss).toBeCloseTo(
+        0.2
+      );
+      expect(result.outcomes[0]?.retention?.meanHistoricalLoss).toBeCloseTo(
+        0.15
+      );
+      expect(result.outcomes[0]?.accepted).toBe(false);
+      expect(actorPromptOf(ag)).not.toContain(BULLET_MARKER);
+    });
+
+    it('rejects a no-benefit candidate even when historical slices improve', async () => {
+      const { ag } = makeAgent();
+      const result = await ag.playbook().evolve(TASKS, {
+        metric: async ({ example, prediction }: any) => {
+          const fixed = prediction?.output?.answer === 'ok-fixed';
+          return String(example.id).startsWith('history-')
+            ? fixed
+              ? 1
+              : 0.8
+            : fixed
+              ? 0.22
+              : 0.2;
+        },
+        maxProposals: 1,
+        retentionPolicy: retentionPolicy(0),
+      });
+
+      expect(result.outcomes[0]?.accepted).toBe(false);
+      expect(result.outcomes[0]?.reason).toContain('current-task gain');
+      const receipt = result.outcomes[0]?.retention;
+      expect(receipt).toMatchObject({
+        currentTask: { before: 0.2, after: 0.22 },
+        accepted: false,
+      });
+      expect(receipt?.currentTask.gain).toBeCloseTo(0.02);
+      expect(receipt?.worstHistoricalLoss).toBeCloseTo(-0.2);
+      expect(receipt?.meanHistoricalLoss).toBeCloseTo(-0.2);
+      expect(actorPromptOf(ag)).not.toContain(BULLET_MARKER);
+    });
+
+    it('rejects a noisy candidate whose repeated current-task mean is insufficient', async () => {
+      const { ag } = makeAgent();
+      let candidateCurrentRun = 0;
+      const result = await ag.playbook().evolve(TASKS, {
+        metric: async ({ example, prediction }: any) => {
+          const fixed = prediction?.output?.answer === 'ok-fixed';
+          if (String(example.id).startsWith('history-')) return 1;
+          if (!fixed) return 0.2;
+          return candidateCurrentRun++ % 2 === 0 ? 1 : 0;
+        },
+        maxProposals: 1,
+        runsPerTask: 2,
+        retentionPolicy: retentionPolicy(0),
+      });
+
+      expect(result.metricCallsUsed).toBe(16);
+      expect(result.outcomes[0]?.accepted).toBe(false);
+      expect(result.outcomes[0]?.retention?.currentTask).toMatchObject({
+        before: 0.2,
+        after: 0.5,
+      });
+      expect(result.outcomes[0]?.reason).toContain('current-task gain');
+      expect(actorPromptOf(ag)).not.toContain(BULLET_MARKER);
+    });
+
+    it('fails closed before mutation when the budget cannot establish complete anchors', async () => {
+      const { ag } = makeAgent();
+      const before = ag.getPlaybook().toJSON();
+      await expect(
+        ag.playbook().evolve(TASKS, {
+          metric: retentionMetric({}),
+          maxProposals: 1,
+          runsPerTask: 2,
+          maxMetricCalls: 7,
+          retentionPolicy: retentionPolicy(0.1),
+        })
+      ).rejects.toThrow(/cannot establish complete retention anchors/);
+      expect(ag.getPlaybook().toJSON()).toEqual(before);
+    });
+
+    it('rejects invalid candidate evidence without emitting a promotion receipt', async () => {
+      const { ag } = makeAgent();
+      const before = ag.getPlaybook().toJSON();
+      const result = await ag.playbook().evolve(TASKS, {
+        metric: async ({ example, prediction }: any) => {
+          const fixed = prediction?.output?.answer === 'ok-fixed';
+          if (fixed && String(example.id).startsWith('history-')) {
+            return Number.NaN;
+          }
+          return fixed
+            ? 1
+            : String(example.id).startsWith('history-')
+              ? 1
+              : 0.2;
+        },
+        maxProposals: 1,
+        retentionPolicy: retentionPolicy(0.5),
+      });
+
+      expect(result.outcomes[0]).toMatchObject({
+        accepted: false,
+        reason: 'retention evaluation produced invalid evaluator evidence',
+      });
+      expect(result.outcomes[0]?.retention).toBeUndefined();
+      expect(ag.getPlaybook().toJSON()).toEqual(before);
+    });
+
+    it('fails before mining or mutation when an anchor metric is invalid', async () => {
+      const { ag } = makeAgent();
+      const before = ag.getPlaybook().toJSON();
+
+      await expect(
+        ag.playbook().evolve(TASKS, {
+          metric: async ({ example }: any) =>
+            example.id === 'history-refunds' ? Number.NaN : 0.2,
+          maxProposals: 1,
+          retentionPolicy: retentionPolicy(0.5),
+        })
+      ).rejects.toThrow(/requires complete, finite evaluator evidence/);
+
+      expect(ag.getPlaybook().toJSON()).toEqual(before);
+    });
+
+    it('rolls back exactly when aborted between candidate retention slices', async () => {
+      const { ag } = makeAgent();
+      const before = ag.getPlaybook().toJSON();
+      const controller = new AbortController();
+
+      await expect(
+        ag.playbook().evolve(TASKS, {
+          metric: async ({ example, prediction }: any) => {
+            const fixed = prediction?.output?.answer === 'ok-fixed';
+            if (
+              fixed &&
+              example.id === 'history-refunds' &&
+              !controller.signal.aborted
+            ) {
+              controller.abort();
+            }
+            return fixed
+              ? 1
+              : String(example.id).startsWith('history-')
+                ? 1
+                : 0.2;
+          },
+          maxProposals: 1,
+          abortSignal: controller.signal,
+          retentionPolicy: retentionPolicy(0.5),
+        })
+      ).rejects.toThrow(/aborted/);
+
+      expect(ag.getPlaybook().toJSON()).toEqual(before);
+      expect(actorPromptOf(ag)).not.toContain(BULLET_MARKER);
+    });
+
+    it('rejects invalid policy authority and identity configurations', async () => {
+      const { ag } = makeAgent();
+      await expect(
+        ag.playbook().evolve(TASKS, {
+          metric: scoreByAnswer,
+          verify: false,
+          retentionPolicy: retentionPolicy(0.1),
+        })
+      ).rejects.toThrow(/requires verify: true/);
+      await expect(
+        ag.playbook().evolve(TASKS, {
+          metric: scoreByAnswer,
+          retentionPolicy: {
+            ...retentionPolicy(0.1),
+            slices: [RETENTION_TASKS[0], RETENTION_TASKS[0]],
+          },
+        })
+      ).rejects.toThrow(/duplicate retention slice/);
+      await expect(
+        ag.playbook().evolve(TASKS, {
+          metric: scoreByAnswer,
+          retentionPolicy: {
+            ...retentionPolicy(0.1),
+            maxMeanHistoricalLoss: Number.NaN,
+          },
+        })
+      ).rejects.toThrow(/must be finite and non-negative/);
+      await expect(
+        ag.playbook().evolve(TASKS, {
+          metric: scoreByAnswer,
+          retentionPolicy: {
+            ...retentionPolicy(0.1),
+            slices: [
+              {
+                ...RETENTION_TASKS[0],
+                tasks: [{ ...RETENTION_TASKS[0].tasks[0], weight: -1 }],
+              },
+            ],
+          },
+        })
+      ).rejects.toThrow(/task weights must be finite and non-negative/);
+    });
   });
 });

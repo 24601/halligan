@@ -28,6 +28,12 @@ export type AxAgentEvalBatchResult<
   mean: number;
   /** True when the budget ran out before every task executed. */
   exhausted: boolean;
+  /** Number of agent + metric attempts completed, including failed attempts. */
+  executedRuns: number;
+  /** Number of attempts required for complete evidence. */
+  expectedRuns: number;
+  /** False when any run threw or returned a non-finite scalar score. */
+  validEvidence: boolean;
 };
 
 export async function runAgentEvalBatch<
@@ -47,6 +53,8 @@ export async function runAgentEvalBatch<
   const records: AxAgentPlaybookEvolveRunRecord<IN, OUT>[] = [];
   const runsPerTask = Math.max(1, Math.floor(args.runsPerTask ?? 1));
   let exhausted = false;
+  let executedRuns = 0;
+  let validEvidence = true;
 
   for (const task of args.tasks) {
     const scores: number[] = [];
@@ -62,6 +70,7 @@ export async function runAgentEvalBatch<
         break;
       }
       args.budget.remaining--;
+      executedRuns++;
 
       try {
         const prediction = await args.agent._forwardForEvaluation(
@@ -75,15 +84,16 @@ export async function runAgentEvalBatch<
           prediction: prediction as Record<string, unknown>,
           example: task as unknown as Parameters<AxMetricFn>[0]['example'],
         });
-        scores.push(
-          typeof score === 'number' && Number.isFinite(score) ? score : 0
-        );
+        const validScore = typeof score === 'number' && Number.isFinite(score);
+        scores.push(validScore ? score : 0);
+        validEvidence &&= validScore;
         lastPrediction = prediction;
       } catch (err) {
         if (args.abortSignal?.aborted) {
           throw err;
         }
         scores.push(0);
+        validEvidence = false;
         lastError = err instanceof Error ? err.message : String(err);
       }
     }
@@ -118,5 +128,8 @@ export async function runAgentEvalBatch<
     records,
     mean: weightSum > 0 ? scoreSum / weightSum : 0,
     exhausted,
+    executedRuns,
+    expectedRuns: args.tasks.length * runsPerTask,
+    validEvidence,
   };
 }

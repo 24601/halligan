@@ -18,7 +18,12 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
 
 ## Open
 
-No entries.
+- `axir-2026-08-25-port-playbook-historical-retention-policy-and-receipts` [axagent] Port playbook historical retention policy and receipts
+  - Status: open
+  - Source commit: `ca760294f5ea4f207052c39c2218e1195103bc2a`
+  - TS paths: `src/ax/agent/agentInternal/playbookEvolve/playbookEvolve.ts`
+  - Impact: TypeScript agent playbook evolution can gate candidates against named/versioned historical anchors with explicit stability/plasticity thresholds and per-slice receipts; generated Python, Java, C++, Go, and Rust agent evolution does not yet expose or enforce that optional policy.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 
 ## Done
 

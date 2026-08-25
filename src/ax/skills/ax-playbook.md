@@ -87,6 +87,68 @@ const result = await apb.evolve(
 );
 ```
 
+### Optional historical retention gate
+
+Use `retentionPolicy` when a verified playbook proposal must improve the
+current task set while staying within explicit loss limits on caller-owned,
+frozen historical slices:
+
+```typescript
+const result = await apb.evolve(
+  { train: currentTasks, validation: currentHoldout },
+  {
+    metric,
+    retentionPolicy: {
+      slices: [
+        { name: 'refunds', version: '2026-07', tasks: refundAnchors },
+        { name: 'routing', version: '3', tasks: routingAnchors },
+      ],
+      minCurrentGain: 0.05, // plasticity
+      maxWorstHistoricalLoss: 0.02, // per-slice stability
+      maxMeanHistoricalLoss: 0.01, // aggregate stability
+    },
+  },
+);
+```
+
+Ax scores each slice before any proposal and keeps those scores fixed as the
+run's anchors. Each fully evaluated proposal gets `outcome.retention` with its
+current-task gain, every named/versioned anchor and candidate score, per-slice
+loss, expected/executed run counts, evidence completeness, worst/mean
+historical loss, thresholds, and the final gate decision. Rejected proposals
+use the existing exact snapshot rollback. The result also exposes
+`retentionAnchors`. `minCurrentGain` replaces `minHeldInGain` for this optional
+gate and compares each proposal with the last accepted current-task score;
+fixed historical anchors prevent sequentially accepted losses from resetting.
+The existing validation-set `epsilon` gate still applies independently.
+
+Retention is optional and default-off. It requires verified evolution, adds
+one baseline and one candidate evaluation per anchor task (times
+`runsPerTask`), and fails before mutation when the metric budget cannot
+establish complete anchors. Invalid weights, evaluator errors, and non-finite
+scores fail closed; an interrupted candidate evaluation rolls back. It does
+not change the metric or judge, expose anchor examples to weakness mining,
+generate candidates, auto-deploy, or promote outside this `evolve` call. Slice
+names, versions, task collection, semantic train/validation disjointness, and
+evaluator validity remain caller authority; use frozen, separately collected
+data and audit overlap before the run. A finite anchor set can detect measured
+regressions only—it is not proof against catastrophic forgetting or live-model
+drift.
+
+This narrow boundary applies to agent playbook bullets. It does not claim to
+govern GEPA prompt/program components, routing/tool policies, or interface
+configuration. Use it where a representative historical corpus and stable,
+finite metric exist; do not use it as a substitute for independent holdouts,
+online monitoring, or human release authority. The retention option is
+TypeScript-only until the linked AxIR backlog work reaches generated packages.
+
+Deterministic zero-cost mechanism evaluation (mock AI, fixed metric and task
+sets; no live-model efficacy claim):
+
+```bash
+AX_PRINT_METRICS=1 npx vitest run src/ax/agent/agentInternal/playbookEvolve/playbookEvolve.test.ts
+```
+
 The agent-level `evolve(dataset, options)` is distinct from the program-level `pb.evolve(examples, metric)` above: it takes an `AxAgentEvalDataset` plus options, runs the whole pipeline, and returns baseline/final held-in & held-out with per-bullet outcomes (no `{ bestScore }`). For full-pipeline tuning of agent instructions and demos (not the playbook) use `agent.optimize(...)` (GEPA).
 
 Generated packages expose that same agent-bound loop with language-shaped APIs:
