@@ -1168,7 +1168,7 @@
       "status": "open",
       "title": "Port provider-neutral visual observation sampling policy",
       "createdAt": "2026-08-25",
-      "sourcePR": null,
+      "sourcePR": 18,
       "sourceCommit": "ca760294f5ea4f207052c39c2218e1195103bc2a",
       "tsPaths": ["src/ax/ai/index.ts", "src/ax/ai/visual"],
       "portableSurface": "axai",
