@@ -922,6 +922,7 @@ import {
   type AxEventCloseOptions,
   type AxEventContext,
   type AxEventContinuation,
+  type AxEventContinuationEnqueueRequest,
   AxEventContinuationNotFoundError,
   type AxEventContinuationPlan,
   type AxEventContinuationRegistration,
@@ -966,6 +967,12 @@ import {
   type AxEventTargetInputContext,
   type AxEventTrust,
   type AxEventValue,
+  type AxEventVerificationResult,
+  type AxEventVerificationStatus,
+  type AxEventVerificationUsage,
+  type AxEventVerifierContext,
+  type AxEventVerifierPolicy,
+  type AxEventVerifierResult,
   AxManualEventClock,
   type AxProgramStateEnvelope,
   type AxProgramStateStore,
@@ -1986,6 +1993,7 @@ export type { AxEventClock };
 export type { AxEventCloseOptions };
 export type { AxEventContext };
 export type { AxEventContinuation };
+export type { AxEventContinuationEnqueueRequest };
 export type { AxEventContinuationPlan };
 export type { AxEventContinuationRegistration };
 export type { AxEventCorrelationKey };
@@ -2031,6 +2039,12 @@ export type { AxEventTarget };
 export type { AxEventTargetInputContext };
 export type { AxEventTrust };
 export type { AxEventValue };
+export type { AxEventVerificationResult };
+export type { AxEventVerificationStatus };
+export type { AxEventVerificationUsage };
+export type { AxEventVerifierContext };
+export type { AxEventVerifierPolicy };
+export type { AxEventVerifierResult };
 export type { AxEvidenceDescriptor };
 export type { AxExample };
 export type { AxExamples };

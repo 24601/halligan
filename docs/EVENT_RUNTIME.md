@@ -188,6 +188,93 @@ Correlation ownership is unique within one identity scope. Progress events can
 use `observe`; terminal events use `resume`. Missing, ambiguous, or expired
 continuations are dead-lettered rather than converted into fresh work.
 
+## Verifier-Gated Continuation
+
+Attach a host-owned verifier when a target may make bounded attempts toward a
+deterministically checkable result. The target receives failure evidence only
+through continuation metadata; it never receives or mutates the verifier.
+
+```ts
+const target = eventTarget('repair')
+  .program(repairAgent)
+  .ai(llm)
+  .input(mapInitialOrVerificationFeedback)
+  .retrySafety('idempotent')
+  .verifier({
+    id: 'test-suite-v1',
+    maxRuns: 4,
+    maxTokens: 40_000,
+    maxWallTimeMs: 10 * 60_000,
+    maxCostUSD: 2,
+    timeoutMs: 30_000,
+    maxEvidenceBytes: 4_096,
+    backoffMs: (attempt) => 1_000 * 2 ** (attempt - 1),
+    fingerprint: (output) => output.workspaceTreeHash,
+    usage: () => readHostRecordedUsage(),
+    verify: (_output, { signal }) => runHostTestSuite({ signal }),
+  })
+  .build();
+```
+
+After each target attempt, the runtime persists output before calling
+`verify`. A pass records `verification.status: 'pass'`, releases final sinks,
+and deletes policy state. A failure bounds its typed JSON evidence, persists it
+on the run, atomically establishes an identity-scoped continuation plus resume
+delivery, and exposes the evidence at
+`continuation.metadata.verification.failure` to the target's resume mapping.
+The existing store, worker, retry, cancellation, and ordering machinery owns
+the next attempt; no scheduler daemon is created.
+
+Limits are fail-closed. `maxRuns` permits that many verifier calls; token, cost,
+and wall-time limits stop before another verifier call once host-reported usage
+reaches the bound. Exhaustion, unchanged state, verifier error, and timeout end
+with run/delivery status `verification_failed` plus the precise typed
+verification status and reason. Abort remains `cancelled`. If a caller-supplied
+fingerprint equals the fingerprint of the previous failure, the target's new
+output is persisted but the repeated verifier call and further loop are
+suppressed. Final sinks run only after a pass.
+
+Use deterministic fingerprints over all state relevant to the verifier.
+Verifier callbacks execute in the host, receive an abort signal, and must not
+run shell commands through core. Autonomous targets should be idempotent;
+otherwise existing lease recovery correctly stops at `outcome_unknown` rather
+than guessing whether to repeat side effects. Persistent stores implement
+`enqueueContinuation` atomically so a resume delivery cannot race ahead of or
+exist without its continuation ownership record.
+
+### Deterministic Evaluation
+
+Run the checked-in one-shot versus bounded-continuation hill-climbing suite:
+
+```bash
+node --import=tsx scripts/eval-event-verifier-continuation.ts
+npx vitest run scripts/event-verifier-eval.test.ts
+```
+
+The seven fixed tasks cover recoverable work, an already-correct/no-benefit
+case, an impossible task, unchanged state, a misleading verifier, a failing
+verifier, and restart recovery. The deterministic outcome counts are:
+
+| Metric | One shot | Bounded continuation |
+| --- | ---: | ---: |
+| Ground-truth pass rate | 1/7 (14.3%) | 3/7 (42.9%) |
+| Target attempts | 7 | 12 |
+| Verifier calls | 7 | 11 |
+| Suppressed verifier calls | 0 | 1 |
+| Correct hard-stop cases | 3/3 | 3/3 |
+| Restart recovery | not exercised | passed |
+| False promotions from misleading verifier | 1 | 1 |
+
+The command also reports measured wall-clock time for that invocation; it is
+diagnostic rather than a fixed assertion. Continuation helps only when later
+attempts can use bounded failure evidence to change a failing result. It adds
+attempt, verifier, persistence, and latency overhead to recoverable failures,
+and no quality benefit to already-correct work. Impossible work exhausts its
+budget, unchanged work suppresses a redundant verifier call, verifier failure
+stops closed, and an incorrect verifier can still promote an incorrect result.
+The independent ground-truth predicate keeps that false promotion visible; the
+evaluation does not relabel it as success.
+
 ## Delivery and Side Effects
 
 The built-in `AxInMemoryEventStore` is volatile and single-process. It retries

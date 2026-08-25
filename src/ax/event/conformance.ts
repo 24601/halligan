@@ -156,6 +156,31 @@ export async function runAxEventStoreConformance(
       'continuation atomic consumption'
     );
 
+    const resumedContinuation: AxEventContinuation = {
+      ...continuation,
+      id: `${key}-continuation-enqueued`,
+      correlation: [{ kind: 'task', value: '43' }],
+    };
+    const resumed = await store.enqueueContinuation({
+      continuation: resumedContinuation,
+      enqueue: enqueueRequest(
+        `${key}-continuation-event`,
+        'tenant-a',
+        options.clock.now()
+      ),
+    });
+    assert(resumed.accepted, 'continuation resume enqueue');
+    assert(
+      (
+        await peer.store.findContinuation(
+          resumedContinuation.identityScope,
+          resumedContinuation.correlation[0]!,
+          options.clock.now()
+        )
+      )?.id === resumedContinuation.id,
+      'continuation and resume delivery commit together'
+    );
+
     const run: AxEventRun = {
       id: `${key}-run`,
       deliveryId: takeover!.id,

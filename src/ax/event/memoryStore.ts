@@ -2,6 +2,7 @@ import {
   AxEventBackpressureError,
   type AxEventClock,
   type AxEventContinuation,
+  type AxEventContinuationEnqueueRequest,
   type AxEventCorrelationKey,
   type AxEventDeadLetter,
   type AxEventDelivery,
@@ -166,6 +167,19 @@ export class AxInMemoryEventStore implements AxEventStore {
       durability: 'volatile',
       deliveryIds,
     };
+  }
+
+  async enqueueContinuation(
+    request: Readonly<AxEventContinuationEnqueueRequest>,
+    signal?: AbortSignal
+  ): Promise<AxEventPublishReceipt> {
+    await this.registerContinuation(request.continuation);
+    try {
+      return await this.enqueue(request.enqueue, signal);
+    } catch (error) {
+      await this.completeContinuation(request.continuation.id);
+      throw error;
+    }
   }
 
   async claim(
@@ -472,6 +486,7 @@ export class AxInMemoryEventStore implements AxEventStore {
     return (
       status === 'succeeded' ||
       status === 'failed' ||
+      status === 'verification_failed' ||
       status === 'cancelled' ||
       status === 'dead_lettered' ||
       status === 'output_persistence_failed' ||

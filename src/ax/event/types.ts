@@ -253,6 +253,78 @@ export interface AxEventTargetInputContext {
   continuation?: Readonly<AxEventContinuation>;
 }
 
+export interface AxEventVerificationUsage {
+  tokens?: number;
+  costUSD?: number;
+}
+
+export type AxEventVerifierResult =
+  | Readonly<{ status: 'pass' }>
+  | Readonly<{
+      status: 'fail';
+      failure: Readonly<{
+        code: string;
+        evidence?: AxEventValue;
+      }>;
+    }>;
+
+export interface AxEventVerifierContext<OUT = unknown> {
+  readonly run: Readonly<AxEventRun<OUT>>;
+  readonly eventContext: Readonly<AxEventContext>;
+  readonly signal: AbortSignal;
+}
+
+/** Host-owned verifier and deterministic continuation limits for one target. */
+export interface AxEventVerifierPolicy<OUT = unknown> {
+  id: string;
+  verify(
+    output: OUT,
+    context: Readonly<AxEventVerifierContext<OUT>>
+  ): AxEventVerifierResult | Promise<AxEventVerifierResult>;
+  fingerprint?: (
+    output: OUT,
+    context: Readonly<AxEventVerifierContext<OUT>>
+  ) => string | Promise<string>;
+  usage?: (
+    output: OUT,
+    context: Readonly<AxEventVerifierContext<OUT>>
+  ) =>
+    | Readonly<AxEventVerificationUsage>
+    | Promise<Readonly<AxEventVerificationUsage>>;
+  maxRuns?: number;
+  maxTokens?: number;
+  maxWallTimeMs?: number;
+  maxCostUSD?: number;
+  timeoutMs?: number;
+  maxEvidenceBytes?: number;
+  backoffMs?:
+    | number
+    | ((attempt: number, failure: Readonly<{ code: string }>) => number);
+}
+
+export type AxEventVerificationStatus =
+  | 'pass'
+  | 'fail'
+  | 'exhausted'
+  | 'unchanged_state'
+  | 'error'
+  | 'timeout';
+
+export interface AxEventVerificationResult {
+  policyId: string;
+  status: AxEventVerificationStatus;
+  run: number;
+  checkedAt: number;
+  cumulativeUsage: Readonly<Required<AxEventVerificationUsage>>;
+  fingerprint?: string;
+  failure?: Readonly<{
+    code: string;
+    evidence?: AxEventValue;
+  }>;
+  reason?: 'max_runs' | 'max_tokens' | 'max_wall_time' | 'max_cost';
+  error?: string;
+}
+
 export type AxEventPathSegment = string | number;
 
 export type AxEventPathRoot =
@@ -332,6 +404,8 @@ export interface AxEventTarget<IN = any, OUT = any> {
   forwardOptions?: Readonly<AxProgramForwardOptions<string>>;
   execution?: 'forward' | 'streaming';
   state?: AxEventProgramStateAdapter<AxProgrammable<IN, OUT>>;
+  /** Host-only gate run after output persistence and before final sinks. */
+  verifier?: Readonly<AxEventVerifierPolicy<OUT>>;
   sinks?: readonly AxEventSink<OUT>[];
   retrySafety?: 'idempotent' | 'unknown';
 }
@@ -395,6 +469,7 @@ export type AxEventDeliveryStatus =
   | 'waiting_event'
   | 'succeeded'
   | 'failed'
+  | 'verification_failed'
   | 'cancelled'
   | 'dead_lettered'
   | 'output_persistence_failed'
@@ -431,6 +506,7 @@ export type AxEventRunStatus =
   | 'waiting_event'
   | 'succeeded'
   | 'failed'
+  | 'verification_failed'
   | 'cancelled'
   | 'output_persistence_failed'
   | 'outcome_unknown';
@@ -454,6 +530,7 @@ export interface AxEventRun<OUT = unknown> {
   finishedAt?: number;
   output?: OUT;
   chunks?: readonly AxGenDeltaOut<OUT>[];
+  verification?: Readonly<AxEventVerificationResult>;
   error?: string;
   continuationIds?: readonly string[];
   sinks?: readonly AxEventSinkAttempt[];
@@ -498,10 +575,20 @@ export interface AxEventEnqueueRequest {
   publishTimeoutMs: number;
 }
 
+export interface AxEventContinuationEnqueueRequest {
+  continuation: Readonly<AxEventContinuation>;
+  enqueue: Readonly<AxEventEnqueueRequest>;
+}
+
 export interface AxEventStore {
   readonly capabilities: Readonly<AxEventStoreCapabilities>;
   enqueue(
     request: Readonly<AxEventEnqueueRequest>,
+    signal?: AbortSignal
+  ): Promise<AxEventPublishReceipt>;
+  /** Atomically establishes continuation ownership and its resume delivery. */
+  enqueueContinuation(
+    request: Readonly<AxEventContinuationEnqueueRequest>,
     signal?: AbortSignal
   ): Promise<AxEventPublishReceipt>;
   claim(

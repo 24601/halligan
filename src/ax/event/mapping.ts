@@ -22,6 +22,7 @@ import {
   type AxEventScalar,
   type AxEventSink,
   type AxEventTarget,
+  type AxEventVerifierPolicy,
 } from './types.js';
 
 const unsafeSegments = new Set(['__proto__', 'constructor', 'prototype']);
@@ -400,9 +401,50 @@ export function validateEventTarget<IN, OUT>(
       );
     }
   }
+  if (target.verifier) {
+    if (!target.verifier.id.trim()) {
+      throw new Error(
+        `AxEventTarget ${target.id} verifier id must be non-empty`
+      );
+    }
+    for (const [name, value] of Object.entries({
+      maxRuns: target.verifier.maxRuns ?? 3,
+      maxTokens: target.verifier.maxTokens,
+      maxWallTimeMs: target.verifier.maxWallTimeMs,
+      maxCostUSD: target.verifier.maxCostUSD,
+      timeoutMs: target.verifier.timeoutMs ?? 30_000,
+    })) {
+      if (value !== undefined && (!Number.isFinite(value) || value <= 0)) {
+        throw new Error(
+          `AxEventTarget ${target.id} verifier ${name} must be positive`
+        );
+      }
+    }
+    if (
+      target.verifier.maxEvidenceBytes !== undefined &&
+      (!Number.isFinite(target.verifier.maxEvidenceBytes) ||
+        target.verifier.maxEvidenceBytes < 16)
+    ) {
+      throw new Error(
+        `AxEventTarget ${target.id} verifier maxEvidenceBytes must be at least 16`
+      );
+    }
+    if (
+      typeof target.verifier.backoffMs === 'number' &&
+      (!Number.isFinite(target.verifier.backoffMs) ||
+        target.verifier.backoffMs < 0)
+    ) {
+      throw new Error(
+        `AxEventTarget ${target.id} verifier backoffMs must be non-negative`
+      );
+    }
+  }
   return {
     ...target,
     ...(target.waitFor ? { waitFor: [...target.waitFor] } : {}),
+    ...(target.verifier
+      ? { verifier: Object.freeze({ ...target.verifier }) }
+      : {}),
   };
 }
 
@@ -498,6 +540,11 @@ export class AxEventTargetBuilder<IN = Record<string, unknown>, OUT = unknown> {
 
   state(state: AxEventProgramStateAdapter<AxProgrammable<IN, OUT>>): this {
     this.value.state = state;
+    return this;
+  }
+
+  verifier(verifier: Readonly<AxEventVerifierPolicy<OUT>>): this {
+    this.value.verifier = verifier;
     return this;
   }
 

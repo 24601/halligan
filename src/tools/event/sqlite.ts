@@ -3,6 +3,7 @@ import {
   AxEventBackpressureError,
   type AxEventClock,
   type AxEventContinuation,
+  type AxEventContinuationEnqueueRequest,
   type AxEventCorrelationKey,
   type AxEventDeadLetter,
   type AxEventDelivery,
@@ -26,6 +27,7 @@ const TERMINAL = [
   'waiting_event',
   'succeeded',
   'failed',
+  'verification_failed',
   'cancelled',
   'dead_lettered',
   'output_persistence_failed',
@@ -134,6 +136,34 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
     for (;;) {
       if (signal?.aborted) throw signal.reason;
       const result = this.tryEnqueue(request);
+      if (result) return result;
+      const remaining = deadline - this.clock.now();
+      if (remaining <= 0) throw new AxEventBackpressureError();
+      await this.clock.sleep(Math.min(25, remaining), signal);
+    }
+  }
+
+  async enqueueContinuation(
+    request: Readonly<AxEventContinuationEnqueueRequest>,
+    signal?: AbortSignal
+  ): Promise<AxEventPublishReceipt> {
+    const eventBytes = Buffer.byteLength(
+      JSON.stringify(request.enqueue.ingress)
+    );
+    if (eventBytes > this.maxEventBytes) {
+      throw new AxEventBackpressureError(
+        `Event is ${eventBytes} bytes; maximum is ${this.maxEventBytes}`
+      );
+    }
+    const deadline = this.clock.now() + request.enqueue.publishTimeoutMs;
+    for (;;) {
+      if (signal?.aborted) throw signal.reason;
+      const result = this.db.transaction(() => {
+        const receipt = this.tryEnqueue(request.enqueue);
+        if (!receipt) return;
+        this.insertContinuation(request.continuation);
+        return receipt;
+      })();
       if (result) return result;
       const remaining = deadline - this.clock.now();
       if (remaining <= 0) throw new AxEventBackpressureError();
@@ -306,34 +336,7 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
   async registerContinuation(
     continuation: Readonly<AxEventContinuation>
   ): Promise<void> {
-    this.db.transaction(() => {
-      this.db
-        .prepare(
-          `INSERT INTO event_continuations
-           (id, identity_scope, continuation_json, created_at, expires_at)
-           VALUES(?,?,?,?,?)`
-        )
-        .run(
-          continuation.id,
-          continuation.identityScope,
-          JSON.stringify(continuation),
-          continuation.createdAt,
-          continuation.expiresAt ?? null
-        );
-      const insert = this.db.prepare(
-        'INSERT INTO event_continuation_keys(correlation_key, continuation_id) VALUES(?,?)'
-      );
-      for (const correlation of continuation.correlation) {
-        insert.run(
-          axEventScopedCorrelationKey(
-            continuation.identityScope,
-            correlation.kind,
-            correlation.value
-          ),
-          continuation.id
-        );
-      }
-    })();
+    this.db.transaction(() => this.insertContinuation(continuation))();
   }
 
   async findContinuation(
@@ -597,6 +600,37 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
         deliveryIds,
       };
     })();
+  }
+
+  private insertContinuation(
+    continuation: Readonly<AxEventContinuation>
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO event_continuations
+         (id, identity_scope, continuation_json, created_at, expires_at)
+         VALUES(?,?,?,?,?)`
+      )
+      .run(
+        continuation.id,
+        continuation.identityScope,
+        JSON.stringify(continuation),
+        continuation.createdAt,
+        continuation.expiresAt ?? null
+      );
+    const insert = this.db.prepare(
+      'INSERT INTO event_continuation_keys(correlation_key, continuation_id) VALUES(?,?)'
+    );
+    for (const correlation of continuation.correlation) {
+      insert.run(
+        axEventScopedCorrelationKey(
+          continuation.identityScope,
+          correlation.kind,
+          correlation.value
+        ),
+        continuation.id
+      );
+    }
   }
 
   private rowToDelivery(row: DeliveryRow): AxEventDelivery {
