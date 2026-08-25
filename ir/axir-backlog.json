@@ -1162,6 +1162,29 @@
       "completedAt": "2026-08-22",
       "completedByCommit": "040f954bce9c7dca44f7fd3436886d036f9e358b",
       "verification": "TS-derived native-image routing fixture; five-language AxIR dev verifier; npm run axir:check-packages; go test ./internal/axir; focused TypeScript router tests"
+    },
+    {
+      "id": "axir-2026-08-25-port-host-owned-principal-preference-evidence-selection",
+      "status": "open",
+      "title": "Port host-owned principal preference evidence selection",
+      "createdAt": "2026-08-25",
+      "sourcePR": null,
+      "sourceCommit": "2ef9eb795dd3198060743365456815501aa88908",
+      "tsPaths": [
+        "src/ax/agent/preferenceEvidence.ts",
+        "src/ax/agent/preferenceEvidence.test.ts",
+        "src/ax/agent/preferenceEvidence.test-d.ts"
+      ],
+      "portableSurface": "axagent",
+      "impact": "Generated runtimes do not yet expose the optional principal-scoped preference evidence contract, authority-aware retrieval, lifecycle helpers, or memory adapter.",
+      "suggestedAxirWork": [
+        "Add or update the TS-derived conformance fixture.",
+        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
+        "Run npm run axir:conformance:check and npm run test:axir."
+      ],
+      "completedAt": null,
+      "completedByCommit": null,
+      "verification": null
     }
   ],
   "nonPortableExemptions": [
