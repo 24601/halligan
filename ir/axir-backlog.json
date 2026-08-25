@@ -1172,6 +1172,7 @@
       "sourceCommit": "ca760294f5ea4f207052c39c2218e1195103bc2a",
       "tsPaths": [
         "src/ax/agent/agentInternal/runtimeGlobals.ts",
+        "src/ax/agent/agentInternal/runtimeGlobals.authority.test.ts",
         "src/ax/agent/agentInternal/runtimeExecutionLlmQuery.ts",
         "src/ax/agent/agent.test.ts"
       ],
