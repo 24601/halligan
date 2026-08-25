@@ -94,8 +94,9 @@ Rules:
 - Success returns `{ success: true, output, terminationReason, history }`.
   Runtime failure returns the same declared output keys set to `null`, plus
   `terminationReason`, canonical complete `history`, and `error`.
-- Resume with `{ history: previous.history }`. IDs remain collision-safe across
-  runs, and replay compaction retains only complete assistant/tool groups.
+- Resume with `{ history: previous.history }`. Ax IDs remain collision-safe
+  across runs; unique native provider IDs are retained separately for replay.
+  Compaction retains only complete assistant/tool groups.
 - `abortSignal` cancels one run; `program.stop()` cancels all its active runs.
 - Canonical JSON stabilizes prompt-cache input, tool arguments/results, and
   persisted history. Treat tool results and stored history as sensitive data.

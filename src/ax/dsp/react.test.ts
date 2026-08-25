@@ -111,7 +111,25 @@ describe('react', () => {
     );
     expect(requests[1]?.chatPrompt.at(-1)).toMatchObject({
       role: 'function',
+      functionId: 'provider-0',
       cache: true,
+    });
+    const replayedCall = requests[1]?.chatPrompt.find(
+      (message) => message.role === 'assistant'
+    );
+    expect(
+      replayedCall?.role === 'assistant'
+        ? replayedCall.functionCalls?.[0]?.id
+        : undefined
+    ).toBe('provider-0');
+    const storedCall = result.history.events.find(
+      (event) => event.role === 'assistant'
+    );
+    expect(
+      storedCall?.role === 'assistant' ? storedCall.calls[0] : {}
+    ).toMatchObject({
+      id: expect.stringMatching(/^axr_[a-f0-9]{32}$/),
+      providerId: 'provider-0',
     });
   });
 
@@ -243,11 +261,19 @@ describe('react', () => {
         const results = request.chatPrompt.filter(
           (message) => message.role === 'function'
         );
+        const replayedCalls = request.chatPrompt.flatMap((message) =>
+          message.role === 'assistant' ? (message.functionCalls ?? []) : []
+        );
         expect(results.map((message) => message.result)).toEqual([
           '{"value":1}',
           '{"value":2}',
           '{"value":3}',
         ]);
+        expect(replayedCalls[0]?.id).toBe('same');
+        expect(new Set(replayedCalls.map((call) => call.id)).size).toBe(3);
+        expect(results.map((message) => message.functionId)).toEqual(
+          replayedCalls.map((call) => call.id)
+        );
         return nativeTurn([{ name: 'submit', args: { answer: 'ordered' } }]);
       },
     });

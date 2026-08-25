@@ -87,8 +87,9 @@ messages. Prompt mode requires exactly:
 ```
 
 Prompt responses with Markdown, extra fields, or invalid JSON are protocol
-failures. Prompt tool results are clearly delimited JSON observations. Neither
-protocol accepts model- or provider-supplied call IDs into canonical history.
+failures. Prompt tool results are clearly delimited JSON observations. Prompt
+mode never accepts model-supplied IDs. Native history retains a valid unique
+provider call ID only for provider replay, alongside Ax's separate canonical ID.
 
 Coverage is capability-based rather than provider-name-based. Native mode works
 through Ax adapters and models that advertise function calling, including
@@ -116,11 +117,13 @@ would be unacceptable.
 
 `result.history` is a serializable provider-neutral transcript. It stores
 assistant calls and matching tool results as atomic ordered groups. Call IDs use
-a fresh UUID for every call (independent of provider IDs), while the transcript
-keeps its own namespace and allocation counter. Forked or sequential resumed
-runs therefore do not collide even when provider IDs repeat. Arguments, results,
-inputs, and `axReactSerializeHistory(...)` use recursive key-sorted canonical
-JSON.
+a fresh Ax UUID for every call, while valid unique native provider IDs are kept
+separately so native assistant/tool replay preserves the provider protocol.
+Duplicate, empty, or oversized provider IDs fall back to the Ax ID. The
+transcript also keeps its own namespace and allocation counter. Forked or
+sequential resumed runs therefore do not collide even when provider IDs repeat.
+Arguments, results, inputs, and `axReactSerializeHistory(...)` use recursive
+key-sorted canonical JSON.
 
 Pass a prior history to resume:
 
@@ -166,7 +169,8 @@ Run the free deterministic protocol/task suite:
 npm run eval:react
 ```
 
-It compares native and prompt lanes on completion, exact tool calls, model
+It compares native and prompt lanes on completion, exact tool calls, canonical
+and replay ID uniqueness, call/result ordering, termination reasons, model
 turns, forced submit, resume determinism, bounded async latency, recoverable
 errors, final failures, and serialized prompt size. Cases include a text-only
 provider, misleading tools, handler failure/recovery, parallel async calls, and

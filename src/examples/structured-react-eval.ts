@@ -19,6 +19,7 @@ import {
   type AxFunction,
   AxMockAIService,
   type AxReactHistory,
+  type AxReactTerminationReason,
   ai,
   axReactSerializeHistory,
   react,
@@ -33,6 +34,9 @@ type Metric = {
   completed: boolean;
   outcomeCorrect: boolean;
   exactToolCalls: boolean;
+  historyIdsValid: boolean;
+  resultPairsOrdered: boolean;
+  terminationCorrect: boolean;
   modelTurns: number;
   forcedSubmit: boolean;
   resumeDeterministic: boolean | null;
@@ -108,6 +112,7 @@ type Scenario = {
   calls: Call[][];
   expected: string[];
   expectedCompleted?: boolean;
+  expectedTermination?: AxReactTerminationReason;
   maxIterations?: number;
   delayMs?: number;
 };
@@ -145,6 +150,7 @@ const scenarios: Scenario[] = [
     ],
     expected: ['lookup:4'],
     maxIterations: 1,
+    expectedTermination: 'forced_submit',
   },
   {
     name: 'bounded-parallel-async',
@@ -169,12 +175,52 @@ const scenarios: Scenario[] = [
     calls: [[], [{ name: 'submit', args: { wrongField: 'invalid' } }]],
     expected: [],
     expectedCompleted: false,
+    expectedTermination: 'forced_submit_failed',
     maxIterations: 1,
   },
 ];
 
 function promptSize(request: Readonly<AxChatRequest<unknown>>): number {
   return JSON.stringify(request.chatPrompt).length;
+}
+
+function historyProtocolEvidence(history: AxReactHistory): {
+  idsValid: boolean;
+  pairsOrdered: boolean;
+} {
+  const canonicalIds = new Set<string>();
+  const replayIds = new Set<string>();
+  let idsValid = true;
+  let pairsOrdered = true;
+  for (let index = 0; index < history.events.length; ) {
+    const assistant = history.events[index];
+    if (assistant?.role !== 'assistant') {
+      pairsOrdered = false;
+      break;
+    }
+    for (const [callIndex, call] of assistant.calls.entries()) {
+      const replayId = call.providerId ?? call.id;
+      if (
+        !/^axr_[a-f0-9]{32}$/.test(call.id) ||
+        canonicalIds.has(call.id) ||
+        replayIds.has(replayId)
+      ) {
+        idsValid = false;
+      }
+      canonicalIds.add(call.id);
+      replayIds.add(replayId);
+      const result = history.events[index + callIndex + 1];
+      if (
+        result?.role !== 'tool' ||
+        result.id !== call.id ||
+        result.name !== call.name
+      ) {
+        pairsOrdered = false;
+      }
+    }
+    index += 1 + assistant.calls.length;
+  }
+  return { idsValid, pairsOrdered };
 }
 
 async function runScripted(
@@ -203,6 +249,10 @@ async function runScripted(
     maxParallelTools: 2,
   }).forward(ai, { question: scenario.name }, { functionCallMode: mode });
   const expectedCompleted = scenario.expectedCompleted ?? true;
+  const expectedTermination =
+    scenario.expectedTermination ??
+    (expectedCompleted ? 'submit' : 'forced_submit_failed');
+  const protocol = historyProtocolEvidence(result.history);
   return {
     lane,
     scenario: scenario.name,
@@ -211,6 +261,9 @@ async function runScripted(
     outcomeCorrect: result.success === expectedCompleted,
     exactToolCalls:
       JSON.stringify(observed) === JSON.stringify(scenario.expected),
+    historyIdsValid: protocol.idsValid,
+    resultPairsOrdered: protocol.pairsOrdered,
+    terminationCorrect: result.terminationReason === expectedTermination,
     modelTurns: turn,
     forcedSubmit: result.terminationReason === 'forced_submit',
     resumeDeterministic: null,
@@ -269,6 +322,7 @@ async function runResume(
     { question: 'resume-history-continuity' },
     { functionCallMode: mode, history: persisted }
   );
+  const protocol = historyProtocolEvidence(resumed.history);
   return {
     lane,
     scenario: 'resume-history-continuity',
@@ -276,6 +330,9 @@ async function runResume(
     completed: resumed.success,
     outcomeCorrect: resumed.success,
     exactToolCalls: JSON.stringify(observed) === JSON.stringify(['lookup:9']),
+    historyIdsValid: protocol.idsValid,
+    resultPairsOrdered: protocol.pairsOrdered,
+    terminationCorrect: resumed.terminationReason === 'submit',
     modelTurns: firstTurns + resumeTurns,
     forcedSubmit: false,
     resumeDeterministic:
@@ -305,6 +362,12 @@ function print(metrics: Metric[], heading: string): void {
           rows.filter((row) => row.outcomeCorrect).length / rows.length,
         exactToolCallRate:
           rows.filter((row) => row.exactToolCalls).length / rows.length,
+        validHistoryIdRate:
+          rows.filter((row) => row.historyIdsValid).length / rows.length,
+        orderedResultPairRate:
+          rows.filter((row) => row.resultPairsOrdered).length / rows.length,
+        correctTerminationRate:
+          rows.filter((row) => row.terminationCorrect).length / rows.length,
         modelTurns: rows.reduce((sum, row) => sum + row.modelTurns, 0),
         forcedSubmits: rows.filter((row) => row.forcedSubmit).length,
         resumeDeterministic: rows
@@ -362,7 +425,12 @@ async function deterministic(): Promise<void> {
     .every((metric) => metric.resumeDeterministic === true);
   if (
     metrics.some(
-      (metric) => !metric.outcomeCorrect || !metric.exactToolCalls
+      (metric) =>
+        !metric.outcomeCorrect ||
+        !metric.exactToolCalls ||
+        !metric.historyIdsValid ||
+        !metric.resultPairsOrdered ||
+        !metric.terminationCorrect
     ) ||
     !forcedSubmitCorrect ||
     !resumeCorrect
@@ -455,6 +523,7 @@ async function live(provider: string): Promise<void> {
         { question: task.question },
         { functionCallMode: mode }
       );
+      const protocol = historyProtocolEvidence(result.history);
       metrics.push({
         lane:
           mode === 'prompt'
@@ -466,6 +535,12 @@ async function live(provider: string): Promise<void> {
         outcomeCorrect: result.success,
         exactToolCalls:
           JSON.stringify(observed) === JSON.stringify(task.expected),
+        historyIdsValid: protocol.idsValid,
+        resultPairsOrdered: protocol.pairsOrdered,
+        terminationCorrect:
+          result.success &&
+          (result.terminationReason === 'submit' ||
+            result.terminationReason === 'forced_submit'),
         modelTurns: turns,
         forcedSubmit: result.terminationReason === 'forced_submit',
         resumeDeterministic: null,

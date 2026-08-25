@@ -57,7 +57,10 @@ export type AxReactTerminationReason =
   | 'aborted';
 
 export type AxReactCall = {
+  /** Globally collision-safe Ax transcript ID. */
   id: string;
+  /** Original native-provider ID, retained only when valid and unique. */
+  providerId?: string;
   name: string;
   /** Canonical JSON. */
   arguments: string;
@@ -148,7 +151,12 @@ type ParsedModelTurn = {
   content?: string;
   thought?: string;
   thoughtBlocks?: AxThoughtBlockItem[];
-  calls: { name: string; args: unknown; parseError?: string }[];
+  calls: {
+    name: string;
+    args: unknown;
+    providerId?: string;
+    parseError?: string;
+  }[];
 };
 
 type ReactGroup = {
@@ -415,6 +423,8 @@ function groupsFromEvents(events: readonly AxReactEvent[]): ReactGroup[] {
   }
   const groups: ReactGroup[] = [];
   const ids = new Set<string>();
+  const providerIds = new Set<string>();
+  const replayIds = new Set<string>();
   for (let index = 0; index < events.length; ) {
     const event = events[index];
     if (
@@ -464,12 +474,27 @@ function groupsFromEvents(events: readonly AxReactEvent[]): ReactGroup[] {
       ) {
         throw new Error('Invalid ReAct history: malformed assistant call');
       }
+      if (
+        call.providerId !== undefined &&
+        (typeof call.providerId !== 'string' ||
+          call.providerId.trim() === '' ||
+          call.providerId.length > 512 ||
+          providerIds.has(call.providerId))
+      ) {
+        throw new Error('Invalid ReAct history: malformed native provider ID');
+      }
       assertCanonicalJSON(call.arguments, `arguments for call ${call.id}`);
       if (callIds.has(call.id) || ids.has(call.id)) {
         throw new Error(`Invalid ReAct history: duplicate call ID ${call.id}`);
       }
       callIds.add(call.id);
       ids.add(call.id);
+      if (call.providerId !== undefined) providerIds.add(call.providerId);
+      const replayId = call.providerId ?? call.id;
+      if (replayIds.has(replayId)) {
+        throw new Error('Invalid ReAct history: duplicate native replay ID');
+      }
+      replayIds.add(replayId);
     }
     for (let callIndex = 0; callIndex < event.calls.length; callIndex++) {
       const tool = events[index + callIndex + 1];
@@ -577,6 +602,9 @@ function nativeMessagesForGroup(
   maxValueCharacters: number
 ): AxChatRequest['chatPrompt'] {
   const assistant = group.assistant;
+  const replayIds = new Map(
+    assistant.calls.map((call) => [call.id, call.providerId ?? call.id])
+  );
   const content = assistant.content
     ? truncatePromptValue(assistant.content, maxValueCharacters)
     : assistant.calls.length === 0
@@ -593,7 +621,7 @@ function nativeMessagesForGroup(
       functionCalls:
         assistant.calls.length > 0
           ? assistant.calls.map((call) => ({
-              id: call.id,
+              id: replayIds.get(call.id)!,
               type: 'function' as const,
               function: { name: call.name, params: call.arguments },
             }))
@@ -601,7 +629,7 @@ function nativeMessagesForGroup(
     },
     ...group.tools.map((tool) => ({
       role: 'function' as const,
-      functionId: tool.id,
+      functionId: replayIds.get(tool.id) ?? tool.id,
       result: truncateCanonicalJSON(tool.result, maxValueCharacters),
       isError: tool.isError,
     })),
@@ -743,11 +771,13 @@ function parseNativeTurn(response: AxChatResponse): ParsedModelTurn {
         return {
           name: call.function.name,
           args: parseJSON(call.function.params),
+          providerId: call.id,
         };
       } catch (error) {
         return {
           name: call.function.name,
           args: { invalidArguments: String(call.function.params ?? '') },
+          providerId: call.id,
           parseError: errorMessage(error),
         };
       }
@@ -1250,20 +1280,40 @@ export class AxReact<IN extends AxGenIn, OUT extends AxGenOut> {
     signal: AbortSignal,
     options: Readonly<AxReactForwardOptions<any>>
   ): Promise<{ success: true; output: OUT } | { aborted: true } | undefined> {
-    const calls = turn.calls.map((call) => ({
-      id: nextCallId(history),
-      name: call.name,
-      arguments: axReactCanonicalJSON(call.args),
-      parseError: call.parseError,
-      args: call.args,
-    }));
+    const usedReplayIds = new Set(
+      history.events.flatMap((event) =>
+        event.role === 'assistant'
+          ? event.calls.map((call) => call.providerId ?? call.id)
+          : []
+      )
+    );
+    const calls = turn.calls.map((call) => {
+      const id = nextCallId(history);
+      const providerId =
+        call.providerId &&
+        call.providerId.trim() !== '' &&
+        call.providerId.length <= 512 &&
+        !usedReplayIds.has(call.providerId)
+          ? call.providerId
+          : undefined;
+      usedReplayIds.add(providerId ?? id);
+      return {
+        id,
+        providerId,
+        name: call.name,
+        arguments: axReactCanonicalJSON(call.args),
+        parseError: call.parseError,
+        args: call.args,
+      };
+    });
     const assistant: AxReactAssistantEvent = {
       role: 'assistant',
       content: turn.content,
       thought: turn.thought,
       thoughtBlocks: turn.thoughtBlocks,
-      calls: calls.map(({ id, name, arguments: args }) => ({
+      calls: calls.map(({ id, providerId, name, arguments: args }) => ({
         id,
+        providerId,
         name,
         arguments: args,
       })),
