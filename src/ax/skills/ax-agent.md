@@ -161,6 +161,40 @@ Rules:
 - Set `agentIdentity.namespace` on the child to control its runtime call site.
 - `onFunctionCall` observers receive `kind: 'internal'` for agent-derived calls and `kind: 'external'` for user-registered tools.
 
+### Retained asynchronous child sessions
+
+Ordinary child agents in `functions: [...]` are synchronous and unchanged. For
+concurrent work that must return a handle immediately, retain its own AxAgent
+runtime/state, and accept later mail, use the opt-in `AxAgentSessionHost`.
+
+Register a stable key with a factory (never a shared singleton), create a root
+with an explicit key allowlist, and add `root.functions()` to the parent
+agent's ordinary function list. Actor code then uses `sessions.spawn(...)`,
+`sessions.inspect(...)`, `sessions.result(...)`, `sessions.send(...)`,
+`sessions.cancel(...)`, and `sessions.dispose(...)` through the normal runtime
+function boundary.
+
+Rules:
+
+- `spawn` is admission, not a result future; it returns a serializable handle
+  before the child completes.
+- Registration factories create state-isolated AxAgents. Single-worker hosts
+  reuse the live instance; multi-worker hosts restore each attempt from the
+  last confirmed state/artifacts to fence stale worker caches.
+- `follow-up` waits behind active work; `steer` requests active cancellation
+  and gets priority at the next mailbox boundary.
+- Cancelling one child retains its last confirmed state for a later follow-up;
+  cancelling the root is terminal and denies new work.
+- Root and per-registration `authorizedChildren` lists are separate privilege
+  boundaries. Child tools and runtime permissions come only from the factory.
+- The in-memory store/scheduler are volatile. Process-restart durability needs
+  persistent host adapters and `host.recover()`.
+- Existing synchronous namespaced child calls remain the smallest choice when
+  the parent needs the answer now.
+
+See `docs/RETAINED_CHILD_SESSIONS.md` for the complete API, limits, durability,
+security, event continuation integration, and evaluation commands.
+
 ### Reserved namespace names
 
 The agent runtime injects a fixed set of globals into the runtime session. These names cannot be used as `agentIdentity.namespace` values or as agent-function namespaces.

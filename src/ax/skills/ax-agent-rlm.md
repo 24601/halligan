@@ -404,6 +404,40 @@ Rules:
 - Batched `llmQuery([...])` returns per-item `[ERROR] ...`.
 - If a result starts with `[ERROR]`, inspect or branch on it instead of assuming success.
 
+### Retained AxAgent delegation is different
+
+`AxAgentSessionHost` is the opt-in path for a real retained AxAgent child. Add
+an owning session client's generated functions to `functions`; executor code
+can then admit work without blocking:
+
+```javascript
+const handle = await sessions.spawn({
+  agent: 'researcher.v1',
+  input: { task: 'Inspect the incident evidence' },
+});
+console.log(handle);
+```
+
+On later turns, inspect the handle or send complete child-signature inputs:
+
+```javascript
+await sessions.send({
+  handle,
+  mode: 'follow-up',
+  input: { task: 'Now compare it with the remediation log' },
+});
+```
+
+Use `mode: 'steer'` only when current child work should be cancelled and the
+new input should run first. `follow-up` never interrupts. Child runtime state
+is captured through the existing AxAgent state format; values Ax cannot
+serialize do not become durable merely because the session is retained.
+
+This mechanism does not expose a second interpreter, inherit parent tools, or
+change `llmQuery(...)` budgets. The host independently bounds child count,
+depth, concurrency, pending/retained mail, tokens, and admitted subcalls. See
+`docs/RETAINED_CHILD_SESSIONS.md`.
+
 Minimal example:
 
 ```javascript
@@ -458,6 +492,7 @@ Delegation decision guide:
 - **JS-only**: deterministic logic such as filter, sort, count, regex, or date math -> do it inline.
 - **Single-shot semantic**: needs LLM reasoning but no tools or multi-step exploration -> single `llmQuery(...)` with narrow context.
 - **Specialist/tool delegation**: needs its own tools, discovery, runtime, or reusable role -> create a child `agent(...)` and pass it in `functions: [...]`.
+- **Retained concurrent specialist**: work should outlive the current actor turn, retain isolated state, or accept later steering/follow-up -> use an explicitly authorized `AxAgentSessionHost` registration.
 - **Parallel semantic fan-out**: two or more independent semantic-only subtasks -> batched `llmQuery([...])`.
 
 Context handling:

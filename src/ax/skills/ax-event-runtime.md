@@ -90,6 +90,26 @@ eventContext.registerContinuation({
 Route progress to `observe`. Route `input_required`, completed, failed, or
 cancelled task events to `resume` when the owning program must run again.
 
+### Retained child session continuations
+
+When an event-driven AxAgent can admit retained children, expose
+`root.functions({ eventContinuations: true })`. Its `sessions.spawn` and
+`sessions.send` functions register a continuation owned by the current event
+target under:
+
+```ts
+AxAgentSessionHost.continuationKey(handle)
+// { kind: 'ax-agent-session', value: handle.id }
+```
+
+Publish terminal host `onEvent` notifications through an application-owned
+event source with that correlation, then route completed/failed/cancelled/
+interrupted events to `resume`. Do not store the continuation in the child
+registry as a second authority: AxEventRuntime owns continuation identity
+scope, persistence, expiry, and target restoration; the session host owns the
+child lifecycle and mailbox. The in-memory adapters on either side remain
+volatile.
+
 ## MCP Adapter
 
 Use `ax-mcp` for client construction, transports, authentication, catalogs,
