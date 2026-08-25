@@ -82,10 +82,11 @@ Detector latency metrics remain finite and nonnegative. Extreme or reversing
 clocks clamp to the safe-integer range and mark the sample as capped rather than
 serializing a non-finite duration.
 
-Timeout does not free an abort-ignoring callback's bounded reservation; it stays
-charged until the underlying promise settles. Observe options and scope fields
-are captured once, and provenance polarity is restricted to `supports`,
-`contradicts`, or `neutral`.
+Timeout does not free an abort-ignoring callback's bounded count or evidence-byte
+reservation; it stays charged until the underlying promise settles. Transient
+keyed work and unsettled callbacks use separate per-class ceilings. Observe
+options and scope fields are captured once, and provenance polarity is
+restricted to `supports`, `contradicts`, or `neutral`.
 
 The built-in demand store is process-local and volatile. Supply an application
 store when cursor/backlog and dedupe must survive a restart or coordinate

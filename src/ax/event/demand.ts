@@ -482,10 +482,11 @@ async function runBoundedCallback<T>(
   callback: (signal: AbortSignal) => T | Promise<T>,
   signal: AbortSignal | undefined,
   timeoutMs: number,
-  reserve: () => () => void
+  reserve: (size: number) => () => void,
+  reservationBytes: number
 ): Promise<T> {
   if (signal?.aborted) throw new AxDemandCancelledError(signal.reason);
-  const release = reserve();
+  const release = reserve(reservationBytes);
   const controller = new AbortController();
   let timeout: ReturnType<typeof setTimeout> | undefined;
   let onAbort: (() => void) | undefined;
@@ -783,6 +784,7 @@ export class AxDemandBoundary {
   >();
   private inFlightBytes = 0;
   private activeCallbacks = 0;
+  private activeCallbackBytes = 0;
 
   constructor(options: Readonly<AxDemandBoundaryOptions>) {
     const rawDetector = options.detector;
@@ -905,7 +907,8 @@ export class AxDemandBoundary {
     nonEmpty(scope.routeId, 'AxDemandScope.routeId');
     nonEmpty(scope.instanceKey, 'AxDemandScope.instanceKey');
     nonEmpty(scope.principalScope, 'AxDemandScope.principalScope');
-    if (bytes(scope) > this.policy.maxScopeBytes) {
+    const scopeBytes = bytes(scope);
+    if (scopeBytes > this.policy.maxScopeBytes) {
       throw new Error('AxDemandScope exceeds the configured byte bound');
     }
     const localDedupeKey = observation.dedupeKey ?? observation.id;
@@ -924,7 +927,7 @@ export class AxDemandBoundary {
     let pending = this.inFlight.get(dedupeKey);
     const duplicate = Boolean(pending);
     if (!pending) {
-      const size = observationBytes + bytes(scope) + bytes(dedupeKey);
+      const size = observationBytes + scopeBytes + bytes(dedupeKey);
       if (
         this.inFlight.size >= this.policy.maxInFlight ||
         this.inFlightBytes + size > this.policy.maxInFlightBytes
@@ -935,6 +938,7 @@ export class AxDemandBoundary {
       const promise = this.process(
         observation,
         observationBytes,
+        scopeBytes,
         scope,
         dedupeKey,
         controller.signal
@@ -967,6 +971,7 @@ export class AxDemandBoundary {
   private async process(
     observation: Readonly<AxDemandObservation>,
     observationBytes: number,
+    scopeBytes: number,
     scope: Readonly<AxDemandScope>,
     dedupeKey: string,
     signal: AbortSignal | undefined
@@ -985,7 +990,8 @@ export class AxDemandBoundary {
           ),
         signal,
         this.policy.callbackTimeoutMs,
-        () => this.reserveCallback()
+        (size) => this.reserveCallback(size),
+        observationBytes + scopeBytes
       );
       const candidateSnapshot = snapshotDetection(candidate);
       validateDetection(candidateSnapshot);
@@ -1020,7 +1026,8 @@ export class AxDemandBoundary {
       detection,
       scope,
       dedupeKey,
-      signal
+      signal,
+      observationBytes + scopeBytes
     );
     const appended = await this.store.append({
       scope,
@@ -1052,7 +1059,8 @@ export class AxDemandBoundary {
     detection: Readonly<AxDemandDetection>,
     scope: Readonly<AxDemandScope>,
     fallbackDedupeKey: string,
-    signal: AbortSignal | undefined
+    signal: AbortSignal | undefined,
+    callbackBaseBytes: number
   ): Promise<Readonly<AxDemandProposal>> {
     const now = finiteTimestamp(this.now(), 'AxDemandBoundary.now()');
     const reasonCodes = [detection.reasonCode];
@@ -1134,7 +1142,8 @@ export class AxDemandBoundary {
               ) ?? 'unknown',
             signal,
             this.policy.callbackTimeoutMs,
-            () => this.reserveCallback()
+            (size) => this.reserveCallback(size),
+            callbackBaseBytes + bytes(detection.standingGrantRef)
           );
         } catch (error) {
           if (
@@ -1180,16 +1189,24 @@ export class AxDemandBoundary {
     });
   }
 
-  private reserveCallback(): () => void {
-    if (this.activeCallbacks >= this.policy.maxInFlight) {
+  private reserveCallback(size: number): () => void {
+    if (!Number.isSafeInteger(size) || size < 1) {
+      throw new Error('AxDemandBoundary callback reservation size is invalid');
+    }
+    if (
+      this.activeCallbacks >= this.policy.maxInFlight ||
+      size > this.policy.maxInFlightBytes - this.activeCallbackBytes
+    ) {
       throw new AxDemandCallbackCapacityError();
     }
     this.activeCallbacks++;
+    this.activeCallbackBytes += size;
     let released = false;
     return () => {
       if (released) return;
       released = true;
       this.activeCallbacks--;
+      this.activeCallbackBytes -= size;
     };
   }
 }

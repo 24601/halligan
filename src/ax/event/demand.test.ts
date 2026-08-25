@@ -551,6 +551,167 @@ describe('AxDemandBoundary', () => {
     expect((await afterSettlement).record.detection.outcome).toBe('demand');
   });
 
+  it('keeps timed-out detector evidence charged against the callback byte budget', async () => {
+    const releases: Array<() => void> = [];
+    const detect = vi.fn(
+      () =>
+        new Promise<AxDemandDetection>((resolve) => {
+          releases.push(() => resolve(detection()));
+        })
+    );
+    const value = new AxDemandBoundary({
+      detector: { id: 'byte-capacity-detector', version: '1', detect },
+      now: () => now,
+      policy: {
+        callbackTimeoutMs: 100,
+        maxInFlight: 10,
+        maxInFlightBytes: 3_000,
+      },
+    });
+    const large = (id: string) =>
+      observation(id, { data: { retained: 'x'.repeat(1_800) } });
+    expect(
+      (await value.observe(large('byte-capacity-timeout'))).record.detection
+        .reasonCode
+    ).toBe('detector_timeout');
+    await expect(value.observe(large('byte-capacity-blocked'))).rejects.toThrow(
+      'callback capacity was exhausted'
+    );
+    expect(detect).toHaveBeenCalledOnce();
+
+    releases[0]?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const restored = value.observe(large('byte-capacity-restored'));
+    await vi.waitFor(() => expect(detect).toHaveBeenCalledTimes(2));
+    releases[1]?.();
+    await expect(restored).resolves.toMatchObject({
+      record: { detection: { outcome: 'demand' } },
+    });
+  });
+
+  it('retains grant callback bytes after timeout until late settlement', async () => {
+    const releases: Array<() => void> = [];
+    const validateStandingGrant = vi.fn(
+      () =>
+        new Promise<'valid'>((resolve) => {
+          releases.push(() => resolve('valid'));
+        })
+    );
+    const value = new AxDemandBoundary({
+      detector: {
+        id: 'grant-byte-capacity',
+        version: '1',
+        detect: () =>
+          detection({
+            confidence: 1,
+            requestedDisposition: 'act',
+            standingGrantRef: 'grant',
+          }),
+      },
+      validateStandingGrant,
+      now: () => now,
+      policy: {
+        callbackTimeoutMs: 100,
+        maxInFlight: 10,
+        maxInFlightBytes: 700,
+      },
+    });
+    expect(
+      (await value.observe(observation('grant-timeout'))).record.proposal
+        .standingGrantState
+    ).toBe('unknown');
+    await expect(
+      value.observe(observation('grant-byte-blocked'))
+    ).rejects.toThrow('callback capacity was exhausted');
+    expect(validateStandingGrant).toHaveBeenCalledOnce();
+
+    releases[0]?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const restored = value.observe(observation('grant-byte-restored'));
+    await vi.waitFor(() =>
+      expect(validateStandingGrant).toHaveBeenCalledTimes(2)
+    );
+    releases[1]?.();
+    expect((await restored).record.proposal.standingGrantState).toBe('valid');
+  });
+
+  it('retains cancelled and hostile-thenable callback bytes until assimilation settles', async () => {
+    let settleCancelled: ((value: AxDemandDetection) => void) | undefined;
+    const cancelledDetector = vi.fn(
+      () =>
+        new Promise<AxDemandDetection>((resolve) => {
+          settleCancelled = resolve;
+        })
+    );
+    const cancelled = new AxDemandBoundary({
+      detector: {
+        id: 'cancelled-bytes',
+        version: '1',
+        detect: cancelledDetector,
+      },
+      now: () => now,
+      policy: {
+        callbackTimeoutMs: 100,
+        maxInFlight: 10,
+        maxInFlightBytes: 500,
+      },
+    });
+    const controller = new AbortController();
+    const pending = cancelled.observe(observation('cancelled-byte-work'), {
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => expect(cancelledDetector).toHaveBeenCalledOnce());
+    controller.abort('cancelled');
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    await expect(
+      cancelled.observe(observation('cancelled-byte-blocked'))
+    ).rejects.toThrow('callback capacity was exhausted');
+    settleCancelled?.(detection());
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const restored = cancelled.observe(observation('cancelled-byte-restored'));
+    await vi.waitFor(() => expect(cancelledDetector).toHaveBeenCalledTimes(2));
+    settleCancelled?.(detection());
+    await expect(restored).resolves.toMatchObject({
+      record: { detection: { outcome: 'demand' } },
+    });
+
+    let thenCalls = 0;
+    let lateResolve: ((value: AxDemandDetection) => void) | undefined;
+    const thenable = {
+      // biome-ignore lint/suspicious/noThenProperty: hostile thenable assimilation is the behavior under test.
+      then(resolve: (value: AxDemandDetection) => void) {
+        thenCalls++;
+        lateResolve = resolve;
+      },
+    };
+    const hostileDetect = vi.fn(() => thenable as Promise<AxDemandDetection>);
+    const hostile = new AxDemandBoundary({
+      detector: { id: 'thenable-bytes', version: '1', detect: hostileDetect },
+      now: () => now,
+      policy: {
+        callbackTimeoutMs: 100,
+        maxInFlight: 10,
+        maxInFlightBytes: 500,
+      },
+    });
+    expect(
+      (await hostile.observe(observation('thenable-timeout'))).record.detection
+        .reasonCode
+    ).toBe('detector_timeout');
+    expect(thenCalls).toBe(1);
+    await expect(
+      hostile.observe(observation('thenable-blocked'))
+    ).rejects.toThrow('callback capacity was exhausted');
+    lateResolve?.(detection());
+    lateResolve?.(detection({ confidence: 0 }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await expect(
+      hostile.observe(observation('thenable-restored'))
+    ).resolves.toMatchObject({
+      record: { detection: { outcome: 'uncertain' } },
+    });
+  });
+
   it('rejects invalid host observations explicitly before detection', async () => {
     const { value, detect } = boundary(detection(), {
       policy: { maxObservationBytes: 100 },

@@ -152,9 +152,11 @@ to 30 seconds by default. A timeout is retained as fail-closed uncertainty;
 caller or runtime cancellation rejects the observation and is never converted
 into successful evidence. Timeout or cancellation does not release the
 underlying callback reservation: an abort-ignoring promise remains charged
-against `maxInFlight` until it actually settles. Capacity exhaustion rejects new
-work. Hosts that must recover that capacity need an actually terminable worker
-or process boundary.
+against both `maxInFlight` and `maxInFlightBytes` until it actually settles.
+Reservations count the serialized observation and scope retained by detector
+callbacks, plus the grant reference for grant callbacks. Capacity exhaustion
+rejects new work. Hosts that must recover that capacity need an actually
+terminable worker or process boundary.
 
 Recorded detector latency is always finite and nonnegative. Clock reversal,
 overflow, or a duration above `Number.MAX_SAFE_INTEGER` milliseconds is clamped
@@ -169,6 +171,12 @@ for the same scoped key. Each waiter owns its cancellation independently; work
 is aborted only when no waiters remain. Pending work is bounded to 1,000 keys
 and 64 MiB by default. Separate processes or boundary instances still need a
 host reservation protocol if callback-level exactly-once behavior is required.
+
+`maxInFlight` and `maxInFlightBytes` are applied as separate per-class ceilings:
+once to transient keyed work and once to unsettled detector/grant callback
+reservations shared together. They are not one aggregate pool, avoiding double
+charging while a callback belongs to live keyed work; worst-case combined
+accounted evidence is therefore twice the configured byte ceiling.
 
 The in-memory defaults retain at most 10,000 records, 64 MiB, 1,000 scopes,
 1,000 records per scope, and seven days. Oldest records/scopes are evicted when
