@@ -191,6 +191,103 @@ export interface AxEventContinuation {
   metadata?: Readonly<Record<string, AxEventValue>>;
 }
 
+export type AxEventEffectStatus =
+  | 'intent'
+  | 'dispatched'
+  | 'succeeded'
+  | 'failed'
+  | 'parked';
+
+export interface AxEventEffectIntent {
+  /** Stable domain operation name, such as `payments.capture`. */
+  operation: string;
+  /** Stable key that the effect implementation must pass to the provider. */
+  idempotencyKey: string;
+  /** Declare idempotent only when replay with the same key is safe. */
+  replaySafety?: 'idempotent' | 'unknown';
+  /**
+   * Persistable, redacted request descriptor bound to this effect identity.
+   * Include every request field whose change must make key reuse fail closed.
+   * Credentials do not belong here.
+   */
+  metadata?: Readonly<Record<string, AxEventValue>>;
+}
+
+export interface AxEventEffect {
+  id: string;
+  deliveryId: string;
+  runId: string;
+  identityScope: string;
+  operation: string;
+  idempotencyKey: string;
+  replaySafety: 'idempotent' | 'unknown';
+  /** SHA-256 of the canonical operation, key, safety, and metadata bytes. */
+  requestDigest: string;
+  status: AxEventEffectStatus;
+  metadata?: Readonly<Record<string, AxEventValue>>;
+  receipt?: AxEventValue;
+  error?: string;
+  parkedReason?: string;
+  createdAt: number;
+  updatedAt: number;
+  dispatchedAt?: number;
+  settledAt?: number;
+  dispatchCount: number;
+  version: number;
+}
+
+export type AxEventEffectSettlement =
+  | Readonly<{ status: 'succeeded'; receipt?: AxEventValue }>
+  | Readonly<{
+      status: 'failed';
+      receipt?: AxEventValue;
+      error?: string;
+    }>;
+
+export interface AxEventEffectCreateRequest extends AxEventEffectIntent {
+  id: string;
+  deliveryId: string;
+  runId: string;
+  identityScope: string;
+  createdAt: number;
+}
+
+export type AxEventEffectTransition =
+  | Readonly<{ type: 'dispatched'; at: number }>
+  | Readonly<{
+      type: 'settled';
+      at: number;
+      settlement: Readonly<AxEventEffectSettlement>;
+    }>
+  | Readonly<{ type: 'parked'; at: number; reason: string }>
+  | Readonly<{ type: 'not_dispatched'; at: number }>;
+
+export type AxEventEffectResolution =
+  | Readonly<{ status: 'succeeded'; receipt?: AxEventValue }>
+  | Readonly<{
+      status: 'failed';
+      receipt?: AxEventValue;
+      error?: string;
+    }>
+  | Readonly<{ status: 'not_dispatched' }>
+  | Readonly<{ status: 'indeterminate' }>
+  | Readonly<{ status: 'parked'; reason: string }>;
+
+export interface AxEventEffectResolverContext {
+  readonly delivery: Readonly<AxEventDelivery>;
+  readonly abortSignal: AbortSignal;
+}
+
+export type AxEventEffectResolver = (
+  effect: Readonly<AxEventEffect>,
+  context: Readonly<AxEventEffectResolverContext>
+) => AxEventEffectResolution | Promise<Readonly<AxEventEffectResolution>>;
+
+export interface AxEventEffectFence {
+  deliveryId: string;
+  fencingToken: number;
+}
+
 export interface AxEventContext {
   readonly runtimeId: string;
   readonly runId: string;
@@ -209,6 +306,19 @@ export interface AxEventContext {
   registerContinuation(
     registration: Readonly<AxEventContinuationRegistration>
   ): string;
+  declareEffect(
+    intent: Readonly<AxEventEffectIntent>
+  ): Promise<Readonly<AxEventEffect>>;
+  markEffectDispatched(
+    effectId: string,
+    expectedVersion: number
+  ): Promise<Readonly<AxEventEffect>>;
+  settleEffect(
+    effectId: string,
+    expectedVersion: number,
+    settlement: Readonly<AxEventEffectSettlement>
+  ): Promise<Readonly<AxEventEffect>>;
+  listEffects(): Promise<readonly Readonly<AxEventEffect>[]>;
 }
 
 export type AxEventInheritance = 'all' | 'none';
@@ -333,7 +443,7 @@ export interface AxEventTarget<IN = any, OUT = any> {
   execution?: 'forward' | 'streaming';
   state?: AxEventProgramStateAdapter<AxProgrammable<IN, OUT>>;
   sinks?: readonly AxEventSink<OUT>[];
-  retrySafety?: 'idempotent' | 'unknown';
+  retrySafety?: 'idempotent' | 'effect-aware' | 'unknown';
 }
 
 export interface AxEventSinkContext<OUT = unknown> {
@@ -398,6 +508,7 @@ export type AxEventDeliveryStatus =
   | 'cancelled'
   | 'dead_lettered'
   | 'output_persistence_failed'
+  | 'parked'
   | 'outcome_unknown';
 
 export interface AxEventDelivery {
@@ -417,7 +528,7 @@ export interface AxEventDelivery {
   runId?: string;
   error?: string;
   sizeBytes: number;
-  retrySafety: 'idempotent' | 'unknown';
+  retrySafety: 'idempotent' | 'effect-aware' | 'unknown';
   ordering: 'strict' | 'relaxed';
   leaseExpiresAt?: number;
   fencingToken?: number;
@@ -433,6 +544,7 @@ export type AxEventRunStatus =
   | 'failed'
   | 'cancelled'
   | 'output_persistence_failed'
+  | 'parked'
   | 'outcome_unknown';
 
 export interface AxEventSinkAttempt {
@@ -448,6 +560,8 @@ export interface AxEventRun<OUT = unknown> {
   routeId: string;
   targetId?: string;
   instanceKey: string;
+  /** Worker owning the fenced claim when this run record was written. */
+  claimedBy?: string;
   status: AxEventRunStatus;
   attempt: number;
   startedAt: number;
@@ -478,6 +592,7 @@ export interface AxEventStoreCapabilities {
   transactions: boolean;
   compareAndSet: boolean;
   outputPersistence: boolean;
+  effectLedger?: boolean;
   conformance?: Readonly<{ multiWorker?: string; schemaVersion?: number }>;
 }
 
@@ -490,7 +605,7 @@ export interface AxEventEnqueueRequest {
     > & {
       availableAt?: number;
       coalesce?: 'latest';
-      retrySafety?: 'idempotent' | 'unknown';
+      retrySafety?: 'idempotent' | 'effect-aware' | 'unknown';
       ordering?: 'strict' | 'relaxed';
     }
   >[];
@@ -541,6 +656,24 @@ export interface AxEventStore {
   close?(): void | Promise<void>;
 }
 
+/** Opt-in effect journal extension; legacy AxEventStore implementations remain valid. */
+export interface AxEventEffectStore extends AxEventStore {
+  readonly capabilities: Readonly<
+    AxEventStoreCapabilities & { effectLedger: true }
+  >;
+  declareEffect(
+    request: Readonly<AxEventEffectCreateRequest>,
+    fence: Readonly<AxEventEffectFence>
+  ): Promise<Readonly<AxEventEffect>>;
+  transitionEffect(
+    effectId: string,
+    expectedVersion: number,
+    transition: Readonly<AxEventEffectTransition>,
+    fence: Readonly<AxEventEffectFence>
+  ): Promise<Readonly<AxEventEffect>>;
+  listEffects(deliveryId: string): Promise<readonly Readonly<AxEventEffect>[]>;
+}
+
 export interface AxEventSourceHandle {
   close(): void | Promise<void>;
 }
@@ -580,6 +713,10 @@ export interface AxEventRuntimeOptions {
   coordination?: 'single-worker' | 'multi-worker';
   leaseMs?: number;
   heartbeatMs?: number;
+  /** Reconciles dispatched effects during retry/recovery; it never runs for new intent. */
+  effectResolver?: AxEventEffectResolver;
+  /** Maximum resolver duration before the effect is parked. Defaults to 30 seconds. */
+  effectResolverTimeoutMs?: number;
 }
 
 export interface AxEventPayloadStore {
@@ -590,5 +727,6 @@ export interface AxEventPayloadStore {
 
 export interface AxEventCloseOptions {
   drain?: boolean;
+  /** Bounds source-handle shutdown and, when enabled, drain waiting. */
   timeoutMs?: number;
 }

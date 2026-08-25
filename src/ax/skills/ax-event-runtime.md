@@ -65,10 +65,41 @@ await source.publish({ event, identity, trust: 'authenticated' });
 - Use `createProgram(instance)` for stateful multi-tenant Agents.
 - Declare `retrySafety: 'idempotent'` only when stable delivery keys protect
   every possible side effect.
+- Declare `retrySafety: 'effect-aware'` only when every external effect is
+  wrapped by the ledger; this keeps existing unknown and idempotent target
+  policies unchanged while applying per-effect recovery to that target. Runtime
+  startup rejects this mode when the store does not implement the effect ledger.
+- For effect-level recovery, application/tool code must call
+  `eventContext.declareEffect(...)` before I/O, call
+  `markEffectDispatched(effect.id, effect.version)` immediately before crossing
+  the dispatch boundary, and call `settleEffect(...)` with the returned version
+  only after a conclusive receipt.
+- A thrown transport call is not proof of effect failure. Leave it dispatched
+  so recovery classifies it as indeterminate.
+- Set effect `replaySafety: 'idempotent'` only when the external provider
+  enforces the stable key. Otherwise unresolved dispatch parks even when the
+  target itself is retryable.
+- A store fence cannot stop a network call already allowed to leave the process.
+  Pass `eventContext.fencingToken` to domain systems that enforce fences; without
+  that, provider idempotency, or a definitive resolver, park the outcome.
+- Use `effectResolver` for an authoritative domain lookup. Return
+  `succeeded`, `failed`, `not_dispatched`, `indeterminate`, or `parked`; resolver
+  errors, the bounded `effectResolverTimeoutMs` timeout, and non-idempotent
+  indeterminate outcomes fail closed to parked. Resolver timeout/shutdown wins
+  even if host code ignores its abort signal. Resolvers are read-only; Ax ignores
+  a late result but cannot terminate JavaScript that ignores abort.
+- Treat effect metadata as the redacted request descriptor. Ax persists a
+  canonical request digest and rejects the same operation/key when that
+  descriptor or replay safety changes; include every non-secret parameter that
+  must be bound to reuse.
+- Redact effect metadata/receipts before persistence. The runtime bounds them
+  but cannot detect secrets or intercept arbitrary I/O.
 - Persist outputs before final sink delivery; redrive sink failures separately.
 - Use `debounceMs` and `coalesce: 'latest'` only when replacing intermediate
   events is part of the route's declared policy.
 - Observe source failures with `onSourceError`.
+- `close({ timeoutMs })` bounds both source-handle shutdown and drain waiting.
+  Host close code may continue if it ignores abort; Ax ignores its late result.
 - The in-memory store is volatile and single-process.
 - For cooperating Node processes on one local disk, use
   `AxSQLiteEventStore` from `@ax-llm/ax-tools/event/sqlite` with explicit
@@ -89,6 +120,42 @@ eventContext.registerContinuation({
 
 Route progress to `observe`. Route `input_required`, completed, failed, or
 cancelled task events to `resume` when the owning program must run again.
+
+## Effect Pattern
+
+```ts
+let effect = await eventContext.declareEffect({
+  operation: 'messages.send',
+  idempotencyKey: `message:${messageId}`,
+  replaySafety: 'idempotent',
+  metadata: { messageId },
+});
+
+if (effect.status === 'succeeded') return effect.receipt;
+if (effect.status === 'failed' || effect.status === 'parked') throw new Error();
+
+effect = await eventContext.markEffectDispatched(effect.id, effect.version);
+const receipt = await sendMessage(message, effect.idempotencyKey);
+await eventContext.settleEffect(effect.id, effect.version, {
+  status: 'succeeded',
+  receipt: { providerId: receipt.id },
+});
+```
+
+`intent` means not dispatched, `dispatched` means indeterminate without a
+settlement, `succeeded|failed` means completed, and `parked` blocks automatic
+dispatch. Duplicate `(delivery, operation, idempotencyKey)` intent returns the
+original record. Fenced store transitions reject stale workers. This is a
+durability classification protocol, not exactly-once execution. Effect versions
+also reject concurrent mutation from a stale same-claim caller.
+
+The SQLite store also binds retained event dedupe identities to canonical
+envelopes, requires the current owner/token and an unexpired active lease for
+delivery/run writes, and revalidates after awaited payload persistence. It does
+not delete a stale payload reference because content-addressed stores may share
+that reference with a winner; use only ownership-aware external garbage
+collection. Fencing fails closed at the JavaScript safe-integer limit rather
+than wrapping.
 
 ## MCP Adapter
 
@@ -143,3 +210,8 @@ Persistent store implementations must pass
 `runAxEventStoreConformance(createStore, { clock })`. A store must not advertise
 multi-worker capability without the conformance marker checked by runtime
 startup.
+
+Run `npm run event:effects:eval` for the reproducible SQLite process-crash,
+restart, resolver, stale-fence, concurrency, legacy-comparison, latency, and
+storage evaluation. Run
+`npx vitest run scripts/event-effects-fault-eval.test.ts` for its assertions.

@@ -23,6 +23,12 @@ import {
   type AxEventContinuationRegistration,
   type AxEventDeadLetter,
   type AxEventDelivery,
+  type AxEventEffect,
+  type AxEventEffectFence,
+  type AxEventEffectIntent,
+  type AxEventEffectResolution,
+  type AxEventEffectSettlement,
+  type AxEventEffectStore,
   type AxEventIngress,
   AxEventInputError,
   AxEventOutcomeUnknownError,
@@ -33,6 +39,7 @@ import {
   type AxEventRuntimeOptions,
   type AxEventSink,
   type AxEventSourceHandle,
+  type AxEventStore,
   type AxEventTarget,
   type AxProgramStateEnvelope,
   AxSystemEventClock,
@@ -55,6 +62,16 @@ type InvocationResult = {
   invoked: boolean;
 };
 
+function isEffectStore(store: AxEventStore): store is AxEventEffectStore {
+  const candidate = store as Partial<AxEventEffectStore>;
+  return (
+    store.capabilities.effectLedger === true &&
+    typeof candidate.declareEffect === 'function' &&
+    typeof candidate.transitionEffect === 'function' &&
+    typeof candidate.listEffects === 'function'
+  );
+}
+
 class AxRuntimeEventContext implements AxEventContext {
   private readonly registrations: Array<{
     id: string;
@@ -75,7 +92,9 @@ class AxRuntimeEventContext implements AxEventContext {
     readonly idempotencyKey: string,
     readonly abortSignal: AbortSignal,
     readonly continuation?: Readonly<AxEventContinuation>,
-    readonly fencingToken?: number
+    readonly fencingToken?: number,
+    private readonly store?: AxEventStore,
+    private readonly now: () => number = Date.now
   ) {}
 
   registerContinuation(
@@ -98,8 +117,73 @@ class AxRuntimeEventContext implements AxEventContext {
     return id;
   }
 
+  async declareEffect(
+    intent: Readonly<AxEventEffectIntent>
+  ): Promise<Readonly<AxEventEffect>> {
+    if (this.abortSignal.aborted) throw this.abortSignal.reason;
+    const store = this.effectStore();
+    return store.declareEffect(
+      {
+        ...structuredClone(intent),
+        id: axEventId('effect'),
+        deliveryId: this.deliveryId,
+        runId: this.runId,
+        identityScope: axEventIdentityScope(this.identity),
+        createdAt: this.now(),
+      },
+      this.effectFence()
+    );
+  }
+
+  async markEffectDispatched(
+    effectId: string,
+    expectedVersion: number
+  ): Promise<Readonly<AxEventEffect>> {
+    if (this.abortSignal.aborted) throw this.abortSignal.reason;
+    return this.effectStore().transitionEffect(
+      effectId,
+      expectedVersion,
+      { type: 'dispatched', at: this.now() },
+      this.effectFence()
+    );
+  }
+
+  settleEffect(
+    effectId: string,
+    expectedVersion: number,
+    settlement: Readonly<AxEventEffectSettlement>
+  ): Promise<Readonly<AxEventEffect>> {
+    return this.effectStore().transitionEffect(
+      effectId,
+      expectedVersion,
+      { type: 'settled', at: this.now(), settlement },
+      this.effectFence()
+    );
+  }
+
+  listEffects(): Promise<readonly Readonly<AxEventEffect>[]> {
+    return this.effectStore().listEffects(this.deliveryId);
+  }
+
   takeRegistrations() {
     return this.registrations.splice(0, this.registrations.length);
+  }
+
+  private effectStore(): AxEventEffectStore {
+    if (!this.store || !isEffectStore(this.store)) {
+      throw new Error('AxEventStore does not support the effect ledger');
+    }
+    return this.store;
+  }
+
+  private effectFence(): AxEventEffectFence {
+    if (this.fencingToken === undefined) {
+      throw new Error('Event effects require a fenced delivery claim');
+    }
+    return {
+      deliveryId: this.deliveryId,
+      fencingToken: this.fencingToken,
+    };
   }
 }
 
@@ -199,11 +283,36 @@ export class AxEventRuntime {
         );
       }
     }
+    const effectAwareTargets = [...this.targets.values()].filter(
+      (target) => target.retrySafety === 'effect-aware'
+    );
+    if (
+      (this.options.effectResolver || effectAwareTargets.length > 0) &&
+      !isEffectStore(this.store)
+    ) {
+      throw new Error(
+        `AxEventRuntime ${
+          this.options.effectResolver
+            ? 'effectResolver'
+            : `configuration for effect-aware targets ${effectAwareTargets.map((target) => target.id).join(', ')}`
+        } requires an effect-aware AxEventStore`
+      );
+    }
     const leaseMs = this.options.leaseMs ?? 30_000;
     const heartbeatMs = this.options.heartbeatMs ?? Math.floor(leaseMs / 3);
     if (leaseMs < 100 || heartbeatMs < 1 || heartbeatMs >= leaseMs) {
       throw new Error(
         'AxEventRuntime requires 0 < heartbeatMs < leaseMs and leaseMs >= 100'
+      );
+    }
+    const effectResolverTimeoutMs =
+      this.options.effectResolverTimeoutMs ?? 30_000;
+    if (
+      !Number.isFinite(effectResolverTimeoutMs) ||
+      effectResolverTimeoutMs <= 0
+    ) {
+      throw new Error(
+        'AxEventRuntime effectResolverTimeoutMs must be a positive finite number'
       );
     }
     this.started = true;
@@ -255,7 +364,7 @@ export class AxEventRuntime {
       availableAt: number;
       coalesce?: 'latest';
       ordering?: 'strict' | 'relaxed';
-      retrySafety?: 'idempotent' | 'unknown';
+      retrySafety?: 'idempotent' | 'effect-aware' | 'unknown';
     }> = [];
     for (const route of this.routes.values()) {
       if (!(await this.routeMatches(route, normalized))) continue;
@@ -292,6 +401,13 @@ export class AxEventRuntime {
 
   getRun(runId: string): Promise<Readonly<AxEventRun> | undefined> {
     return this.store.getRun(runId);
+  }
+
+  getEffects(deliveryId: string): Promise<readonly Readonly<AxEventEffect>[]> {
+    if (!isEffectStore(this.store)) {
+      throw new Error('AxEventStore does not support the effect ledger');
+    }
+    return this.store.listEffects(deliveryId);
   }
 
   listDeadLetters(): Promise<readonly Readonly<AxEventDeadLetter>[]> {
@@ -364,14 +480,31 @@ export class AxEventRuntime {
 
   async close(options: Readonly<AxEventCloseOptions> = {}): Promise<void> {
     if (this.closing) return;
+    const timeoutMs = options.timeoutMs ?? 30_000;
+    if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
+      throw new Error(
+        'AxEventRuntime close timeoutMs must be finite and non-negative'
+      );
+    }
     this.closing = true;
     this.sourceController.abort('AxEventRuntime closing');
-    await Promise.allSettled(
-      this.sourceHandles.map((handle) => handle.close())
+    const sourceClose = Promise.allSettled(
+      this.sourceHandles.map((handle) =>
+        Promise.resolve().then(() => handle.close())
+      )
     );
+    const sourceCloseTimeout = new AbortController();
+    try {
+      await Promise.race([
+        sourceClose,
+        this.clock.sleep(timeoutMs, sourceCloseTimeout.signal),
+      ]);
+    } finally {
+      sourceCloseTimeout.abort('Event source close phase completed');
+    }
     if (options.drain !== false) {
       try {
-        await this.waitForIdle(options.timeoutMs ?? 30_000);
+        await this.waitForIdle(timeoutMs);
       } catch {
         // The abort below makes unfinished volatile deliveries visible again on
         // an explicit redrive rather than hiding the shutdown failure.
@@ -432,14 +565,16 @@ export class AxEventRuntime {
   }
 
   private async processDelivery(
-    claimed: Readonly<AxEventDelivery>,
+    initialClaim: Readonly<AxEventDelivery>,
     workerId: string
   ): Promise<void> {
+    let claimed = initialClaim;
     if (
       claimed.recoveredFromExpiredLease &&
       claimed.invocationStarted &&
-      claimed.retrySafety !== 'idempotent'
+      claimed.retrySafety === 'unknown'
     ) {
+      await this.parkOutcomeUnknownEffects(claimed);
       const reason =
         'outcome_unknown: expired worker lease after invocation started';
       await this.store.saveDelivery({
@@ -499,6 +634,50 @@ export class AxEventRuntime {
       const heartbeatController = new AbortController();
       this.activeRuns.set(runId, controller);
       const attempt = claimed.attempt + 1;
+      const heartbeat = this.heartbeatClaim(
+        claimed,
+        workerId,
+        controller,
+        heartbeatController.signal
+      );
+      let effectParkReason: string | undefined;
+      try {
+        effectParkReason = await this.reconcileEffects(
+          claimed,
+          controller.signal
+        );
+      } catch (error) {
+        heartbeatController.abort('Event effect reconciliation failed');
+        await heartbeat;
+        this.activeRuns.delete(runId);
+        throw error;
+      }
+      if (effectParkReason) {
+        try {
+          await this.parkDelivery(claimed, effectParkReason);
+        } finally {
+          heartbeatController.abort('Event delivery parked');
+          await heartbeat;
+          this.activeRuns.delete(runId);
+        }
+        return;
+      }
+      const refreshedClaim = await this.store.getDelivery(claimed.id);
+      if (
+        !refreshedClaim ||
+        refreshedClaim.claimedBy !== workerId ||
+        refreshedClaim.fencingToken !== claimed.fencingToken ||
+        refreshedClaim.leaseExpiresAt === undefined ||
+        refreshedClaim.leaseExpiresAt <= this.clock.now()
+      ) {
+        heartbeatController.abort('Event claim was lost during reconciliation');
+        await heartbeat;
+        this.activeRuns.delete(runId);
+        throw new Error(`Stale event claim for ${claimed.id}`);
+      }
+      // Reconciliation may outlive the original lease while the heartbeat
+      // extends it. Never overwrite that extension with the stale claim copy.
+      claimed = refreshedClaim;
       const eventContext = new AxRuntimeEventContext(
         this.id,
         runId,
@@ -513,7 +692,9 @@ export class AxEventRuntime {
         claimed.id,
         controller.signal,
         continuation,
-        claimed.fencingToken
+        claimed.fencingToken,
+        this.store,
+        () => this.clock.now()
       );
       let run: AxEventRun = {
         id: runId,
@@ -521,6 +702,7 @@ export class AxEventRuntime {
         routeId: route.id,
         ...(targetId ? { targetId } : {}),
         instanceKey,
+        claimedBy: workerId,
         status: 'running',
         attempt,
         startedAt: this.clock.now(),
@@ -535,12 +717,6 @@ export class AxEventRuntime {
         runId,
       });
       await this.store.saveRun(run);
-      const heartbeat = this.heartbeatClaim(
-        claimed,
-        workerId,
-        controller,
-        heartbeatController.signal
-      );
       let invoked = false;
       try {
         let result: InvocationResult = { waiting: false, invoked: false };
@@ -620,6 +796,25 @@ export class AxEventRuntime {
           await this.store.completeContinuation(continuation.id);
       } catch (error) {
         if (controller.signal.aborted) {
+          const effectParkReason = await this.parkCancelledEffects(
+            claimed,
+            axEventErrorMessage(controller.signal.reason)
+          );
+          if (effectParkReason) {
+            run = {
+              ...run,
+              status: 'parked',
+              finishedAt: this.clock.now(),
+              error: effectParkReason,
+            };
+            await this.store.saveRun(run);
+            await this.parkDelivery(
+              { ...claimed, attempt, runId },
+              effectParkReason,
+              false
+            );
+            return;
+          }
           run = {
             ...run,
             status: 'cancelled',
@@ -665,8 +860,13 @@ export class AxEventRuntime {
         }
         const unsafe =
           error instanceof AxEventOutcomeUnknownError ||
-          (invoked && target?.retrySafety !== 'idempotent');
+          (invoked && (target?.retrySafety ?? 'unknown') === 'unknown');
         if (unsafe) {
+          await this.parkOutcomeUnknownEffects({
+            ...claimed,
+            attempt,
+            runId,
+          });
           run = {
             ...run,
             status: 'outcome_unknown',
@@ -695,6 +895,25 @@ export class AxEventRuntime {
           error instanceof AxEventContinuationNotFoundError ||
           error instanceof AxEventInputError;
         if (!nonRetryable && attempt < (this.options.maxAttempts ?? 5)) {
+          const effectParkReason = await this.reconcileEffects(
+            { ...claimed, attempt, runId, invocationStarted: invoked },
+            controller.signal
+          );
+          if (effectParkReason) {
+            run = {
+              ...run,
+              status: 'parked',
+              finishedAt: this.clock.now(),
+              error: effectParkReason,
+            };
+            await this.store.saveRun(run);
+            await this.parkDelivery(
+              { ...claimed, attempt, runId },
+              effectParkReason,
+              false
+            );
+            return;
+          }
           const retryMs = Math.min(
             this.options.retryMaxMs ?? 60_000,
             (this.options.retryBaseMs ?? 1_000) * 2 ** (attempt - 1)
@@ -1084,6 +1303,236 @@ export class AxEventRuntime {
         return;
       }
     }
+  }
+
+  private async reconcileEffects(
+    delivery: Readonly<AxEventDelivery>,
+    abortSignal: AbortSignal
+  ): Promise<string | undefined> {
+    if (!isEffectStore(this.store)) return;
+    const store = this.store;
+    const fence = this.effectFence(delivery);
+    const effects = await store.listEffects(delivery.id);
+    for (let effect of effects) {
+      if (
+        effect.status === 'intent' ||
+        effect.status === 'succeeded' ||
+        effect.status === 'failed'
+      ) {
+        continue;
+      }
+      if (this.options.effectResolver) {
+        let resolution: Readonly<AxEventEffectResolution>;
+        try {
+          resolution = await this.resolveEffect(effect, delivery, abortSignal);
+        } catch (error) {
+          const reason = this.effectReason(
+            `Effect resolver failed for ${effect.operation}: ${axEventErrorMessage(error)}`
+          );
+          effect = await store.transitionEffect(
+            effect.id,
+            effect.version,
+            { type: 'parked', at: this.clock.now(), reason },
+            fence
+          );
+          return effect.parkedReason;
+        }
+        if (
+          resolution.status === 'succeeded' ||
+          resolution.status === 'failed'
+        ) {
+          effect = await store.transitionEffect(
+            effect.id,
+            effect.version,
+            {
+              type: 'settled',
+              at: this.clock.now(),
+              settlement: resolution,
+            },
+            fence
+          );
+        } else if (resolution.status === 'not_dispatched') {
+          effect = await store.transitionEffect(
+            effect.id,
+            effect.version,
+            { type: 'not_dispatched', at: this.clock.now() },
+            fence
+          );
+        } else if (resolution.status === 'parked') {
+          effect = await store.transitionEffect(
+            effect.id,
+            effect.version,
+            {
+              type: 'parked',
+              at: this.clock.now(),
+              reason: resolution.reason,
+            },
+            fence
+          );
+        }
+      }
+      if (effect.status === 'parked') {
+        return (
+          effect.parkedReason ?? `Event effect ${effect.operation} is parked`
+        );
+      }
+      if (
+        effect.status === 'dispatched' &&
+        effect.replaySafety !== 'idempotent'
+      ) {
+        const reason = this.effectReason(
+          `Indeterminate non-idempotent effect ${effect.operation}:${effect.idempotencyKey}`
+        );
+        effect = await store.transitionEffect(
+          effect.id,
+          effect.version,
+          { type: 'parked', at: this.clock.now(), reason },
+          fence
+        );
+        return effect.parkedReason;
+      }
+    }
+    return;
+  }
+
+  private async resolveEffect(
+    effect: Readonly<AxEventEffect>,
+    delivery: Readonly<AxEventDelivery>,
+    abortSignal: AbortSignal
+  ): Promise<Readonly<AxEventEffectResolution>> {
+    const resolver = this.options.effectResolver;
+    if (!resolver) throw new Error('No event effect resolver is configured');
+    if (abortSignal.aborted) throw abortSignal.reason;
+    const timeoutMs = this.options.effectResolverTimeoutMs ?? 30_000;
+    const controller = new AbortController();
+    const abortResolver = () => controller.abort(abortSignal.reason);
+    abortSignal.addEventListener('abort', abortResolver, { once: true });
+    const timeoutError = new Error(
+      `Effect resolver timed out after ${timeoutMs}ms`
+    );
+    const timeout = this.clock.sleep(timeoutMs, controller.signal).then(() => {
+      controller.abort(timeoutError);
+      throw timeoutError;
+    });
+    try {
+      return await Promise.race([
+        Promise.resolve().then(() =>
+          resolver(effect, {
+            delivery,
+            abortSignal: controller.signal,
+          })
+        ),
+        timeout,
+      ]);
+    } finally {
+      abortSignal.removeEventListener('abort', abortResolver);
+      if (!controller.signal.aborted) {
+        controller.abort('Event effect resolver completed');
+      }
+    }
+  }
+
+  private async parkCancelledEffects(
+    delivery: Readonly<AxEventDelivery>,
+    cancellationReason: string
+  ): Promise<string | undefined> {
+    if (!isEffectStore(this.store)) return;
+    const fence = this.effectFence(delivery);
+    let parkedReason: string | undefined;
+    for (const effect of await this.store.listEffects(delivery.id)) {
+      if (
+        effect.status !== 'dispatched' ||
+        effect.replaySafety === 'idempotent'
+      ) {
+        continue;
+      }
+      parkedReason = this.effectReason(
+        `Cancelled with indeterminate effect: ${cancellationReason}`
+      );
+      await this.store.transitionEffect(
+        effect.id,
+        effect.version,
+        {
+          type: 'parked',
+          at: this.clock.now(),
+          reason: parkedReason,
+        },
+        fence
+      );
+    }
+    return parkedReason;
+  }
+
+  private async parkOutcomeUnknownEffects(
+    delivery: Readonly<AxEventDelivery>
+  ): Promise<void> {
+    if (!isEffectStore(this.store)) return;
+    const fence = this.effectFence(delivery);
+    for (const effect of await this.store.listEffects(delivery.id)) {
+      if (effect.status !== 'dispatched') continue;
+      await this.store.transitionEffect(
+        effect.id,
+        effect.version,
+        {
+          type: 'parked',
+          at: this.clock.now(),
+          reason: this.effectReason(
+            `Target outcome is outcome_unknown with indeterminate effect ${effect.operation}:${effect.idempotencyKey}`
+          ),
+        },
+        fence
+      );
+    }
+  }
+
+  private async parkDelivery(
+    delivery: Readonly<AxEventDelivery>,
+    reason: string,
+    updatePreviousRun = true
+  ): Promise<void> {
+    if (updatePreviousRun && delivery.runId) {
+      const previousRun = await this.store.getRun(delivery.runId);
+      if (previousRun) {
+        await this.store.saveRun({
+          ...previousRun,
+          claimedBy: delivery.claimedBy,
+          status: 'parked',
+          finishedAt: this.clock.now(),
+          error: reason,
+          ...(delivery.fencingToken !== undefined
+            ? { fencingToken: delivery.fencingToken }
+            : {}),
+        });
+      }
+    }
+    await this.store.saveDelivery({
+      ...delivery,
+      status: 'parked',
+      error: reason,
+    });
+    await this.store.addDeadLetter({
+      id: axEventId('dead-letter'),
+      kind: 'delivery',
+      deliveryId: delivery.id,
+      ...(delivery.runId ? { runId: delivery.runId } : {}),
+      reason,
+      createdAt: this.clock.now(),
+    });
+  }
+
+  private effectFence(delivery: Readonly<AxEventDelivery>): AxEventEffectFence {
+    if (delivery.fencingToken === undefined) {
+      throw new Error('Event effects require a fenced delivery claim');
+    }
+    return {
+      deliveryId: delivery.id,
+      fencingToken: delivery.fencingToken,
+    };
+  }
+
+  private effectReason(reason: string): string {
+    // 1,000 UTF-16 code units are always within the store's 4 KiB UTF-8 bound.
+    return reason.slice(0, 1_000);
   }
 
   private async deadLetterDelivery(

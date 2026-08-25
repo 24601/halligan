@@ -929,6 +929,17 @@ import {
   type AxEventDeadLetter,
   type AxEventDelivery,
   type AxEventDeliveryStatus,
+  type AxEventEffect,
+  type AxEventEffectCreateRequest,
+  type AxEventEffectFence,
+  type AxEventEffectIntent,
+  type AxEventEffectResolution,
+  type AxEventEffectResolver,
+  type AxEventEffectResolverContext,
+  type AxEventEffectSettlement,
+  type AxEventEffectStatus,
+  type AxEventEffectStore,
+  type AxEventEffectTransition,
   type AxEventEnqueueRequest,
   type AxEventEnvelope,
   type AxEventIdentity,
@@ -976,13 +987,18 @@ import {
   type AxUCPWebhookEventSourceOptions,
 } from './event/ucpSource.js';
 import {
+  axApplyEventEffectTransition,
+  axEventEffectRequestDigest,
+  axEventEffectRequestFingerprint,
   axEventErrorMessage,
   axEventId,
   axEventIdentityScope,
+  axEventIngressFingerprint,
   axEventMatches,
   axEventScopedCorrelationKey,
   axEventScopedDedupeKey,
   axEventSizeBytes,
+  axValidateEventEffectCreateRequest,
   axValidateEventEnvelope,
 } from './event/util.js';
 import type { AxFlowStateDependencyAnalysis } from './flow/dependencyAnalyzer.js';
@@ -1467,6 +1483,7 @@ export { axAIWebLLMCreativeConfig };
 export { axAIWebLLMDefaultConfig };
 export { axAnalyzeChatPromptRequirements };
 export { axAnalyzeRequestRequirements };
+export { axApplyEventEffectTransition };
 export { axApplyMCPAuthentication };
 export { axApplyOpenAIChatAudioRequest };
 export { axAudioFormatFromMimeType };
@@ -1496,9 +1513,12 @@ export { axDefaultOptimizerLogger };
 export { axDefaultOptimizerMetricsConfig };
 export { axDeserializeOptimizedProgram };
 export { axEmitUsageEvent };
+export { axEventEffectRequestDigest };
+export { axEventEffectRequestFingerprint };
 export { axEventErrorMessage };
 export { axEventId };
 export { axEventIdentityScope };
+export { axEventIngressFingerprint };
 export { axEventMatches };
 export { axEventScopedCorrelationKey };
 export { axEventScopedDedupeKey };
@@ -1582,6 +1602,7 @@ export { axUpdateMetricsConfig };
 export { axUpdateOptimizerMetricsConfig };
 export { axValidateChatRequestMessage };
 export { axValidateChatResponseResult };
+export { axValidateEventEffectCreateRequest };
 export { axValidateEventEnvelope };
 export { axValidateGeminiLiveAudioInput };
 export { axValidateProviderCapabilities };
@@ -1992,6 +2013,17 @@ export type { AxEventCorrelationKey };
 export type { AxEventDeadLetter };
 export type { AxEventDelivery };
 export type { AxEventDeliveryStatus };
+export type { AxEventEffect };
+export type { AxEventEffectCreateRequest };
+export type { AxEventEffectFence };
+export type { AxEventEffectIntent };
+export type { AxEventEffectResolution };
+export type { AxEventEffectResolver };
+export type { AxEventEffectResolverContext };
+export type { AxEventEffectSettlement };
+export type { AxEventEffectStatus };
+export type { AxEventEffectStore };
+export type { AxEventEffectTransition };
 export type { AxEventEnqueueRequest };
 export type { AxEventEnvelope };
 export type { AxEventIdentity };

@@ -168,6 +168,16 @@ dead-letter before invocation begins. Fan-out is represented as multiple
 matching routes so each target retains independent authorization, ordering,
 retry, cancellation, and run state.
 
+Application and tool code can opt individual external operations into the
+host-owned effect ledger through the propagated `AxEventContext`. Intent is
+persisted before dispatch, optional dispatch state distinguishes an unresolved
+boundary, and success/failure settlement stores a bounded receipt. Canonical
+request digests reject changed request descriptors under a reused effect key.
+Recovery for an explicitly `effect-aware` target reuses settled outcomes,
+permits explicitly idempotent replay with the same domain key, accepts bounded
+authoritative resolver results, and parks indeterminate non-idempotent effects.
+Ax does not intercept arbitrary I/O or claim exactly-once side effects.
+
 The in-memory store is volatile and single-worker. Crash-safe, cooperating
 multi-process execution requires the conforming SQLite store from the Node-only
 tools entry point. AxIR specifies deterministic routing, input mapping, retry

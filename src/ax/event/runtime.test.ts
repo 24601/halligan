@@ -140,6 +140,15 @@ describe('AxEventRuntime', () => {
     });
     const firstA = await runtime.publish(tenantA);
     const secondA = await runtime.publish(tenantA);
+    await expect(
+      runtime.publish({
+        ...tenantA,
+        event: {
+          ...tenantA.event,
+          data: { value: 'changed' },
+        },
+      })
+    ).rejects.toThrow('identity conflicts with previously accepted ingress');
     const firstB = await runtime.publish(tenantB);
     await runtime.waitForIdle();
     expect(anonymous.deliveryIds).toEqual([]);
@@ -431,6 +440,28 @@ describe('AxEventRuntime', () => {
       expect.objectContaining({ message: 'timer failed' })
     );
     await runtime.close({ drain: false });
+  });
+
+  it('bounds source shutdown when a handle ignores its abort signal', async () => {
+    let sourceSignal: AbortSignal | undefined;
+    const runtime = new AxEventRuntime({
+      routes: [],
+      sources: [
+        {
+          id: 'hung-close',
+          start: (context) => {
+            sourceSignal = context.signal;
+            return { close: () => new Promise<void>(() => {}) };
+          },
+        },
+      ],
+    });
+    await runtime.start();
+    const startedAt = Date.now();
+    await runtime.close({ drain: false, timeoutMs: 20 });
+
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    expect(sourceSignal?.aborted).toBe(true);
   });
 
   it('refuses durable sources on the volatile store by default', async () => {

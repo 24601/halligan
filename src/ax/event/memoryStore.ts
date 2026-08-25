@@ -5,6 +5,11 @@ import {
   type AxEventCorrelationKey,
   type AxEventDeadLetter,
   type AxEventDelivery,
+  type AxEventEffect,
+  type AxEventEffectCreateRequest,
+  type AxEventEffectFence,
+  type AxEventEffectStore,
+  type AxEventEffectTransition,
   type AxEventEnqueueRequest,
   type AxEventPublishReceipt,
   type AxEventRun,
@@ -14,9 +19,13 @@ import {
   AxSystemEventClock,
 } from './types.js';
 import {
+  axApplyEventEffectTransition,
+  axEventEffectRequestDigest,
   axEventId,
+  axEventIngressFingerprint,
   axEventScopedCorrelationKey,
   axEventScopedDedupeKey,
+  axValidateEventEffectCreateRequest,
 } from './util.js';
 
 export interface AxInMemoryEventStoreOptions {
@@ -28,7 +37,7 @@ export interface AxInMemoryEventStoreOptions {
 
 type Waiter = { resolve: () => void; reject: (error: unknown) => void };
 
-export class AxInMemoryEventStore implements AxEventStore {
+export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
   readonly capabilities = {
     durability: 'volatile',
     coordination: 'single-worker',
@@ -36,6 +45,7 @@ export class AxInMemoryEventStore implements AxEventStore {
     transactions: false,
     compareAndSet: false,
     outputPersistence: true,
+    effectLedger: true,
   } as const;
 
   private readonly clock: AxEventClock;
@@ -47,9 +57,11 @@ export class AxInMemoryEventStore implements AxEventStore {
   private readonly deliveryOrder: string[] = [];
   private readonly dedupe = new Map<
     string,
-    { eventId: string; deliveryIds: string[] }
+    { eventId: string; deliveryIds: string[]; ingressFingerprint: string }
   >();
   private readonly runs = new Map<string, AxEventRun>();
+  private readonly effects = new Map<string, AxEventEffect>();
+  private readonly effectKeys = new Map<string, string>();
   private readonly continuations = new Map<string, AxEventContinuation>();
   private readonly continuationKeys = new Map<string, string>();
   private readonly deadLetters = new Map<string, AxEventDeadLetter>();
@@ -71,8 +83,14 @@ export class AxInMemoryEventStore implements AxEventStore {
     signal?: AbortSignal
   ): Promise<AxEventPublishReceipt> {
     const dedupeKey = axEventScopedDedupeKey(request.ingress);
+    const ingressFingerprint = axEventIngressFingerprint(request.ingress);
     const duplicate = this.dedupe.get(dedupeKey);
     if (duplicate) {
+      if (duplicate.ingressFingerprint !== ingressFingerprint) {
+        throw new Error(
+          `Event identity conflicts with previously accepted ingress ${request.ingress.event.source}:${request.ingress.event.id}`
+        );
+      }
       return {
         eventId: duplicate.eventId,
         accepted: true,
@@ -157,6 +175,7 @@ export class AxInMemoryEventStore implements AxEventStore {
     this.dedupe.set(dedupeKey, {
       eventId: request.ingress.event.id,
       deliveryIds,
+      ingressFingerprint,
     });
     this.notify(this.workWaiters);
     return {
@@ -237,6 +256,84 @@ export class AxInMemoryEventStore implements AxEventStore {
   async getRun(runId: string): Promise<Readonly<AxEventRun> | undefined> {
     const run = this.runs.get(runId);
     return run ? structuredClone(run) : undefined;
+  }
+
+  async declareEffect(
+    request: Readonly<AxEventEffectCreateRequest>,
+    fence: Readonly<AxEventEffectFence>
+  ): Promise<Readonly<AxEventEffect>> {
+    axValidateEventEffectCreateRequest(request);
+    const requestDigest = await axEventEffectRequestDigest(request);
+    this.assertFence(fence);
+    if (request.deliveryId !== fence.deliveryId) {
+      throw new Error(`Event effect fence does not own ${request.deliveryId}`);
+    }
+    const key = this.effectKey(
+      request.deliveryId,
+      request.operation,
+      request.idempotencyKey
+    );
+    const existingId = this.effectKeys.get(key);
+    if (existingId) {
+      const existing = this.effects.get(existingId)!;
+      if (existing.requestDigest !== requestDigest) {
+        throw new Error(
+          `Event effect intent conflicts with existing ${request.operation}:${request.idempotencyKey}`
+        );
+      }
+      return structuredClone(existing);
+    }
+    const effect: AxEventEffect = {
+      id: request.id,
+      deliveryId: request.deliveryId,
+      runId: request.runId,
+      identityScope: request.identityScope,
+      operation: request.operation,
+      idempotencyKey: request.idempotencyKey,
+      replaySafety: request.replaySafety ?? 'unknown',
+      requestDigest,
+      status: 'intent',
+      ...(request.metadata
+        ? { metadata: structuredClone(request.metadata) }
+        : {}),
+      createdAt: request.createdAt,
+      updatedAt: request.createdAt,
+      dispatchCount: 0,
+      version: 1,
+    };
+    this.effects.set(effect.id, effect);
+    this.effectKeys.set(key, effect.id);
+    return structuredClone(effect);
+  }
+
+  async transitionEffect(
+    effectId: string,
+    expectedVersion: number,
+    transition: Readonly<AxEventEffectTransition>,
+    fence: Readonly<AxEventEffectFence>
+  ): Promise<Readonly<AxEventEffect>> {
+    this.assertFence(fence);
+    const effect = this.effects.get(effectId);
+    if (!effect) throw new Error(`Unknown event effect: ${effectId}`);
+    if (effect.deliveryId !== fence.deliveryId) {
+      throw new Error(`Event effect fence does not own ${effectId}`);
+    }
+    const next = axApplyEventEffectTransition(effect, transition);
+    if (next.version === effect.version) return structuredClone(effect);
+    if (effect.version !== expectedVersion) {
+      throw new Error(`Stale event effect version for ${effectId}`);
+    }
+    this.effects.set(effectId, structuredClone(next));
+    return structuredClone(next);
+  }
+
+  async listEffects(
+    deliveryId: string
+  ): Promise<readonly Readonly<AxEventEffect>[]> {
+    return [...this.effects.values()]
+      .filter((effect) => effect.deliveryId === deliveryId)
+      .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id))
+      .map((effect) => structuredClone(effect));
   }
 
   async registerContinuation(
@@ -339,6 +436,9 @@ export class AxInMemoryEventStore implements AxEventStore {
       error: undefined,
       claimedBy: undefined,
       runId: undefined,
+      leaseExpiresAt: undefined,
+      invocationStarted: undefined,
+      fencingToken: (delivery.fencingToken ?? 0) + 1,
     };
     this.deliveries.set(deliveryId, redriven);
     this.pendingDeliveries++;
@@ -475,6 +575,7 @@ export class AxInMemoryEventStore implements AxEventStore {
       status === 'cancelled' ||
       status === 'dead_lettered' ||
       status === 'output_persistence_failed' ||
+      status === 'parked' ||
       status === 'outcome_unknown' ||
       status === 'waiting_event'
     );
@@ -483,6 +584,30 @@ export class AxInMemoryEventStore implements AxEventStore {
   private notify(waiters: Set<Waiter>): void {
     for (const waiter of waiters) waiter.resolve();
     waiters.clear();
+  }
+
+  private assertFence(fence: Readonly<AxEventEffectFence>): void {
+    const delivery = this.deliveries.get(fence.deliveryId);
+    if (
+      !delivery ||
+      delivery.fencingToken !== fence.fencingToken ||
+      !delivery.claimedBy ||
+      (delivery.status !== 'claimed' && delivery.status !== 'running') ||
+      delivery.leaseExpiresAt === undefined ||
+      delivery.leaseExpiresAt <= this.clock.now()
+    ) {
+      throw new Error(
+        `Stale or expired fencing token for event delivery ${fence.deliveryId}`
+      );
+    }
+  }
+
+  private effectKey(
+    deliveryId: string,
+    operation: string,
+    idempotencyKey: string
+  ): string {
+    return `${deliveryId}\n${operation}\n${idempotencyKey}`;
   }
 }
 

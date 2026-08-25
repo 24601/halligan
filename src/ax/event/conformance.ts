@@ -2,6 +2,7 @@ import {
   AxEventBackpressureError,
   type AxEventClock,
   type AxEventContinuation,
+  type AxEventEffectStore,
   type AxEventEnqueueRequest,
   type AxEventRun,
   type AxEventStore,
@@ -58,6 +59,17 @@ export async function runAxEventStoreConformance(
     assert(!accepted.duplicate, 'first enqueue is accepted');
     assert(duplicate.duplicate, 'identity-scoped duplicate is rejected');
     assert(!otherTenant.duplicate, 'different tenant does not collide');
+    await expectReject(
+      peer.store.enqueue({
+        ...first,
+        ingress: {
+          ...first.ingress,
+          event: { ...first.ingress.event, data: { eventId: 'changed' } },
+        },
+      }),
+      'conflicting duplicate ingress'
+    );
+    assertions++;
 
     const claimed = await store.claim('worker-a', options.clock.now(), 100);
     assert(claimed?.claimedBy === 'worker-a', 'atomic claim');
@@ -70,6 +82,11 @@ export async function runAxEventStoreConformance(
 
     const staleCandidate = claimed!;
     options.clock.advanceBy(101);
+    await expectReject(
+      store.saveDelivery({ ...staleCandidate, status: 'succeeded' }),
+      'expired claim without takeover'
+    );
+    assertions++;
     const takeover = await peer.store.claim(
       'worker-b',
       options.clock.now(),
@@ -80,6 +97,15 @@ export async function runAxEventStoreConformance(
       (takeover?.fencingToken ?? 0) > (staleCandidate.fencingToken ?? 0),
       'takeover increments fencing token'
     );
+    await expectReject(
+      peer.store.saveDelivery({
+        ...takeover!,
+        claimedBy: 'worker-c',
+        status: 'running',
+      }),
+      'wrong current owner'
+    );
+    assertions++;
     await expectReject(
       store.saveDelivery({ ...staleCandidate, status: 'succeeded' }),
       'stale fencing token'
@@ -122,6 +148,120 @@ export async function runAxEventStoreConformance(
     );
     assertions++;
 
+    if (store.capabilities.effectLedger) {
+      assert(peer.store.capabilities.effectLedger, 'peer effect ledger');
+      const effectStore = store as AxEventEffectStore;
+      const peerEffectStore = peer.store as AxEventEffectStore;
+      const effectRequest = {
+        id: `${key}-effect`,
+        deliveryId: takeover!.id,
+        runId: `${key}-run`,
+        identityScope: takeover!.identityScope,
+        operation: 'conformance.effect',
+        idempotencyKey: takeover!.id,
+        replaySafety: 'idempotent' as const,
+        metadata: { request: 'same', redacted: true },
+        createdAt: options.clock.now(),
+      };
+      const effectFence = {
+        deliveryId: takeover!.id,
+        fencingToken: takeover!.fencingToken!,
+      };
+      const intent = await peerEffectStore.declareEffect(
+        effectRequest,
+        effectFence
+      );
+      const duplicateIntent = await effectStore.declareEffect(
+        {
+          ...effectRequest,
+          id: `${key}-duplicate-effect`,
+          metadata: { redacted: true, request: 'same' },
+        },
+        effectFence
+      );
+      assert(intent.status === 'intent', 'effect intent persists');
+      assert(duplicateIntent.id === intent.id, 'effect intent is idempotent');
+      assert(
+        intent.requestDigest === duplicateIntent.requestDigest,
+        'effect request canonicalization is stable'
+      );
+      await expectReject(
+        effectStore.declareEffect(
+          {
+            ...effectRequest,
+            id: `${key}-conflicting-effect`,
+            metadata: { request: 'changed', redacted: true },
+          },
+          effectFence
+        ),
+        'changed request with reused effect identity'
+      );
+      assertions++;
+      const dispatched = await peerEffectStore.transitionEffect(
+        intent.id,
+        intent.version,
+        { type: 'dispatched', at: options.clock.now() },
+        effectFence
+      );
+      assert(dispatched.status === 'dispatched', 'effect dispatch persists');
+      await expectReject(
+        peerEffectStore.transitionEffect(
+          intent.id,
+          intent.version,
+          { type: 'dispatched', at: options.clock.now() },
+          effectFence
+        ),
+        'stale effect revision'
+      );
+      assertions++;
+      await expectReject(
+        effectStore.transitionEffect(
+          intent.id,
+          dispatched.version,
+          {
+            type: 'settled',
+            at: options.clock.now(),
+            settlement: { status: 'succeeded' },
+          },
+          {
+            deliveryId: staleCandidate.id,
+            fencingToken: staleCandidate.fencingToken!,
+          }
+        ),
+        'stale effect writer'
+      );
+      assertions++;
+      const settled = await peerEffectStore.transitionEffect(
+        intent.id,
+        dispatched.version,
+        {
+          type: 'settled',
+          at: options.clock.now(),
+          settlement: {
+            status: 'succeeded',
+            receipt: { providerId: 'receipt' },
+          },
+        },
+        effectFence
+      );
+      assert(settled.status === 'succeeded', 'effect settlement persists');
+      assert(
+        (await effectStore.listEffects(takeover!.id))[0]?.status ===
+          'succeeded',
+        'effect ledger is shared across workers'
+      );
+      await expectReject(
+        effectStore.transitionEffect(
+          intent.id,
+          settled.version,
+          { type: 'dispatched', at: options.clock.now() },
+          effectFence
+        ),
+        'illegal effect transition'
+      );
+      assertions++;
+    }
+
     const continuation: AxEventContinuation = {
       id: `${key}-continuation`,
       targetId: 'target',
@@ -161,6 +301,7 @@ export async function runAxEventStoreConformance(
       deliveryId: takeover!.id,
       routeId: takeover!.routeId,
       instanceKey: takeover!.instanceKey,
+      claimedBy: takeover!.claimedBy,
       status: 'succeeded',
       attempt: 1,
       startedAt: options.clock.now(),
@@ -177,6 +318,7 @@ export async function runAxEventStoreConformance(
       store.saveRun({
         ...run,
         id: `${key}-stale-run`,
+        claimedBy: staleCandidate.claimedBy,
         fencingToken: staleCandidate.fencingToken,
       }),
       'stale output writer'

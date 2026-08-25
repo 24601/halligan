@@ -1162,6 +1162,32 @@
       "completedAt": "2026-08-22",
       "completedByCommit": "040f954bce9c7dca44f7fd3436886d036f9e358b",
       "verification": "TS-derived native-image routing fixture; five-language AxIR dev verifier; npm run axir:check-packages; go test ./internal/axir; focused TypeScript router tests"
+    },
+    {
+      "id": "axir-2026-08-25-port-axeventruntime-effect-aware-resumability",
+      "status": "open",
+      "title": "Port AxEventRuntime effect-aware resumability",
+      "createdAt": "2026-08-25",
+      "sourcePR": null,
+      "sourceCommit": "ca760294f5ea4f207052c39c2218e1195103bc2a",
+      "tsPaths": [
+        "src/ax/event/types.ts",
+        "src/ax/event/runtime.ts",
+        "src/ax/event/memoryStore.ts",
+        "src/ax/event/mapping.ts",
+        "src/ax/event/util.ts",
+        "src/ax/event/conformance.ts"
+      ],
+      "portableSurface": "axprogram",
+      "impact": "Add the effect intent/dispatched/settled/parked state machine, resolver outcomes, effect-level replay safety, fencing, and host APIs to AxIR plus all generated language runtimes and conformance fixtures without claiming exactly-once effects.",
+      "suggestedAxirWork": [
+        "Add or update the TS-derived conformance fixture.",
+        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
+        "Run npm run axir:conformance:check and npm run test:axir."
+      ],
+      "completedAt": null,
+      "completedByCommit": null,
+      "verification": null
     }
   ],
   "nonPortableExemptions": [

@@ -138,13 +138,39 @@ instead of being replayed blindly.
 Delivery is strictly ordered per target instance by default. Use `debounceMs`
 to delay a route and add `coalesce: 'latest'` only when replacing intermediate
 events is correct for that route. Declare `retrySafety: 'idempotent'` only when
-stable delivery keys protect every possible side effect.
+stable delivery keys protect every possible side effect. Declare
+`retrySafety: 'effect-aware'` only when every external effect is explicitly
+wrapped by the ledger.
+
+### Classify Explicit External Effects
+
+TypeScript application and tool code can wrap an external operation with the
+effect ledger carried by `eventContext`: persist `declareEffect(...)` before
+I/O, call `markEffectDispatched(...)` immediately before crossing the external
+boundary, and write a conclusive success/failure receipt with
+`settleEffect(...)`. After restart, intent is not dispatched, a dispatch without
+settlement is indeterminate, settlement is completed, and a parked effect
+blocks automatic dispatch.
+
+The bounded, redacted effect metadata is a request descriptor. Ax persists a
+digest of its canonical bytes with operation, idempotency key, and replay
+safety, and rejects identity reuse when that descriptor changes.
+
+Recovery may replay only an effect explicitly declared idempotent with a key
+the external provider enforces. A host `effectResolver` can instead query the
+domain system and return a conclusive outcome or prove that dispatch did not
+happen. Resolver execution is timeout- and abort-bounded; timeout parks even if
+host code ignores abort. Unknown non-idempotent outcomes park for review. Ax
+cannot intercept arbitrary I/O, make a provider honor a key, or promise
+exactly-once side effects. Generated-language effect-ledger parity is tracked
+separately and is not implied by the existing single-worker event capability.
 
 `cancelRun(runId)` aborts an active program and its nested calls. `close()`
-stops sources, drains by default, and then aborts remaining workers; caller-owned
-protocol clients must still be closed by the caller. For deterministic tests,
-`AxManualEventClock` advances retries, debounce windows, and continuation
-expiry without waiting for wall-clock time.
+stops sources, drains by default, and then aborts remaining workers. Its timeout
+also bounds a source handle that ignores abort, though Ax cannot terminate that
+host JavaScript. Caller-owned protocol clients must still be closed by the
+caller. For deterministic tests, `AxManualEventClock` advances retries,
+debounce windows, and continuation expiry without waiting for wall-clock time.
 
 ## Generated Languages
 

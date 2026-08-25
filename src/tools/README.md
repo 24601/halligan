@@ -23,7 +23,9 @@ processes.
 
 `@ax-llm/ax-tools/event/sqlite` exports `AxSQLiteEventStore` and
 `AX_SQLITE_EVENT_STANDARD_RETENTION`. It supports cooperating Node processes
-that share a local SQLite file. It is not intended for network filesystems.
+that share a local SQLite file. Schema v2 includes the fenced AxEventRuntime
+effect ledger and migrates schema v1 databases in place. It is not intended for
+network filesystems.
 
 ### Function Tools
 

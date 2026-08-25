@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   AxEventBackpressureError,
   type AxEventClock,
@@ -6,6 +6,11 @@ import {
   type AxEventCorrelationKey,
   type AxEventDeadLetter,
   type AxEventDelivery,
+  type AxEventEffect,
+  type AxEventEffectCreateRequest,
+  type AxEventEffectFence,
+  type AxEventEffectStore,
+  type AxEventEffectTransition,
   type AxEventEnqueueRequest,
   type AxEventPayloadStore,
   type AxEventPublishReceipt,
@@ -14,14 +19,21 @@ import {
   type AxProgramStateEnvelope,
   type AxProgramStateStore,
   AxSystemEventClock,
+  axApplyEventEffectTransition,
+  axEventEffectRequestDigest,
+  axEventEffectRequestFingerprint,
   axEventIdentityScope,
+  axEventIngressFingerprint,
   axEventScopedCorrelationKey,
   axEventScopedDedupeKey,
+  axValidateEventEffectCreateRequest,
 } from '@ax-llm/ax';
 import Database from 'better-sqlite3';
 
-const SCHEMA_VERSION = 1;
-const MULTI_WORKER_CONFORMANCE = 'axevent-store-v1';
+const SCHEMA_VERSION = 4;
+const MULTI_WORKER_CONFORMANCE = 'axevent-store-v4';
+const MAX_FENCING_TOKEN = Number.MAX_SAFE_INTEGER;
+const LEGACY_UNVERIFIABLE_INGRESS_PREFIX = 'legacy-unverifiable:';
 const TERMINAL = [
   'waiting_event',
   'succeeded',
@@ -29,6 +41,7 @@ const TERMINAL = [
   'cancelled',
   'dead_lettered',
   'output_persistence_failed',
+  'parked',
   'outcome_unknown',
 ] as const;
 
@@ -36,6 +49,8 @@ export interface AxSQLiteEventRetention {
   eventAndResultMs: number;
   runMetadataAndDeadLettersMs: number;
   completedContinuationsMs: number;
+  /** Defaults to runMetadataAndDeadLettersMs for retention objects from schema v1. */
+  settledEffectsMs?: number;
 }
 
 export const AX_SQLITE_EVENT_STANDARD_RETENTION: Readonly<AxSQLiteEventRetention> =
@@ -43,6 +58,7 @@ export const AX_SQLITE_EVENT_STANDARD_RETENTION: Readonly<AxSQLiteEventRetention
     eventAndResultMs: 7 * 24 * 60 * 60 * 1_000,
     runMetadataAndDeadLettersMs: 30 * 24 * 60 * 60 * 1_000,
     completedContinuationsMs: 7 * 24 * 60 * 60 * 1_000,
+    settledEffectsMs: 30 * 24 * 60 * 60 * 1_000,
   };
 
 export interface AxSQLiteEventStoreOptions {
@@ -81,7 +97,9 @@ type DeliveryRow = {
   invocation_started: number;
 };
 
-export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
+export class AxSQLiteEventStore
+  implements AxEventStore, AxEventEffectStore, AxProgramStateStore
+{
   readonly capabilities = {
     durability: 'persistent',
     coordination: 'multi-worker',
@@ -89,6 +107,7 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
     transactions: true,
     compareAndSet: true,
     outputPersistence: true,
+    effectLedger: true,
     conformance: {
       multiWorker: MULTI_WORKER_CONFORMANCE,
       schemaVersion: SCHEMA_VERSION,
@@ -170,6 +189,7 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
         .get(now, now, ...TERMINAL) as DeliveryRow | undefined;
       if (!row) return;
       const recovered = row.status !== 'queued';
+      this.assertFencingTokenCanAdvance(row.id, row.fencing_token);
       const fencingToken = row.fencing_token + 1;
       const updated = this.db
         .prepare(
@@ -198,13 +218,19 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
     fencingToken: number,
     leaseExpiresAt: number
   ): Promise<void> {
+    this.assertSafeFencingToken(deliveryId, fencingToken);
+    const now = this.clock.now();
+    if (leaseExpiresAt <= now) {
+      throw new Error(`Stale event claim for ${deliveryId}`);
+    }
     const result = this.db
       .prepare(
         `UPDATE event_deliveries SET lease_expires_at=?
          WHERE id=? AND claimed_by=? AND fencing_token=?
-           AND status IN ('claimed','running')`
+           AND status IN ('claimed','running')
+           AND lease_expires_at > ?`
       )
-      .run(leaseExpiresAt, deliveryId, workerId, fencingToken);
+      .run(leaseExpiresAt, deliveryId, workerId, fencingToken, now);
     if (result.changes !== 1)
       throw new Error(`Stale event claim for ${deliveryId}`);
   }
@@ -219,34 +245,56 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
   }
 
   async saveDelivery(delivery: Readonly<AxEventDelivery>): Promise<void> {
+    if (!delivery.claimedBy || delivery.fencingToken === undefined) {
+      throw new Error(`Stale event claim for ${delivery.id}`);
+    }
+    this.assertSafeFencingToken(delivery.id, delivery.fencingToken);
     const result = this.db
-      .prepare(
-        `UPDATE event_deliveries SET
-          status=?, attempt=?, available_at=?, claimed_by=?, run_id=?, error=?,
-          lease_expires_at=?, invocation_started=?, retry_safety=?, ordering_mode=?
-         WHERE id=? AND fencing_token=?`
+      .transaction(() =>
+        this.db
+          .prepare(
+            `UPDATE event_deliveries SET
+              status=?, attempt=?, available_at=?, run_id=?, error=?,
+              invocation_started=?, retry_safety=?, ordering_mode=?
+             WHERE id=? AND claimed_by=? AND fencing_token=?
+               AND status IN ('claimed','running')
+               AND lease_expires_at > ?`
+          )
+          .run(
+            delivery.status,
+            delivery.attempt,
+            delivery.availableAt,
+            delivery.runId ?? null,
+            delivery.error ?? null,
+            delivery.invocationStarted ? 1 : 0,
+            delivery.retrySafety,
+            delivery.ordering,
+            delivery.id,
+            delivery.claimedBy,
+            delivery.fencingToken,
+            this.clock.now()
+          )
       )
-      .run(
-        delivery.status,
-        delivery.attempt,
-        delivery.availableAt,
-        delivery.claimedBy ?? null,
-        delivery.runId ?? null,
-        delivery.error ?? null,
-        delivery.leaseExpiresAt ?? null,
-        delivery.invocationStarted ? 1 : 0,
-        delivery.retrySafety,
-        delivery.ordering,
-        delivery.id,
-        delivery.fencingToken ?? -1
-      );
+      .immediate();
     if (result.changes !== 1) {
-      throw new Error(`Stale fencing token for event delivery ${delivery.id}`);
+      throw new Error(`Stale or expired event claim for ${delivery.id}`);
     }
   }
 
   async saveRun(run: Readonly<AxEventRun>): Promise<void> {
-    this.assertFence(run.deliveryId, run.fencingToken);
+    if (!run.claimedBy || run.fencingToken === undefined) {
+      throw new Error(`Stale event claim for ${run.deliveryId}`);
+    }
+    this.assertSafeFencingToken(run.deliveryId, run.fencingToken);
+    this.db
+      .transaction(() =>
+        this.assertActiveClaim(
+          run.deliveryId,
+          run.claimedBy!,
+          run.fencingToken!
+        )
+      )
+      .immediate();
     let stored: AxEventRun = structuredClone(run);
     const hasPayload = run.output !== undefined || run.chunks !== undefined;
     const payload = { output: run.output, chunks: run.chunks };
@@ -260,7 +308,7 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
         );
       }
       const outputRef = await this.options.payloadStore.put(
-        `event-run:${run.id}`,
+        `event-run:${run.id}:${run.fencingToken}:${randomUUID()}`,
         payload
       );
       stored = {
@@ -271,20 +319,29 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
       };
     }
     this.db
-      .prepare(
-        `INSERT INTO event_runs(id, delivery_id, run_json, updated_at, finished_at)
-         VALUES(?,?,?,?,?)
-         ON CONFLICT(id) DO UPDATE SET
-           run_json=excluded.run_json, updated_at=excluded.updated_at,
-           finished_at=excluded.finished_at`
-      )
-      .run(
-        run.id,
-        run.deliveryId,
-        JSON.stringify(stored),
-        this.clock.now(),
-        run.finishedAt ?? null
-      );
+      .transaction(() => {
+        this.assertActiveClaim(
+          run.deliveryId,
+          run.claimedBy!,
+          run.fencingToken!
+        );
+        this.db
+          .prepare(
+            `INSERT INTO event_runs(id, delivery_id, run_json, updated_at, finished_at)
+             VALUES(?,?,?,?,?)
+             ON CONFLICT(id) DO UPDATE SET
+               run_json=excluded.run_json, updated_at=excluded.updated_at,
+               finished_at=excluded.finished_at`
+          )
+          .run(
+            run.id,
+            run.deliveryId,
+            JSON.stringify(stored),
+            this.clock.now(),
+            run.finishedAt ?? null
+          );
+      })
+      .immediate();
   }
 
   async getRun(runId: string): Promise<Readonly<AxEventRun> | undefined> {
@@ -301,6 +358,125 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
       return { ...run, output: payload.output, chunks: payload.chunks };
     }
     return run;
+  }
+
+  async declareEffect(
+    request: Readonly<AxEventEffectCreateRequest>,
+    fence: Readonly<AxEventEffectFence>
+  ): Promise<Readonly<AxEventEffect>> {
+    axValidateEventEffectCreateRequest(request);
+    const requestDigest = await axEventEffectRequestDigest(request);
+    return this.db
+      .transaction(() => {
+        this.assertEffectFence(request.deliveryId, fence);
+        const existing = this.db
+          .prepare(
+            `SELECT effect_json FROM event_effects
+           WHERE delivery_id=? AND operation=? AND idempotency_key=?`
+          )
+          .get(request.deliveryId, request.operation, request.idempotencyKey) as
+          | { effect_json: string }
+          | undefined;
+        if (existing) {
+          const effect = JSON.parse(existing.effect_json) as AxEventEffect;
+          if (effect.requestDigest !== requestDigest) {
+            throw new Error(
+              `Event effect intent conflicts with existing ${request.operation}:${request.idempotencyKey}`
+            );
+          }
+          return effect;
+        }
+        const effect: AxEventEffect = {
+          id: request.id,
+          deliveryId: request.deliveryId,
+          runId: request.runId,
+          identityScope: request.identityScope,
+          operation: request.operation,
+          idempotencyKey: request.idempotencyKey,
+          replaySafety: request.replaySafety ?? 'unknown',
+          requestDigest,
+          status: 'intent',
+          ...(request.metadata
+            ? { metadata: structuredClone(request.metadata) }
+            : {}),
+          createdAt: request.createdAt,
+          updatedAt: request.createdAt,
+          dispatchCount: 0,
+          version: 1,
+        };
+        this.db
+          .prepare(
+            `INSERT INTO event_effects(
+            id, delivery_id, operation, idempotency_key, status,
+            effect_json, created_at, updated_at, settled_at
+          ) VALUES(?,?,?,?,?,?,?,?,NULL)`
+          )
+          .run(
+            effect.id,
+            effect.deliveryId,
+            effect.operation,
+            effect.idempotencyKey,
+            effect.status,
+            JSON.stringify(effect),
+            effect.createdAt,
+            effect.updatedAt
+          );
+        return effect;
+      })
+      .immediate();
+  }
+
+  async transitionEffect(
+    effectId: string,
+    expectedVersion: number,
+    transition: Readonly<AxEventEffectTransition>,
+    fence: Readonly<AxEventEffectFence>
+  ): Promise<Readonly<AxEventEffect>> {
+    return this.db
+      .transaction(() => {
+        const row = this.db
+          .prepare(
+            'SELECT delivery_id, effect_json FROM event_effects WHERE id=?'
+          )
+          .get(effectId) as
+          | { delivery_id: string; effect_json: string }
+          | undefined;
+        if (!row) throw new Error(`Unknown event effect: ${effectId}`);
+        this.assertEffectFence(row.delivery_id, fence);
+        const current = JSON.parse(row.effect_json) as AxEventEffect;
+        const next = axApplyEventEffectTransition(current, transition);
+        if (next.version === current.version) return current;
+        if (current.version !== expectedVersion) {
+          throw new Error(`Stale event effect version for ${effectId}`);
+        }
+        this.db
+          .prepare(
+            `UPDATE event_effects SET status=?, effect_json=?, updated_at=?, settled_at=?
+           WHERE id=?`
+          )
+          .run(
+            next.status,
+            JSON.stringify(next),
+            next.updatedAt,
+            next.settledAt ?? null,
+            next.id
+          );
+        return next;
+      })
+      .immediate();
+  }
+
+  async listEffects(
+    deliveryId: string
+  ): Promise<readonly Readonly<AxEventEffect>[]> {
+    return (
+      this.db
+        .prepare(
+          `SELECT effect_json FROM event_effects
+           WHERE delivery_id=? ORDER BY created_at, id`
+        )
+        .all(deliveryId) as { effect_json: string }[]
+    ).map((row) => JSON.parse(row.effect_json) as AxEventEffect);
   }
 
   async registerContinuation(
@@ -419,14 +595,35 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
 
   async redriveDelivery(deliveryId: string, now: number): Promise<void> {
     const result = this.db
-      .prepare(
-        `UPDATE event_deliveries SET status='queued', attempt=0, available_at=?,
-         claimed_by=NULL, run_id=NULL, error=NULL, lease_expires_at=NULL,
-         invocation_started=0
-         WHERE id=? AND status IN (${TERMINAL.map(() => '?').join(',')})`
-      )
-      .run(now, deliveryId, ...TERMINAL);
-    if (result.changes !== 1) {
+      .transaction(() => {
+        const row = this.db
+          .prepare(
+            `SELECT fencing_token FROM event_deliveries
+             WHERE id=? AND status IN (${TERMINAL.map(() => '?').join(',')})`
+          )
+          .get(deliveryId, ...TERMINAL) as
+          | { fencing_token: number }
+          | undefined;
+        if (!row) return;
+        this.assertFencingTokenCanAdvance(deliveryId, row.fencing_token);
+        return this.db
+          .prepare(
+            `UPDATE event_deliveries SET status='queued', attempt=0, available_at=?,
+             claimed_by=NULL, run_id=NULL, error=NULL, lease_expires_at=NULL,
+             invocation_started=0, fencing_token=?
+             WHERE id=? AND fencing_token=?
+               AND status IN (${TERMINAL.map(() => '?').join(',')})`
+          )
+          .run(
+            now,
+            row.fencing_token + 1,
+            deliveryId,
+            row.fencing_token,
+            ...TERMINAL
+          );
+      })
+      .immediate();
+    if (!result || result.changes !== 1) {
       throw new Error(`Event delivery ${deliveryId} is not terminal`);
     }
   }
@@ -521,14 +718,42 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
   ): AxEventPublishReceipt | undefined {
     return this.db.transaction((): AxEventPublishReceipt | undefined => {
       const dedupeKey = axEventScopedDedupeKey(request.ingress);
+      const ingressFingerprint = axEventIngressFingerprint(request.ingress);
       const duplicate = this.db
         .prepare(
-          'SELECT event_id, delivery_ids_json FROM event_dedupe WHERE dedupe_key=?'
+          `SELECT event_id, delivery_ids_json, ingress_json, ingress_fingerprint
+           FROM event_dedupe WHERE dedupe_key=?`
         )
         .get(dedupeKey) as
-        | { event_id: string; delivery_ids_json: string }
+        | {
+            event_id: string;
+            delivery_ids_json: string;
+            ingress_json: string | null;
+            ingress_fingerprint: string | null;
+          }
         | undefined;
       if (duplicate) {
+        const legacyUnverifiable = duplicate.ingress_fingerprint?.startsWith(
+          LEGACY_UNVERIFIABLE_INGRESS_PREFIX
+        );
+        if (legacyUnverifiable) {
+          throw new Error(
+            `Event identity cannot be verified against legacy ingress ${request.ingress.event.source}:${request.ingress.event.id}`
+          );
+        }
+        if (duplicate.ingress_fingerprint !== ingressFingerprint) {
+          throw new Error(
+            `Event identity conflicts with previously accepted ingress ${request.ingress.event.source}:${request.ingress.event.id}`
+          );
+        }
+        if (duplicate.ingress_json === null) {
+          this.db
+            .prepare(
+              `UPDATE event_dedupe SET ingress_json=?
+               WHERE dedupe_key=? AND ingress_json IS NULL`
+            )
+            .run(JSON.stringify(request.ingress), dedupeKey);
+        }
         return {
           eventId: duplicate.event_id,
           accepted: true,
@@ -581,12 +806,17 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
       }
       this.db
         .prepare(
-          'INSERT INTO event_dedupe(dedupe_key,event_id,delivery_ids_json,created_at) VALUES(?,?,?,?)'
+          `INSERT INTO event_dedupe(
+             dedupe_key,event_id,delivery_ids_json,ingress_json,
+             ingress_fingerprint,created_at
+           ) VALUES(?,?,?,?,?,?)`
         )
         .run(
           dedupeKey,
           request.ingress.event.id,
           JSON.stringify(deliveryIds),
+          JSON.stringify(request.ingress),
+          ingressFingerprint,
           request.acceptedAt
         );
       return {
@@ -600,6 +830,7 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
   }
 
   private rowToDelivery(row: DeliveryRow): AxEventDelivery {
+    this.assertSafeFencingToken(row.id, row.fencing_token);
     return {
       id: row.id,
       sequence: row.sequence,
@@ -629,21 +860,122 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
 
   private assertFence(deliveryId: string, fencingToken?: number): void {
     if (fencingToken === undefined) return;
+    this.assertSafeFencingToken(deliveryId, fencingToken);
     const row = this.db
-      .prepare('SELECT fencing_token FROM event_deliveries WHERE id=?')
-      .get(deliveryId) as { fencing_token: number } | undefined;
-    if (!row || row.fencing_token !== fencingToken) {
-      throw new Error(`Stale fencing token for event delivery ${deliveryId}`);
+      .prepare(
+        `SELECT fencing_token, claimed_by, status, lease_expires_at
+         FROM event_deliveries WHERE id=?`
+      )
+      .get(deliveryId) as
+      | {
+          fencing_token: number;
+          claimed_by: string | null;
+          status: AxEventDelivery['status'];
+          lease_expires_at: number | null;
+        }
+      | undefined;
+    if (
+      !row ||
+      !Number.isSafeInteger(row.fencing_token) ||
+      row.fencing_token !== fencingToken ||
+      row.claimed_by === null ||
+      (row.status !== 'claimed' && row.status !== 'running') ||
+      row.lease_expires_at === null ||
+      row.lease_expires_at <= this.clock.now()
+    ) {
+      throw new Error(
+        `Stale or expired fencing token for event delivery ${deliveryId}`
+      );
+    }
+  }
+
+  private assertActiveClaim(
+    deliveryId: string,
+    claimedBy: string,
+    fencingToken: number
+  ): void {
+    this.assertSafeFencingToken(deliveryId, fencingToken);
+    const row = this.db
+      .prepare(
+        `SELECT 1 FROM event_deliveries
+         WHERE id=? AND claimed_by=? AND fencing_token=?
+           AND status IN ('claimed','running')
+           AND lease_expires_at > ?`
+      )
+      .get(deliveryId, claimedBy, fencingToken, this.clock.now());
+    if (!row) {
+      throw new Error(`Stale or expired event claim for ${deliveryId}`);
+    }
+  }
+
+  private assertEffectFence(
+    deliveryId: string,
+    fence: Readonly<AxEventEffectFence>
+  ): void {
+    if (deliveryId !== fence.deliveryId) {
+      throw new Error(`Event effect fence does not own ${deliveryId}`);
+    }
+    this.assertSafeFencingToken(fence.deliveryId, fence.fencingToken);
+    const row = this.db
+      .prepare(
+        `SELECT fencing_token, claimed_by, status, lease_expires_at
+         FROM event_deliveries WHERE id=?`
+      )
+      .get(fence.deliveryId) as
+      | {
+          fencing_token: number;
+          claimed_by: string | null;
+          status: AxEventDelivery['status'];
+          lease_expires_at: number | null;
+        }
+      | undefined;
+    if (
+      !row ||
+      !Number.isSafeInteger(row.fencing_token) ||
+      row.fencing_token !== fence.fencingToken ||
+      row.claimed_by === null ||
+      (row.status !== 'claimed' && row.status !== 'running') ||
+      row.lease_expires_at === null ||
+      row.lease_expires_at <= this.clock.now()
+    ) {
+      throw new Error(
+        `Stale or expired fencing token for event delivery ${fence.deliveryId}`
+      );
+    }
+  }
+
+  private assertSafeFencingToken(
+    deliveryId: string,
+    fencingToken: number
+  ): void {
+    if (!Number.isSafeInteger(fencingToken) || fencingToken < 0) {
+      throw new Error(
+        `Unsafe fencing token for event delivery ${deliveryId}; rotate the delivery identity`
+      );
+    }
+  }
+
+  private assertFencingTokenCanAdvance(
+    deliveryId: string,
+    fencingToken: number
+  ): void {
+    this.assertSafeFencingToken(deliveryId, fencingToken);
+    if (fencingToken >= MAX_FENCING_TOKEN) {
+      throw new Error(
+        `Fencing token exhausted for event delivery ${deliveryId}; rotate the delivery identity`
+      );
     }
   }
 
   private migrate(): void {
-    const version = this.db.pragma('user_version', { simple: true }) as number;
+    let version = this.db.pragma('user_version', { simple: true }) as number;
     if (version > SCHEMA_VERSION) {
       throw new Error(`Unsupported AxSQLiteEventStore schema ${version}`);
     }
     if (version === 0) {
-      this.db.exec(`
+      this.db
+        .transaction(() =>
+          this.db.exec(`
         CREATE TABLE event_deliveries (
           sequence INTEGER PRIMARY KEY AUTOINCREMENT,
           id TEXT NOT NULL UNIQUE,
@@ -672,6 +1004,8 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
           dedupe_key TEXT PRIMARY KEY,
           event_id TEXT NOT NULL,
           delivery_ids_json TEXT NOT NULL,
+          ingress_json TEXT NOT NULL,
+          ingress_fingerprint TEXT NOT NULL,
           created_at INTEGER NOT NULL
         );
         CREATE TABLE event_runs (
@@ -705,8 +1039,165 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
           state_json TEXT NOT NULL,
           updated_at INTEGER NOT NULL
         );
-        PRAGMA user_version = 1;
-      `);
+        CREATE TABLE event_effects (
+          id TEXT PRIMARY KEY,
+          delivery_id TEXT NOT NULL,
+          operation TEXT NOT NULL,
+          idempotency_key TEXT NOT NULL,
+          status TEXT NOT NULL,
+          effect_json TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          settled_at INTEGER,
+          UNIQUE(delivery_id, operation, idempotency_key)
+        );
+        CREATE INDEX event_effects_delivery ON event_effects(delivery_id, status, created_at);
+        PRAGMA user_version = 4;
+      `)
+        )
+        .immediate();
+      return;
+    }
+    if (version === 1) {
+      this.db
+        .transaction(() =>
+          this.db.exec(`
+        CREATE TABLE event_effects (
+          id TEXT PRIMARY KEY,
+          delivery_id TEXT NOT NULL,
+          operation TEXT NOT NULL,
+          idempotency_key TEXT NOT NULL,
+          status TEXT NOT NULL,
+          effect_json TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          settled_at INTEGER,
+          UNIQUE(delivery_id, operation, idempotency_key)
+        );
+        CREATE INDEX event_effects_delivery ON event_effects(delivery_id, status, created_at);
+        PRAGMA user_version = 2;
+      `)
+        )
+        .immediate();
+      version = 2;
+    }
+    if (version === 2) {
+      this.db
+        .transaction(() => {
+          const columns = new Set(
+            (
+              this.db.pragma('table_info(event_dedupe)') as {
+                name: string;
+              }[]
+            ).map((column) => column.name)
+          );
+          if (!columns.has('ingress_json')) {
+            this.db.exec(
+              'ALTER TABLE event_dedupe ADD COLUMN ingress_json TEXT'
+            );
+          }
+          if (!columns.has('ingress_fingerprint')) {
+            this.db.exec(
+              'ALTER TABLE event_dedupe ADD COLUMN ingress_fingerprint TEXT'
+            );
+          }
+          const rows = this.db
+            .prepare(
+              `SELECT dedupe_key, delivery_ids_json, ingress_json
+               FROM event_dedupe`
+            )
+            .all() as {
+            dedupe_key: string;
+            delivery_ids_json: string;
+            ingress_json: string | null;
+          }[];
+          const lookup = this.db.prepare(
+            'SELECT ingress_json FROM event_deliveries WHERE id=?'
+          );
+          const update = this.db.prepare(
+            `UPDATE event_dedupe SET ingress_json=?, ingress_fingerprint=?
+             WHERE dedupe_key=?`
+          );
+          for (const row of rows) {
+            let ingressJson = row.ingress_json;
+            if (!ingressJson) {
+              const [deliveryId] = JSON.parse(
+                row.delivery_ids_json
+              ) as string[];
+              const delivery = deliveryId
+                ? (lookup.get(deliveryId) as
+                    | { ingress_json: string }
+                    | undefined)
+                : undefined;
+              ingressJson = delivery?.ingress_json ?? null;
+            }
+            const ingressFingerprint = ingressJson
+              ? axEventIngressFingerprint(JSON.parse(ingressJson))
+              : `${LEGACY_UNVERIFIABLE_INGRESS_PREFIX}${createHash('sha256')
+                  .update(row.dedupe_key)
+                  .digest('hex')}`;
+            update.run(ingressJson, ingressFingerprint, row.dedupe_key);
+          }
+          const effects = this.db
+            .prepare('SELECT id, effect_json FROM event_effects')
+            .all() as { id: string; effect_json: string }[];
+          const updateEffect = this.db.prepare(
+            'UPDATE event_effects SET effect_json=? WHERE id=?'
+          );
+          for (const row of effects) {
+            const effect = JSON.parse(row.effect_json) as AxEventEffect;
+            if (effect.requestDigest) continue;
+            effect.requestDigest = createHash('sha256')
+              .update(
+                axEventEffectRequestFingerprint({
+                  id: effect.id,
+                  deliveryId: effect.deliveryId,
+                  runId: effect.runId,
+                  identityScope: effect.identityScope,
+                  operation: effect.operation,
+                  idempotencyKey: effect.idempotencyKey,
+                  replaySafety: effect.replaySafety,
+                  metadata: effect.metadata,
+                  createdAt: effect.createdAt,
+                })
+              )
+              .digest('hex');
+            updateEffect.run(JSON.stringify(effect), effect.id);
+          }
+          this.db.pragma('user_version = 3');
+        })
+        .immediate();
+      version = 3;
+    }
+    if (version === 3) {
+      this.db
+        .transaction(() => {
+          const columns = new Set(
+            (
+              this.db.pragma('table_info(event_dedupe)') as {
+                name: string;
+              }[]
+            ).map((column) => column.name)
+          );
+          if (!columns.has('ingress_json')) {
+            this.db.exec(
+              'ALTER TABLE event_dedupe ADD COLUMN ingress_json TEXT'
+            );
+          }
+          const missingFingerprint = this.db
+            .prepare(
+              `SELECT COUNT(*) AS count FROM event_dedupe
+               WHERE ingress_fingerprint IS NULL`
+            )
+            .get() as { count: number };
+          if (missingFingerprint.count > 0) {
+            throw new Error(
+              'Cannot safely migrate event dedupe rows without canonical ingress fingerprints'
+            );
+          }
+          this.db.pragma('user_version = 4');
+        })
+        .immediate();
     }
   }
 
@@ -714,6 +1205,19 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
     const retention = this.options.retention;
     this.db.transaction(() => {
       const eventCutoff = now - retention.eventAndResultMs;
+      this.db
+        .prepare(
+          `DELETE FROM event_effects
+           WHERE settled_at IS NOT NULL AND settled_at < ?`
+        )
+        .run(
+          now -
+            Math.max(
+              retention.eventAndResultMs,
+              retention.settledEffectsMs ??
+                retention.runMetadataAndDeadLettersMs
+            )
+        );
       this.db
         .prepare('DELETE FROM event_dedupe WHERE created_at < ?')
         .run(eventCutoff);
@@ -727,7 +1231,11 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
       this.db
         .prepare(
           `DELETE FROM event_deliveries
-           WHERE accepted_at < ? AND status IN (${TERMINAL.map(() => '?').join(',')})`
+           WHERE accepted_at < ? AND status IN (${TERMINAL.map(() => '?').join(',')})
+             AND NOT EXISTS (
+               SELECT 1 FROM event_effects e
+               WHERE e.delivery_id=event_deliveries.id
+             )`
         )
         .run(eventCutoff, ...TERMINAL);
       this.db

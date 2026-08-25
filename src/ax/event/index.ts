@@ -45,6 +45,17 @@ export type {
   AxEventDeadLetter,
   AxEventDelivery,
   AxEventDeliveryStatus,
+  AxEventEffect,
+  AxEventEffectCreateRequest,
+  AxEventEffectFence,
+  AxEventEffectIntent,
+  AxEventEffectResolution,
+  AxEventEffectResolver,
+  AxEventEffectResolverContext,
+  AxEventEffectSettlement,
+  AxEventEffectStatus,
+  AxEventEffectStore,
+  AxEventEffectTransition,
   AxEventEnvelope,
   AxEventIdentity,
   AxEventIngress,
@@ -91,3 +102,8 @@ export {
 } from './types.js';
 export type { AxUCPWebhookEventSourceOptions } from './ucpSource.js';
 export { AxUCPWebhookEventSource } from './ucpSource.js';
+export {
+  axEventEffectRequestDigest,
+  axEventEffectRequestFingerprint,
+  axEventIngressFingerprint,
+} from './util.js';

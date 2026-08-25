@@ -506,7 +506,7 @@ export class AxEventTargetBuilder<IN = Record<string, unknown>, OUT = unknown> {
     return this;
   }
 
-  retrySafety(retrySafety: 'idempotent' | 'unknown'): this {
+  retrySafety(retrySafety: 'idempotent' | 'effect-aware' | 'unknown'): this {
     this.value.retrySafety = retrySafety;
     return this;
   }

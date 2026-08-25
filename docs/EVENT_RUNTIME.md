@@ -206,14 +206,151 @@ does not repeat the model call.
 Targets default to unknown side-effect safety. If a program may have performed
 a side effect and then fails, the runtime records `outcome_unknown` rather than
 blindly replaying it. Set `retrySafety: 'idempotent'` only when every effect is
-protected by the stable delivery idempotency key.
+protected by the stable delivery idempotency key. Set
+`retrySafety: 'effect-aware'` only when every external effect is explicitly
+wrapped by the ledger below; recovery then applies each effect's own replay
+safety instead of treating the whole invocation as unknown.
+
+### Explicit effect ledger
+
+Target-level retry safety remains the compatibility boundary for code that does
+not opt in. For an external operation that needs finer crash classification,
+application or tool code must explicitly place the operation inside the effect
+sandwich exposed by `AxEventContext`:
+
+```ts
+let effect = await eventContext.declareEffect({
+  operation: 'payments.capture',
+  idempotencyKey: `capture:${paymentId}`,
+  replaySafety: 'idempotent', // only if the provider honors this key
+  metadata: { paymentId }, // bounded, persistable, and already redacted
+});
+
+if (effect.status === 'succeeded') return effect.receipt;
+if (effect.status === 'failed') throw new Error(effect.error);
+if (effect.status === 'parked') throw new Error(effect.parkedReason);
+
+// Persist this immediately before crossing the external dispatch boundary.
+effect = await eventContext.markEffectDispatched(effect.id, effect.version);
+const receipt = await payments.capture(paymentId, {
+  idempotencyKey: effect.idempotencyKey,
+  signal: eventContext.abortSignal,
+});
+await eventContext.settleEffect(effect.id, effect.version, {
+  status: 'succeeded',
+  receipt: { providerId: receipt.id },
+});
+```
+
+Do not settle a failed effect merely because a transport call threw. Record
+`failed` only when the provider or a domain resolver proves that the operation
+failed. A timeout after dispatch is indeterminate and should remain
+`dispatched`. The restart classifications below are valid only when every
+external call follows this ordering; Ax cannot detect omitted or misordered
+wrapper calls.
+
+`metadata` is also the bounded, redacted request descriptor bound to this
+effect identity. Ax hashes canonical bytes for `(operation, idempotencyKey,
+replaySafety, metadata)` and persists the digest with the intent. Reusing the
+same effect identity with a changed descriptor fails closed; object key order
+does not change the digest. Include every non-secret request field whose change
+must invalidate key reuse. The digest does not make omitted parameters safe and
+does not make it acceptable to persist credentials.
+
+The persisted state machine is:
+
+| Status                 | Classification after restart                              | Automatic recovery                                                                                       |
+| ---------------------- | --------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| no record              | crash before durable intent; Ax cannot classify an effect | target-level policy only                                                                                 |
+| `intent`               | not dispatched                                            | target may resume; duplicate declarations return the original record                                     |
+| `dispatched`           | indeterminate                                             | replay only when both target policy and effect `replaySafety` allow it, or a resolver reconciles it      |
+| `succeeded` / `failed` | completed settlement                                      | target may resume and inspect the receipt without redispatching                                          |
+| `parked`               | unresolved and blocked                                    | no automatic dispatch; redrive requires a resolver that returns a conclusive outcome or `not_dispatched` |
+
+Normal transitions are `intent -> dispatched -> succeeded|failed`. Direct
+`intent -> succeeded|failed` is only for a durable host-local outcome with no
+external dispatch. Recovery may move `dispatched|parked -> intent` only after a
+resolver returns `not_dispatched`, or settle/park it. Terminal settlement is
+immutable; conflicting duplicate settlements fail closed. Dispatch and
+settlement compare the caller's observed effect version, so only one same-claim
+caller obtains a given transition; identical repeated settlement is accepted.
+Each transition also validates the current, unexpired delivery fencing token.
+SQLite performs each intent or transition in one local transaction; this does
+not make the database transaction atomic with the external service.
+
+Intent identity is unique within one delivery by `(operation,
+idempotencyKey)`. Event redelivery already maps to that stable delivery. The
+idempotency key is evidence only when the external provider actually enforces
+it; naming a key does not make an effect idempotent.
+
+A store fence stops stale database mutation, not a network call already allowed
+to leave the process. Pass `eventContext.fencingToken` as a provider/domain
+fence when the external system supports it, alongside the stable idempotency
+key. Without provider enforcement or a definitive status resolver, a crash in
+that gap remains indeterminate and must park.
+
+`eventContext.listEffects()` and `runtime.getEffects(deliveryId)` inspect the
+ledger. Recovery inspects unresolved records before target invocation. An
+effect resolver can query an authoritative domain system:
+
+```ts
+const runtime = eventRuntime({
+  routes,
+  effectResolverTimeoutMs: 10_000,
+  effectResolver: async (effect, { abortSignal }) => {
+    const payment = await payments.lookup(effect.idempotencyKey, {
+      signal: abortSignal,
+    });
+    if (payment?.captured) {
+      return {
+        status: 'succeeded',
+        receipt: { providerId: payment.id },
+      };
+    }
+    if (payment === null) return { status: 'not_dispatched' };
+    return { status: 'indeterminate' };
+  },
+});
+```
+
+Resolvers may return `succeeded`, `failed`, `not_dispatched`, `indeterminate`,
+or `parked`. Resolver errors and timeouts park the effect. Resolver execution
+defaults to a 30-second bound; `effectResolverTimeoutMs` configures it. Timeout
+and runtime shutdown abort the resolver signal and win the runtime's internal
+race even when host resolver code ignores abort, so a hung resolver cannot
+indefinitely block recovery or `close({ drain: false })`. An indeterminate
+effect with unknown replay safety also parks; an explicitly idempotent one may
+replay with the same key. Cancellation parks dispatched, non-idempotent effects
+while leaving not-dispatched intent inspectable. Existing unknown target
+recovery still records `outcome_unknown`; its dispatched effect records are
+parked as additional evidence.
+
+Resolvers are trusted, read-only reconciliation code. JavaScript cannot
+terminate a resolver promise that ignores abort: Ax parks the effect and ignores
+the late result, but the host code may continue running. Do not dispatch an
+external effect from a resolver, and honor its abort signal to release resources.
+
+Metadata is limited to 16 KiB and receipts to 64 KiB; persisted effect text is
+limited to 4 KiB per field. Limits reduce accidental payload growth, not secret
+exposure. The host must redact metadata and receipts before passing them to Ax.
+Ax cannot intercept arbitrary network, filesystem, SDK, or tool I/O, and it
+does not claim exactly-once side effects.
+
+The store contract is additive: `AxEventEffectStore` extends `AxEventStore`, so
+existing third-party stores and targets continue to run without ledger behavior.
+Effect context calls, `effect-aware` targets, and `effectResolver` fail closed
+until the configured store advertises and implements `effectLedger`. Built-in
+memory and SQLite stores do.
 
 ## Cancellation and Shutdown
 
 `cancelRun(runId)` aborts the active program and its nested calls. `close()`
-stops sources, drains by default, then aborts remaining workers. Caller-owned
-protocol clients remain caller-owned. Background source failures are supervised
-through `onSourceError`; they are never thrown from an unobserved callback.
+stops sources, drains by default, then aborts remaining workers. The close
+`timeoutMs` also bounds source-handle shutdown when host code ignores its abort
+signal; Ax ignores a late close result but cannot terminate that JavaScript.
+Caller-owned protocol clients remain caller-owned. Background source failures
+are supervised through `onSourceError`; they are never thrown from an
+unobserved callback.
 
 ## Deterministic Tests
 
@@ -243,16 +380,74 @@ const runtime = eventRuntime({
 ```
 
 It uses WAL transactions, busy timeouts, leases, monotonically increasing
-fencing tokens, state compare-and-set, and output persistence before sinks. Its
-claim is limited to cooperating Node processes sharing one local SQLite file;
-do not deploy it on a network filesystem. `runAxEventStoreConformance(...)` is
-the normative kit for other stores.
+fencing tokens, state compare-and-set, and output persistence before sinks.
+Delivery and run writes require the exact current owner/token, an active
+claimed/running status, and an unexpired lease in the write transaction. Runs
+that offload payloads revalidate those conditions after the awaited payload
+write and before the run-row transaction. A stale writer is rejected, but its
+returned payload reference is retained: `AxEventPayloadStore` may deduplicate
+different keys to one reference, so deleting without a conditional ownership
+API could delete a winner's committed payload. Hosts may garbage-collect only
+references they can prove are unreferenced. Fencing tokens fail closed before
+leaving JavaScript's safe-integer range; the delivery identity must be rotated
+instead of wrapping or reusing a token. Its claim is limited to cooperating
+Node processes sharing one local SQLite file; do not deploy it on a network
+filesystem. `runAxEventStoreConformance(...)` is the normative kit for other
+stores.
 
 Retention is required. The standard preset keeps event/result payloads and
 completed continuations for seven days and run metadata/dead letters for 30
-days. Inline payloads default to 16 MiB. Larger outputs require an
-`AxEventPayloadStore`; otherwise the run records `output_persistence_failed`,
-does not dispatch sinks, and never repeats the completed model call.
+days. Settled effects default to 30 days; unresolved intent, dispatched, and
+parked effects prevent their owning delivery from being pruned. Configured
+settled-effect retention is raised to the delivery redrive horizon when needed.
+Schema v1 databases migrate in place to schema v4 with an empty effect ledger.
+Schema v2 databases backfill request digests and canonical ingress fingerprints
+from ingress retained independently in the dedupe row, falling back to a
+surviving delivery. If neither exists, migration writes a non-null unverifiable
+tombstone. Because equality is then unknowable, every replay for that identity
+fails closed without creating a delivery until normal dedupe retention removes
+the row; it does not bind an arbitrary first replay. Schema v3 fingerprints
+remain authoritative, while schema v4 retains ingress independently for
+zero-route records. A duplicate scoped event id with a changed envelope is
+otherwise rejected while its dedupe record is retained. Legacy retention
+objects default effect retention to run-metadata retention. Inline payloads
+default to 16 MiB. Larger outputs require an `AxEventPayloadStore`; otherwise
+the run records `output_persistence_failed`, does not dispatch sinks, and never
+repeats the completed model call.
+
+### Fault-injection evaluation
+
+Run the checked-in SQLite fault evaluation and its assertions from the
+repository root:
+
+```bash
+npm run event:effects:eval
+npx vitest run scripts/event-effects-fault-eval.test.ts
+npx vitest run src/ax/event/effects.test.ts src/ax/event/runtime.test.ts src/tools/event/sqlite.test.ts
+```
+
+The evaluation kills child processes without closing their SQLite handles at
+every durable boundary (before intent, intent, dispatched, settled success,
+settled failure, and parked), then restarts the store/runtime after lease
+expiry. It covers idempotent replay, non-idempotent parking, all resolver
+outcomes, two-store claim contention, duplicate intent insertion, stale fences,
+legacy target-only retry behavior, lost/duplicate records, and schema/store
+restart. It also prints measured mean latency and SQLite storage deltas for 200
+baseline deliveries versus 200 effect sandwiches.
+
+The focused adversarial command additionally covers changed-request reuse,
+canonical key reordering, resolver timeout and shutdown when the resolver
+ignores abort, a source handle that ignores shutdown, current-owner checks,
+lease expiry without takeover, a content-addressed payload collision during
+takeover, zero-route migration/replay, and fencing-token exhaustion.
+
+One orb run measured 0.452 ms baseline versus 1.137 ms with intent, dispatch,
+and settlement writes (+0.685 ms mean), and approximately 737 bytes per settled
+effect. These are environment-specific observations, not performance gates.
+The evaluation establishes durability classification and recovery behavior
+only. It does not simulate disk corruption or power-loss filesystem behavior,
+verify an external provider's idempotency implementation, prove exactly-once
+effects, or evaluate model quality.
 
 ## MCP Adapter
 
