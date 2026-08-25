@@ -1,6 +1,7 @@
 import {
   getJSRuntimeHostFunctionSpeculationAdapter,
   type JSRuntimeHostFunctionSpeculationAdapter,
+  type JSRuntimeHostFunctionSpeculationLaunch,
 } from './jsRuntimeHostFunction.js';
 
 const DEFAULT_MAX_CONCURRENCY = 4;
@@ -40,7 +41,9 @@ export type AxJSRuntimeSpeculationEventReason =
   | 'no-match'
   | 'execution-complete'
   | 'execution-aborted'
-  | 'execution-failed';
+  | 'execution-failed'
+  | 'authority-invalidated'
+  | 'launch-invalidated';
 
 export type AxJSRuntimeSpeculationEvent = Readonly<{
   kind: AxJSRuntimeSpeculationEventKind;
@@ -903,6 +906,7 @@ type SpeculationEntry = {
   adapter: JSRuntimeHostFunctionSpeculationAdapter;
   controller: AbortController;
   keyReady: Promise<string | undefined>;
+  launchReady: Promise<JSRuntimeHostFunctionSpeculationLaunch>;
   result: Promise<unknown>;
   claimed: boolean;
   dispatched: boolean;
@@ -916,7 +920,10 @@ export type JSRuntimeSpeculationClaim =
 export class JSRuntimeSpeculationTurn {
   private readonly entries: SpeculationEntry[] = [];
   private readonly semaphore: Semaphore;
-  private readonly deterministicResults = new Map<string, Promise<unknown>>();
+  private readonly deterministicLaunches = new Map<
+    string,
+    Promise<JSRuntimeHostFunctionSpeculationLaunch>
+  >();
   private finished = false;
 
   constructor(
@@ -1060,14 +1067,39 @@ export class JSRuntimeSpeculationTurn {
         });
 
       const entry = {} as SpeculationEntry;
-      const result = (async () => {
+      const launchReady = (async () => {
         const key = await keyReady;
         if (key === undefined || controller.signal.aborted) {
           throw new SpeculationUnavailableError();
         }
         const args = await argsReady;
-        const launch = () =>
-          this.semaphore.run(controller.signal, async () => {
+        const launch = () => {
+          let settled = false;
+          let resolveLaunch!: (
+            value: JSRuntimeHostFunctionSpeculationLaunch
+          ) => void;
+          const ready = new Promise<JSRuntimeHostFunctionSpeculationLaunch>(
+            (resolve) => {
+              resolveLaunch = resolve;
+            }
+          );
+          const settle = (value: JSRuntimeHostFunctionSpeculationLaunch) => {
+            if (settled) return;
+            settled = true;
+            resolveLaunch(value);
+          };
+          const failedLaunch = (
+            error: unknown
+          ): JSRuntimeHostFunctionSpeculationLaunch => {
+            const result = Promise.reject(error);
+            void result.catch(() => {});
+            return {
+              result,
+              canClaim: () => false,
+              invalidReason: 'launch-invalidated',
+            };
+          };
+          const slot = this.semaphore.run(controller.signal, async () => {
             entry.dispatched = true;
             this.emit({
               kind: 'dispatch',
@@ -1075,17 +1107,29 @@ export class JSRuntimeSpeculationTurn {
               callIndex: index,
               deterministic: policy.deterministic,
             });
-            return adapter.launch(args, controller.signal);
+            try {
+              const launched = await adapter.launch(args, controller.signal);
+              settle(launched);
+              return await launched.result;
+            } catch (error) {
+              const failed = failedLaunch(error);
+              settle(failed);
+              return failed.result;
+            }
           });
+          void slot.catch((error) => settle(failedLaunch(error)));
+          return ready;
+        };
         if (!policy.deterministic) return launch();
 
         const deterministicKey = `${ref}\n${key}`;
-        const existing = this.deterministicResults.get(deterministicKey);
+        const existing = this.deterministicLaunches.get(deterministicKey);
         if (existing) return existing;
-        const sharedResult = launch();
-        this.deterministicResults.set(deterministicKey, sharedResult);
-        return sharedResult;
+        const sharedLaunch = launch();
+        this.deterministicLaunches.set(deterministicKey, sharedLaunch);
+        return sharedLaunch;
       })();
+      const result = launchReady.then((launch) => launch.result);
       Object.assign(entry, {
         index,
         tool: parsed.tool,
@@ -1094,6 +1138,7 @@ export class JSRuntimeSpeculationTurn {
         adapter,
         controller,
         keyReady,
+        launchReady,
         result,
         claimed: false,
         dispatched: false,
@@ -1165,6 +1210,26 @@ export class JSRuntimeSpeculationTurn {
       // shared; nondeterministic occurrences must be reserved exactly once.
       if ((!entry.deterministic && entry.claimed) || entry.cancelled) continue;
       if (key !== actualKey) continue;
+      const launch = await entry.launchReady;
+      if ((!entry.deterministic && entry.claimed) || entry.cancelled) continue;
+      let canClaim = true;
+      try {
+        canClaim = launch.canClaim?.() ?? true;
+      } catch {
+        canClaim = false;
+      }
+      if (!canClaim) {
+        entry.cancelled = true;
+        entry.controller.abort('speculative authority invalidated');
+        this.emit({
+          kind: 'miss',
+          tool,
+          callIndex: entry.index,
+          deterministic: entry.deterministic,
+          reason: launch.invalidReason ?? 'launch-invalidated',
+        });
+        return { hit: false };
+      }
       entry.claimed = true;
       this.emit({
         kind: 'hit',
@@ -1174,9 +1239,7 @@ export class JSRuntimeSpeculationTurn {
       });
       return {
         hit: true,
-        value: Promise.resolve().then(() =>
-          entry.adapter.commit(args, entry.result)
-        ),
+        value: entry.adapter.commit(args, launch),
       };
     }
 

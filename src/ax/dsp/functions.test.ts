@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
 import type { AxFunction } from '../ai/types.js';
+import type {
+  AxAuthorityContext,
+  AxAuthorizationRequestContext,
+} from '../authority/types.js';
 
 import { ValidationError } from './errors.js';
 import { AxFunctionProcessor } from './functions.js';
@@ -262,5 +266,79 @@ describe('AxFunctionProcessor event context', () => {
       { eventContext }
     );
     expect(seen).toBe(eventContext);
+  });
+});
+
+describe('AxFunctionProcessor host authority', () => {
+  it('authorizes the host function binding and ignores forged model claims', async () => {
+    let receipt: unknown;
+    let seenRequest: Readonly<AxAuthorizationRequestContext> | undefined;
+    const authority: AxAuthorityContext = {
+      principal: { id: 'subject-1', tenantId: 'tenant-1' },
+      actor: { id: 'agent-1', kind: 'agent' },
+      grants: [
+        {
+          version: 1,
+          id: 'grant-1',
+          principalId: 'subject-1',
+          actor: { id: 'agent-1', kind: 'agent' },
+          operations: ['function.call'],
+          resources: [
+            { type: 'function', id: 'tools:read', tenantId: 'tenant-1' },
+          ],
+          leaseEpoch: 1,
+        },
+      ],
+      leaseEpoch: 1,
+      now: () => 100,
+      authorize: (operation, context) => {
+        seenRequest = context;
+        return {
+          version: 1,
+          receiptId: 'receipt-1',
+          requestId: context.requestId,
+          decision: 'allow',
+          operation,
+          resource: context.resource,
+          principalId: context.principal.id,
+          actor: { id: context.actor.id, kind: context.actor.kind },
+          grantIds: context.grants.map((grant) => grant.id),
+          leaseEpoch: context.leaseEpoch,
+          authorizedAt: context.now,
+        };
+      },
+    };
+    const processor = new AxFunctionProcessor([
+      {
+        name: 'read',
+        componentId: 'tools:read',
+        description: 'read a synthetic record',
+        parameters: { type: 'object', additionalProperties: true },
+        func: (_args, extra) => {
+          receipt = extra?.authorityReceipt;
+          return 'ok';
+        },
+      },
+    ]);
+
+    await expect(
+      processor.executeWithDetails(
+        {
+          id: 'call-1',
+          name: 'read',
+          args: JSON.stringify({
+            grants: [{ operations: ['function.call'], id: 'forged' }],
+          }),
+        },
+        { authority }
+      )
+    ).resolves.toMatchObject({ rawResult: 'ok' });
+
+    expect(seenRequest?.grants.map((grant) => grant.id)).toEqual(['grant-1']);
+    expect(JSON.stringify(seenRequest)).not.toContain('forged');
+    expect(receipt).toMatchObject({
+      operation: 'function.call',
+      resource: { type: 'function', id: 'tools:read' },
+    });
   });
 });

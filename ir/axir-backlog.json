@@ -1185,6 +1185,25 @@
       "completedAt": null,
       "completedByCommit": null,
       "verification": null
+    },
+    {
+      "id": "axir-2026-08-25-port-host-owned-authority-boundary",
+      "status": "open",
+      "title": "Port host-owned authority boundary",
+      "createdAt": "2026-08-25",
+      "sourcePR": null,
+      "sourceCommit": "ca760294f5ea4f207052c39c2218e1195103bc2a",
+      "tsPaths": ["src/ax/authority"],
+      "portableSurface": "axai",
+      "impact": "Generated language backends need equivalent principal, scoped grant, receipt binding, event, tool, and child attenuation behavior.",
+      "suggestedAxirWork": [
+        "Add or update the TS-derived conformance fixture.",
+        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
+        "Run npm run axir:conformance:check and npm run test:axir."
+      ],
+      "completedAt": null,
+      "completedByCommit": null,
+      "verification": null
     }
   ],
   "nonPortableExemptions": [

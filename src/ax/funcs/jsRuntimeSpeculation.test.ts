@@ -19,8 +19,10 @@ function createTestCallable(
   const callable: TestCallable = (...args) =>
     Promise.resolve(handler(args, undefined));
   setJSRuntimeHostFunctionSpeculationAdapter(callable, {
-    launch: (args, signal) => Promise.resolve(handler(args, signal)),
-    commit: (_args, result) => result,
+    launch: (args, signal) => ({
+      result: Promise.resolve(handler(args, signal)),
+    }),
+    commit: (_args, launch) => launch.result,
   });
   return callable;
 }

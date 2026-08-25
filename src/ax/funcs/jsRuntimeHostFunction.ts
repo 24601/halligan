@@ -6,13 +6,29 @@
  * from exposing it.
  */
 
+export type JSRuntimeHostFunctionSpeculationLaunch = Readonly<{
+  /** The authorized physical operation. Rejections are observed by the turn. */
+  result: Promise<unknown>;
+  /** Revalidate host authority or other launch-time preconditions at claim. */
+  canClaim?: () => boolean;
+  /** Internal diagnostic when canClaim() fails. */
+  invalidReason?: 'authority-invalidated' | 'launch-invalidated';
+  /** Execution-scoped cancellation used if claim must fall back normally. */
+  signal?: AbortSignal;
+}>;
+
 export type JSRuntimeHostFunctionSpeculationAdapter = Readonly<{
-  /** Launch the real operation early without committing normal call telemetry. */
-  launch: (args: readonly unknown[], signal: AbortSignal) => Promise<unknown>;
-  /** Commit one logical runtime call and observe the already-started result. */
+  /** Authorize and launch early without committing normal call telemetry. */
+  launch: (
+    args: readonly unknown[],
+    signal: AbortSignal
+  ) =>
+    | JSRuntimeHostFunctionSpeculationLaunch
+    | Promise<JSRuntimeHostFunctionSpeculationLaunch>;
+  /** Commit one logical runtime call and observe the authorized launch. */
   commit: (
     args: readonly unknown[],
-    result: Promise<unknown>
+    launch: JSRuntimeHostFunctionSpeculationLaunch
   ) => Promise<unknown>;
 }>;
 

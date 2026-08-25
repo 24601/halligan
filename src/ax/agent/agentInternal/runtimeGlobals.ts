@@ -4,7 +4,20 @@ import type {
   AxFunction,
   AxFunctionJSONSchema,
 } from '../../ai/types.js';
-import { setJSRuntimeHostFunctionSpeculationAdapter } from '../../funcs/jsRuntimeHostFunction.js';
+import {
+  axAuthorize,
+  axFunctionAuthorityTarget,
+  getAuthorizationDeniedReceipt,
+  isAuthorizationReceiptCurrent,
+} from '../../authority/authority.js';
+import type {
+  AxAuthorityContext,
+  AxAuthorityInheritance,
+} from '../../authority/types.js';
+import {
+  type JSRuntimeHostFunctionSpeculationLaunch,
+  setJSRuntimeHostFunctionSpeculationAdapter,
+} from '../../funcs/jsRuntimeHostFunction.js';
 import { mergeAbortSignals } from '../../util/abort.js';
 import { AxAgentProtocolCompletionSignal } from '../completion.js';
 import { serializeForEval } from '../optimize.js';
@@ -137,7 +150,9 @@ export function wrapFunction(
   functionCallRecorder?: AxAgentFunctionCallRecorder,
   kind: 'internal' | 'external' = 'external',
   onFunctionCall?: AxAgentOnFunctionCall,
-  eventContext?: import('../../event/types.js').AxEventContext
+  eventContext?: import('../../event/types.js').AxEventContext,
+  authority?: AxAuthorityContext,
+  authorityInheritance?: AxAuthorityInheritance
 ): (...args: unknown[]) => Promise<unknown> {
   const normalizedQualifiedName = qualifiedName ?? fn.name;
 
@@ -212,10 +227,34 @@ export function wrapFunction(
     }
   };
 
-  const launch = (
+  const authorityTarget = () =>
+    authority
+      ? axFunctionAuthorityTarget(
+          fn as AxFunction,
+          authority,
+          normalizedQualifiedName
+        )
+      : undefined;
+
+  const authorizeCall = async (
+    invocationSignal: AbortSignal | undefined,
+    target = authorityTarget()
+  ) => {
+    if (!authority || !target) return undefined;
+    const receipt = await axAuthorize(
+      authority,
+      target.operation,
+      target.resource,
+      invocationSignal
+    );
+    return { receipt: receipt!, target };
+  };
+
+  const launchFunction = (
     callArgs: Record<string, unknown>,
     invocationSignal: AbortSignal | undefined,
-    includeCompletionProtocol = true
+    includeCompletionProtocol: boolean,
+    authorization: Awaited<ReturnType<typeof authorizeCall>>
   ): Promise<unknown> => {
     try {
       return Promise.resolve(
@@ -226,6 +265,9 @@ export function wrapFunction(
             ? protocolForTrigger?.(normalizedQualifiedName)
             : undefined,
           eventContext,
+          authority,
+          authorityInheritance,
+          authorityReceipt: authorization?.receipt,
         })
       );
     } catch (error) {
@@ -233,10 +275,62 @@ export function wrapFunction(
     }
   };
 
-  const wrapped = async (...args: unknown[]): Promise<unknown> => {
+  const runLogicalCall = async (
+    callArgs: Record<string, unknown>,
+    invocationSignal: AbortSignal | undefined,
+    observe = true
+  ): Promise<unknown> => {
+    const authorization = await authorizeCall(invocationSignal);
+    if (observe) await observeCall(callArgs);
+    return observeResult(
+      callArgs,
+      launchFunction(callArgs, invocationSignal, true, authorization)
+    );
+  };
+
+  const wrapped = (...args: unknown[]): Promise<unknown> => {
     const callArgs = normalizeCallArgs(args);
+    return runLogicalCall(callArgs, abortSignal);
+  };
+
+  const authorityIsCurrent = (
+    authorization: NonNullable<Awaited<ReturnType<typeof authorizeCall>>>
+  ): boolean =>
+    !!authority &&
+    isAuthorizationReceiptCurrent(
+      authority,
+      authorization.target.operation,
+      authorization.target.resource,
+      authorization.receipt
+    );
+
+  const failedAuthorizationLaunch = (
+    error: unknown,
+    signal: AbortSignal | undefined,
+    canClaim = () => false
+  ) => {
+    const result = Promise.reject(error);
+    void result.catch(() => {});
+    return {
+      result,
+      canClaim,
+      invalidReason: 'authority-invalidated' as const,
+      signal,
+    };
+  };
+
+  const commitSpeculativeCall = async (
+    callArgs: Record<string, unknown>,
+    speculative: JSRuntimeHostFunctionSpeculationLaunch
+  ): Promise<unknown> => {
+    if (speculative.canClaim && !speculative.canClaim()) {
+      return runLogicalCall(callArgs, speculative.signal ?? abortSignal);
+    }
     await observeCall(callArgs);
-    return observeResult(callArgs, launch(callArgs, abortSignal));
+    if (speculative.canClaim && !speculative.canClaim()) {
+      return runLogicalCall(callArgs, speculative.signal ?? abortSignal, false);
+    }
+    return observeResult(callArgs, speculative.result);
   };
 
   // Child agents are intentionally excluded: their nested tools and budgets
@@ -244,17 +338,46 @@ export function wrapFunction(
   // callables still require an exact AxJSRuntime speculation allowlist entry.
   if (kind === 'external') {
     setJSRuntimeHostFunctionSpeculationAdapter(wrapped, {
-      launch: (args, signal) =>
-        launch(
-          normalizeCallArgs(args),
-          mergeAbortSignals(abortSignal, signal),
-          false
-        ),
-      commit: async (args, result) => {
+      launch: async (args, signal) => {
         const callArgs = normalizeCallArgs(args);
-        await observeCall(callArgs);
-        return observeResult(callArgs, result);
+        const invocationSignal = mergeAbortSignals(abortSignal, signal);
+        const target = authorityTarget();
+        try {
+          const authorization = await authorizeCall(invocationSignal, target);
+          return {
+            result: launchFunction(
+              callArgs,
+              invocationSignal,
+              false,
+              authorization
+            ),
+            ...(authorization
+              ? {
+                  canClaim: () => authorityIsCurrent(authorization),
+                  invalidReason: 'authority-invalidated' as const,
+                  signal: invocationSignal,
+                }
+              : { signal: invocationSignal }),
+          };
+        } catch (error) {
+          const receipt = getAuthorizationDeniedReceipt(error);
+          return failedAuthorizationLaunch(
+            error,
+            invocationSignal,
+            receipt && authority && target
+              ? () =>
+                  isAuthorizationReceiptCurrent(
+                    authority,
+                    target.operation,
+                    target.resource,
+                    receipt
+                  )
+              : undefined
+          );
+        }
       },
+      commit: (args, speculative) =>
+        commitSpeculativeCall(normalizeCallArgs(args), speculative),
     });
   }
 
@@ -340,6 +463,10 @@ export function buildRuntimeGlobals(
   const eventContext = s._activeEventContext as
     | import('../../event/types.js').AxEventContext
     | undefined;
+  const authority = s._activeAuthority as AxAuthorityContext | undefined;
+  const authorityInheritance = s._activeAuthorityInheritance as
+    | AxAuthorityInheritance
+    | undefined;
 
   // Agent functions under namespace.* (e.g. utils.myFn, custom.otherFn).
   // Agent-derived entries carry `_kind: 'internal'` so that `onFunctionCall`
@@ -361,7 +488,9 @@ export function buildRuntimeGlobals(
           functionCallRecorder,
           agentFn._kind ?? 'external',
           onFunctionCall,
-          eventContext
+          eventContext,
+          authority,
+          authorityInheritance
         )
       : buildStageToolStub(qualifiedName);
     if (agentFn._alwaysInclude !== true) {
@@ -402,7 +531,9 @@ export function buildRuntimeGlobals(
               functionCallRecorder,
               'external',
               onFunctionCall,
-              eventContext
+              eventContext,
+              authority,
+              authorityInheritance
             )
           : buildStageToolStub(qualifiedName);
         registerCallable(
@@ -489,7 +620,9 @@ export function buildRuntimeGlobals(
               functionCallRecorder,
               'external',
               onFunctionCall,
-              eventContext
+              eventContext,
+              authority,
+              authorityInheritance
             )
           : buildStageToolStub(qualifiedName);
         registerCallable(

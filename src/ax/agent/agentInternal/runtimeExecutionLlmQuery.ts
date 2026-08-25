@@ -325,13 +325,14 @@ export function buildLlmQueryBindings(
   const llmQuery: LlmQueryBindings['llmQuery'] = (queryOrQueries, ctx) =>
     runLlmQuery(queryOrQueries, ctx);
   setJSRuntimeHostFunctionSpeculationAdapter(llmQuery, {
-    launch: (args, signal) =>
-      runLlmQuery(
+    launch: (args, signal) => ({
+      result: runLlmQuery(
         args[0] as Parameters<LlmQueryBindings['llmQuery']>[0],
         args[1],
         mergeAbortSignals(effectiveAbortSignal, signal)
       ),
-    commit: (_args, result) => result,
+    }),
+    commit: (_args, launch) => launch.result,
   });
 
   return { llmQuery };
