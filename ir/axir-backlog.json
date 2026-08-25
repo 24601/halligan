@@ -1168,7 +1168,7 @@
       "status": "open",
       "title": "Port host-owned principal preference evidence selection",
       "createdAt": "2026-08-25",
-      "sourcePR": null,
+      "sourcePR": 19,
       "sourceCommit": "2ef9eb795dd3198060743365456815501aa88908",
       "tsPaths": [
         "src/ax/agent/preferenceEvidence.ts",

@@ -20,6 +20,7 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
 
 - `axir-2026-08-25-port-host-owned-principal-preference-evidence-selection` [axagent] Port host-owned principal preference evidence selection
   - Status: open
+  - Source PR: #19
   - Source commit: `2ef9eb795dd3198060743365456815501aa88908`
   - TS paths: `src/ax/agent/preferenceEvidence.ts`, `src/ax/agent/preferenceEvidence.test.ts`, `src/ax/agent/preferenceEvidence.test-d.ts`
   - Impact: Generated runtimes do not yet expose the optional principal-scoped preference evidence contract, authority-aware retrieval, lifecycle helpers, or memory adapter.
