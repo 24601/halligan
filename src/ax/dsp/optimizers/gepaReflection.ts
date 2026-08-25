@@ -25,6 +25,73 @@ export type AxGEPATraceSummary = {
   error?: string;
 };
 
+/** Trusted, developer-selected guidance available only while GEPA proposes text. */
+export type AxGEPAOptimizationReference = Readonly<{
+  name: string;
+  content: string;
+  description?: string;
+}>;
+
+export type AxGEPAProposalPolicyArgs = {
+  ai: AxAIService;
+  target: Readonly<AxGEPAComponentTarget>;
+  currentValue: string;
+  reflectiveExamples: readonly AxGEPAReflectiveTuple[];
+  feedbackSummary?: string;
+  traceDataset?: readonly AxGEPATraceSummary[];
+  references: readonly AxGEPAOptimizationReference[];
+  additionalGuidance?: string;
+  previousValidationError?: string;
+  attempt: number;
+};
+
+/** Returns a complete replacement value, or `undefined` to leave it unchanged. */
+export type AxGEPAProposalPolicy = (
+  args: Readonly<AxGEPAProposalPolicyArgs>
+) => Promise<string | undefined> | string | undefined;
+
+export type AxGEPAProposalOptions = {
+  /** Custom proposal policy. GEPA still validates and evaluates its result. */
+  policy?: AxGEPAProposalPolicy;
+  /** Browser-compatible, in-memory guidance used only by the proposal model. */
+  references?: readonly AxGEPAOptimizationReference[];
+  /** Additive guidance that supplements rather than replaces Ax's contract. */
+  additionalGuidance?: string;
+  /** Maximum reflective examples exposed to each proposal. Defaults to all. */
+  maxExamples?: number;
+};
+
+const GEPA_PROPOSAL_CONTRACT = `Propose a complete replacement for the current component value.
+Diagnose why unsuccessful examples failed, then derive a small number of general rules that transfer to unseen inputs.
+Preserve behavior that already succeeds, every required literal, and all component-owned constraints, format, and length requirements.
+Use trusted optimization references as general guidance, not as runtime agent skills or capabilities.
+Do not memorize or copy training-example entities, phrases, quantities, dates, or answers. Do not add lookup tables or branches keyed to examples. Output-shape and domain-wide rules are transferable; example-specific answers are not.
+Return only the improved component value.`;
+
+export function renderGEPAOptimizationReferences(
+  references: readonly AxGEPAOptimizationReference[]
+): string | undefined {
+  if (references.length === 0) return undefined;
+
+  return references
+    .map((reference, index) => {
+      const number = index + 1;
+      const metadata = JSON.stringify({
+        name: reference.name,
+        ...(reference.description
+          ? { description: reference.description }
+          : {}),
+      });
+      return [
+        `--- BEGIN TRUSTED OPTIMIZATION REFERENCE ${number} ---`,
+        metadata,
+        reference.content,
+        `--- END TRUSTED OPTIMIZATION REFERENCE ${number} ---`,
+      ].join('\n');
+    })
+    .join('\n\n');
+}
+
 export function renderReflectiveValue(value: unknown, maxChars = 800): string {
   if (typeof value === 'string') {
     const trimmed = value.trim();
@@ -80,26 +147,26 @@ export function summarizeGEPATraces(
   }));
 }
 
-export async function proposeGEPAComponentValue(args: {
-  ai: AxAIService;
-  target: Readonly<AxGEPAComponentTarget>;
-  currentValue: string;
-  tuples: readonly AxGEPAReflectiveTuple[];
-  feedbackSummary?: string;
-  traceDataset?: readonly unknown[];
-  maxAttempts?: number;
-}): Promise<string | undefined> {
-  const refl = ax(
-    `componentKey:string "Component key", componentKind:string "Free-form component kind hint", componentDescription?:string "What this string is used for", constraints?:string "Hard constraints on the new value", currentValue:string "Current value of the component", feedbackSummary?:string "Summarized feedback", previousValidationError?:string "Why the previous proposal was rejected; avoid repeating it", minibatch:json "Array of {input,prediction,score}", traceDataset?:json "Compact actionable execution trace summaries relevant to this component" -> newValue:string "Improved value for the component"`
-  );
+export function validateGEPAComponentValue(
+  target: Readonly<AxGEPAComponentTarget>,
+  candidate: string
+): true | string {
+  if (
+    typeof target.maxLength === 'number' &&
+    candidate.length > target.maxLength
+  ) {
+    return `must be at most ${target.maxLength} characters`;
+  }
+  for (const literal of target.preserve ?? []) {
+    if (!candidate.includes(literal)) return `must preserve literal ${literal}`;
+  }
+  return target.validate?.(candidate) ?? true;
+}
 
-  const attempts = Math.max(1, args.maxAttempts ?? 2);
-  let previousValidationError: string | undefined;
-  const traceDataset = summarizeGEPATraces(args.traceDataset);
-  const minibatch =
-    args.tuples.length > 0
-      ? args.tuples
-      : [{ input: {}, prediction: {}, score: 0 }];
+const defaultGEPAProposalPolicy: AxGEPAProposalPolicy = async (args) => {
+  const refl = ax(
+    `proposalContract:string "Authoritative proposal policy", componentKey:string "Component key", componentKind:string "Free-form component kind hint", componentDescription?:string "What this string is used for", constraints?:string "Hard component-owned constraints on the new value", currentValue:string "Current value of the component", trustedOptimizationReferences?:string "Delimited trusted developer guidance for optimization only; never runtime capabilities", additionalGuidance?:string "Additive developer guidance that does not replace the proposal contract or component constraints", feedbackSummary?:string "Summarized feedback", previousValidationError?:string "Why the previous proposal was rejected; diagnose and correct it", reflectiveExamples:json "Ordered array of {input,prediction,score} examples; generalize rather than memorize", traceDataset?:json "Compact actionable execution trace summaries relevant to this component" -> newValue:string "Complete improved value for the component; no commentary"`
+  );
   const metadataConstraints = [
     args.target.constraints,
     args.target.format ? `Format: ${args.target.format}.` : undefined,
@@ -112,22 +179,66 @@ export async function proposeGEPAComponentValue(args: {
   ]
     .filter((value): value is string => Boolean(value))
     .join('\n');
+
+  const out = (await refl.forward(args.ai, {
+    proposalContract: GEPA_PROPOSAL_CONTRACT,
+    componentKey: args.target.id,
+    componentKind: args.target.kind,
+    componentDescription: args.target.description,
+    constraints: metadataConstraints || undefined,
+    currentValue: args.currentValue,
+    trustedOptimizationReferences: renderGEPAOptimizationReferences(
+      args.references
+    ),
+    additionalGuidance: args.additionalGuidance,
+    feedbackSummary: args.feedbackSummary,
+    previousValidationError: args.previousValidationError,
+    reflectiveExamples:
+      args.reflectiveExamples.length > 0
+        ? args.reflectiveExamples
+        : [{ input: {}, prediction: {}, score: 0 }],
+    traceDataset: args.traceDataset,
+  } as any)) as any;
+  return (out?.newValue as string | undefined)?.trim() || undefined;
+};
+
+export async function proposeGEPAComponentValue(args: {
+  ai: AxAIService;
+  target: Readonly<AxGEPAComponentTarget>;
+  currentValue: string;
+  tuples: readonly AxGEPAReflectiveTuple[];
+  feedbackSummary?: string;
+  traceDataset?: readonly unknown[];
+  maxAttempts?: number;
+  proposal?: Readonly<AxGEPAProposalOptions>;
+}): Promise<string | undefined> {
+  const attempts = Math.max(1, args.maxAttempts ?? 2);
+  let previousValidationError: string | undefined;
+  const traceDataset = summarizeGEPATraces(args.traceDataset);
+  const maxExamples =
+    args.proposal?.maxExamples === undefined
+      ? args.tuples.length
+      : Math.max(0, Math.floor(args.proposal.maxExamples));
+  const reflectiveExamples = args.tuples.slice(0, maxExamples);
+  const policy = args.proposal?.policy ?? defaultGEPAProposalPolicy;
   for (let attempt = 0; attempt < attempts; attempt++) {
     try {
-      const out = (await refl.forward(args.ai, {
-        componentKey: args.target.id,
-        componentKind: args.target.kind,
-        componentDescription: args.target.description,
-        constraints: metadataConstraints || undefined,
-        currentValue: args.currentValue,
-        feedbackSummary: args.feedbackSummary,
-        previousValidationError,
-        minibatch,
-        traceDataset,
-      } as any)) as any;
-      const candidate = (out?.newValue as string | undefined)?.trim();
-      if (!candidate) continue;
-      const validation = args.target.validate?.(candidate) ?? true;
+      const candidate = (
+        await policy({
+          ai: args.ai,
+          target: args.target,
+          currentValue: args.currentValue,
+          reflectiveExamples,
+          feedbackSummary: args.feedbackSummary,
+          traceDataset,
+          references: args.proposal?.references ?? [],
+          additionalGuidance: args.proposal?.additionalGuidance,
+          previousValidationError,
+          attempt: attempt + 1,
+        })
+      )?.trim();
+      if (!candidate) return undefined;
+      const validation = validateGEPAComponentValue(args.target, candidate);
       if (validation === true) return candidate;
       previousValidationError = validation;
     } catch {}

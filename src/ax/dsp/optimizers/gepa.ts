@@ -34,6 +34,7 @@ import {
 import {
   proposeGEPAComponentValue,
   renderReflectiveValue,
+  validateGEPAComponentValue,
 } from './gepaReflection.js';
 import { AxGEPAComponentSelector } from './gepaSelection.js';
 import {
@@ -770,8 +771,11 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
           )) as Record<string, string> | undefined;
           if (proposedMap) {
             for (const groupTarget of targetGroup) {
-              const proposed = proposedMap[groupTarget.id];
-              if (typeof proposed === 'string' && proposed.length > 0) {
+              const proposed = proposedMap[groupTarget.id]?.trim();
+              if (
+                proposed &&
+                validateGEPAComponentValue(groupTarget, proposed) === true
+              ) {
                 proposedCfg[groupTarget.id] = proposed;
               }
             }
@@ -1236,6 +1240,7 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       feedbackSummary,
       traceDataset: targetMeta?.traceDataset,
       maxAttempts: 2,
+      proposal: options?.gepaProposal,
     });
 
     return proposed ?? currentInstruction;

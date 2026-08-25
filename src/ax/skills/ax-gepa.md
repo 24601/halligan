@@ -35,6 +35,59 @@ Use this skill to generate GEPA optimization code. Prefer the top-level `optimiz
 - `result.optimizedProgram` is the easy-to-apply best candidate. `result.paretoFront` is the full trade-off set for multi-objective runs.
 - Direct `AxGEPA` still has its own `bootstrap` option, but top-level `optimize(...)` composes the existing `AxBootstrapFewShot` optimizer before GEPA instead.
 
+## Proposal Policy and Optimization References
+
+Use `gepaProposal` when the reflection model needs trusted developer guidance or a custom way to propose component text:
+
+```typescript
+const result = await optimize(program, train, metric, {
+  studentAI,
+  teacherAI,
+  validationExamples: validation,
+  gepaProposal: {
+    references: [
+      {
+        name: 'support-policy',
+        description: 'General escalation rules',
+        content: policyMarkdown,
+      },
+    ],
+    additionalGuidance: 'Prefer short, testable rules.',
+    maxExamples: 6,
+    policy: async ({
+      ai,
+      target,
+      currentValue,
+      reflectiveExamples,
+      references,
+      additionalGuidance,
+      previousValidationError,
+      attempt,
+    }) => {
+      // Return a complete replacement, or undefined to keep currentValue.
+      return proposeWithYourPolicy({
+        ai,
+        target,
+        currentValue,
+        reflectiveExamples,
+        references,
+        additionalGuidance,
+        previousValidationError,
+        attempt,
+      });
+    },
+  },
+});
+```
+
+- `references` are ordered, in-memory, trusted inputs to proposal generation. They are not runtime agent skills, tools, filesystem paths, or persisted optimized-program data.
+- `additionalGuidance` augments the built-in proposal contract; it does not replace component constraints.
+- `maxExamples` bounds the ordered reflective examples passed to each proposal. It does not change the training or held-out evaluation sets.
+- A custom `policy` proposes text only. GEPA remains responsible for retries, component-owned `validate`, `preserve`, `maxLength`, `format`, and `constraints`, and metric-based held-out acceptance.
+- Returning `undefined` keeps the current component value. Invalid proposals are retried with `previousValidationError`; exhausted retries also keep the current value.
+- The same `gepaProposal` option is available on `AxGEPA.compile(...)`, `optimize(...)`, and `agent.optimize(...)`.
+- The built-in policy diagnoses failures, derives general rules, preserves successful behavior and required literals, and explicitly rejects memorizing example entities, quantities, dates, phrases, or answers.
+
 ## Metric Selection
 
 Choose the evaluation path deliberately:
