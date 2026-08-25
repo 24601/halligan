@@ -20,7 +20,7 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
 
 - `axir-2026-08-25-port-trusted-event-component-lifecycle-manager` [axprogram] Port trusted event component lifecycle manager
   - Status: open
-  - Source commit: `ca760294f5ea4f207052c39c2218e1195103bc2a`
+  - Source commit: `eba59c68670f657c7d3b163a5bdc3b4c91d25545`
   - TS paths: `src/ax/event/components.ts`
   - Impact: TypeScript exposes a trusted process-local event integration manager with stable component IDs and versions, dependency ordering, scoped reverse disposers, transactional activation rollback, serialized transitions, cooperative abort, inspectable diagnostics, and manager-visible hot replacement. Generated Python, Java, C++, Go, and Rust event runtimes retain their existing source lifecycle but do not expose this generic host component API.
   - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
