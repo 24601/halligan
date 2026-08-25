@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+
 import { describe, expect, it, vi } from 'vitest';
 
 import {
@@ -58,6 +60,37 @@ function file(filename, previousFilename) {
     ...(previousFilename ? { previous_filename: previousFilename } : {}),
   };
 }
+
+describe('pull request evaluation policy', () => {
+  const template = readFileSync('.github/PULL_REQUEST_TEMPLATE.md', 'utf8');
+
+  it('keeps the required tests and evaluation sections and evidence semantics', () => {
+    expect(template).toMatch(/^-[ ]\*\*Tests\*\*:/m);
+    expect(template).toMatch(/^-[ ]\*\*Evaluation\*\*:/m);
+
+    const requirements = [
+      /static, type, unit, and integration tests/i,
+      /meaningful, truthful evaluation suited to the claim/i,
+      /held-out hill-climbing comparison.+claimed outcome improvement/i,
+      /reproducible benchmark.+latency\/cost/i,
+      /fault injection.+recovery\/durability/i,
+      /audit-fidelity and overhead checks.+infrastructure/i,
+      /declared baseline/i,
+      /calls, tokens, wall-clock time, and cost/i,
+      /negative or regression results/i,
+      /exact commands and artifacts/i,
+      /where it helps \/ does not help/i,
+      /limitations and safety assumptions/i,
+      /do not hard-code outcomes.+mutate evaluators or hidden tests.+claims beyond the evidence/i,
+      /paid provider calls are not required in CI.+deterministic zero-cost mechanism evaluations.+bounded live evaluations are optional/i,
+      /documentation-only, typo-only, or mechanical metadata changes.+not applicable.+rather than inventing one/i,
+    ];
+
+    for (const requirement of requirements) {
+      expect(template).toMatch(requirement);
+    }
+  });
+});
 
 describe('external contribution trust boundary', () => {
   it.each(['OWNER', 'MEMBER'])('trusts %s', (association) => {

@@ -138,6 +138,16 @@ npm run build:index --workspace=@ax-llm/ax
 - keep `src/ax/` browser-compatible; do not add `fs`, `path`, or `os` there
 - never commit API keys; use environment variables
 
+## Tests And Evaluation
+
+Behavioral features and changes require all applicable static, type, unit, and
+integration tests plus a meaningful, truthful evaluation matched to the claim.
+Declare the baseline and evaluation budget, report regressions as well as wins,
+and provide reproducible commands and artifacts. Never hard-code outcomes,
+mutate evaluators or hidden tests, or claim more than the evidence supports.
+See `.github/CONTRIBUTING.md` and the pull request template for the required
+evaluation type, evidence, exemptions, and zero-cost/live-evaluation rules.
+
 ## Examples
 
 Examples should usually follow these conventions:
