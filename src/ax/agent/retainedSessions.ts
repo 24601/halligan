@@ -131,7 +131,7 @@ export interface AxAgentSessionRegistrySnapshot {
 }
 
 export interface AxAgentSessionRestoreOptions {
-  /** Trusted authority/accounting digest stored apart from the snapshot. */
+  /** Trusted canonical snapshot digest stored apart from the snapshot. */
   expectedPolicyDigest: string;
 }
 
@@ -449,6 +449,143 @@ function equalUsage(
   );
 }
 
+function bytesToHex(bytes: Uint8Array): string {
+  let hex = '';
+  for (const byte of bytes) hex += byte.toString(16).padStart(2, '0');
+  return hex;
+}
+
+async function canonicalSnapshotValue(value: unknown): Promise<unknown> {
+  const seen = new Map<object, number>();
+
+  const entries = async (record: object) => {
+    const out: [string, unknown][] = [];
+    for (const key of Object.keys(record).sort()) {
+      out.push([key, await encode((record as Record<string, unknown>)[key])]);
+    }
+    return out;
+  };
+
+  const encode = async (current: unknown): Promise<unknown> => {
+    if (current === null) return ['null'];
+    switch (typeof current) {
+      case 'undefined':
+        return ['undefined'];
+      case 'boolean':
+        return ['boolean', current];
+      case 'string':
+        return ['string', current];
+      case 'number':
+        if (Number.isNaN(current)) return ['number', 'nan'];
+        if (current === Number.POSITIVE_INFINITY)
+          return ['number', 'positive-infinity'];
+        if (current === Number.NEGATIVE_INFINITY)
+          return ['number', 'negative-infinity'];
+        if (Object.is(current, -0)) return ['number', 'negative-zero'];
+        return ['number', current];
+      case 'bigint':
+        return ['bigint', current.toString()];
+      case 'function':
+      case 'symbol':
+        throw new AxAgentSessionSerializationError(
+          `snapshot integrity cannot encode ${typeof current} values`
+        );
+    }
+
+    const object = current as object;
+    const reference = seen.get(object);
+    if (reference !== undefined) return ['reference', reference];
+    const id = seen.size;
+    seen.set(object, id);
+
+    if (Array.isArray(object)) {
+      return ['array', id, object.length, await entries(object)];
+    }
+    if (object instanceof Date) {
+      return ['date', id, await encode(object.getTime())];
+    }
+    if (object instanceof RegExp) {
+      return ['regexp', id, object.source, object.flags, object.lastIndex];
+    }
+    if (object instanceof Map) {
+      const mapped: [unknown, unknown][] = [];
+      for (const [key, nested] of object) {
+        mapped.push([await encode(key), await encode(nested)]);
+      }
+      return ['map', id, mapped];
+    }
+    if (object instanceof Set) {
+      const values: unknown[] = [];
+      for (const nested of object) values.push(await encode(nested));
+      return ['set', id, values];
+    }
+    if (object instanceof ArrayBuffer) {
+      return ['array-buffer', id, bytesToHex(new Uint8Array(object))];
+    }
+    if (
+      typeof SharedArrayBuffer !== 'undefined' &&
+      object instanceof SharedArrayBuffer
+    ) {
+      throw new AxAgentSessionSerializationError(
+        'snapshot integrity cannot authenticate mutable SharedArrayBuffer values'
+      );
+    }
+    if (ArrayBuffer.isView(object)) {
+      const view = object as ArrayBufferView;
+      if (
+        typeof SharedArrayBuffer !== 'undefined' &&
+        view.buffer instanceof SharedArrayBuffer
+      ) {
+        throw new AxAgentSessionSerializationError(
+          'snapshot integrity cannot authenticate views over mutable SharedArrayBuffer values'
+        );
+      }
+      return [
+        'array-buffer-view',
+        id,
+        object.constructor.name,
+        view.byteOffset,
+        view.byteLength,
+        await encode(view.buffer),
+      ];
+    }
+    if (typeof Blob !== 'undefined' && object instanceof Blob) {
+      const file =
+        typeof File !== 'undefined' && object instanceof File
+          ? [object.name, object.lastModified]
+          : undefined;
+      return [
+        'blob',
+        id,
+        object.type,
+        file,
+        bytesToHex(new Uint8Array(await object.arrayBuffer())),
+      ];
+    }
+    if (object instanceof Error) {
+      return [
+        'error',
+        id,
+        object.name,
+        object.message,
+        object.stack,
+        await encode(object.cause),
+        await entries(object),
+      ];
+    }
+
+    const prototype = Object.getPrototypeOf(object);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw new AxAgentSessionSerializationError(
+        `snapshot integrity cannot encode ${object.constructor?.name ?? 'platform'} values`
+      );
+    }
+    return ['object', id, prototype === null, await entries(object)];
+  };
+
+  return encode(value);
+}
+
 function canonicalPolicy(snapshot: Readonly<AxAgentSessionRegistrySnapshot>) {
   const sessions = Object.keys(snapshot.sessions)
     .sort()
@@ -465,15 +602,26 @@ function canonicalPolicy(snapshot: Readonly<AxAgentSessionRegistrySnapshot>) {
         depth: record.depth,
         authorizedChildren: canonicalKeys(record.authorizedChildren),
         status: record.status,
+        createdAt: record.createdAt,
+        updatedAt: record.updatedAt,
         activeMessageId: record.activeMessageId,
+        state: record.state,
+        artifacts: record.artifacts,
         usage: record.usage,
         descendantUsage: record.descendantUsage,
         retiredDescendantUsage: record.retiredDescendantUsage,
+        lastError: record.lastError,
         mailbox: record.mailbox.map((message) => ({
           id: message.id,
           jobId: message.jobId,
           mode: message.mode,
           status: message.status,
+          input: message.input,
+          createdAt: message.createdAt,
+          startedAt: message.startedAt,
+          completedAt: message.completedAt,
+          result: message.result,
+          error: message.error,
           attemptId: message.attemptId,
           cancelRequested: message.cancelRequested,
           tokenReservation: message.tokenReservation,
@@ -488,6 +636,9 @@ function canonicalPolicy(snapshot: Readonly<AxAgentSessionRegistrySnapshot>) {
       capability: snapshot.root.capability,
       epoch: snapshot.root.epoch,
       authorizedChildren: canonicalKeys(snapshot.root.authorizedChildren),
+      status: snapshot.root.status,
+      createdAt: snapshot.root.createdAt,
+      updatedAt: snapshot.root.updatedAt,
       limits: {
         maxChildren: snapshot.root.limits.maxChildren,
         maxDepth: snapshot.root.limits.maxDepth,
@@ -498,7 +649,6 @@ function canonicalPolicy(snapshot: Readonly<AxAgentSessionRegistrySnapshot>) {
         maxTokensPerMessage: snapshot.root.limits.maxTokensPerMessage,
         maxSubcalls: snapshot.root.limits.maxSubcalls,
       },
-      status: snapshot.root.status,
       admittedChildren: snapshot.root.admittedChildren,
       admittedSubcalls: snapshot.root.admittedSubcalls,
       descendantUsage: snapshot.root.descendantUsage,
@@ -516,7 +666,9 @@ function canonicalPolicy(snapshot: Readonly<AxAgentSessionRegistrySnapshot>) {
 async function digestPolicy(
   snapshot: Readonly<AxAgentSessionRegistrySnapshot>
 ): Promise<string> {
-  return sha256(JSON.stringify(canonicalPolicy(snapshot)));
+  return sha256(
+    JSON.stringify(await canonicalSnapshotValue(canonicalPolicy(snapshot)))
+  );
 }
 
 function timingSafeEqual(left: string, right: string): boolean {
@@ -886,8 +1038,8 @@ export class AxAgentSessionHost {
     options: Readonly<AxAgentSessionRestoreOptions>
   ): Promise<AxAgentSessionClient> {
     this.assertOpen();
-    await this.validateSnapshot(snapshot, options.expectedPolicyDigest);
     const restored: AxAgentSessionRegistrySnapshot = cloneStructured(snapshot);
+    await this.validateSnapshot(restored, options.expectedPolicyDigest);
     restored.revision = 0;
     this.interruptRunning(restored);
     this.rotateExecutionAuthority(restored);

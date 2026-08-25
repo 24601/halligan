@@ -161,11 +161,13 @@ Application tools should still use stable idempotency keys when retry is safe.
 explicit state transfer with the same uncertainty rule. Store the expected
 digest separately in trusted host metadata; do not read it from the candidate
 snapshot at restore time. The expected SHA-256 digest authenticates canonical
-root/child authority, lifecycle, mailbox, and accounting state. Restore then
-reconciles direct usage from per-attempt usage, descendant usage through the
-tree, retired/disposed ledgers, reservations, outcome-unknown charges,
-subcalls, mailbox counts, concurrency, and budget status before accepting the
-snapshot.
+root/child authority, lifecycle timestamps and diagnostics, complete mailbox
+inputs/results, retained agent state/artifacts, and accounting state. The
+canonical encoder preserves structured-clone identity and common structured
+values rather than relying on lossy JSON conversion. Restore then reconciles
+direct usage from per-attempt usage, descendant usage through the tree,
+retired/disposed ledgers, reservations, outcome-unknown charges, subcalls,
+mailbox counts, concurrency, and budget status before accepting the snapshot.
 
 Restore is an ownership transfer, not a clone of live authority. It always
 advances the destination epoch, rotates root and child bearer capabilities,

@@ -436,7 +436,8 @@ Recovery advances a root-wide lease epoch: restore the root and refresh handles
 before sending more mail; executor closures from the previous owner are stale.
 Ambiguous running work keeps its pre-dispatch token reservation charged.
 Explicit snapshot restore also rotates destination authority, and its
-separately trusted digest covers canonical policy plus accounting aggregates.
+separately trusted digest covers canonical policy, lifecycle diagnostics,
+mailbox payloads, retained state/artifacts, and accounting aggregates.
 
 This mechanism does not expose a second interpreter, inherit parent tools, or
 change `llmQuery(...)` budgets. The host independently bounds child count,

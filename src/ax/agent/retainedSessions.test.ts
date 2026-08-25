@@ -12,6 +12,7 @@ import {
   type AxAgentSessionJob,
   AxAgentSessionNotFoundError,
   type AxAgentSessionRegistration,
+  type AxAgentSessionRegistrySnapshot,
   type AxAgentSessionScheduler,
   AxAgentSessionStaleHandleError,
   type AxAgentSessionStore,
@@ -362,6 +363,99 @@ async function refreshDirectHandle(client: AxAgentSessionClient, id: string) {
   return handle;
 }
 
+const restoredFieldTamperCases: ReadonlyArray<
+  readonly [
+    field: string,
+    mutate: (
+      snapshot: AxAgentSessionRegistrySnapshot,
+      sessionId: string
+    ) => void,
+  ]
+> = [
+  [
+    'root.createdAt',
+    (snapshot) => {
+      snapshot.root.createdAt++;
+    },
+  ],
+  [
+    'root.updatedAt',
+    (snapshot) => {
+      snapshot.root.updatedAt++;
+    },
+  ],
+  [
+    'session.createdAt',
+    (snapshot, sessionId) => {
+      snapshot.sessions[sessionId]!.createdAt++;
+    },
+  ],
+  [
+    'session.updatedAt',
+    (snapshot, sessionId) => {
+      snapshot.sessions[sessionId]!.updatedAt++;
+    },
+  ],
+  [
+    'session.state',
+    (snapshot, sessionId) => {
+      snapshot.sessions[sessionId]!.state!.runtimeBindings = {
+        history: ['forged state'],
+      };
+    },
+  ],
+  [
+    'session.artifacts',
+    (snapshot, sessionId) => {
+      snapshot.sessions[sessionId]!.artifacts = { forged: true };
+    },
+  ],
+  [
+    'message.startedAt',
+    (snapshot, sessionId) => {
+      const message = snapshot.sessions[sessionId]!.mailbox[0]!;
+      message.startedAt = (message.startedAt ?? 0) + 1;
+    },
+  ],
+  [
+    'message.createdAt',
+    (snapshot, sessionId) => {
+      snapshot.sessions[sessionId]!.mailbox[0]!.createdAt++;
+    },
+  ],
+  [
+    'message.completedAt',
+    (snapshot, sessionId) => {
+      const message = snapshot.sessions[sessionId]!.mailbox[0]!;
+      message.completedAt = message.completedAt! + 1;
+    },
+  ],
+  [
+    'message.input',
+    (snapshot, sessionId) => {
+      snapshot.sessions[sessionId]!.mailbox[0]!.input = { value: 'forged' };
+    },
+  ],
+  [
+    'message.result',
+    (snapshot, sessionId) => {
+      snapshot.sessions[sessionId]!.mailbox[0]!.result = { value: 'forged' };
+    },
+  ],
+  [
+    'message.error',
+    (snapshot, sessionId) => {
+      snapshot.sessions[sessionId]!.mailbox[0]!.error = 'forged message error';
+    },
+  ],
+  [
+    'session.lastError',
+    (snapshot, sessionId) => {
+      snapshot.sessions[sessionId]!.lastError = 'forged session error';
+    },
+  ],
+];
+
 describe('retained child agent sessions', () => {
   it('admits concurrent children immediately without blocking on results', async () => {
     DeterministicAgent.active = 0;
@@ -677,6 +771,61 @@ describe('retained child agent sessions', () => {
     await expect(
       destinationRoot.inspect(destinationHandle)
     ).resolves.toMatchObject({ status: 'completed' });
+  });
+
+  it.each(restoredFieldTamperCases)(
+    'rejects snapshot tampering of authenticated %s',
+    async (_field, mutate) => {
+      const sourceHost = host();
+      const root = await sourceHost.createRoot({
+        authorizedChildren: ['worker'],
+      });
+      const handle = await root.spawn('worker', { value: 'authenticated' });
+      await completed(root, handle);
+      const snapshot = await sourceHost.snapshot(handle.rootId);
+      const tampered = structuredClone(snapshot);
+      mutate(tampered, handle.id);
+
+      await expect(
+        host().restore(tampered, {
+          expectedPolicyDigest: snapshot.policyDigest,
+        })
+      ).rejects.toThrow(/policy digest is invalid/);
+    }
+  );
+
+  it('authenticates non-JSON structured-clone mailbox payloads', async () => {
+    const sourceHost = host();
+    const root = await sourceHost.createRoot({
+      authorizedChildren: ['worker'],
+    });
+    const input: WorkInput & { metadata: Map<string, unknown> } = {
+      value: 'structured',
+      metadata: new Map<string, unknown>([
+        ['count', 1n],
+        ['time', new Date(0)],
+        ['bytes', new Uint8Array([1, 2, 3])],
+      ]),
+    };
+    const handle = await root.spawn('worker', input);
+    await completed(root, handle);
+    const snapshot = await sourceHost.snapshot(handle.rootId);
+
+    await expect(
+      host().restore(snapshot, {
+        expectedPolicyDigest: snapshot.policyDigest,
+      })
+    ).resolves.toMatchObject({ sessionId: snapshot.root.id });
+
+    const tampered = structuredClone(snapshot);
+    const tamperedInput = tampered.sessions[handle.id]!.mailbox[0]!
+      .input as typeof input;
+    tamperedInput.metadata.set('count', 2n);
+    await expect(
+      host().restore(tampered, {
+        expectedPolicyDigest: snapshot.policyDigest,
+      })
+    ).rejects.toThrow(/policy digest is invalid/);
   });
 
   it('rejects snapshots whose root or child authorization was altered', async () => {

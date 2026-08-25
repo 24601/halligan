@@ -195,9 +195,10 @@ Rules:
 - Running messages reserve conservative tokens before execution; an
   `outcome_unknown` attempt keeps that reservation charged. Explicit snapshot
   restore requires a separately trusted digest covering canonical authority,
-  lifecycle, and accounting. Restore reconciles usage/reservations/subcalls and
-  rotates destination epoch, capabilities, and pending job authority; dispatch
-  checks both epoch and job ID. Refresh handles after transfer.
+  lifecycle timestamps/diagnostics, mailbox payloads, retained state/artifacts,
+  and accounting. Restore reconciles usage/reservations/subcalls and rotates
+  destination epoch, capabilities, and pending job authority; dispatch checks
+  both epoch and job ID. Refresh handles after transfer.
 - Existing synchronous namespaced child calls remain the smallest choice when
   the parent needs the answer now.
 
