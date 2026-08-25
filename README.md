@@ -251,8 +251,10 @@ if (result.success) console.log(result.output.answer);
 `react(...)` prefers provider-native calls and falls back to a strict prompt
 protocol for text-only models. It returns resumable canonical history and a
 structured failure with every output key preserved. Resume is fail-closed
-against tool-catalog, host-authority, and native replay-protocol changes; use a
-versioned `historyAuthority` for durable cross-process history. See
+against tool-catalog, host-authority, and native replay-protocol changes; use
+versioned `historyAuthority` and `replayProfile` values for durable native
+cross-process history. Without a replay profile, native resume is scoped to the
+current provider object. See
 [`docs/REACT.md`](docs/REACT.md) for protocol, concurrency, compaction, provider
 coverage, and the reproducible native-vs-prompt evaluation.
 

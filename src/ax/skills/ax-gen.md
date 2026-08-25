@@ -97,10 +97,13 @@ Rules:
 - Resume with `{ history: previous.history }`. Ax IDs remain collision-safe
   across runs; unique native provider IDs are retained separately for replay.
   Compaction retains only complete assistant/tool groups. Resume is bound to
-  the executable catalog, replay provider/model protocol, and a host authority
-  digest. Set a stable non-secret `historyAuthority` to recreate the module
-  across processes, override it per run for shared multi-scope modules, and
-  version it when permissions or tool semantics change.
+  the executable catalog, replay provider/model/config protocol, and a host
+  authority digest. Set a stable non-secret `historyAuthority` to recreate the
+  module across processes, and set `replayProfile` for durable native resume
+  across provider objects. Rotate the latter for provider defaults, adapter/API,
+  endpoint/deployment, routing, or native-ID changes. Without it, native resume
+  is fail-closed to the current provider object; prompt resume remains
+  provider-neutral. Both values support per-run overrides.
 - `abortSignal` cancels one run; `program.stop()` cancels all its active runs.
 - Canonical JSON stabilizes prompt-cache input, tool arguments/results, and
   persisted history. Structural validation does not authenticate semantic

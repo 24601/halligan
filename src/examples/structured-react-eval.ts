@@ -319,6 +319,7 @@ async function runResume(
   });
   const program = react('question:string -> answer:string', {
     functions: makeTools(observed),
+    replayProfile: 'structured-react-eval:mock-native:v1',
     maxIterations: 1,
   });
   const first = await program.forward(

@@ -45,6 +45,15 @@ const DEFAULT_MAX_TOOL_CALLS = 16;
 const DEFAULT_MAX_PROMPT_GROUPS = 24;
 const DEFAULT_MAX_PROMPT_CHARACTERS = 64_000;
 const DEFAULT_MAX_PROMPT_VALUE_CHARACTERS = 12_000;
+const NATIVE_REPLAY_PROTOCOL = {
+  version: 1,
+  request: 'ax-chat-functions',
+  assistantReplay: 'functionCalls',
+  resultReplay: 'function-results-by-call-id',
+  providerIds: 'preserve-valid-unique-otherwise-use-ax-id',
+  forcedSubmit: 'provider-function-choice-submit',
+} as const;
+const nativeProviderInstances = new WeakMap<object, string>();
 
 type NullableOutput<OUT> = { [K in keyof OUT]: OUT[K] | null };
 
@@ -98,7 +107,7 @@ export type AxReactHistory = {
   toolCatalogHash: string;
   /** Digest of the host-selected authority/version scope. */
   authorityHash: string;
-  /** Digest of the replay mode and native provider/model identity. */
+  /** Digest of the replay mode and native provider/model protocol profile. */
   replayProtocolHash: string;
   /** Canonical JSON for the original input values. */
   input: string;
@@ -136,6 +145,11 @@ export type AxReactOptions = {
    * Omission scopes history to this AxReact instance.
    */
   historyAuthority?: string;
+  /**
+   * Non-secret native provider protocol/deployment version for durable resume.
+   * Omission binds native history to the current AxAIService object.
+   */
+  replayProfile?: string;
   /** Normal model turns before Ax forces one final submit-only turn. */
   maxIterations?: number;
   /** Calls in one assistant turn execute concurrently up to this bound. */
@@ -155,11 +169,13 @@ export type AxReactForwardOptions<MODEL = string> =
     history?: AxReactHistory;
     /** Per-run host authority/version; overrides the module default. */
     historyAuthority?: string;
+    /** Per-run native replay profile; overrides the module default. */
+    replayProfile?: string;
     maxIterations?: number;
   };
 
 type ReactConfig = Required<
-  Omit<AxReactOptions, 'functions' | 'historyAuthority'>
+  Omit<AxReactOptions, 'functions' | 'historyAuthority' | 'replayProfile'>
 >;
 
 type ParsedModelTurn = {
@@ -196,6 +212,15 @@ function validatedHistoryAuthority(value: string): string {
   if (value.trim() === '' || value.length > 1_024) {
     throw new Error(
       'historyAuthority must contain 1 to 1024 characters when provided'
+    );
+  }
+  return value;
+}
+
+function validatedReplayProfile(value: string): string {
+  if (value.trim() === '' || value.length > 1_024) {
+    throw new Error(
+      'replayProfile must contain 1 to 1024 characters when provided'
     );
   }
   return value;
@@ -451,17 +476,69 @@ function toolCatalogHash(tools: readonly AxFunction[]): Promise<string> {
   return sha256(axReactCanonicalJSON(canonicalToolCatalog(tools)));
 }
 
+function nativeProviderInstance(ai: Readonly<AxAIService>): string {
+  const key = ai as object;
+  const current = nativeProviderInstances.get(key);
+  if (current) return current;
+  const created = randomUUID();
+  nativeProviderInstances.set(key, created);
+  return created;
+}
+
 function replayProtocolHash(
   ai: Readonly<AxAIService>,
   native: boolean,
-  model: unknown
+  options: Readonly<
+    Pick<AxReactForwardOptions<unknown>, 'model' | 'modelConfig'>
+  >,
+  replayProfile?: string
 ): Promise<string> {
+  if (!native) {
+    return sha256(axReactCanonicalJSON({ mode: 'prompt', version: 1 }));
+  }
+
+  const requestedModelConfig = {
+    ...options.modelConfig,
+    stream: false,
+    n: 1,
+  };
+  const providerBinding = replayProfile
+    ? { type: 'host-profile', value: replayProfile }
+    : {
+        type: 'service-instance',
+        serviceId: ai.getId(),
+        objectInstance: nativeProviderInstance(ai),
+      };
+  const modelBinding =
+    options.model !== undefined
+      ? { source: 'request', value: options.model }
+      : replayProfile
+        ? { source: 'host-profile-default' }
+        : {
+            source: 'provider-last-used',
+            value: ai.getLastUsedChatModel() ?? null,
+          };
+  const modelConfigBinding = replayProfile
+    ? {
+        request: requestedModelConfig,
+        providerDefaults: 'host-profile',
+      }
+    : {
+        request: requestedModelConfig,
+        providerEffectiveLastUsed: ai.getLastUsedModelConfig() ?? null,
+      };
+
   return sha256(
-    axReactCanonicalJSON(
-      native
-        ? { mode: 'native', provider: ai.getName(), model: model ?? null }
-        : { mode: 'prompt' }
-    )
+    axReactCanonicalJSON({
+      mode: 'native',
+      provider: {
+        name: ai.getName(),
+        binding: providerBinding,
+      },
+      model: modelBinding,
+      modelConfig: modelConfigBinding,
+      toolCalls: NATIVE_REPLAY_PROTOCOL,
+    })
   );
 }
 
@@ -642,7 +719,7 @@ function validateHistory(
     }
     if (history.replayProtocolHash !== expectedReplayProtocolHash) {
       throw new Error(
-        'ReAct history does not match the current replay provider/model protocol'
+        'ReAct history does not match the current native replay profile/protocol'
       );
     }
   } catch (error) {
@@ -909,6 +986,7 @@ export class AxReact<IN extends AxGenIn, OUT extends AxGenOut> {
   private readonly signature: AxSignature<IN, OUT>;
   private readonly signatureHash: Promise<string>;
   private readonly historyAuthority: string;
+  private readonly replayProfile?: string;
   private readonly functions: AxFunction[];
   private readonly config: ReactConfig;
   private readonly activeControllers = new Set<AbortController>();
@@ -924,6 +1002,10 @@ export class AxReact<IN extends AxGenIn, OUT extends AxGenOut> {
     this.historyAuthority = validatedHistoryAuthority(
       options.historyAuthority ?? `instance:${randomUUID()}`
     );
+    this.replayProfile =
+      options.replayProfile === undefined
+        ? undefined
+        : validatedReplayProfile(options.replayProfile);
     this.functions = options.functions ? parseFunctions(options.functions) : [];
     this.assertToolNames(this.functions);
     this.config = {
@@ -986,6 +1068,10 @@ export class AxReact<IN extends AxGenIn, OUT extends AxGenOut> {
         options.historyAuthority ?? this.historyAuthority
       )
     );
+    const replayProfile =
+      options.replayProfile === undefined
+        ? this.replayProfile
+        : validatedReplayProfile(options.replayProfile);
     const configured = options.functions
       ? parseFunctions(options.functions, this.functions)
       : [...this.functions];
@@ -994,7 +1080,7 @@ export class AxReact<IN extends AxGenIn, OUT extends AxGenOut> {
     const native = this.resolveNativeMode(ai, options);
     const [initialCatalogHash, protocolHash] = await Promise.all([
       toolCatalogHash([...configured, submit]),
-      replayProtocolHash(ai, native, options.model),
+      replayProtocolHash(ai, native, options, replayProfile),
     ]);
     const history = options.history
       ? cloneHistory(options.history)
@@ -1060,6 +1146,7 @@ export class AxReact<IN extends AxGenIn, OUT extends AxGenOut> {
           history,
           allTools,
           native,
+          replayProfile,
           false,
           contextPrompt,
           signal,
@@ -1104,6 +1191,7 @@ export class AxReact<IN extends AxGenIn, OUT extends AxGenOut> {
         history,
         [submit],
         native,
+        replayProfile,
         true,
         contextPrompt,
         signal,
@@ -1281,6 +1369,7 @@ export class AxReact<IN extends AxGenIn, OUT extends AxGenOut> {
     history: AxReactHistory,
     tools: readonly AxFunction[],
     native: boolean,
+    replayProfile: string | undefined,
     forcedSubmit: boolean,
     contextPrompt: AxChatRequest['chatPrompt'],
     signal: AbortSignal,
@@ -1345,6 +1434,7 @@ export class AxReact<IN extends AxGenIn, OUT extends AxGenOut> {
       const {
         history: _history,
         historyAuthority: _historyAuthority,
+        replayProfile: _replayProfile,
         maxIterations: _maxIterations,
         ...forwardOptions
       } = options;
@@ -1357,6 +1447,14 @@ export class AxReact<IN extends AxGenIn, OUT extends AxGenOut> {
       });
       if (response instanceof ReadableStream) {
         throw new Error('react() does not accept streaming model responses');
+      }
+      if (native) {
+        history.replayProtocolHash = await replayProtocolHash(
+          ai,
+          true,
+          options,
+          replayProfile
+        );
       }
       if (response.modelUsage) this.usage.push(response.modelUsage);
       if (signal.aborted)
@@ -1536,6 +1634,7 @@ export class AxReact<IN extends AxGenIn, OUT extends AxGenOut> {
           const {
             history: _history,
             historyAuthority: _historyAuthority,
+            replayProfile: _replayProfile,
             maxIterations: _maxIterations,
             ...forwardOptions
           } = options;

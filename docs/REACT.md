@@ -126,8 +126,11 @@ Arguments, results, inputs, and `axReactSerializeHistory(...)` use recursive
 key-sorted canonical JSON. The history header binds replay to hashes of the
 signature, canonical executable tool catalog (names, schemas, protocol
 metadata, and the reserved `submit`), host authority/version, and replay mode.
-Native replay additionally binds the provider name and selected model so
-provider-specific call IDs are not replayed into a different native protocol.
+Native replay additionally binds the provider name, selected model, effective
+non-streaming request `modelConfig`, and a versioned Ax tool-call/ID protocol.
+Without an explicit host profile, it also binds the `AxAIService` object and
+its post-call last-used model/config so provider-specific call IDs are not
+replayed through a reconstructed or substituted native adapter.
 
 Pass a prior history to resume:
 
@@ -139,25 +142,49 @@ const resumed = await answer.forward(llm, input, {
 
 The signature, canonical input, current executable catalog, authority, and
 replay protocol must match. By default authority is scoped to one `AxReact`
-instance. To persist history across process restarts or recreate the module,
-provide a stable, non-secret host authority/version:
+instance, and native replay is scoped to one `AxAIService` object. To persist
+native history across process restarts or recreate both objects, provide stable,
+non-secret host authority and replay versions:
 
 ```typescript
 const answer = react('question:string -> answer:string', {
   functions: [lookup],
   historyAuthority: 'support-assistant:tenant-a:tools-v3',
+  replayProfile: 'openai-responses:deployment-west:gpt-5.4-mini:v2',
 });
 ```
 
-Change that value whenever tool implementation semantics, credentials,
+Change `historyAuthority` whenever tool implementation semantics, credentials,
 permissions, tenant scope, or host-provided context authority changes. Matching
-the value is an authorization decision by the host; it is not a credential or
-an integrity signature. A per-run `historyAuthority` forward option overrides
-the module default; use it on both the initial and resumed calls when one module
-serves multiple authorization scopes. Ax clones caller-owned history before
-appending. It retains the full canonical transcript for persistence while
-replaying only bounded recent context. Compaction drops only complete
-assistant/result groups, never an orphan call or result. Tune
+it is an authorization decision by the host; it is not a credential or an
+integrity signature. A per-run `historyAuthority` forward option overrides the
+module default; use it on both the initial and resumed calls when one module
+serves multiple authorization scopes.
+
+`replayProfile` is a host assertion about the complete native replay boundary,
+not a value Ax can infer from a provider name. It must identify the adapter and
+protocol/API version, endpoint or deployment, provider default model when
+`model` is omitted, provider-level model/tool-call defaults not present in the
+forward `modelConfig`, routing pin, and native call-ID semantics. Rotate it when
+any of those change, including relevant Ax/provider adapter upgrades. Do not put
+credentials or other secrets in it. Ax still hashes an explicitly requested
+model and the effective ReAct request config (`stream: false`, `n: 1`, plus the
+caller config), so those changes fail closed independently. A per-run
+`replayProfile` override supports a shared module only when the host supplies it
+on both the initial and resumed calls.
+
+When `replayProfile` is omitted, native continuation on the same provider object
+uses the last model/config Ax can introspect after a call. Ax cannot reliably
+inspect a fresh provider's default model, endpoint, deployment, or adapter
+version before that call, so cross-instance native resume fails closed instead
+of guessing. Prompt-mode history remains provider-neutral and does not require a
+replay profile. Do not durably replay native IDs through an unpinned balancer or
+router; use a profile only when the host can guarantee a protocol-stable route.
+
+Ax clones caller-owned history before appending. It retains the full canonical
+transcript for persistence while replaying only bounded recent context.
+Compaction drops only complete assistant/result groups, never an orphan call or
+result. Tune
 `maxPromptHistoryGroups`, `maxPromptHistoryCharacters`, and
 `maxPromptValueCharacters` for the selected model.
 
@@ -185,6 +212,9 @@ during tool execution does not commit a partial call/result group.
   are replayed as untrusted evidence. The caller owns storage integrity and
   must verify its own MAC/signature before passing history when tampering is in
   scope.
+- A matching `replayProfile` authorizes protocol compatibility; it does not
+  prove it. The host must rotate it for default-model, config, adapter/API,
+  endpoint/deployment, routing, or native-ID semantic changes.
 - Keep effects idempotent when a caller may retry a failed or aborted run. Ax
   guarantees transcript atomicity, not rollback of external side effects.
 

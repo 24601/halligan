@@ -639,6 +639,7 @@ describe('react', () => {
       functions: [
         tool('lookup', async ({ value }: { value: number }) => value),
       ],
+      replayProfile: 'mock-native:v1',
       maxIterations: 1,
     });
     const first = await program.forward(firstAI, { question: 'Resume me' });
@@ -703,6 +704,7 @@ describe('react', () => {
     const first = await react('question:string -> answer:string', {
       functions: [privilegedLookup],
       historyAuthority: 'tenant-a:privileged:v1',
+      replayProfile: 'native-provider:deployment-a:v1',
       maxIterations: 1,
     }).forward(firstAI, { question: 'Authorized resume' });
     expect(first.success).toBe(false);
@@ -720,6 +722,7 @@ describe('react', () => {
         })),
       ],
       historyAuthority: 'tenant-a:privileged:v1',
+      replayProfile: 'native-provider:deployment-a:v1',
     });
     await expect(
       recreated.forward(
@@ -731,6 +734,7 @@ describe('react', () => {
 
     const noTools = react('question:string -> answer:string', {
       historyAuthority: 'tenant-a:privileged:v1',
+      replayProfile: 'native-provider:deployment-a:v1',
     });
     await expect(
       noTools.forward(
@@ -754,6 +758,7 @@ describe('react', () => {
         }),
       ],
       historyAuthority: 'tenant-a:privileged:v1',
+      replayProfile: 'native-provider:deployment-a:v1',
     });
     await expect(
       changedSchema.forward(
@@ -786,7 +791,85 @@ describe('react', () => {
         { question: 'Authorized resume' },
         { history: first.history }
       )
-    ).rejects.toThrow('current replay provider/model protocol');
+    ).rejects.toThrow('current native replay profile/protocol');
+
+    const changedProtocol = react('question:string -> answer:string', {
+      functions: [privilegedLookup],
+      historyAuthority: 'tenant-a:privileged:v1',
+      replayProfile: 'native-provider:deployment-a:v2',
+    });
+    await expect(
+      changedProtocol.forward(
+        resumeAI,
+        { question: 'Authorized resume' },
+        { history: first.history }
+      )
+    ).rejects.toThrow('current native replay profile/protocol');
+  });
+
+  it('binds native replay to provider defaults, model config, and adapter identity', async () => {
+    let defaultModel = 'default-model-a';
+    let turns = 0;
+    const ai = new AxMockAIService({
+      id: 'shared-provider-id',
+      name: 'same-provider-name',
+      features: { functions: true },
+      chatResponse: async () => {
+        turns++;
+        return turns === 1
+          ? nativeTurn([{ name: 'lookup', args: { value: 1 } }])
+          : nativeTurn([]);
+      },
+    });
+    vi.spyOn(ai, 'getLastUsedChatModel').mockImplementation(() => defaultModel);
+    const program = react('question:string -> answer:string', {
+      functions: [
+        tool('lookup', async ({ value }: { value: number }) => value),
+      ],
+      maxIterations: 1,
+    });
+    const first = await program.forward(
+      ai,
+      { question: 'Replay profile binding' },
+      { modelConfig: { temperature: 0 } }
+    );
+    expect(first.success).toBe(false);
+
+    defaultModel = 'default-model-b';
+    await expect(
+      program.forward(
+        ai,
+        { question: 'Replay profile binding' },
+        { history: first.history, modelConfig: { temperature: 0 } }
+      )
+    ).rejects.toThrow('current native replay profile/protocol');
+
+    defaultModel = 'default-model-a';
+    await expect(
+      program.forward(
+        ai,
+        { question: 'Replay profile binding' },
+        { history: first.history, modelConfig: { temperature: 0.5 } }
+      )
+    ).rejects.toThrow('current native replay profile/protocol');
+
+    const differentAdapter = new AxMockAIService({
+      id: 'shared-provider-id',
+      name: 'same-provider-name',
+      features: { functions: true },
+      chatResponse: async () =>
+        nativeTurn([{ name: 'submit', args: { answer: 'not replayed' } }]),
+    });
+    vi.spyOn(differentAdapter, 'getLastUsedChatModel').mockReturnValue(
+      'default-model-a'
+    );
+    await expect(
+      program.forward(
+        differentAdapter,
+        { question: 'Replay profile binding' },
+        { history: first.history, modelConfig: { temperature: 0 } }
+      )
+    ).rejects.toThrow('current native replay profile/protocol');
   });
 
   it('accepts canonical semantic history edits as caller-owned input', async () => {
@@ -955,6 +1038,7 @@ describe('react', () => {
       functions: [
         tool('lookup', async ({ value }: { value: number }) => ({ value })),
       ],
+      replayProfile: 'mock-native:compaction:v1',
       maxIterations: 3,
       maxPromptHistoryGroups: 1,
     });
