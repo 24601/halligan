@@ -233,64 +233,167 @@ function isPositiveRequirementBound(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) > 0;
 }
 
+function frozenNullRecord<T>(
+  entries: readonly (readonly [string, unknown])[]
+): T {
+  const record = Object.create(null) as Record<string, unknown>;
+  for (const [key, value] of entries) {
+    Object.defineProperty(record, key, {
+      value,
+      enumerable: true,
+      configurable: false,
+      writable: false,
+    });
+  }
+  return Object.freeze(record) as T;
+}
+
+function ownDataValue(value: unknown, key: string, path: string): unknown {
+  if (!value || typeof value !== 'object') return undefined;
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  if (!descriptor) return undefined;
+  if (!('value' in descriptor)) {
+    throw new Error(`${path}.${key} must be an own data property`);
+  }
+  return descriptor.value;
+}
+
 function frozenProtocol(value: AxRuntimeProtocol): AxRuntimeProtocol {
-  return Object.freeze({ name: value.name, version: value.version });
+  return frozenNullRecord<AxRuntimeProtocol>([
+    ['name', ownDataValue(value, 'name', 'protocol')],
+    ['version', ownDataValue(value, 'version', 'protocol')],
+  ]);
 }
 
 function frozenPlatformAuthority(
   value: AxRuntimePlatformAuthority
 ): AxRuntimePlatformAuthority {
-  return Object.freeze(
-    Object.fromEntries(platformAuthorityKeys.map((key) => [key, value[key]]))
-  ) as AxRuntimePlatformAuthority;
+  return frozenNullRecord<AxRuntimePlatformAuthority>(
+    platformAuthorityKeys.map((key) => [
+      key,
+      ownDataValue(value, key, 'authority.platform'),
+    ])
+  );
 }
 
 function frozenAuthority(
   value: AxRuntimeCapabilities['authority']
 ): AxRuntimeCapabilities['authority'] {
-  return Object.freeze({
-    host: value.host,
-    modules: value.modules,
-    network: value.network,
-    platform: frozenPlatformAuthority(value.platform),
-  });
+  return frozenNullRecord<AxRuntimeCapabilities['authority']>([
+    ['host', ownDataValue(value, 'host', 'authority')],
+    ['modules', ownDataValue(value, 'modules', 'authority')],
+    ['network', ownDataValue(value, 'network', 'authority')],
+    [
+      'platform',
+      frozenPlatformAuthority(
+        ownDataValue(
+          value,
+          'platform',
+          'authority'
+        ) as AxRuntimePlatformAuthority
+      ),
+    ],
+  ]);
 }
 
 function frozenResources(
   value: AxRuntimeCapabilities['resources']
 ): AxRuntimeCapabilities['resources'] {
-  return Object.freeze({
-    ...(value.timeoutMs === undefined ? {} : { timeoutMs: value.timeoutMs }),
-    timeoutEnforcement: value.timeoutEnforcement,
-    ...(value.memoryMb === undefined ? {} : { memoryMb: value.memoryMb }),
-  });
+  const timeoutMs = ownDataValue(value, 'timeoutMs', 'resources');
+  const memoryMb = ownDataValue(value, 'memoryMb', 'resources');
+  return frozenNullRecord<AxRuntimeCapabilities['resources']>([
+    ...(timeoutMs === undefined ? [] : ([['timeoutMs', timeoutMs]] as const)),
+    [
+      'timeoutEnforcement',
+      ownDataValue(value, 'timeoutEnforcement', 'resources'),
+    ],
+    ...(memoryMb === undefined ? [] : ([['memoryMb', memoryMb]] as const)),
+  ]);
+}
+
+function frozenProtocols(value: unknown): readonly AxRuntimeProtocol[] {
+  if (!Array.isArray(value)) return Object.freeze([]);
+  const protocols: AxRuntimeProtocol[] = [];
+  for (let index = 0; index < value.length; index++) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, index);
+    if (!descriptor || !('value' in descriptor)) {
+      throw new Error('protocol.features must contain own data entries');
+    }
+    Object.defineProperty(protocols, index, {
+      value: frozenProtocol(descriptor.value as AxRuntimeProtocol),
+      enumerable: true,
+      configurable: false,
+      writable: false,
+    });
+  }
+  return Object.freeze(protocols);
 }
 
 /** Creates a deeply immutable declaration snapshot. Freezing is not proof. */
 export function axCreateRuntimeCapabilities(
   value: AxRuntimeCapabilities
 ): AxRuntimeCapabilities {
-  const snapshot = Object.freeze({
-    schemaVersion: value.schemaVersion,
-    inspect: value.inspect,
-    snapshot: value.snapshot,
-    patch: value.patch,
-    abort: value.abort,
-    language: value.language,
-    usageInstructions: value.usageInstructions,
-    platform: value.platform,
-    protocol: Object.freeze({
-      name: value.protocol.name,
-      version: value.protocol.version,
-      features: Object.freeze(value.protocol.features.map(frozenProtocol)),
-    }),
-    persistence: Object.freeze({
-      session: value.persistence.session,
-      restart: value.persistence.restart,
-    }),
-    resources: frozenResources(value.resources),
-    authority: frozenAuthority(value.authority),
-  });
+  const protocol = ownDataValue(value, 'protocol', 'capabilities');
+  const persistence = ownDataValue(value, 'persistence', 'capabilities');
+  const snapshot = frozenNullRecord<AxRuntimeCapabilities>([
+    ['schemaVersion', ownDataValue(value, 'schemaVersion', 'capabilities')],
+    ['inspect', ownDataValue(value, 'inspect', 'capabilities')],
+    ['snapshot', ownDataValue(value, 'snapshot', 'capabilities')],
+    ['patch', ownDataValue(value, 'patch', 'capabilities')],
+    ['abort', ownDataValue(value, 'abort', 'capabilities')],
+    ['language', ownDataValue(value, 'language', 'capabilities')],
+    [
+      'usageInstructions',
+      ownDataValue(value, 'usageInstructions', 'capabilities'),
+    ],
+    ['platform', ownDataValue(value, 'platform', 'capabilities')],
+    [
+      'protocol',
+      frozenNullRecord<AxRuntimeCapabilities['protocol']>([
+        ['name', ownDataValue(protocol, 'name', 'capabilities.protocol')],
+        ['version', ownDataValue(protocol, 'version', 'capabilities.protocol')],
+        [
+          'features',
+          frozenProtocols(
+            ownDataValue(protocol, 'features', 'capabilities.protocol')
+          ),
+        ],
+      ]),
+    ],
+    [
+      'persistence',
+      frozenNullRecord<AxRuntimeCapabilities['persistence']>([
+        [
+          'session',
+          ownDataValue(persistence, 'session', 'capabilities.persistence'),
+        ],
+        [
+          'restart',
+          ownDataValue(persistence, 'restart', 'capabilities.persistence'),
+        ],
+      ]),
+    ],
+    [
+      'resources',
+      frozenResources(
+        ownDataValue(
+          value,
+          'resources',
+          'capabilities'
+        ) as AxRuntimeCapabilities['resources']
+      ),
+    ],
+    [
+      'authority',
+      frozenAuthority(
+        ownDataValue(
+          value,
+          'authority',
+          'capabilities'
+        ) as AxRuntimeCapabilities['authority']
+      ),
+    ],
+  ]);
   if (!isRuntimeCapabilities(snapshot)) {
     throw new Error('Invalid Ax runtime capabilities declaration');
   }
@@ -439,20 +542,26 @@ function snapshotDeclaration(
   runtime: AxCodeRuntime
 ): AxRuntimeCapabilities | null {
   try {
-    return isRuntimeCapabilities(runtime.capabilities)
-      ? axCreateRuntimeCapabilities(runtime.capabilities)
-      : null;
+    const declaration = ownDataValue(runtime, 'capabilities', 'runtime') as
+      | AxRuntimeCapabilities
+      | undefined;
+    return declaration ? axCreateRuntimeCapabilities(declaration) : null;
   } catch {
     return null;
   }
 }
 
-function assertRequirementDataTree(
+function captureRequirementDataTree(
   value: unknown,
   path: string,
   seen: WeakSet<object>
-): void {
-  if (value === null || typeof value !== 'object') return;
+): unknown {
+  if (value === null || typeof value !== 'object') {
+    if (['function', 'symbol', 'bigint'].includes(typeof value)) {
+      throw new Error(`${path} has an unsupported value`);
+    }
+    return value;
+  }
   if (seen.has(value)) {
     throw new Error(`${path} must not contain cycles`);
   }
@@ -473,6 +582,9 @@ function assertRequirementDataTree(
   if (isArray && !requirementArrayPaths.has(path)) {
     throw new Error(`${path} has an unsupported array value`);
   }
+  const captured: unknown[] | Record<string, unknown> = isArray
+    ? []
+    : Object.create(null);
   for (const key of Reflect.ownKeys(descriptors)) {
     if (typeof key !== 'string') {
       throw new Error(`${path} contains unsupported symbol fields`);
@@ -491,7 +603,16 @@ function assertRequirementDataTree(
     if (!descriptor.enumerable) {
       throw new Error(`${path}.${key} must be enumerable`);
     }
-    assertRequirementDataTree(descriptor.value, `${path}.${key}`, seen);
+    Object.defineProperty(captured, key, {
+      value: captureRequirementDataTree(
+        descriptor.value,
+        `${path}.${key}`,
+        seen
+      ),
+      enumerable: true,
+      configurable: false,
+      writable: false,
+    });
   }
   if (isArray) {
     const length = descriptors.length?.value;
@@ -502,34 +623,7 @@ function assertRequirementDataTree(
     }
   }
   seen.delete(value);
-}
-
-function freezeRequirementTree(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    const array: unknown[] = [];
-    for (let index = 0; index < value.length; index++) {
-      Object.defineProperty(array, index, {
-        value: freezeRequirementTree(value[index]),
-        enumerable: true,
-        configurable: false,
-        writable: false,
-      });
-    }
-    return Object.freeze(array);
-  }
-  if (value && typeof value === 'object') {
-    const record = Object.create(null) as Record<string, unknown>;
-    for (const [key, child] of Object.entries(value)) {
-      Object.defineProperty(record, key, {
-        value: freezeRequirementTree(child),
-        enumerable: true,
-        configurable: false,
-        writable: false,
-      });
-    }
-    return Object.freeze(record);
-  }
-  return value;
+  return Object.freeze(captured);
 }
 
 function requirementValues<T>(value: T | readonly T[]): readonly T[] {
@@ -558,11 +652,12 @@ function snapshotRequirements(
   requirements: AxRuntimeCapabilityRequirements
 ): AxRuntimeCapabilityRequirements {
   try {
-    // Accessors are rejected before structuredClone can invoke them. The clone
-    // also rejects Proxy exotic objects, functions, and other non-data input.
-    assertRequirementDataTree(requirements, 'requirements', new WeakSet());
-    return freezeRequirementTree(
-      structuredClone(requirements)
+    // Capture each own descriptor value directly into the canonical tree. Proxy
+    // reflection can be effectful, but the source graph is never reread.
+    return captureRequirementDataTree(
+      requirements,
+      'requirements',
+      new WeakSet()
     ) as AxRuntimeCapabilityRequirements;
   } catch (error) {
     throw new Error(
@@ -764,6 +859,37 @@ function validateAdmissionEvidence(evidence: AxRuntimeAdmissionEvidence): void {
   }
 }
 
+function snapshotAdmissionEvidence(
+  evidence: AxRuntimeAdmissionEvidence
+): AxRuntimeAdmissionEvidence {
+  const snapshot = frozenNullRecord<AxRuntimeAdmissionEvidence>([
+    ['evaluator', ownDataValue(evidence, 'evaluator', 'admission')],
+    ['source', ownDataValue(evidence, 'source', 'admission')],
+    [
+      'authority',
+      frozenAuthority(
+        ownDataValue(
+          evidence,
+          'authority',
+          'admission'
+        ) as AxRuntimeCapabilities['authority']
+      ),
+    ],
+    [
+      'resources',
+      frozenResources(
+        ownDataValue(
+          evidence,
+          'resources',
+          'admission'
+        ) as AxRuntimeCapabilities['resources']
+      ),
+    ],
+  ]);
+  validateAdmissionEvidence(snapshot);
+  return snapshot;
+}
+
 /**
  * Host admission boundary for security-sensitive matching. The runtime cannot
  * self-attach a valid receipt; the host must mint and pass it to selection.
@@ -772,14 +898,22 @@ export function axCreateRuntimeAdmissionReceipt(
   runtime: AxCodeRuntime,
   evidence: AxRuntimeAdmissionEvidence
 ): AxRuntimeAdmissionReceipt {
-  validateAdmissionEvidence(evidence);
-  const implementation = Object.freeze({
-    language: runtime.language,
-    createSession: runtime.createSession,
-    getUsageInstructions: runtime.getUsageInstructions,
-    getPrimitiveOverrides: runtime.getPrimitiveOverrides,
-    formatCallable: runtime.formatCallable,
-  });
+  const evidenceSnapshot = snapshotAdmissionEvidence(evidence);
+  const implementation = frozenNullRecord<
+    Readonly<{
+      language: string | undefined;
+      createSession: AxCodeRuntime['createSession'];
+      getUsageInstructions: AxCodeRuntime['getUsageInstructions'];
+      getPrimitiveOverrides: AxCodeRuntime['getPrimitiveOverrides'];
+      formatCallable: AxCodeRuntime['formatCallable'];
+    }>
+  >([
+    ['language', runtime.language],
+    ['createSession', runtime.createSession],
+    ['getUsageInstructions', runtime.getUsageInstructions],
+    ['getPrimitiveOverrides', runtime.getPrimitiveOverrides],
+    ['formatCallable', runtime.formatCallable],
+  ]);
   if (
     typeof implementation.createSession !== 'function' ||
     typeof implementation.getUsageInstructions !== 'function' ||
@@ -790,30 +924,34 @@ export function axCreateRuntimeAdmissionReceipt(
   ) {
     throw new Error('Runtime admission implementation is malformed');
   }
-  const executable: AxCodeRuntime = Object.freeze({
+  const executable = frozenNullRecord<AxCodeRuntime>([
     ...(implementation.language === undefined
-      ? {}
-      : { language: implementation.language }),
-    createSession: implementation.createSession.bind(runtime),
-    getUsageInstructions: implementation.getUsageInstructions.bind(runtime),
+      ? []
+      : ([['language', implementation.language]] as const)),
+    ['createSession', implementation.createSession.bind(runtime)],
+    ['getUsageInstructions', implementation.getUsageInstructions.bind(runtime)],
     ...(implementation.getPrimitiveOverrides
-      ? {
-          getPrimitiveOverrides:
+      ? ([
+          [
+            'getPrimitiveOverrides',
             implementation.getPrimitiveOverrides.bind(runtime),
-        }
-      : {}),
+          ],
+        ] as const)
+      : []),
     ...(implementation.formatCallable
-      ? { formatCallable: implementation.formatCallable.bind(runtime) }
-      : {}),
-  });
-  const receipt = Object.freeze({
-    runtime,
-    executable,
-    evaluator: evidence.evaluator,
-    source: evidence.source,
-    authority: frozenAuthority(evidence.authority),
-    resources: frozenResources(evidence.resources),
-  });
+      ? ([
+          ['formatCallable', implementation.formatCallable.bind(runtime)],
+        ] as const)
+      : []),
+  ]);
+  const receipt = frozenNullRecord<AxRuntimeAdmissionReceipt>([
+    ['runtime', runtime],
+    ['executable', executable],
+    ['evaluator', evidenceSnapshot.evaluator],
+    ['source', evidenceSnapshot.source],
+    ['authority', evidenceSnapshot.authority],
+    ['resources', evidenceSnapshot.resources],
+  ]);
   admissionReceipts.add(receipt);
   admittedImplementations.set(receipt, implementation);
   return receipt;

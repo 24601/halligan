@@ -163,6 +163,12 @@ describe('AxIR capability conversion', () => {
     expect(axRuntimeCapabilitiesToAxIR(extended)).toEqual(axir);
     expect(Object.isFrozen(extended)).toBe(true);
     expect(Object.isFrozen(extended.authority.platform)).toBe(true);
+    expect(Object.getPrototypeOf(extended)).toBeNull();
+    expect(Object.getPrototypeOf(extended.protocol)).toBeNull();
+    expect(Object.getPrototypeOf(extended.persistence)).toBeNull();
+    expect(Object.getPrototypeOf(extended.resources)).toBeNull();
+    expect(Object.getPrototypeOf(extended.authority)).toBeNull();
+    expect(Object.getPrototypeOf(extended.authority.platform)).toBeNull();
   });
 
   it('normalizes feature protocol tokens onto the shared protocol path', () => {
@@ -382,7 +388,7 @@ describe('axSelectCodeRuntime', () => {
     expect(authorityReads).toBe(0);
   });
 
-  it('rejects proxied resources after reflection without value reads', () => {
+  it('captures proxied resources after reflection without value reads', () => {
     let resourceReads = 0;
     let prototypeReads = 0;
     let ownKeyReads = 0;
@@ -417,11 +423,44 @@ describe('axSelectCodeRuntime', () => {
 
     expect(() =>
       axSelectCodeRuntime([runtime(capabilities())], requirements)
-    ).toThrow(/unable to create an immutable data snapshot/);
+    ).toThrow(/trusted host admission receipt/);
     expect(resourceReads).toBe(0);
     expect(prototypeReads).toBeGreaterThan(0);
     expect(ownKeyReads).toBeGreaterThan(0);
     expect(descriptorReads).toBeGreaterThan(0);
+  });
+
+  it('does not reread source fields after nested Proxy reflection', () => {
+    let accessorReads = 0;
+    let reflectionReads = 0;
+    const authority: Record<string, unknown> = { host: 'denied' };
+    authority.platform = new Proxy(
+      { filesystem: 'denied' },
+      {
+        getPrototypeOf(target) {
+          reflectionReads++;
+          Object.defineProperty(authority, 'host', {
+            configurable: true,
+            enumerable: true,
+            get() {
+              accessorReads++;
+              return undefined;
+            },
+          });
+          return Reflect.getPrototypeOf(target);
+        },
+      }
+    );
+    const requirements = {
+      schemaVersion: axRuntimeCapabilityRequirementsVersion,
+      authority,
+    } as never;
+
+    expect(() =>
+      axSelectCodeRuntime([runtime(capabilities())], requirements)
+    ).toThrow(/trusted host admission receipt/);
+    expect(reflectionReads).toBeGreaterThan(0);
+    expect(accessorReads).toBe(0);
   });
 
   it('ignores inherited requirement fields on canonical records', () => {
@@ -453,7 +492,7 @@ describe('axSelectCodeRuntime', () => {
     expect(selected).toMatchObject({ runtime: candidate, index: 0 });
   });
 
-  it('rejects non-enumerable security requirements before cloning', () => {
+  it('rejects non-enumerable security requirements during capture', () => {
     const requirements = {
       schemaVersion: axRuntimeCapabilityRequirementsVersion,
     } as Record<string, unknown>;
@@ -581,6 +620,99 @@ describe('axSelectCodeRuntime', () => {
     selected.runtime.createSession();
     expect(admittedExecutions).toBe(1);
     expect(replacementExecutions).toBe(0);
+  });
+
+  it('ignores inherited optional resource bounds in admissions', () => {
+    const authority = admissionEvidence().authority;
+    const evidence = admissionEvidence({
+      resources: { timeoutEnforcement: 'hard' },
+    });
+    let timeoutReads = 0;
+    let memoryReads = 0;
+    let selectionError: unknown;
+    const previousTimeout = Object.getOwnPropertyDescriptor(
+      Object.prototype,
+      'timeoutMs'
+    );
+    const previousMemory = Object.getOwnPropertyDescriptor(
+      Object.prototype,
+      'memoryMb'
+    );
+    let candidate: AxCodeRuntime | undefined;
+    let admission:
+      | ReturnType<typeof axCreateRuntimeAdmissionReceipt>
+      | undefined;
+    Object.defineProperties(Object.prototype, {
+      timeoutMs: {
+        configurable: true,
+        get() {
+          timeoutReads++;
+          return 1;
+        },
+      },
+      memoryMb: {
+        configurable: true,
+        get() {
+          memoryReads++;
+          return 1;
+        },
+      },
+    });
+    try {
+      candidate = runtime(
+        capabilities({
+          authority,
+          resources: { timeoutEnforcement: 'hard' },
+        })
+      );
+      admission = axCreateRuntimeAdmissionReceipt(candidate, evidence);
+      try {
+        axSelectCodeRuntime(
+          [candidate],
+          {
+            schemaVersion: axRuntimeCapabilityRequirementsVersion,
+            resources: { maxTimeoutMs: 1, maxMemoryMb: 1 },
+          },
+          { admissions: [admission] }
+        );
+      } catch (error) {
+        selectionError = error;
+      }
+    } finally {
+      if (previousTimeout) {
+        Object.defineProperty(Object.prototype, 'timeoutMs', previousTimeout);
+      } else {
+        Reflect.deleteProperty(Object.prototype, 'timeoutMs');
+      }
+      if (previousMemory) {
+        Object.defineProperty(Object.prototype, 'memoryMb', previousMemory);
+      } else {
+        Reflect.deleteProperty(Object.prototype, 'memoryMb');
+      }
+    }
+
+    expect(timeoutReads).toBe(0);
+    expect(memoryReads).toBe(0);
+    expect(candidate).toBeDefined();
+    expect(admission).toBeDefined();
+    expect(Object.getPrototypeOf(admission)).toBeNull();
+    expect(Object.getPrototypeOf(admission?.resources)).toBeNull();
+    expect(Object.getPrototypeOf(admission?.authority)).toBeNull();
+    expect(Object.getPrototypeOf(admission?.executable)).toBeNull();
+    expect(Object.getPrototypeOf(candidate?.capabilities)).toBeNull();
+    expect(
+      Object.getPrototypeOf(candidate?.capabilities?.resources)
+    ).toBeNull();
+    expect(
+      Object.hasOwn(candidate?.capabilities?.resources ?? {}, 'timeoutMs')
+    ).toBe(false);
+    expect(
+      Object.hasOwn(candidate?.capabilities?.resources ?? {}, 'memoryMb')
+    ).toBe(false);
+    expect(selectionError).toBeInstanceOf(Error);
+    expect((selectionError as Error).message).toMatch(
+      /requires timeout at most 1ms.*requires memory limit at most 1MB/s
+    );
   });
 
   it('matches base and feature protocols through one path', () => {

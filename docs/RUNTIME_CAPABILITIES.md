@@ -47,17 +47,24 @@ insufficient declarations are rejected.
 
 At selector ingress, requirements are accepted only as realm-local plain
 objects and dense arrays with enumerable own-data properties: accessors,
-symbols, hidden fields, cycles, exotic and cross-realm objects, and proxies are
-rejected. Descriptor preflight can invoke a Proxy's `getPrototypeOf`, `ownKeys`,
-and `getOwnPropertyDescriptor` traps before cloning rejects it, so callers must
-not pass effectful proxies. The boundary cannot portably identify a Proxy
-without observing reflection traps.
+symbols, hidden fields, cycles, and exotic and cross-realm objects are rejected.
+Proxies cannot be identified portably: their `getPrototypeOf`, `ownKeys`, and
+`getOwnPropertyDescriptor` traps may run while descriptors are captured, so
+callers must not pass effectful proxies. Each observed descriptor value is
+detached directly into the canonical tree; the live source graph is not
+traversed again and property-value getters are not used.
 
 Accepted input is rebuilt as deeply frozen null-prototype records and dense
 arrays. Only that canonical snapshot is used for schema validation, admission
 gating, and matching; inherited properties are never requirements. This
 prevents caller-owned values from changing between those steps, but does not
 treat freezing as security proof.
+
+Capability declarations, admission receipts, authority records, resource
+records, persistence records, and protocol records use the same frozen
+null-prototype boundary. Optional timeout and memory bounds are copied only
+from own data properties; ambient prototype values cannot become admitted
+bounds.
 
 Inspect/snapshot/patch/abort, language, platform, protocol, and persistence may
 be matched against the immutable declaration snapshot. Authority and resource
