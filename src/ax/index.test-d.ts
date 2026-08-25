@@ -12,12 +12,14 @@ import {
   type AxAIOpenAIResponsesConfig,
   type AxAIOpenAIResponsesRequest,
   type AxAIService,
+  type AxCodeRuntime,
   type AxFunction,
   type AxFunctionHandler,
   type AxParetoResult,
   type AxProgrammable,
   type AxProgramSource,
   ax,
+  axProgramSourceRuntimeProtocol,
   f,
   flow,
   fn,
@@ -595,3 +597,16 @@ sourceProgram.forward(optimizeAI, { userQuestion: 'hello' }).then((output) => {
 });
 // @ts-expect-error missing required input
 void sourceProgram.forward(optimizeAI, {});
+
+declare const customCodeRuntime: AxCodeRuntime;
+programSource('question:string -> answer:string', {
+  runtime: {
+    runtime: customCodeRuntime,
+    protocol: axProgramSourceRuntimeProtocol,
+  },
+  valueLimits: { maxBytes: 65_536, maxDepth: 12, maxWidth: 256 },
+});
+// @ts-expect-error custom runtimes require an explicit compatibility wrapper
+programSource('question:string -> answer:string', {
+  runtime: customCodeRuntime,
+});

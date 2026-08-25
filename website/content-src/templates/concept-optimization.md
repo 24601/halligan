@@ -89,10 +89,13 @@ replace the complete implementation and control flow, not only an instruction.
 Candidate source is a strict `ax-program-source/v1` JSON AST with explicit
 predictor/tool capabilities. It is never evaluated as host JavaScript: a fixed
 Ax interpreter runs it in the default locked-down worker runtime with call,
-iteration, and wall-clock budgets. Parse/bind failures reject the candidate,
-runtime failures are scored against their aligned examples, and the immutable
-signature strictly validates final output fields. This experimental API is not
-yet part of the generated-language AxIR surface.
+iteration, wall-clock, JSON value, and Node worker-resource budgets. Timed-out
+execution epochs reject late bridge results, while already-dispatched external
+effects remain host-owned. Parse/bind failures reject the candidate, runtime
+failures are scored against their aligned examples, and the immutable signature
+strictly validates final output fields. Custom runtimes require explicit
+JavaScript/protocol compatibility but remain trusted adapters. This experimental
+API is not yet part of the generated-language AxIR surface.
 
 See the
 [program-source design and bounded evaluation](https://github.com/ax-llm/ax/blob/main/docs/PROGRAM_SOURCE.md)

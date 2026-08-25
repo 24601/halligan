@@ -1,4 +1,4 @@
-import type { AxCodeRuntime } from '../agent/rlm.js';
+import type { AxCodeRuntime, AxCodeSession } from '../agent/rlm.js';
 import type { AxAIService, AxFunction } from '../ai/types.js';
 import { AxJSRuntime } from '../funcs/jsRuntime.js';
 import { validateStructuredOutputValues } from './extract.js';
@@ -20,6 +20,14 @@ import type {
 import { validateValue } from './util.js';
 
 export const axProgramSourceVersion = 'ax-program-source/v1' as const;
+export const axProgramSourceRuntimeProtocol =
+  'ax-program-source-runtime/js-v1' as const;
+
+export const axProgramSourceDefaultNodeResourceLimits = Object.freeze({
+  maxOldGenerationSizeMb: 64,
+  maxYoungGenerationSizeMb: 16,
+  stackSizeMb: 4,
+});
 
 export type AxProgramSourceCapability = 'predict' | `tool:${string}`;
 
@@ -97,17 +105,37 @@ export type AxProgramSourceState = Readonly<{
   source: string;
 }>;
 
+export type AxProgramSourceRuntime = Readonly<{
+  runtime: AxCodeRuntime;
+  protocol: typeof axProgramSourceRuntimeProtocol;
+}>;
+
+export type AxProgramSourceValueLimits = Readonly<{
+  /** Maximum JSON-wire bytes for any input, bridge argument/result, or output. */
+  maxBytes: number;
+  /** Maximum object/array nesting depth, with the root at depth zero. */
+  maxDepth: number;
+  /** Maximum entries in any one object or array. */
+  maxWidth: number;
+}>;
+
+export type AxProgramSourceLateBridgeEvent = Readonly<{
+  epoch: number;
+  kind: 'predictor' | 'tool';
+  name: string;
+  phase: 'call' | 'completion';
+  reason: string;
+  elapsedMs: number;
+}>;
+
 export type AxProgramSourceOptions = AxProgramOptions &
   Readonly<{
     /** Host tools that source may name. These are the only non-LM capabilities. */
     tools?: readonly AxFunction[];
     /** Initial source. Omit to seed a single-predictor implementation. */
     source?: string;
-    /**
-     * Runtime asked to create one session per forward. The default is a
-     * locked-down AxJSRuntime worker.
-     */
-    runtime?: AxCodeRuntime;
+    /** Explicit JavaScript/protocol-compatible runtime. Omit for AxJSRuntime. */
+    runtime?: AxProgramSourceRuntime;
     /** Maximum bridged predictor calls per forward. Default: 16. */
     maxPredictorCalls?: number;
     /** Maximum direct and predictor-mediated tool calls per forward. Default: 32. */
@@ -116,8 +144,10 @@ export type AxProgramSourceOptions = AxProgramOptions &
     maxIterations?: number;
     /** Maximum AxGen continuation steps inside one predictor call. Default: 8. */
     maxStepsPerPredictor?: number;
-    /** Default AxJSRuntime wall-clock timeout. Ignored for a custom runtime. */
+    /** Wall-clock authority timeout for the runtime and host bridges. */
     timeoutMs?: number;
+    /** Serializable JSON graph limits applied at every runtime boundary. */
+    valueLimits?: Partial<AxProgramSourceValueLimits>;
   }>;
 
 export class AxProgramSourceError extends Error {
@@ -134,6 +164,13 @@ export class AxProgramSourceBudgetError extends AxProgramSourceError {
   }
 }
 
+export class AxProgramSourceSessionExpiredError extends AxProgramSourceError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AxProgramSourceSessionExpiredError';
+  }
+}
+
 type BoundProgramSource = {
   document: AxProgramSourceDocument;
   source: string;
@@ -142,6 +179,12 @@ type BoundProgramSource = {
 const MAX_SOURCE_LENGTH = 50_000;
 const MAX_SOURCE_STATEMENTS = 128;
 const MAX_SOURCE_NESTING = 8;
+const MAX_LATE_BRIDGE_EVENTS = 128;
+const DEFAULT_VALUE_LIMITS: AxProgramSourceValueLimits = Object.freeze({
+  maxBytes: 1_048_576,
+  maxDepth: 24,
+  maxWidth: 4_096,
+});
 const FORBIDDEN_PATH_SEGMENTS = new Set([
   '__proto__',
   'constructor',
@@ -153,6 +196,187 @@ const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
+
+const jsonStringByteLength = (value: string): number => {
+  let bytes = 2;
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index);
+    if (
+      unit === 0x22 ||
+      unit === 0x5c ||
+      unit === 0x08 ||
+      unit === 0x09 ||
+      unit === 0x0a ||
+      unit === 0x0c ||
+      unit === 0x0d
+    ) {
+      bytes += 2;
+    } else if (unit <= 0x1f) {
+      bytes += 6;
+    } else if (unit <= 0x7f) {
+      bytes += 1;
+    } else if (unit <= 0x7ff) {
+      bytes += 2;
+    } else if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        bytes += 4;
+        index += 1;
+      } else {
+        bytes += 6;
+      }
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+      bytes += 6;
+    } else {
+      bytes += 3;
+    }
+  }
+  return bytes;
+};
+
+const validateSerializableValue = (
+  value: unknown,
+  limits: Readonly<AxProgramSourceValueLimits>,
+  label: string
+): void => {
+  let bytes = 0;
+  const ancestors = new WeakSet<object>();
+  const consume = (amount: number) => {
+    bytes += amount;
+    if (bytes > limits.maxBytes) {
+      throw new AxProgramSourceBudgetError(
+        `${label} exceeds serialized value byte limit: ${limits.maxBytes}`
+      );
+    }
+  };
+  const visit = (current: unknown, depth: number, path: string): void => {
+    if (depth > limits.maxDepth) {
+      throw new AxProgramSourceBudgetError(
+        `${label} exceeds value depth limit: ${limits.maxDepth} at ${path}`
+      );
+    }
+    if (current === null) {
+      consume(4);
+      return;
+    }
+    switch (typeof current) {
+      case 'string':
+        consume(jsonStringByteLength(current));
+        return;
+      case 'number':
+        if (!Number.isFinite(current)) {
+          throw new AxProgramSourceError(
+            `${label} is not JSON-serializable: non-finite number at ${path}`
+          );
+        }
+        consume(Object.is(current, -0) ? 1 : String(current).length);
+        return;
+      case 'boolean':
+        consume(current ? 4 : 5);
+        return;
+      case 'object':
+        break;
+      default:
+        throw new AxProgramSourceError(
+          `${label} is not JSON-serializable: ${typeof current} at ${path}`
+        );
+    }
+
+    if (ancestors.has(current)) {
+      throw new AxProgramSourceError(
+        `${label} is not JSON-serializable: cyclic value at ${path}`
+      );
+    }
+    ancestors.add(current);
+    try {
+      if (Array.isArray(current)) {
+        if (current.length > limits.maxWidth) {
+          throw new AxProgramSourceBudgetError(
+            `${label} exceeds value width limit: ${limits.maxWidth} at ${path}`
+          );
+        }
+        if (Object.getOwnPropertySymbols(current).length > 0) {
+          throw new AxProgramSourceError(
+            `${label} is not JSON-serializable: symbol key at ${path}`
+          );
+        }
+        const extraKeys = Object.keys(current).filter(
+          (key) =>
+            !/^0$|^[1-9][0-9]*$/.test(key) || Number(key) >= current.length
+        );
+        if (extraKeys.length > 0) {
+          throw new AxProgramSourceError(
+            `${label} is not JSON-serializable: array property '${extraKeys[0]}' at ${path}`
+          );
+        }
+        consume(2 + Math.max(0, current.length - 1));
+        for (let index = 0; index < current.length; index += 1) {
+          const descriptor = Object.getOwnPropertyDescriptor(
+            current,
+            String(index)
+          );
+          if (
+            !descriptor ||
+            !descriptor.enumerable ||
+            !('value' in descriptor)
+          ) {
+            throw new AxProgramSourceError(
+              `${label} is not JSON-serializable: sparse or accessor array value at ${path}[${index}]`
+            );
+          }
+          visit(descriptor.value, depth + 1, `${path}[${index}]`);
+        }
+        return;
+      }
+
+      const prototype = Object.getPrototypeOf(current);
+      if (prototype !== Object.prototype && prototype !== null) {
+        throw new AxProgramSourceError(
+          `${label} is not JSON-serializable: non-plain object at ${path}`
+        );
+      }
+      const keys = Reflect.ownKeys(current);
+      if (keys.some((key) => typeof key !== 'string')) {
+        throw new AxProgramSourceError(
+          `${label} is not JSON-serializable: symbol key at ${path}`
+        );
+      }
+      if (keys.length > limits.maxWidth) {
+        throw new AxProgramSourceBudgetError(
+          `${label} exceeds value width limit: ${limits.maxWidth} at ${path}`
+        );
+      }
+      consume(2 + Math.max(0, keys.length - 1));
+      for (const key of keys as string[]) {
+        if (FORBIDDEN_PATH_SEGMENTS.has(key)) {
+          throw new AxProgramSourceError(
+            `${label} contains unsafe object key '${key}' at ${path}`
+          );
+        }
+        const descriptor = Object.getOwnPropertyDescriptor(current, key);
+        if (!descriptor || !descriptor.enumerable || !('value' in descriptor)) {
+          throw new AxProgramSourceError(
+            `${label} is not JSON-serializable: non-data property '${key}' at ${path}`
+          );
+        }
+        consume(jsonStringByteLength(key) + 1);
+        visit(descriptor.value, depth + 1, `${path}.${key}`);
+      }
+    } finally {
+      ancestors.delete(current);
+    }
+  };
+
+  try {
+    visit(value, 0, '$');
+  } catch (error) {
+    if (error instanceof AxProgramSourceError) throw error;
+    throw new AxProgramSourceError(
+      `${label} could not be inspected as a serializable value`,
+      { cause: error }
+    );
+  }
+};
 
 function fail(path: string, message: string): never {
   throw new AxProgramSourceError(
@@ -900,6 +1124,10 @@ export class AxProgramSource<
   private readonly maxToolCalls: number;
   private readonly maxIterations: number;
   private readonly maxStepsPerPredictor: number;
+  private readonly timeoutMs: number;
+  private readonly valueLimits: AxProgramSourceValueLimits;
+  private nextSessionEpoch = 0;
+  private readonly lateBridgeEvents: AxProgramSourceLateBridgeEvent[] = [];
   private boundSource: BoundProgramSource;
 
   constructor(
@@ -945,10 +1173,43 @@ export class AxProgramSource<
       options?.maxStepsPerPredictor ?? 8,
       1
     );
-    this.runtime =
-      options?.runtime ??
-      new AxJSRuntime({
-        timeout: options?.timeoutMs ?? 30_000,
+    this.timeoutMs = validateBudget(
+      'timeoutMs',
+      options?.timeoutMs ?? 30_000,
+      1
+    );
+    this.valueLimits = Object.freeze({
+      maxBytes: validateBudget(
+        'valueLimits.maxBytes',
+        options?.valueLimits?.maxBytes ?? DEFAULT_VALUE_LIMITS.maxBytes,
+        1
+      ),
+      maxDepth: validateBudget(
+        'valueLimits.maxDepth',
+        options?.valueLimits?.maxDepth ?? DEFAULT_VALUE_LIMITS.maxDepth,
+        0
+      ),
+      maxWidth: validateBudget(
+        'valueLimits.maxWidth',
+        options?.valueLimits?.maxWidth ?? DEFAULT_VALUE_LIMITS.maxWidth,
+        1
+      ),
+    });
+    if (options?.runtime) {
+      if (options.runtime.protocol !== axProgramSourceRuntimeProtocol) {
+        throw new AxProgramSourceError(
+          `Custom runtime protocol must be '${axProgramSourceRuntimeProtocol}'`
+        );
+      }
+      if (options.runtime.runtime.language !== 'JavaScript') {
+        throw new AxProgramSourceError(
+          "Custom program-source runtime language must be 'JavaScript'"
+        );
+      }
+      this.runtime = options.runtime.runtime;
+    } else {
+      this.runtime = new AxJSRuntime({
+        timeout: this.timeoutMs,
         permissions: [],
         outputMode: 'return',
         captureConsole: false,
@@ -959,8 +1220,10 @@ export class AxProgramSource<
         blockShadowRealm: true,
         lockWorkerIPC: true,
         useNodePermissionModel: 'auto',
+        resourceLimits: axProgramSourceDefaultNodeResourceLimits,
         allowDenoRemoteImport: false,
       });
+    }
     this.boundSource = this.bind(
       options?.source ?? seedProgramSource(this.signature, tools)
     );
@@ -977,6 +1240,10 @@ export class AxProgramSource<
 
   public getCapabilities(): readonly AxProgramSourceCapability[] {
     return [...this.boundSource.document.capabilities];
+  }
+
+  public getLateBridgeEvents(): readonly AxProgramSourceLateBridgeEvent[] {
+    return this.lateBridgeEvents.map((event) => ({ ...event }));
   }
 
   public dumpState(): AxProgramSourceState {
@@ -1029,6 +1296,7 @@ export class AxProgramSource<
       'The final top-level statement must return every required outer output and no undeclared outputs.',
       `Every forEach must declare maxIterations no greater than ${this.maxIterations}.`,
       `Runtime budgets per example: ${this.maxPredictorCalls} predictor calls, ${this.maxToolCalls} tool calls, ${this.maxIterations} executed statements/loop iterations, ${this.maxStepsPerPredictor} continuation steps per predictor.`,
+      `Every input, bridge argument/result, and output is limited to ${this.valueLimits.maxBytes} serialized JSON bytes, depth ${this.valueLimits.maxDepth}, and width ${this.valueLimits.maxWidth}.`,
       'Source is a data-only control-flow AST. JavaScript, eval, Function, imports, filesystem, process, network, ambient globals, mutable cross-call state, and dynamic capability construction are unsupported.',
       'Do not hard-code train examples or expected answers. Prefer deterministic control flow only when it generalizes from the declared inputs.',
     ].join('\n');
@@ -1085,7 +1353,50 @@ export class AxProgramSource<
       }
       validateValue(field, value as never);
     }
+    validateSerializableValue(values, this.valueLimits, 'Program source input');
 
+    const epoch = ++this.nextSessionEpoch;
+    const authorityStartedAt = Date.now();
+    const authorityAbort = new AbortController();
+    let authorityActive = true;
+    let authorityReason = 'session active';
+    let rejectExpiration: ((error: Error) => void) | undefined;
+    const expiredError = () =>
+      new AxProgramSourceSessionExpiredError(
+        `Program source session ${epoch} expired: ${authorityReason}`
+      );
+    const recordLateBridge = (
+      kind: AxProgramSourceLateBridgeEvent['kind'],
+      name: string,
+      phase: AxProgramSourceLateBridgeEvent['phase']
+    ) => {
+      if (this.lateBridgeEvents.length >= MAX_LATE_BRIDGE_EVENTS) return;
+      this.lateBridgeEvents.push({
+        epoch,
+        kind,
+        name,
+        phase,
+        reason: authorityReason,
+        elapsedMs: Date.now() - authorityStartedAt,
+      });
+    };
+    const assertAuthority = (
+      kind: AxProgramSourceLateBridgeEvent['kind'],
+      name: string,
+      phase: AxProgramSourceLateBridgeEvent['phase']
+    ) => {
+      if (authorityActive) return;
+      recordLateBridge(kind, name, phase);
+      throw expiredError();
+    };
+    const revokeAuthority = (reason: string) => {
+      if (!authorityActive) return;
+      authorityActive = false;
+      authorityReason = reason;
+      const error = expiredError();
+      rejectExpiration?.(error);
+      authorityAbort.abort(error);
+    };
     let predictorCalls = 0;
     let toolCalls = 0;
     const callTool = async (
@@ -1093,6 +1404,13 @@ export class AxProgramSource<
       args: unknown,
       emitTrace: boolean
     ): Promise<unknown> => {
+      assertAuthority('tool', name, 'call');
+      const normalizedArgs = args ?? {};
+      validateSerializableValue(
+        normalizedArgs,
+        this.valueLimits,
+        `Program source tool '${name}' arguments`
+      );
       toolCalls += 1;
       if (toolCalls > this.maxToolCalls) {
         throw new AxProgramSourceBudgetError(
@@ -1110,27 +1428,40 @@ export class AxProgramSource<
           {
             id: `program-source-${toolCalls}`,
             name,
-            args: JSON.stringify(args ?? {}),
+            args: JSON.stringify(normalizedArgs),
           },
-          { ...options, ai }
+          { ...options, ai, abortSignal: authorityAbort.signal }
+        );
+        assertAuthority('tool', name, 'completion');
+        validateSerializableValue(
+          result.rawResult,
+          this.valueLimits,
+          `Program source tool '${name}' result`
         );
         if (emitTrace) {
           await options?.onFunctionCall?.({
             fn: name,
             componentId: tool.componentId ?? name,
-            args,
+            args: normalizedArgs,
             result: result.rawResult,
             ok: true,
             ms: Date.now() - startedAt,
           });
+          assertAuthority('tool', name, 'completion');
         }
         return result.rawResult;
       } catch (error) {
+        if (!authorityActive) {
+          if (!(error instanceof AxProgramSourceSessionExpiredError)) {
+            recordLateBridge('tool', name, 'completion');
+          }
+          throw expiredError();
+        }
         if (emitTrace) {
           await options?.onFunctionCall?.({
             fn: name,
             componentId: tool.componentId ?? name,
-            args,
+            args: normalizedArgs,
             result: error instanceof Error ? error.message : String(error),
             ok: false,
             ms: Date.now() - startedAt,
@@ -1148,6 +1479,9 @@ export class AxProgramSource<
       }>,
       input: unknown
     ): Promise<unknown> => {
+      const predictorName =
+        spec.signature === '$program' ? '$program' : spec.signature;
+      assertAuthority('predictor', predictorName, 'call');
       predictorCalls += 1;
       if (predictorCalls > this.maxPredictorCalls) {
         throw new AxProgramSourceBudgetError(
@@ -1159,6 +1493,11 @@ export class AxProgramSource<
           'Program source predictor input must evaluate to an object'
         );
       }
+      validateSerializableValue(
+        input,
+        this.valueLimits,
+        `Program source predictor '${predictorName}' input`
+      );
       const predictorTools = spec.tools.map((name) => {
         const tool = this.tools.get(name);
         if (!tool)
@@ -1173,35 +1512,75 @@ export class AxProgramSource<
       );
       if (spec.instruction) predictor.setInstruction(spec.instruction);
       try {
-        return await predictor.forward(ai, input, {
+        const result = await predictor.forward(ai, input, {
           ...options,
           functions: predictorTools,
+          abortSignal: authorityAbort.signal,
           maxSteps: Math.min(
             options?.maxSteps ?? this.maxStepsPerPredictor,
             this.maxStepsPerPredictor
           ),
           stream: false,
         });
+        assertAuthority('predictor', predictorName, 'completion');
+        validateSerializableValue(
+          result,
+          this.valueLimits,
+          `Program source predictor '${predictorName}' result`
+        );
+        return result;
+      } catch (error) {
+        if (!authorityActive) {
+          if (!(error instanceof AxProgramSourceSessionExpiredError)) {
+            recordLateBridge('predictor', predictorName, 'completion');
+          }
+          throw expiredError();
+        }
+        throw error;
       } finally {
         this.usage.push(...predictor.getUsage());
       }
     };
 
-    const session = this.runtime.createSession(
-      {
-        __axProgramSourceDocument: this.boundSource.document,
-        __axProgramSourceInputs: values,
-        __axProgramSourceMaxIterations: this.maxIterations,
-        __axProgramSourcePredict: predict,
-        __axProgramSourceTool: (name: string, args: unknown) =>
-          callTool(name, args, true),
-      },
-      { shouldBubbleError: () => true }
-    );
+    let session: AxCodeSession | undefined;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const onExternalAbort = () =>
+      revokeAuthority(
+        `aborted: ${options?.abortSignal?.reason ?? 'execution aborted'}`
+      );
     try {
-      const rawOutput = await session.execute(PROGRAM_SOURCE_RUNTIME, {
-        signal: options?.abortSignal,
+      session = this.runtime.createSession(
+        {
+          __axProgramSourceDocument: this.boundSource.document,
+          __axProgramSourceInputs: values,
+          __axProgramSourceMaxIterations: this.maxIterations,
+          __axProgramSourcePredict: predict,
+          __axProgramSourceTool: (name: string, args: unknown) =>
+            callTool(name, args, true),
+        },
+        { shouldBubbleError: () => true }
+      );
+      const expiration = new Promise<never>((_resolve, reject) => {
+        rejectExpiration = reject;
       });
+      timeout = setTimeout(
+        () => revokeAuthority(`timed out after ${this.timeoutMs}ms`),
+        this.timeoutMs
+      );
+      options?.abortSignal?.addEventListener('abort', onExternalAbort, {
+        once: true,
+      });
+      if (options?.abortSignal?.aborted) onExternalAbort();
+      const execution = session.execute(PROGRAM_SOURCE_RUNTIME, {
+        signal: authorityAbort.signal,
+      });
+      const rawOutput = await Promise.race([execution, expiration]);
+      if (!authorityActive) throw expiredError();
+      validateSerializableValue(
+        rawOutput,
+        this.valueLimits,
+        'Program source output'
+      );
       if (!isRecord(rawOutput)) {
         throw new AxProgramSourceError(
           'Program source must return an output object'
@@ -1220,7 +1599,10 @@ export class AxProgramSource<
       this.trace = { ...values, ...output } as OUT;
       return output as OUT;
     } finally {
-      session.close();
+      if (timeout !== undefined) clearTimeout(timeout);
+      options?.abortSignal?.removeEventListener('abort', onExternalAbort);
+      revokeAuthority('session closed');
+      session?.close();
     }
   }
 

@@ -803,9 +803,15 @@ import {
   type AxProgramSourceDocument,
   AxProgramSourceError,
   type AxProgramSourceExpression,
+  type AxProgramSourceLateBridgeEvent,
   type AxProgramSourceOptions,
+  type AxProgramSourceRuntime,
+  AxProgramSourceSessionExpiredError,
   type AxProgramSourceState,
   type AxProgramSourceStatement,
+  type AxProgramSourceValueLimits,
+  axProgramSourceDefaultNodeResourceLimits,
+  axProgramSourceRuntimeProtocol,
   axProgramSourceVersion,
   programSource,
 } from './dsp/programSource.js';
@@ -1432,6 +1438,7 @@ export { AxProgram };
 export { AxProgramSource };
 export { AxProgramSourceBudgetError };
 export { AxProgramSourceError };
+export { AxProgramSourceSessionExpiredError };
 export { AxPromptTemplate };
 export { AxProviderRouter };
 export { AxPushEventSource };
@@ -1576,6 +1583,8 @@ export { axOpenAIChatAudioDefaults };
 export { axOptimizableValidators };
 export { axPlaybookFailureSection };
 export { axProcessContentForProvider };
+export { axProgramSourceDefaultNodeResourceLimits };
+export { axProgramSourceRuntimeProtocol };
 export { axProgramSourceVersion };
 export { axResolveAIProfileFeatures };
 export { axResolveAIProfileId };
@@ -2312,9 +2321,12 @@ export type { AxProgramOptions };
 export type { AxProgramSourceCapability };
 export type { AxProgramSourceDocument };
 export type { AxProgramSourceExpression };
+export type { AxProgramSourceLateBridgeEvent };
 export type { AxProgramSourceOptions };
+export type { AxProgramSourceRuntime };
 export type { AxProgramSourceState };
 export type { AxProgramSourceStatement };
+export type { AxProgramSourceValueLimits };
 export type { AxProgramStateEnvelope };
 export type { AxProgramStateStore };
 export type { AxProgramStreamingForwardOptions };

@@ -8,7 +8,9 @@ import {
   AxProgramSourceBudgetError,
   type AxProgramSourceDocument,
   type AxProgramSourceExpression,
+  AxProgramSourceSessionExpiredError,
   type AxProgramSourceStatement,
+  axProgramSourceRuntimeProtocol,
   axProgramSourceVersion,
   programSource,
 } from './programSource.js';
@@ -23,6 +25,11 @@ const source = (
   capabilities: AxProgramSourceDocument['capabilities'] = []
 ): string =>
   JSON.stringify({ version: axProgramSourceVersion, capabilities, steps });
+
+const compatibleRuntime = (runtime: AxCodeRuntime) => ({
+  runtime,
+  protocol: axProgramSourceRuntimeProtocol,
+});
 
 const returnAnswer = (
   value: AxProgramSourceExpression
@@ -307,7 +314,7 @@ describe('AxProgramSource', () => {
     const candidate = source([returnAnswer(literal(marker))]);
     const program = programSource('question:string -> answer:string', {
       source: candidate,
-      runtime,
+      runtime: compatibleRuntime(runtime),
     });
 
     await program.forward({} as never, { question: 'one' });
@@ -321,6 +328,32 @@ describe('AxProgramSource', () => {
     expect(
       JSON.stringify(capturedGlobals?.__axProgramSourceDocument)
     ).toContain(marker);
+  });
+
+  it('requires an explicit JavaScript program-source protocol for custom runtimes', () => {
+    const runtime: AxCodeRuntime = {
+      language: 'Python',
+      getUsageInstructions: () => '',
+      createSession: () => ({
+        execute: async () => ({ answer: 'unsafe' }),
+        patchGlobals: async () => {},
+        close: () => {},
+      }),
+    };
+
+    expect(() =>
+      programSource('question:string -> answer:string', {
+        runtime: compatibleRuntime(runtime),
+      })
+    ).toThrow(/language must be 'JavaScript'/);
+    expect(() =>
+      programSource('question:string -> answer:string', {
+        runtime: {
+          runtime: { ...runtime, language: 'JavaScript' },
+          protocol: 'not-compatible',
+        } as never,
+      })
+    ).toThrow(/Custom runtime protocol/);
   });
 
   it.each(['eval', 'import', 'filesystem', 'process', 'network'])(
@@ -401,6 +434,191 @@ describe('AxProgramSource', () => {
     await expect(
       toolLimited.forward({} as never, { question: 'q' })
     ).rejects.toBeInstanceOf(AxProgramSourceBudgetError);
+  });
+
+  it('fails closed on Unicode bytes, recursive depth, width, and cycles', async () => {
+    const constant = source([returnAnswer(literal('ok'))]);
+    const unicode = programSource('payload:string -> answer:string', {
+      source: constant,
+      valueLimits: { maxBytes: 20 },
+    });
+    await expect(
+      unicode.forward({} as never, { payload: '😀😀😀' })
+    ).rejects.toThrow(/serialized value byte limit: 20/);
+
+    const deep = programSource('payload:json -> answer:string', {
+      source: constant,
+      valueLimits: { maxDepth: 2 },
+    });
+    await expect(
+      deep.forward({} as never, { payload: { a: { b: { c: 'deep' } } } })
+    ).rejects.toThrow(/value depth limit: 2/);
+
+    const wide = programSource('payload:json -> answer:string', {
+      source: constant,
+      valueLimits: { maxWidth: 2 },
+    });
+    await expect(
+      wide.forward({} as never, { payload: { a: 1, b: 2, c: 3 } })
+    ).rejects.toThrow(/value width limit: 2/);
+
+    const cyclicPayload: { self?: unknown } = {};
+    cyclicPayload.self = cyclicPayload;
+    await expect(
+      programSource('payload:json -> answer:string', {
+        source: constant,
+      }).forward({} as never, { payload: cyclicPayload })
+    ).rejects.toThrow(/cyclic value/);
+  });
+
+  it('bounds tool results and final outputs before crossing onward boundaries', async () => {
+    const toolSource = source(
+      [
+        {
+          op: 'tool',
+          name: 'wide',
+          as: 'result',
+          args: { op: 'object', entries: {} },
+        },
+        returnAnswer(ref('result.answer')),
+      ],
+      ['tool:wide']
+    );
+    const wideTool: AxFunction = {
+      name: 'wide',
+      description: 'Return a deliberately wide result.',
+      parameters: { type: 'object', properties: {} },
+      returns: { type: 'object' },
+      func: () => ({ answer: 'ok', extraA: 1, extraB: 2 }),
+    };
+    await expect(
+      programSource('question:string -> answer:string', {
+        source: toolSource,
+        tools: [wideTool],
+        valueLimits: { maxWidth: 2 },
+      }).forward({} as never, { question: 'q' })
+    ).rejects.toThrow(/tool 'wide' result exceeds value width limit: 2/);
+
+    let argumentToolCalled = false;
+    const argumentTool: AxFunction = {
+      name: 'boundedArguments',
+      description: 'Must not receive an oversized argument graph.',
+      parameters: {
+        type: 'object',
+        properties: { values: { type: 'array', items: { type: 'string' } } },
+        required: ['values'],
+      },
+      returns: { type: 'object' },
+      func: () => {
+        argumentToolCalled = true;
+        return { answer: 'unexpected' };
+      },
+    };
+    const argumentSource = source(
+      [
+        {
+          op: 'tool',
+          name: 'boundedArguments',
+          as: 'result',
+          args: {
+            op: 'object',
+            entries: {
+              values: {
+                op: 'array',
+                items: [literal('a'), literal('b'), literal('c')],
+              },
+            },
+          },
+        },
+        returnAnswer(ref('result.answer')),
+      ],
+      ['tool:boundedArguments']
+    );
+    await expect(
+      programSource('question:string -> answer:string', {
+        source: argumentSource,
+        tools: [argumentTool],
+        valueLimits: { maxWidth: 2 },
+      }).forward({} as never, { question: 'q' })
+    ).rejects.toThrow(/tool 'boundedArguments' arguments exceeds value width/);
+    expect(argumentToolCalled).toBe(false);
+
+    const wideOutput = programSource('question:string -> answer:string', {
+      source: source([returnAnswer(literal('😀😀😀'))]),
+      valueLimits: { maxBytes: 20 },
+    });
+    await expect(
+      wideOutput.forward({} as never, { question: 'q' })
+    ).rejects.toThrow(
+      /Program source output exceeds serialized value byte limit: 20/
+    );
+  });
+
+  it('revokes timed-out bridge epochs and records a late host-tool completion', async () => {
+    await programSource('question:string -> answer:string', {
+      source: source([returnAnswer(literal('warm'))]),
+      timeoutMs: 1_000,
+    }).forward({} as never, { question: 'warm' });
+
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    let observedSignal: AbortSignal | undefined;
+    let externalEffectAt = 0;
+    const delayedTool: AxFunction = {
+      name: 'delayed',
+      description: 'Completes after the program-source session times out.',
+      parameters: { type: 'object', properties: {} },
+      returns: { type: 'object' },
+      func: async (_args, extra) => {
+        observedSignal = extra?.abortSignal;
+        markStarted();
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        externalEffectAt = Date.now();
+        return { answer: 'late' };
+      },
+    };
+    const delayedSource = source(
+      [
+        {
+          op: 'tool',
+          name: 'delayed',
+          as: 'result',
+          args: { op: 'object', entries: {} },
+        },
+        returnAnswer(ref('result.answer')),
+      ],
+      ['tool:delayed']
+    );
+    const program = programSource('question:string -> answer:string', {
+      source: delayedSource,
+      tools: [delayedTool],
+      timeoutMs: 250,
+    });
+    const pending = program.forward({} as never, { question: 'q' });
+    await Promise.race([
+      started,
+      new Promise<never>((_resolve, reject) =>
+        setTimeout(() => reject(new Error('tool did not start')), 1_000)
+      ),
+    ]);
+    await expect(pending).rejects.toBeInstanceOf(
+      AxProgramSourceSessionExpiredError
+    );
+    const timeoutObservedAt = Date.now();
+    expect(observedSignal?.aborted).toBe(true);
+
+    await new Promise((resolve) => setTimeout(resolve, 450));
+    expect(externalEffectAt).toBeGreaterThanOrEqual(timeoutObservedAt);
+    expect(program.getLateBridgeEvents()).toMatchObject([
+      {
+        kind: 'tool',
+        name: 'delayed',
+        phase: 'completion',
+        reason: 'timed out after 250ms',
+      },
+    ]);
   });
 
   it('enforces bounded loop execution', async () => {
@@ -498,7 +716,7 @@ describe('AxProgramSource', () => {
     };
     const program = programSource('question:string -> answer:string', {
       source: source([returnAnswer(literal('never'))]),
-      runtime,
+      runtime: compatibleRuntime(runtime),
     });
     const controller = new AbortController();
     controller.abort('test stop');

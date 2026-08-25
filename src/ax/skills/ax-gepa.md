@@ -80,6 +80,15 @@ Critical rules:
   complete grammar, and predictor/tool/iteration/continuation budgets.
 - Parse/bind errors reject the candidate. Runtime and strict typed-output
   errors become aligned per-example zero scores during direct GEPA evaluation.
+- Inputs and all predictor/tool/output bridge values must fit configurable JSON
+  byte/depth/width limits. The default Node worker also has heap/stack ceilings.
+- Timeout, abort, and close revoke the execution epoch. Late bridge completions
+  are rejected and recorded, but an already-dispatched external tool/provider
+  effect remains host-owned and cannot be undone by worker termination.
+- Custom runtimes require JavaScript plus the explicit
+  `ax-program-source-runtime/js-v1` protocol declaration. This is a compatibility
+  assertion, not proof of isolation, authority, persistence, or resource policy;
+  use the default runtime for the documented worker policy.
 - Save source state with `dumpState()` / `loadState()`, or preserve it inside a
   normal serialized optimized artifact's `componentMap`.
 - Do not add host `eval`, `Function`, imports, filesystem, process, network, or
@@ -93,8 +102,9 @@ dynamic capabilities/models, persistent mutable source state, nested returns,
 and intermediate token streaming.
 
 The checked-in hill climb is deterministic zero-cost mechanism evidence: a
-train memorizer is rejected on held-out data, a general tool source is promoted,
-and a redundant source is rejected against a perfect seed. Run:
+train memorizer is rejected on validation data, a general tool source is
+promoted, a frozen final test is reported only after selection, and a redundant
+source is rejected against a perfect seed. Run:
 
 ```bash
 node --import=tsx src/examples/program-source-evaluation.ts

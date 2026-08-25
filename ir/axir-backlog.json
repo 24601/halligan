@@ -1180,7 +1180,7 @@
         "src/ax/dsp/optimizers/gepaEvaluation.test.ts"
       ],
       "portableSurface": "axoptimize",
-      "impact": "TypeScript exposes programSource(), a validated ax-program-source/v1 control-flow AST with explicit predictor/tool capabilities, default locked-down worker interpretation, strict typed outputs, per-example call/iteration budgets, state serialization, and GEPA-aligned bind/runtime failures. Generated Python, Java, C++, Go, and Rust packages do not expose this program-source component or interpreted grammar.",
+      "impact": "TypeScript exposes programSource(), a validated ax-program-source/v1 control-flow AST with explicit predictor/tool capabilities, default locked-down worker interpretation and Node resource ceilings, strict typed outputs, bounded JSON bridge values, revocable execution epochs, explicit custom-runtime language/protocol compatibility, per-example call/iteration budgets, state serialization, and GEPA-aligned bind/runtime failures. Generated Python, Java, C++, Go, and Rust packages do not expose this program-source component, interpreted grammar, or runtime bridge contract.",
       "suggestedAxirWork": [
         "Add or update the TS-derived conformance fixture.",
         "Update AxIR/Core or descriptor data to match the portable TS behavior.",

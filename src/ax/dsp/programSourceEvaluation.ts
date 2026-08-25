@@ -13,7 +13,7 @@ type CandidateResult = Readonly<{
   name: string;
   status: 'promoted' | 'rejected' | 'invalid';
   trainScore?: number;
-  heldOutScore?: number;
+  validationScore?: number;
   sourceBytes: number;
   statementCount?: number;
   runtimeMs: number;
@@ -25,11 +25,16 @@ export type ProgramSourceEvaluationReport = Readonly<{
   evidence: 'mechanism-only-not-model-quality';
   seed: Readonly<{
     trainScore: number;
-    heldOutScore: number;
+    validationScore: number;
     sourceBytes: number;
     statementCount: number;
   }>;
   candidates: readonly CandidateResult[];
+  finalTest: Readonly<{
+    examples: number;
+    seedScore: number;
+    optimizedScore: number;
+  }>;
   negative: Readonly<{
     seedScore: number;
     candidateScore: number;
@@ -59,7 +64,7 @@ export type ProgramSourceEvaluationReport = Readonly<{
 
 const budgets = {
   metricCalls: 30,
-  predictorCalls: 12,
+  predictorCalls: 16,
   toolCalls: 8,
   wallTimeMs: 10_000,
 } as const;
@@ -138,9 +143,14 @@ export async function runProgramSourceEvaluation(): Promise<ProgramSourceEvaluat
     { id: 'train-c', urgent: true, answer: 'urgent' },
     { id: 'train-d', urgent: false, answer: 'normal' },
   ];
-  const heldOut: Example[] = [
-    { id: 'held-a', urgent: true, answer: 'urgent' },
-    { id: 'held-b', urgent: false, answer: 'normal' },
+  const validationSet: Example[] = [
+    { id: 'validation-a', urgent: true, answer: 'urgent' },
+    { id: 'validation-b', urgent: false, answer: 'normal' },
+  ];
+  // Frozen until after candidate selection; these rows never affect promotion.
+  const finalTest: Example[] = [
+    { id: 'final-a', urgent: true, answer: 'urgent' },
+    { id: 'final-b', urgent: false, answer: 'normal' },
   ];
   const classify: AxFunction = {
     name: 'classifyUrgency',
@@ -195,13 +205,13 @@ export async function runProgramSourceEvaluation(): Promise<ProgramSourceEvaluat
   const seedSource = program.getProgramSource();
   const seed = {
     trainScore: await score(train),
-    heldOutScore: await score(heldOut),
+    validationScore: await score(validationSet),
     sourceBytes: seedSource.length,
     statementCount: statementCount(seedSource)!,
   };
   let incumbentSource = seedSource;
   let incumbentTrain = seed.trainScore;
-  let incumbentHeldOut = seed.heldOutScore;
+  let incumbentValidation = seed.validationScore;
   const results: CandidateResult[] = [];
   const memorizer = source([
     answer(
@@ -235,30 +245,30 @@ export async function runProgramSourceEvaluation(): Promise<ProgramSourceEvaluat
     { name: 'general-tool-rule', source: general },
   ]) {
     const candidateStarted = Date.now();
-    const validation = component.validate?.(candidate.source);
-    if (validation !== true) {
+    const candidateValidation = component.validate?.(candidate.source);
+    if (candidateValidation !== true) {
       results.push({
         name: candidate.name,
         status: 'invalid',
         sourceBytes: candidate.source.length,
         runtimeMs: Date.now() - candidateStarted,
         costUsd: 0,
-        reason: String(validation),
+        reason: String(candidateValidation),
       });
       continue;
     }
     apply(candidate.source);
     const trainScore = await score(train);
-    const heldOutScore = await score(heldOut);
-    if (trainScore > incumbentTrain && heldOutScore >= incumbentHeldOut) {
+    const validationScore = await score(validationSet);
+    if (trainScore > incumbentTrain && validationScore >= incumbentValidation) {
       incumbentSource = candidate.source;
       incumbentTrain = trainScore;
-      incumbentHeldOut = heldOutScore;
+      incumbentValidation = validationScore;
       results.push({
         name: candidate.name,
         status: 'promoted',
         trainScore,
-        heldOutScore,
+        validationScore,
         sourceBytes: candidate.source.length,
         statementCount: statementCount(candidate.source),
         runtimeMs: Date.now() - candidateStarted,
@@ -270,15 +280,21 @@ export async function runProgramSourceEvaluation(): Promise<ProgramSourceEvaluat
         name: candidate.name,
         status: 'rejected',
         trainScore,
-        heldOutScore,
+        validationScore,
         sourceBytes: candidate.source.length,
         statementCount: statementCount(candidate.source),
         runtimeMs: Date.now() - candidateStarted,
         costUsd: 0,
-        reason: 'requires train improvement without held-out regression',
+        reason: 'requires train improvement without validation regression',
       });
     }
   }
+
+  // Selection is complete before either final-test score is observed.
+  apply(seedSource);
+  const finalSeedScore = await score(finalTest);
+  apply(incumbentSource);
+  const finalOptimizedScore = await score(finalTest);
 
   const negativeProgram = programSource('id:string -> answer:string', {
     maxPredictorCalls: 2,
@@ -341,6 +357,11 @@ export async function runProgramSourceEvaluation(): Promise<ProgramSourceEvaluat
     evidence: 'mechanism-only-not-model-quality',
     seed,
     candidates: results,
+    finalTest: {
+      examples: finalTest.length,
+      seedScore: finalSeedScore,
+      optimizedScore: finalOptimizedScore,
+    },
     negative: {
       seedScore: negativeSeed,
       candidateScore: negativeCandidate,
