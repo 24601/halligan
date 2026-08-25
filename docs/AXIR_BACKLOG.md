@@ -21,7 +21,7 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
 - `axir-2026-08-25-port-strict-held-out-playbook-promotion-policy` [axagent] Port strict held-out playbook promotion policy
   - Status: open
   - Source PR: #4
-  - Source commit: `77b3cba5d260443235a14a3f17acc877d1720369`
+  - Source commit: `77b3cba4ca6300f623d596de26f7d5f60736d76c`
   - TS paths: `src/ax/agent`
   - Impact: TypeScript agent.playbook().evolve() can require semantic train/validation disjointness and complete held-out evidence, fail closed on insufficient budget or evaluator errors, and prevent verify:false bypass; generated language runtimes retain only the permissive verify gate.
   - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
