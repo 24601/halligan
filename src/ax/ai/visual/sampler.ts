@@ -72,6 +72,24 @@ const typedArrayBufferGetter = Object.getOwnPropertyDescriptor(
   typedArrayPrototype,
   'buffer'
 )?.get as IntrinsicGetter | undefined;
+const arrayBufferByteLengthGetter = Object.getOwnPropertyDescriptor(
+  ArrayBuffer.prototype,
+  'byteLength'
+)?.get as IntrinsicGetter | undefined;
+const sharedArrayBufferByteLengthGetter =
+  typeof SharedArrayBuffer === 'undefined'
+    ? undefined
+    : (Object.getOwnPropertyDescriptor(
+        SharedArrayBuffer.prototype,
+        'byteLength'
+      )?.get as IntrinsicGetter | undefined);
+
+class AxVisualSharedMemoryError extends Error {
+  constructor() {
+    super('SharedArrayBuffer-backed visual input is unsupported');
+    this.name = 'AxVisualSharedMemoryError';
+  }
+}
 
 const isNonNegativeInteger = (value: unknown): value is number =>
   typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
@@ -154,11 +172,22 @@ function copyUint8Array(value: unknown): Uint8Array | undefined {
   const byteOffset = typedArrayByteOffsetGetter.call(value);
   const byteLength = typedArrayByteLengthGetter.call(value);
   const buffer = typedArrayBufferGetter.call(value);
+  if (sharedArrayBufferByteLengthGetter) {
+    try {
+      sharedArrayBufferByteLengthGetter.call(buffer);
+      throw new AxVisualSharedMemoryError();
+    } catch (error) {
+      if (error instanceof AxVisualSharedMemoryError) throw error;
+    }
+  }
+  const bufferByteLength = arrayBufferByteLengthGetter?.call(buffer);
   if (
     !isNonNegativeInteger(length) ||
     !isNonNegativeInteger(byteOffset) ||
     !isNonNegativeInteger(byteLength) ||
-    byteLength !== length
+    !isNonNegativeInteger(bufferByteLength) ||
+    byteLength !== length ||
+    byteOffset + byteLength > bufferByteLength
   ) {
     return undefined;
   }
@@ -350,8 +379,13 @@ export class AxFrameSampler {
   ): AxFrameSamplerDecision {
     try {
       return this.observeInternal(observation, nowMs);
-    } catch {
-      return this.decision('suppress', 'malformed');
+    } catch (error) {
+      return this.decision(
+        'suppress',
+        error instanceof AxVisualSharedMemoryError
+          ? 'shared_memory'
+          : 'malformed'
+      );
     }
   }
 

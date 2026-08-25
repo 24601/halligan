@@ -86,6 +86,7 @@ export type AxFrameSamplerReason =
   | 'expired'
   | 'revoked'
   | 'oversized'
+  | 'shared_memory'
   | 'malformed'
   | 'stream_mismatch';
 

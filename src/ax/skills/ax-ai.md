@@ -252,7 +252,10 @@ two clock epochs cannot share a meaningful window.
 Supply either a `dhash-64` digest or a host-normalized 9 × 8 `Uint8Array`
 luminance grid. `axVisualPerceptualDigest(...)` computes the 64-bit difference
 hash synchronously with browser-safe typed-array operations. It does not decode
-images. Scene cuts can bypass `minIntervalMs`; all accepted samples still obey
+images. SharedArrayBuffer-backed grids are refused as `shared_memory` because an
+unsynchronized writer could change the bytes during snapshotting; the host must
+provide an ordinary, stable `ArrayBuffer`-backed grid. Scene cuts can bypass
+`minIntervalMs`; all accepted samples still obey
 the rolling frame, byte, and token budgets. `maxIntervalMs` is a heartbeat, not
 a guarantee: freshness, authority, validation, and budgets still fail closed.
 

@@ -1,4 +1,5 @@
 import { runInNewContext } from 'node:vm';
+import { Worker } from 'node:worker_threads';
 import { describe, expect, it } from 'vitest';
 import { AxFrameSampler, axVisualPerceptualDigest } from './sampler.js';
 import type { AxVisualObservation } from './types.js';
@@ -105,6 +106,52 @@ describe('axVisualPerceptualDigest', () => {
           luma: invalid as unknown as Uint8Array,
         })
       ).toThrow(/9 x 8/);
+    }
+  });
+
+  it('rejects a SharedArrayBuffer while a worker mutates its bytes', async () => {
+    const bytes = new SharedArrayBuffer(72);
+    const control = new SharedArrayBuffer(4);
+    const worker = new Worker(
+      `
+        const { parentPort, workerData } = require('node:worker_threads');
+        const bytes = new Uint8Array(workerData.bytes);
+        const control = new Int32Array(workerData.control);
+        parentPort.postMessage('ready');
+        while (Atomics.load(control, 0) === 0) {
+          bytes.fill(0);
+          bytes.fill(255);
+        }
+      `,
+      { eval: true, workerData: { bytes, control } }
+    );
+
+    await new Promise<void>((resolve, reject) => {
+      worker.once('message', () => resolve());
+      worker.once('error', reject);
+    });
+
+    try {
+      const sharedLuma = new Uint8Array(bytes);
+      for (let attempt = 0; attempt < 100; attempt++) {
+        expect(() =>
+          axVisualPerceptualDigest({
+            width: 9,
+            height: 8,
+            luma: sharedLuma,
+          })
+        ).toThrow(/SharedArrayBuffer/);
+      }
+      expect(
+        sampler().observe(
+          frame(1, 0, {
+            perceptualInput: { width: 9, height: 8, luma: sharedLuma },
+          })
+        ).reason
+      ).toBe('shared_memory');
+    } finally {
+      Atomics.store(new Int32Array(control), 0, 1);
+      await worker.terminate();
     }
   });
 });
