@@ -1011,7 +1011,8 @@ export function axAttachCausalCandidateEvidence<OUT = any>(
   }
   const manifest = axCreateCausalCandidateEvidenceManifest(
     [...(existing?.records ?? []), ...records],
-    { ...inheritedOptions, ...options }
+    { ...inheritedOptions, ...options },
+    existing?.receipts
   );
   if (manifest.omittedRecordCount > 0) {
     throw new Error('causal evidence append exceeds configured retention');

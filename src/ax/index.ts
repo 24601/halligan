@@ -772,6 +772,7 @@ import {
   type AxCausalEvidenceAuthority,
   type AxCausalEvidenceAuthorityVerifier,
   type AxCausalEvidenceKind,
+  type AxCausalEvidenceReceipt,
   type AxCausalEvidenceReference,
   type AxCausalMetricOutcome,
   type AxCausalMetricPrediction,
@@ -1975,6 +1976,7 @@ export type { AxCausalCandidateSplitOutcome };
 export type { AxCausalEvidenceAuthority };
 export type { AxCausalEvidenceAuthorityVerifier };
 export type { AxCausalEvidenceKind };
+export type { AxCausalEvidenceReceipt };
 export type { AxCausalEvidenceReference };
 export type { AxCausalMetricOutcome };
 export type { AxCausalMetricPrediction };

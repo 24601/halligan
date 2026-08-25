@@ -135,6 +135,9 @@ export interface AxCausalEvidenceEvaluationResult {
     forgedManifestRejected: boolean;
     legacyHashCollisionSeparated: boolean;
     invalidChronologyRejected: boolean;
+    postVerificationMutationIsolated: boolean;
+    priorReceiptPreserved: boolean;
+    malformedUtf16Rejected: boolean;
   };
   bytes: { baseline: number; withEvidence: number; overhead: number };
   negativeCasesPreserved: readonly string[];
@@ -319,6 +322,36 @@ export async function evaluateCausalCandidateEvidence(): Promise<AxCausalEvidenc
   } catch {
     invalidChronologyRejected = true;
   }
+  const toctouSerialized = JSON.parse(evidenceJson);
+  const mutatingVerifier: AxCausalEvidenceAuthorityVerifier = (
+    payload,
+    authority
+  ) => {
+    const verified = receipts.verify(payload, authority);
+    toctouSerialized.causalCandidateEvidence.records[0].hypothesis =
+      'FORGED AFTER VERIFY';
+    return verified;
+  };
+  const toctouReplay = axDeserializeOptimizedProgram(toctouSerialized, {
+    causalEvidenceVerifier: mutatingVerifier,
+  });
+  const postVerificationMutationIsolated =
+    toctouReplay.causalCandidateEvidence?.records[0]?.hypothesis ===
+      records[0]?.hypothesis &&
+    toctouSerialized.causalCandidateEvidence.records[0].hypothesis ===
+      'FORGED AFTER VERIFY';
+  const priorReceiptPreserved =
+    settled.causalCandidateEvidence?.receipts.length === 2 &&
+    settled.causalCandidateEvidence.receipts[0]?.authority.receiptId ===
+      'receipt-evaluation' &&
+    settled.causalCandidateEvidence.receipts[1]?.authority.receiptId ===
+      'receipt-settlement';
+  let malformedUtf16Rejected = false;
+  try {
+    await axFingerprintCausalEvidence(String.fromCharCode(0xd800));
+  } catch {
+    malformedUtf16Rejected = true;
+  }
 
   const elapsedWallTimeMs = performance.now() - started;
   const result: AxCausalEvidenceEvaluationResult = {
@@ -350,6 +383,9 @@ export async function evaluateCausalCandidateEvidence(): Promise<AxCausalEvidenc
       legacyHashCollisionSeparated:
         legacyCollisionLeft !== legacyCollisionRight,
       invalidChronologyRejected,
+      postVerificationMutationIsolated,
+      priorReceiptPreserved,
+      malformedUtf16Rejected,
     },
     bytes: {
       baseline: new TextEncoder().encode(baselineJson).byteLength,

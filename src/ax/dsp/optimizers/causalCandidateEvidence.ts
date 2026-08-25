@@ -90,8 +90,15 @@ export type AxCausalEvidenceAuthorityVerifier = (
   authority: Readonly<AxCausalEvidenceAuthority>
 ) => boolean;
 
+export interface AxCausalEvidenceReceipt {
+  readonly authority: AxCausalEvidenceAuthority;
+  readonly recordCount: number;
+  readonly totalRecordCount: number;
+  readonly omittedRecordCount: number;
+}
+
 export interface AxCausalCandidateEvidenceManifest {
-  readonly version: 2;
+  readonly version: 3;
   readonly records: readonly AxCausalCandidateEvidenceRecord[];
   readonly totalRecordCount: number;
   readonly omittedRecordCount: number;
@@ -103,11 +110,12 @@ export interface AxCausalCandidateEvidenceManifest {
     readonly evidenceSummaries: 'omitted' | 'bounded';
     readonly maxSummaryChars: number;
   };
-  readonly authority: AxCausalEvidenceAuthority;
+  /** Append-only per-batch authority chain; the final receipt covers prior receipts. */
+  readonly receipts: readonly AxCausalEvidenceReceipt[];
 }
 
 export interface AxCausalCandidateEvidenceOptions {
-  /** Manifest-scoped host identity and durable receipt metadata. */
+  /** Host identity and durable receipt metadata for this appended record batch. */
   authority: AxCausalEvidenceAuthority;
   /** Host-owned verification. Return false for an unknown or mismatched receipt. */
   verifyAuthority: AxCausalEvidenceAuthorityVerifier;
@@ -532,10 +540,30 @@ function validateManifestRecords(
   }
 }
 
+function assertWellFormedUtf16(value: string): void {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (index + 1 >= value.length || next < 0xdc00 || next > 0xdfff) {
+        throw new Error(
+          'causal evidence fingerprint input is not well-formed UTF-16'
+        );
+      }
+      index += 1;
+    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+      throw new Error(
+        'causal evidence fingerprint input is not well-formed UTF-16'
+      );
+    }
+  }
+}
+
 /** Canonical NFC UTF-8 SHA-256 evidence identity. */
 export async function axFingerprintCausalEvidence(
   value: string
 ): Promise<string> {
+  assertWellFormedUtf16(value);
   const bytes = new TextEncoder().encode(value.normalize('NFC'));
   const digest = await crypto.subtle.digest('SHA-256', bytes);
   return `sha256:${Array.from(new Uint8Array(digest), (byte) =>
@@ -546,7 +574,8 @@ export async function axFingerprintCausalEvidence(
 /** Build a bounded, recursively immutable host-authored evidence manifest. */
 export function axCreateCausalCandidateEvidenceManifest(
   records: readonly Readonly<AxCausalCandidateEvidenceRecord>[],
-  options: Readonly<AxCausalCandidateEvidenceOptions>
+  options: Readonly<AxCausalCandidateEvidenceOptions>,
+  priorReceipts: readonly Readonly<AxCausalEvidenceReceipt>[] = []
 ): AxCausalCandidateEvidenceManifest {
   if (typeof options?.verifyAuthority !== 'function') {
     throw new Error('causal candidate evidence authority verifier is required');
@@ -574,8 +603,9 @@ export function axCreateCausalCandidateEvidenceManifest(
   let retained = normalized.slice(0, resolved.maxRecords);
   let omittedRecordCount = totalRecordCount - retained.length;
   const authority = normalizeAuthority(options.authority);
+  const inheritedReceipts = priorReceipts.map(normalizeReceipt);
   const makeManifest = (): AxCausalCandidateEvidenceManifest => ({
-    version: 2,
+    version: 3,
     records: retained,
     totalRecordCount,
     omittedRecordCount,
@@ -589,7 +619,15 @@ export function axCreateCausalCandidateEvidenceManifest(
         : 'omitted',
       maxSummaryChars: resolved.maxSummaryChars,
     },
-    authority,
+    receipts: [
+      ...inheritedReceipts,
+      {
+        authority,
+        recordCount: retained.length,
+        totalRecordCount,
+        omittedRecordCount,
+      },
+    ],
   });
   const encoder = new TextEncoder();
   let manifest = makeManifest();
@@ -610,14 +648,7 @@ export function axCreateCausalCandidateEvidenceManifest(
       `causal candidate evidence metadata exceeds maxArtifactBytes=${resolved.maxArtifactBytes}`
     );
   }
-  if (
-    !options.verifyAuthority(
-      axCanonicalizeCausalCandidateEvidenceManifest(manifest),
-      authority
-    )
-  ) {
-    throw new Error('causal candidate evidence authority verification failed');
-  }
+  validateReceiptChain(manifest, options.verifyAuthority);
   return deepFreeze(manifest);
 }
 
@@ -639,27 +670,113 @@ function normalizeAuthority(
   };
 }
 
-/** Stable JSON payload covered by the host authority receipt. */
-export function axCanonicalizeCausalCandidateEvidenceManifest(
-  manifest: Readonly<AxCausalCandidateEvidenceManifest>
+function normalizeReceipt(
+  receipt: Readonly<AxCausalEvidenceReceipt>
+): AxCausalEvidenceReceipt {
+  return {
+    authority: normalizeAuthority(receipt.authority),
+    recordCount: receipt.recordCount,
+    totalRecordCount: receipt.totalRecordCount,
+    omittedRecordCount: receipt.omittedRecordCount,
+  };
+}
+
+function canonicalizeReceipt(
+  manifest: Readonly<AxCausalCandidateEvidenceManifest>,
+  receiptIndex: number
 ): string {
+  const receipt = manifest.receipts[receiptIndex]!;
   return JSON.stringify({
     version: manifest.version,
-    records: manifest.records,
-    totalRecordCount: manifest.totalRecordCount,
-    omittedRecordCount: manifest.omittedRecordCount,
+    records: manifest.records.slice(0, receipt.recordCount),
+    recordCount: receipt.recordCount,
+    totalRecordCount: receipt.totalRecordCount,
+    omittedRecordCount: receipt.omittedRecordCount,
     maxRecords: manifest.maxRecords,
     maxArtifactBytes: manifest.maxArtifactBytes,
     privacy: manifest.privacy,
+    priorReceipts: manifest.receipts.slice(0, receiptIndex),
   });
 }
 
-export function axCloneCausalCandidateEvidenceManifest(
+function validateReceiptChain(
   manifest: Readonly<AxCausalCandidateEvidenceManifest>,
+  verifyAuthority: AxCausalEvidenceAuthorityVerifier
+): void {
+  if (manifest.receipts.length === 0) {
+    throw new Error('causal candidate evidence requires an authority receipt');
+  }
+  let priorRecordCount = -1;
+  for (const [index, receipt] of manifest.receipts.entries()) {
+    if (
+      !hasExactKeys(receipt, [
+        'authority',
+        'recordCount',
+        'totalRecordCount',
+        'omittedRecordCount',
+      ]) ||
+      !hasExactKeys(receipt.authority, [
+        'principalId',
+        'evaluatorId',
+        'verifierId',
+        'receiptId',
+        'receiptVersion',
+      ]) ||
+      !Number.isInteger(receipt.recordCount) ||
+      receipt.recordCount < 0 ||
+      receipt.recordCount > manifest.records.length ||
+      receipt.recordCount <= priorRecordCount ||
+      !Number.isInteger(receipt.totalRecordCount) ||
+      !Number.isInteger(receipt.omittedRecordCount) ||
+      receipt.omittedRecordCount < 0 ||
+      receipt.totalRecordCount !==
+        receipt.recordCount + receipt.omittedRecordCount ||
+      (index < manifest.receipts.length - 1 &&
+        (receipt.totalRecordCount !== receipt.recordCount ||
+          receipt.omittedRecordCount !== 0))
+    ) {
+      throw new Error('invalid causal candidate evidence receipt chain');
+    }
+    const authority = normalizeAuthority(receipt.authority);
+    if (
+      JSON.stringify(authority) !== JSON.stringify(receipt.authority) ||
+      !verifyAuthority(canonicalizeReceipt(manifest, index), authority)
+    ) {
+      throw new Error(
+        'causal candidate evidence authority verification failed'
+      );
+    }
+    priorRecordCount = receipt.recordCount;
+  }
+  const finalReceipt = manifest.receipts.at(-1)!;
+  if (
+    finalReceipt.recordCount !== manifest.records.length ||
+    finalReceipt.totalRecordCount !== manifest.totalRecordCount ||
+    finalReceipt.omittedRecordCount !== manifest.omittedRecordCount
+  ) {
+    throw new Error('final authority receipt does not cover the manifest');
+  }
+}
+
+/** Stable JSON payload covered by the final host authority receipt. */
+export function axCanonicalizeCausalCandidateEvidenceManifest(
+  manifest: Readonly<AxCausalCandidateEvidenceManifest>
+): string {
+  return canonicalizeReceipt(manifest, manifest.receipts.length - 1);
+}
+
+export function axCloneCausalCandidateEvidenceManifest(
+  sourceManifest: Readonly<AxCausalCandidateEvidenceManifest>,
   verifyAuthority: AxCausalEvidenceAuthorityVerifier
 ): AxCausalCandidateEvidenceManifest {
   if (typeof verifyAuthority !== 'function') {
     throw new Error('causal candidate evidence authority verifier is required');
+  }
+  let manifest: AxCausalCandidateEvidenceManifest;
+  try {
+    manifest = JSON.parse(JSON.stringify(sourceManifest));
+  } catch {
+    throw new Error('causal candidate evidence manifest is not serializable');
   }
   if (
     !hasExactKeys(manifest, [
@@ -670,7 +787,7 @@ export function axCloneCausalCandidateEvidenceManifest(
       'maxRecords',
       'maxArtifactBytes',
       'privacy',
-      'authority',
+      'receipts',
     ]) ||
     !hasExactKeys(manifest.privacy, [
       'evidencePayloads',
@@ -678,14 +795,7 @@ export function axCloneCausalCandidateEvidenceManifest(
       'evidenceSummaries',
       'maxSummaryChars',
     ]) ||
-    !hasExactKeys(manifest.authority, [
-      'principalId',
-      'evaluatorId',
-      'verifierId',
-      'receiptId',
-      'receiptVersion',
-    ]) ||
-    manifest.version !== 2 ||
+    manifest.version !== 3 ||
     manifest.privacy?.evidencePayloads !== 'not_in_schema' ||
     manifest.privacy?.freeText !== 'bounded_not_redacted' ||
     !Number.isInteger(manifest.totalRecordCount) ||
@@ -726,26 +836,19 @@ export function axCloneCausalCandidateEvidenceManifest(
     normalizeRecord(record, resolved)
   );
   validateManifestRecords(validatedRecords);
-  const authority = normalizeAuthority(manifest.authority);
   if (
     resolved.maxRecords !== manifest.maxRecords ||
     resolved.maxArtifactBytes !== manifest.maxArtifactBytes ||
     resolved.maxSummaryChars !== manifest.privacy.maxSummaryChars ||
-    JSON.stringify(authority) !== JSON.stringify(manifest.authority) ||
     manifest.records.length > manifest.maxRecords ||
     JSON.stringify(validatedRecords) !== JSON.stringify(manifest.records) ||
     new TextEncoder().encode(JSON.stringify(manifest)).byteLength >
-      manifest.maxArtifactBytes ||
-    !verifyAuthority(
-      axCanonicalizeCausalCandidateEvidenceManifest(manifest),
-      authority
-    )
+      manifest.maxArtifactBytes
   ) {
     throw new Error(
       'invalid, unauthorized, or unbounded causal candidate evidence manifest'
     );
   }
-  return deepFreeze(
-    JSON.parse(JSON.stringify(manifest)) as AxCausalCandidateEvidenceManifest
-  );
+  validateReceiptChain(manifest, verifyAuthority);
+  return deepFreeze(manifest);
 }

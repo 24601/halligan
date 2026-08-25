@@ -23,7 +23,7 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
   - Source PR: #15
   - Source commit: `ca760294f5ea4f207052c39c2218e1195103bc2a`
   - TS paths: `src/ax/dsp/optimize.ts`, `src/ax/dsp/optimizer.ts`, `src/ax/dsp/optimizers/causalCandidateEvidence.test-d.ts`, `src/ax/dsp/optimizers/causalCandidateEvidence.test.ts`, `src/ax/dsp/optimizers/causalCandidateEvidence.ts`
-  - Impact: TypeScript optimized-program artifacts can carry bounded immutable host-verified causal evidence linking canonical SHA-256 evidence identities, hypotheses, affected components, predictions, held-in and held-out outcomes, chronological decisions and settlements, and optional comparable ablations while snapshot rollback preserves append-only history; generated runtimes do not expose this manifest or attachment and rollback helpers.
+  - Impact: TypeScript optimized-program artifacts can carry bounded immutable host-verified causal evidence linking well-formed canonical SHA-256 evidence identities, hypotheses, affected components, predictions, held-in and held-out outcomes, chronological decisions and settlements, and optional comparable ablations; detached replay prevents post-verification mutation, per-batch authority receipts remain chained across append, and snapshot rollback preserves append-only history. Generated runtimes do not expose this manifest or attachment and rollback helpers.
   - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 
 ## Done

@@ -1178,7 +1178,7 @@
         "src/ax/dsp/optimizers/causalCandidateEvidence.ts"
       ],
       "portableSurface": "axoptimize",
-      "impact": "TypeScript optimized-program artifacts can carry bounded immutable host-verified causal evidence linking canonical SHA-256 evidence identities, hypotheses, affected components, predictions, held-in and held-out outcomes, chronological decisions and settlements, and optional comparable ablations while snapshot rollback preserves append-only history; generated runtimes do not expose this manifest or attachment and rollback helpers.",
+      "impact": "TypeScript optimized-program artifacts can carry bounded immutable host-verified causal evidence linking well-formed canonical SHA-256 evidence identities, hypotheses, affected components, predictions, held-in and held-out outcomes, chronological decisions and settlements, and optional comparable ablations; detached replay prevents post-verification mutation, per-batch authority receipts remain chained across append, and snapshot rollback preserves append-only history. Generated runtimes do not expose this manifest or attachment and rollback helpers.",
       "suggestedAxirWork": [
         "Add or update the TS-derived conformance fixture.",
         "Update AxIR/Core or descriptor data to match the portable TS behavior.",

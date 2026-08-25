@@ -19,6 +19,9 @@ describe('causal candidate evidence evaluation', () => {
       forgedManifestRejected: true,
       legacyHashCollisionSeparated: true,
       invalidChronologyRejected: true,
+      postVerificationMutationIsolated: true,
+      priorReceiptPreserved: true,
+      malformedUtf16Rejected: true,
     });
     expect(result.negativeCasesPreserved).toEqual([
       'claim-no-benefit',
