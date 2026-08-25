@@ -130,7 +130,11 @@ rewrite retained identity, evidence, or provenance. Grant validation receives
 a structured context containing its opaque reference, observation, boundary
 scope, and abort signal. The scope always binds boundary ID, route ID, instance
 key, and principal identity around the host's local observation/dedupe key. A
-custom observation mapper cannot remove that authority scope.
+custom observation mapper cannot remove that authority scope. Host observations
+and detector outputs are schema-snapshotted into detached plain records with one
+read per declared field; validation, byte limits, freezing, and retention all
+use that same snapshot. Throwing detector getters become explicit uncertainty,
+while throwing host getters reject before detector invocation.
 
 Observation validation and size failures reject explicitly before detector
 invocation; rejected host input is not retained. A detection's `confidence` is

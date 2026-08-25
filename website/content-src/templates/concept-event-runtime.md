@@ -73,7 +73,9 @@ Detector and grant callbacks receive deeply frozen copies while a separate
 canonical clone is retained. Boundary, route, instance, and principal scope
 wraps every local dedupe key even when a custom mapper supplies the observation.
 Callbacks have bounded timeouts, and runtime cancellation remains cancellation
-rather than successful evidence.
+rather than successful evidence. Observation and detector fields are read once
+into plain snapshots used consistently for validation, byte limits, and
+retention.
 
 Detector latency metrics remain finite and nonnegative. Extreme or reversing
 clocks clamp to the safe-integer range and mark the sample as capped rather than

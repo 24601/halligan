@@ -74,6 +74,8 @@ await source.publish({ event, identity, trust: 'authenticated' });
 - Callbacks receive deeply frozen copies while a separate canonical clone is
   retained. Route, instance, principal, and boundary scope wraps every local
   dedupe key even when a custom mapper supplies the observation.
+- Host observations and detector outputs are read once into plain snapshots;
+  validation, byte measurement, and retention use the same frozen values.
 - Keep callbacks within the configured timeout and propagate runtime
   cancellation as cancellation, not successful uncertainty. One boundary
   single-flights a scoped key with per-waiter cancellation and bounded pending

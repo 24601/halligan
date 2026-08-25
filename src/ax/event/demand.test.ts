@@ -307,6 +307,92 @@ describe('AxDemandBoundary', () => {
     ).toMatchObject({ detectorLatencyMs: 0, detectorLatencyCapped: true });
   });
 
+  it('snapshots stateful detector output once before validation and measurement', async () => {
+    let confidenceReads = 0;
+    let reasonReads = 0;
+    const stateful = {
+      outcome: 'demand',
+      get confidence() {
+        confidenceReads++;
+        return confidenceReads === 1 ? 1 : 7;
+      },
+      requestedDisposition: 'notify',
+      reasonCode: 'stateful_output',
+      get reason() {
+        reasonReads++;
+        return reasonReads === 1 ? 'short' : 'x'.repeat(10_000);
+      },
+      evidence: [],
+    } as AxDemandDetection;
+    const value = boundary(stateful, { policy: { maxDetectionBytes: 512 } });
+    const record = (await value.value.observe(observation('stateful-output')))
+      .record;
+    expect(confidenceReads).toBe(1);
+    expect(reasonReads).toBe(1);
+    expect(record.detection).toMatchObject({ confidence: 1, reason: 'short' });
+    expect(record.metrics.detectionBytes).toBe(
+      new TextEncoder().encode(JSON.stringify(record.detection)).byteLength
+    );
+  });
+
+  it('reads host observation fields once and fails closed on throwing getters', async () => {
+    let idReads = 0;
+    let dataReads = 0;
+    const raw = {
+      get id() {
+        idReads++;
+        return idReads === 1 ? 'stateful-observation' : 'changed';
+      },
+      source: 'app://synthetic',
+      type: 'synthetic.observation',
+      observedAt: now,
+      get data() {
+        dataReads++;
+        return dataReads === 1 ? { value: 'retained' } : { value: 'changed' };
+      },
+      provenance: observation('stateful-observation').provenance,
+    } as AxDemandObservation;
+    const value = boundary(detection());
+    const record = (await value.value.observe(raw)).record;
+    expect(idReads).toBe(1);
+    expect(dataReads).toBe(1);
+    expect(record.observation).toMatchObject({
+      id: 'stateful-observation',
+      data: { value: 'retained' },
+    });
+    expect(record.metrics.observationBytes).toBe(
+      new TextEncoder().encode(JSON.stringify(record.observation)).byteLength
+    );
+
+    let hostThrowReads = 0;
+    const throwingHost = {
+      ...observation('throwing-host'),
+      get id(): string {
+        hostThrowReads++;
+        throw new Error('host getter failed');
+      },
+    };
+    await expect(value.value.observe(throwingHost)).rejects.toThrow(
+      'host getter failed'
+    );
+    expect(hostThrowReads).toBe(1);
+
+    let detectorThrowReads = 0;
+    const throwingDetection = {
+      ...detection(),
+      get reason(): string {
+        detectorThrowReads++;
+        throw new Error('detector getter failed');
+      },
+    };
+    const failClosed = boundary(throwingDetection);
+    const failed = (
+      await failClosed.value.observe(observation('throwing-detector'))
+    ).record;
+    expect(detectorThrowReads).toBe(1);
+    expect(failed.detection.reasonCode).toBe('detector_invalid');
+  });
+
   it('bounds detector evidence before retention', async () => {
     const { value } = boundary(detection({ reason: 'x'.repeat(1_000) }), {
       policy: { maxDetectionBytes: 100 },

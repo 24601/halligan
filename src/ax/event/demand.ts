@@ -280,6 +280,102 @@ function validateRecordMetrics(
   }
 }
 
+function snapshotProvenance(
+  raw: readonly Readonly<AxDemandProvenance>[],
+  label: string
+): AxDemandProvenance[] {
+  if (!Array.isArray(raw)) throw new Error(`${label} must be an array`);
+  return Array.from(raw, (item, index) => {
+    if (typeof item !== 'object' || item === null) {
+      throw new Error(`${label}[${index}] must be an object`);
+    }
+    const source = item.source;
+    const reference = item.reference;
+    const observedAt = item.observedAt;
+    const polarity = item.polarity;
+    return {
+      source,
+      reference,
+      observedAt,
+      ...(polarity !== undefined ? { polarity } : {}),
+    };
+  });
+}
+
+function snapshotObservation(
+  raw: Readonly<AxDemandObservation>
+): AxDemandObservation {
+  if (typeof raw !== 'object' || raw === null) {
+    throw new Error('AxDemandObservation must be an object');
+  }
+  const id = raw.id;
+  const source = raw.source;
+  const type = raw.type;
+  const observedAt = raw.observedAt;
+  const subject = raw.subject;
+  const data = raw.data;
+  const provenance = raw.provenance;
+  const expiresAt = raw.expiresAt;
+  const dedupeKey = raw.dedupeKey;
+  return {
+    id,
+    source,
+    type,
+    observedAt,
+    ...(subject !== undefined ? { subject } : {}),
+    ...(data !== undefined ? { data: clone(data) } : {}),
+    provenance: snapshotProvenance(provenance, 'observation.provenance'),
+    ...(expiresAt !== undefined ? { expiresAt } : {}),
+    ...(dedupeKey !== undefined ? { dedupeKey } : {}),
+  };
+}
+
+function snapshotDetection(
+  raw: Readonly<AxDemandDetection>
+): AxDemandDetection {
+  if (typeof raw !== 'object' || raw === null) {
+    throw new Error('AxDemandDetection must be an object');
+  }
+  const outcome = raw.outcome;
+  const confidence = raw.confidence;
+  const requestedDisposition = raw.requestedDisposition;
+  const reasonCode = raw.reasonCode;
+  const reason = raw.reason;
+  const evidence = raw.evidence;
+  const rawCalibration = raw.calibration;
+  const standingGrantRef = raw.standingGrantRef;
+  const expiresAt = raw.expiresAt;
+  let calibration: AxDemandCalibration | undefined;
+  if (rawCalibration !== undefined) {
+    if (typeof rawCalibration !== 'object' || rawCalibration === null) {
+      throw new Error('detection.calibration must be an object');
+    }
+    const method = rawCalibration.method;
+    const version = rawCalibration.version;
+    const expectedCalibrationError = rawCalibration.expectedCalibrationError;
+    const sampleSize = rawCalibration.sampleSize;
+    calibration = {
+      method,
+      version,
+      ...(expectedCalibrationError !== undefined
+        ? { expectedCalibrationError }
+        : {}),
+      ...(sampleSize !== undefined ? { sampleSize } : {}),
+    };
+  }
+  return {
+    outcome,
+    confidence,
+    requestedDisposition,
+    reasonCode,
+    ...(reason !== undefined ? { reason } : {}),
+    evidence: snapshotProvenance(evidence, 'detection.evidence'),
+    ...(calibration ? { calibration } : {}),
+    ...(standingGrantRef !== undefined ? { standingGrantRef } : {}),
+    ...(expiresAt !== undefined ? { expiresAt } : {}),
+  };
+}
+
 function validateProvenance(
   evidence: readonly Readonly<AxDemandProvenance>[],
   label: string
@@ -307,7 +403,6 @@ function validateObservation(observation: Readonly<AxDemandObservation>): void {
     type: observation.type,
     ...(observation.data !== undefined ? { data: observation.data } : {}),
   });
-  clone(observation);
 }
 
 function validateDetection(detection: Readonly<AxDemandDetection>): void {
@@ -340,7 +435,6 @@ function validateDetection(detection: Readonly<AxDemandDetection>): void {
       throw new Error('detection.calibration.sampleSize must be non-negative');
     }
   }
-  clone(detection);
 }
 
 function uncertainDetection(
@@ -748,8 +842,8 @@ export class AxDemandBoundary {
     if (options.signal?.aborted) {
       throw new AxDemandCancelledError(options.signal.reason);
     }
-    validateObservation(rawObservation);
-    const observation = clone(rawObservation);
+    const observation = deepFreeze(snapshotObservation(rawObservation));
+    validateObservation(observation);
     const observationBytes = bytes(observation);
     if (observationBytes > this.policy.maxObservationBytes) {
       throw new Error(
@@ -846,14 +940,15 @@ export class AxDemandBoundary {
         signal,
         this.policy.callbackTimeoutMs
       );
-      validateDetection(candidate);
-      const candidateBytes = bytes(candidate);
+      const candidateSnapshot = snapshotDetection(candidate);
+      validateDetection(candidateSnapshot);
+      const candidateBytes = bytes(candidateSnapshot);
       if (candidateBytes > this.policy.maxDetectionBytes) {
         throw new Error(
           `AxDemandDetection is ${candidateBytes} bytes; maximum is ${this.policy.maxDetectionBytes}`
         );
       }
-      detection = clone(candidate);
+      detection = deepFreeze(candidateSnapshot);
     } catch (error) {
       if (error instanceof AxDemandCancelledError) throw error;
       detection = uncertainDetection(
