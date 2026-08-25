@@ -1,4 +1,6 @@
 import { AxAgentClarificationError } from '../agent/agentInternal/agentStateTypes.js';
+import { axAuthorize } from '../authority/authority.js';
+import type { AxAuthorityContext } from '../authority/types.js';
 import type { AxGenDeltaOut, AxProgrammable } from '../dsp/types.js';
 import {
   AxEventRouteBuilder,
@@ -74,6 +76,7 @@ class AxRuntimeEventContext implements AxEventContext {
     readonly attempt: number,
     readonly idempotencyKey: string,
     readonly abortSignal: AbortSignal,
+    readonly authority?: Readonly<AxAuthorityContext>,
     readonly continuation?: Readonly<AxEventContinuation>,
     readonly fencingToken?: number
   ) {}
@@ -499,6 +502,10 @@ export class AxEventRuntime {
       const heartbeatController = new AbortController();
       this.activeRuns.set(runId, controller);
       const attempt = claimed.attempt + 1;
+      const authority =
+        typeof this.options.authority === 'function'
+          ? await this.options.authority(claimed.ingress)
+          : this.options.authority;
       const eventContext = new AxRuntimeEventContext(
         this.id,
         runId,
@@ -512,6 +519,7 @@ export class AxEventRuntime {
         attempt,
         claimed.id,
         controller.signal,
+        authority,
         continuation,
         claimed.fencingToken
       );
@@ -545,10 +553,28 @@ export class AxEventRuntime {
       try {
         let result: InvocationResult = { waiting: false, invoked: false };
         if (route.action === 'observe') {
+          await this.authorizeEventOperation(
+            eventContext,
+            'event.observe',
+            'event.route',
+            route.id
+          );
           await route.observe?.(claimed.ingress, eventContext);
         } else if (route.action === 'invalidate') {
+          await this.authorizeEventOperation(
+            eventContext,
+            'event.invalidate',
+            'event.route',
+            route.id
+          );
           await route.invalidator!.invalidate(claimed.ingress, eventContext);
         } else {
+          await this.authorizeEventOperation(
+            eventContext,
+            'event.target.invoke',
+            'event.target',
+            target!.id
+          );
           result = await this.invokeTarget(
             target!,
             instanceKey,
@@ -832,6 +858,7 @@ export class AxEventRuntime {
       ...(target.forwardOptions ?? {}),
       eventContext,
       eventInheritance: 'all' as const,
+      ...(eventContext.authority ? { authority: eventContext.authority } : {}),
       abortSignal: eventContext.abortSignal,
     };
     let output: unknown;
@@ -990,6 +1017,12 @@ export class AxEventRuntime {
       let count = 0;
       for (; count < (this.options.maxAttempts ?? 5); count++) {
         try {
+          await this.authorizeEventOperation(
+            eventContext,
+            'event.sink.write',
+            'event.sink',
+            sink.id
+          );
           await sink.write(run.output, {
             run,
             eventContext,
@@ -1039,6 +1072,12 @@ export class AxEventRuntime {
     eventContext: AxRuntimeEventContext
   ): Promise<void> {
     try {
+      await this.authorizeEventOperation(
+        eventContext,
+        'event.sink.write_chunk',
+        'event.sink',
+        sink.id
+      );
       await sink.writeChunk?.(chunk, {
         run,
         eventContext,
@@ -1056,6 +1095,30 @@ export class AxEventRuntime {
         createdAt: this.clock.now(),
       });
     }
+  }
+
+  private authorizeEventOperation(
+    context: Readonly<AxEventContext>,
+    operation: string,
+    type: string,
+    id: string
+  ) {
+    const verifiedIngressTenant =
+      context.trust === 'authenticated' || context.trust === 'trusted'
+        ? context.identity.tenantId
+        : undefined;
+    const tenantId =
+      verifiedIngressTenant ?? context.authority?.principal.tenantId;
+    return axAuthorize(
+      context.authority,
+      operation,
+      {
+        type,
+        id,
+        ...(tenantId ? { tenantId } : {}),
+      },
+      context.abortSignal
+    );
   }
 
   private async heartbeatClaim(

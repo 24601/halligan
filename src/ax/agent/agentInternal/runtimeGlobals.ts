@@ -4,6 +4,14 @@ import type {
   AxFunction,
   AxFunctionJSONSchema,
 } from '../../ai/types.js';
+import {
+  axAuthorize,
+  axFunctionAuthorityTarget,
+} from '../../authority/authority.js';
+import type {
+  AxAuthorityContext,
+  AxAuthorityInheritance,
+} from '../../authority/types.js';
 import { AxAgentProtocolCompletionSignal } from '../completion.js';
 import { serializeForEval } from '../optimize.js';
 import { DISCOVERY_DISCOVER_NAME, MEMORIES_LOAD_NAME } from '../runtime.js';
@@ -135,7 +143,9 @@ export function wrapFunction(
   functionCallRecorder?: AxAgentFunctionCallRecorder,
   kind: 'internal' | 'external' = 'external',
   onFunctionCall?: AxAgentOnFunctionCall,
-  eventContext?: import('../../event/types.js').AxEventContext
+  eventContext?: import('../../event/types.js').AxEventContext,
+  authority?: AxAuthorityContext,
+  authorityInheritance?: AxAuthorityInheritance
 ): (...args: unknown[]) => Promise<unknown> {
   return async (...args: unknown[]) => {
     let callArgs: Record<string, unknown>;
@@ -161,6 +171,21 @@ export function wrapFunction(
 
     const normalizedQualifiedName = qualifiedName ?? fn.name;
     const protocol = protocolForTrigger?.(normalizedQualifiedName);
+    const authorityReceipt = authority
+      ? await (() => {
+          const target = axFunctionAuthorityTarget(
+            fn as AxFunction,
+            authority,
+            normalizedQualifiedName
+          );
+          return axAuthorize(
+            authority,
+            target.operation,
+            target.resource,
+            abortSignal
+          );
+        })()
+      : undefined;
     if (onFunctionCall) {
       try {
         await onFunctionCall({
@@ -177,6 +202,9 @@ export function wrapFunction(
         ai,
         protocol,
         eventContext,
+        authority,
+        authorityInheritance,
+        authorityReceipt,
       });
       functionCallRecorder?.({
         qualifiedName: normalizedQualifiedName,
@@ -284,6 +312,10 @@ export function buildRuntimeGlobals(
   const eventContext = s._activeEventContext as
     | import('../../event/types.js').AxEventContext
     | undefined;
+  const authority = s._activeAuthority as AxAuthorityContext | undefined;
+  const authorityInheritance = s._activeAuthorityInheritance as
+    | AxAuthorityInheritance
+    | undefined;
 
   // Agent functions under namespace.* (e.g. utils.myFn, custom.otherFn).
   // Agent-derived entries carry `_kind: 'internal'` so that `onFunctionCall`
@@ -305,7 +337,9 @@ export function buildRuntimeGlobals(
           functionCallRecorder,
           agentFn._kind ?? 'external',
           onFunctionCall,
-          eventContext
+          eventContext,
+          authority,
+          authorityInheritance
         )
       : buildStageToolStub(qualifiedName);
     if (agentFn._alwaysInclude !== true) {
@@ -346,7 +380,9 @@ export function buildRuntimeGlobals(
               functionCallRecorder,
               'external',
               onFunctionCall,
-              eventContext
+              eventContext,
+              authority,
+              authorityInheritance
             )
           : buildStageToolStub(qualifiedName);
         registerCallable(
@@ -433,7 +469,9 @@ export function buildRuntimeGlobals(
               functionCallRecorder,
               'external',
               onFunctionCall,
-              eventContext
+              eventContext,
+              authority,
+              authorityInheritance
             )
           : buildStageToolStub(qualifiedName);
         registerCallable(

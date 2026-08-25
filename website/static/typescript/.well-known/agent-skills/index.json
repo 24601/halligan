@@ -55,7 +55,7 @@
       "type": "skill-md",
       "description": "This skill helps an LLM generate correct core AxAgent code using @ax-llm/ax. Use when the user asks about agent(), child agents, namespaced functions, discovery mode, clarification, bubbleErrors, host-side final/clarification protocol, or ordinary agent runtime behavior. For MCP clients, native runtime modules, subscriptions, tasks, or authentication use ax-mcp alongside this skill. For RLM/code-runtime work use ax-agent-rlm; for callbacks and telemetry use ax-agent-observability; for recall/memory/skill loading use ax-agent-memory-skills; for agent.optimize(...) use ax-agent-optimize.",
       "url": "ax-agent/SKILL.md",
-      "digest": "sha256:448b8e4dd18dc3d906f2783160cfc035e740a2a84d6700dc40831e3ab3a2b892"
+      "digest": "sha256:4a65a790de1438a23986ce9b440c170e6da98f69b706d0f501b021eca9e9ea6d"
     },
     {
       "name": "ax-agent-rlm",
@@ -97,7 +97,7 @@
       "type": "skill-md",
       "description": "Use AxEventRuntime to ingest events, explicitly wake or resume AxGen, AxAgent, and AxFlow, persist state and results, and route outputs safely.",
       "url": "ax-event-runtime/SKILL.md",
-      "digest": "sha256:8c8ed96edea4c98512d8262edef001045aa3496e2709181db49316e5f7493872"
+      "digest": "sha256:c529d3a73bb3b541c1b07420ee3a98f0a859794085d58c428d66aa9469e7b86f"
     },
     {
       "name": "ax-gepa",

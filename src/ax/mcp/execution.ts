@@ -1,4 +1,9 @@
 import type { AxChatRequest, AxFunction } from '../ai/types.js';
+import { axAttenuateAuthority } from '../authority/authority.js';
+import type {
+  AxAuthorityContext,
+  AxAuthorityInheritance,
+} from '../authority/types.js';
 import type { AxUCPClient } from '../ucp/client.js';
 import { axMCPToolVisibleTo } from './apps.js';
 import type { AxMCPClient } from './client.js';
@@ -519,6 +524,8 @@ export function axMCPChildExecutionOptions<
     _mcpExecutionContext?: AxMCPExecutionContext;
     eventContext?: unknown;
     eventInheritance?: 'all' | 'none';
+    authority?: AxAuthorityContext;
+    authorityInheritance?: AxAuthorityInheritance;
   }>,
 >(options: T): T {
   const {
@@ -526,14 +533,23 @@ export function axMCPChildExecutionOptions<
     ucp: _ucp,
     mcpContext: _context,
     eventContext: _eventContext,
+    authority: _authority,
     ...rest
   } = options;
   const child = options._mcpExecutionContext?.forChild();
+  const childAuthority = !options.authority
+    ? undefined
+    : options.authorityInheritance === 'none'
+      ? { ...options.authority, grants: [] }
+      : typeof options.authorityInheritance === 'object'
+        ? axAttenuateAuthority(options.authority, options.authorityInheritance)
+        : options.authority;
   return {
     ...rest,
     ...(child ? { _mcpExecutionContext: child } : {}),
     ...(options.eventInheritance !== 'none' && options.eventContext
       ? { eventContext: options.eventContext }
       : {}),
+    ...(childAuthority ? { authority: childAuthority } : {}),
   } as unknown as T;
 }

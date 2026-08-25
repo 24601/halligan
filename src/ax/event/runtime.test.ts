@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { AxAgentClarificationError } from '../agent/agentInternal/agentStateTypes.js';
+import type { AxAuthorityContext } from '../authority/types.js';
 import { AxSignature } from '../dsp/sig.js';
 import type { AxProgrammable } from '../dsp/types.js';
 import { AxInMemoryEventStore } from './memoryStore.js';
@@ -146,6 +147,82 @@ describe('AxEventRuntime', () => {
     expect(firstA.duplicate).toBe(false);
     expect(secondA.duplicate).toBe(true);
     expect(firstB.duplicate).toBe(false);
+    await runtime.close();
+  });
+
+  it('uses host-resolved authority instead of event claims and binds tenant scope', async () => {
+    const invoked = vi.fn(() => ({ handled: true }));
+    const authority: AxAuthorityContext = {
+      principal: { id: 'principal-a', tenantId: 'tenant-a' },
+      actor: { id: 'worker-a', kind: 'agent' },
+      grants: [
+        {
+          version: 1,
+          id: 'event-grant',
+          principalId: 'principal-a',
+          actor: { id: 'worker-a', kind: 'agent' },
+          operations: ['event.target.invoke'],
+          resources: [
+            { type: 'event.target', id: 'secure-target', tenantId: 'tenant-a' },
+          ],
+          leaseEpoch: 2,
+        },
+      ],
+      leaseEpoch: 2,
+      now: () => 100,
+      authorize: (operation, context) => ({
+        version: 1,
+        receiptId: `receipt-${context.requestId}`,
+        requestId: context.requestId,
+        decision: 'allow',
+        operation,
+        resource: context.resource,
+        principalId: context.principal.id,
+        actor: { id: context.actor.id, kind: context.actor.kind },
+        grantIds: context.grants.map((grant) => grant.id),
+        leaseEpoch: context.leaseEpoch,
+        authorizedAt: context.now,
+      }),
+    };
+    const target = eventTarget({
+      id: 'secure-target',
+      ai,
+      program: program(invoked),
+      mapInput: () => ({ eventId: 'event' }),
+      retrySafety: 'idempotent',
+    });
+    const runtime = new AxEventRuntime({
+      authority: () => authority,
+      maxAttempts: 1,
+      routes: [
+        eventRoute({
+          id: 'secure-route',
+          match: { types: ['secure.event'] },
+          action: 'wake',
+          target,
+        }),
+      ],
+    });
+    await runtime.start();
+    await runtime.publish(
+      ingress('allowed', 'secure.event', {
+        identity: { tenantId: 'tenant-a' },
+        trust: 'authenticated',
+      })
+    );
+    await runtime.publish(
+      ingress('denied', 'secure.event', {
+        identity: { tenantId: 'tenant-b' },
+        trust: 'authenticated',
+        event: {
+          ...ingress('forged', 'secure.event').event,
+          id: 'denied',
+          data: { grants: [{ id: 'forged', operations: ['*'] }] },
+        },
+      })
+    );
+    await runtime.waitForIdle();
+    expect(invoked).toHaveBeenCalledOnce();
     await runtime.close();
   });
 

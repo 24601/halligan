@@ -10,6 +10,11 @@ import type {
   AxFunctionResultContent,
   AxLoggerFunction,
 } from '../ai/types.js';
+import {
+  axAuthorize,
+  axFunctionAuthorityTarget,
+} from '../authority/authority.js';
+import type { AxAuthorityContext } from '../authority/types.js';
 import type { AxMemory } from '../mem/memory.js';
 import { ValidationError } from './errors.js';
 import { axGlobals } from './globals.js';
@@ -174,6 +179,22 @@ export class AxFunctionProcessor {
           step: options.step,
           abortSignal: options.abortSignal,
           eventContext: options.eventContext,
+          authority: options.authority,
+          authorityInheritance: options.authorityInheritance,
+          authorityReceipt: options.authority
+            ? await (() => {
+                const target = axFunctionAuthorityTarget(
+                  fnSpec,
+                  options.authority
+                );
+                return axAuthorize(
+                  options.authority,
+                  target.operation,
+                  target.resource,
+                  options.abortSignal
+                );
+              })()
+            : undefined,
           _mcpExecutionContext: options._mcpExecutionContext,
         }
       : undefined;
@@ -327,6 +348,7 @@ type ProcessFunctionsArgs = {
   ) => void | Promise<void>;
   mcpExecutionContext?: import('../mcp/execution.js').AxMCPExecutionContext;
   eventContext?: import('../event/types.js').AxEventContext;
+  authority?: AxAuthorityContext;
 };
 
 export const processFunctions = async ({
@@ -350,6 +372,7 @@ export const processFunctions = async ({
   onFunctionCall,
   mcpExecutionContext,
   eventContext,
+  authority,
 }: Readonly<ProcessFunctionsArgs>) => {
   const funcProc = new AxFunctionProcessor(functionList);
   const functionsExecuted = new Set<string>();
@@ -463,6 +486,7 @@ export const processFunctions = async ({
           step,
           abortSignal,
           eventContext,
+          authority,
           _mcpExecutionContext: mcpExecutionContext,
         })
         .then(
@@ -594,6 +618,7 @@ export const processFunctions = async ({
             step,
             abortSignal,
             eventContext,
+            authority,
             _mcpExecutionContext: mcpExecutionContext,
           });
 
