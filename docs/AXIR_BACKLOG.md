@@ -22,7 +22,7 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
   - Status: open
   - Source PR: #14
   - Source commit: `e5174ff8a33503e7c71b9beb1c048c12972c8245`
-  - TS paths: `src/ax/agent/agentInternal/playbookEvolve/playbookEvolve.ts`
+  - TS paths: `src/ax/agent/agent.test-d.ts`, `src/ax/agent/agentInternal/playbookEvolve/evalHarness.ts`, `src/ax/agent/agentInternal/playbookEvolve/playbookEvolve.test.ts`, `src/ax/agent/agentInternal/playbookEvolve/playbookEvolve.ts`, `src/ax/agent/agentInternal/playbookEvolve/playbookEvolveTypes.ts`
   - Impact: TypeScript agent playbook evolution can gate candidates against named/versioned historical anchors with explicit stability/plasticity thresholds and per-slice receipts; generated Python, Java, C++, Go, and Rust agent evolution does not yet expose or enforce that optional policy.
   - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 
