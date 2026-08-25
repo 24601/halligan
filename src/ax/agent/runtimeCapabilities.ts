@@ -3,6 +3,8 @@ import type { AxCodeRuntime } from './rlm.js';
 export const axCodeRuntimeProtocol = 'ax-code-runtime';
 export const axCodeRuntimeProtocolVersion = '1';
 export const axRuntimeCapabilitiesVersion = 'ax-runtime-capabilities/v1';
+export const axRuntimeCapabilityRequirementsVersion =
+  'ax-runtime-requirements/v1';
 
 export type AxRuntimeAuthority =
   | 'denied'
@@ -83,6 +85,7 @@ export type AxRuntimeCapabilityExtensions = Omit<
 >;
 
 export type AxRuntimeCapabilityRequirements = Readonly<{
+  schemaVersion?: typeof axRuntimeCapabilityRequirementsVersion;
   inspect?: true;
   snapshot?: true;
   patch?: true;
@@ -119,7 +122,10 @@ export type AxRuntimeAdmissionEvidence = Readonly<{
 }>;
 
 export type AxRuntimeAdmissionReceipt = Readonly<{
+  /** Original candidate identity used only for receipt matching. */
   runtime: AxCodeRuntime;
+  /** Frozen facade over the implementation admitted by the host. */
+  executable: AxCodeRuntime;
   evaluator: string;
   source: AxRuntimeAdmissionEvidence['source'];
   authority: AxRuntimeCapabilities['authority'];
@@ -175,6 +181,16 @@ const platformAuthorityKeys: readonly (keyof AxRuntimePlatformAuthority)[] = [
   'wasi',
 ];
 const admissionReceipts = new WeakSet<object>();
+const admittedImplementations = new WeakMap<
+  AxRuntimeAdmissionReceipt,
+  Readonly<{
+    language: string | undefined;
+    createSession: AxCodeRuntime['createSession'];
+    getUsageInstructions: AxCodeRuntime['getUsageInstructions'];
+    getPrimitiveOverrides: AxCodeRuntime['getPrimitiveOverrides'];
+    formatCallable: AxCodeRuntime['formatCallable'];
+  }>
+>();
 const admissionSources = new Set<AxRuntimeAdmissionEvidence['source']>([
   'adapter-execution',
   'external-attestation',
@@ -407,6 +423,83 @@ function validateRequirements(
   requirements: AxRuntimeCapabilityRequirements
 ): void {
   const errors: string[] = [];
+  if (
+    !requirements ||
+    typeof requirements !== 'object' ||
+    Array.isArray(requirements)
+  ) {
+    throw new Error('Invalid runtime capability requirements: expected object');
+  }
+  const rejectUnknownKeys = (
+    value: unknown,
+    allowed: readonly string[],
+    path: string
+  ) => {
+    if (value === undefined) return;
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      errors.push(`${path} must be an object`);
+      return;
+    }
+    for (const key of Reflect.ownKeys(value)) {
+      if (typeof key !== 'string' || !allowed.includes(key)) {
+        errors.push(`${path} contains unsupported field ${String(key)}`);
+      }
+    }
+  };
+  rejectUnknownKeys(
+    requirements,
+    [
+      'schemaVersion',
+      'inspect',
+      'snapshot',
+      'patch',
+      'abort',
+      'language',
+      'platform',
+      'protocol',
+      'persistence',
+      'resources',
+      'authority',
+    ],
+    'requirements'
+  );
+  rejectUnknownKeys(requirements.protocol, ['name', 'version'], 'protocol');
+  rejectUnknownKeys(
+    requirements.persistence,
+    ['session', 'restart'],
+    'persistence'
+  );
+  rejectUnknownKeys(
+    requirements.resources,
+    ['maxTimeoutMs', 'timeoutEnforcement', 'maxMemoryMb'],
+    'resources'
+  );
+  rejectUnknownKeys(
+    requirements.authority,
+    ['host', 'modules', 'network', 'platform'],
+    'authority'
+  );
+  rejectUnknownKeys(
+    requirements.authority?.platform,
+    platformAuthorityKeys,
+    'authority.platform'
+  );
+  const needsAdmission = !!requirements.resources || !!requirements.authority;
+  if (
+    needsAdmission &&
+    requirements.schemaVersion !== axRuntimeCapabilityRequirementsVersion
+  ) {
+    errors.push(
+      `security requirements require schemaVersion ${axRuntimeCapabilityRequirementsVersion}`
+    );
+  } else if (
+    requirements.schemaVersion !== undefined &&
+    requirements.schemaVersion !== axRuntimeCapabilityRequirementsVersion
+  ) {
+    errors.push(
+      `unsupported requirements schemaVersion ${requirements.schemaVersion}`
+    );
+  }
   const validateStrings = (value: string | readonly string[], name: string) => {
     const values = Array.isArray(value) ? value : [value];
     if (
@@ -520,24 +613,77 @@ export function axCreateRuntimeAdmissionReceipt(
   evidence: AxRuntimeAdmissionEvidence
 ): AxRuntimeAdmissionReceipt {
   validateAdmissionEvidence(evidence);
+  const implementation = Object.freeze({
+    language: runtime.language,
+    createSession: runtime.createSession,
+    getUsageInstructions: runtime.getUsageInstructions,
+    getPrimitiveOverrides: runtime.getPrimitiveOverrides,
+    formatCallable: runtime.formatCallable,
+  });
+  if (
+    typeof implementation.createSession !== 'function' ||
+    typeof implementation.getUsageInstructions !== 'function' ||
+    (implementation.getPrimitiveOverrides !== undefined &&
+      typeof implementation.getPrimitiveOverrides !== 'function') ||
+    (implementation.formatCallable !== undefined &&
+      typeof implementation.formatCallable !== 'function')
+  ) {
+    throw new Error('Runtime admission implementation is malformed');
+  }
+  const executable: AxCodeRuntime = Object.freeze({
+    ...(implementation.language === undefined
+      ? {}
+      : { language: implementation.language }),
+    createSession: implementation.createSession.bind(runtime),
+    getUsageInstructions: implementation.getUsageInstructions.bind(runtime),
+    ...(implementation.getPrimitiveOverrides
+      ? {
+          getPrimitiveOverrides:
+            implementation.getPrimitiveOverrides.bind(runtime),
+        }
+      : {}),
+    ...(implementation.formatCallable
+      ? { formatCallable: implementation.formatCallable.bind(runtime) }
+      : {}),
+  });
   const receipt = Object.freeze({
     runtime,
+    executable,
     evaluator: evidence.evaluator,
     source: evidence.source,
     authority: frozenAuthority(evidence.authority),
     resources: frozenResources(evidence.resources),
   });
   admissionReceipts.add(receipt);
+  admittedImplementations.set(receipt, implementation);
   return receipt;
 }
 
-function matchingAdmission(
+function resolveAdmission(
   runtime: AxCodeRuntime,
   receipts: readonly AxRuntimeAdmissionReceipt[] | undefined
-): AxRuntimeAdmissionReceipt | undefined {
-  return receipts?.find(
-    (receipt) => admissionReceipts.has(receipt) && receipt.runtime === runtime
+): Readonly<{
+  receipt?: AxRuntimeAdmissionReceipt;
+  stale: boolean;
+}> {
+  const receipt = receipts?.find(
+    (candidate) =>
+      admissionReceipts.has(candidate) && candidate.runtime === runtime
   );
+  if (!receipt) return { stale: false };
+  const implementation = admittedImplementations.get(receipt);
+  try {
+    const stale =
+      !implementation ||
+      runtime.language !== implementation.language ||
+      runtime.createSession !== implementation.createSession ||
+      runtime.getUsageInstructions !== implementation.getUsageInstructions ||
+      runtime.getPrimitiveOverrides !== implementation.getPrimitiveOverrides ||
+      runtime.formatCallable !== implementation.formatCallable;
+    return stale ? { stale: true } : { receipt, stale: false };
+  } catch {
+    return { stale: true };
+  }
 }
 
 function supportsProtocol(
@@ -554,7 +700,8 @@ function capabilityRejectionReasons(
   runtime: AxCodeRuntime,
   capabilities: AxRuntimeCapabilities,
   requirements: AxRuntimeCapabilityRequirements,
-  admission: AxRuntimeAdmissionReceipt | undefined
+  admission: AxRuntimeAdmissionReceipt | undefined,
+  staleAdmission: boolean
 ): string[] {
   const reasons: string[] = [];
   if ((runtime.language ?? 'JavaScript') !== capabilities.language) {
@@ -595,6 +742,10 @@ function capabilityRejectionReasons(
   }
 
   const needsAdmission = !!requirements.resources || !!requirements.authority;
+  if (needsAdmission && staleAdmission) {
+    reasons.push('host admission no longer matches runtime implementation');
+    return reasons;
+  }
   if (needsAdmission && !admission) {
     reasons.push(
       'security requirements require a trusted host admission receipt'
@@ -654,7 +805,8 @@ function capabilityRejectionReasons(
 
 /**
  * Selects the first declared match. Security requirements additionally require
- * a host-minted receipt; declarations alone are never authority/resource proof.
+ * a host-minted receipt and return its frozen executable facade; declarations
+ * alone are never authority/resource proof.
  */
 export function axSelectCodeRuntime(
   runtimes: readonly AxCodeRuntime[],
@@ -672,6 +824,7 @@ export function axSelectCodeRuntime(
     };
   }
   validateRequirements(requirements);
+  const needsAdmission = !!requirements.resources || !!requirements.authority;
   const rejected: { index: number; reasons: string[] }[] = [];
   for (const [index, runtime] of runtimes.entries()) {
     const capabilities = snapshotDeclaration(runtime);
@@ -682,18 +835,21 @@ export function axSelectCodeRuntime(
       });
       continue;
     }
-    const admission = matchingAdmission(runtime, options?.admissions);
+    const admission = needsAdmission
+      ? resolveAdmission(runtime, options?.admissions)
+      : { stale: false };
     const reasons = capabilityRejectionReasons(
       runtime,
       capabilities,
       requirements,
-      admission
+      admission.receipt,
+      admission.stale
     );
     if (reasons.length === 0) {
       return {
-        runtime,
+        runtime: admission.receipt?.executable ?? runtime,
         capabilities,
-        ...(admission ? { admission } : {}),
+        ...(admission.receipt ? { admission: admission.receipt } : {}),
         index,
         requirementAware: true,
         rejected,

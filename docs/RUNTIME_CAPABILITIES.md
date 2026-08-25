@@ -40,9 +40,10 @@ declaration is still untrusted metadata and is not security evidence.
 the first candidate, including legacy runtimes without declarations.
 
 Passing requirements opts into fail-closed matching. Invalid requirements,
-including resource bounds that are not positive safe integers, throw before
-candidates are considered. Missing, malformed, contradictory, and insufficient
-declarations are rejected.
+including unknown top-level or nested fields and resource bounds that are not
+positive safe integers, throw before candidates are considered. Unknown fields
+are never interpreted as satisfied. Missing, malformed, contradictory, and
+insufficient declarations are rejected.
 
 Inspect/snapshot/patch/abort, language, platform, protocol, and persistence may
 be matched against the immutable declaration snapshot. Authority and resource
@@ -62,6 +63,7 @@ const admission = axCreateRuntimeAdmissionReceipt(runtime, {
 const { runtime: selected } = axSelectCodeRuntime(
   candidates,
   {
+    schemaVersion: 'ax-runtime-requirements/v1',
     protocol: { name: 'ax-code-runtime', version: '1' },
     resources: { maxTimeoutMs: 1_000, timeoutEnforcement: 'hard' },
     authority: {
@@ -74,11 +76,20 @@ const { runtime: selected } = axSelectCodeRuntime(
 );
 ```
 
-Receipts are bound to a runtime identity, deeply snapshot admitted values, and
-must be supplied out-of-band by the selecting host. A runtime cannot make its
-declaration count as a receipt. The receipt records what the host admitted; it
-does not prove that the evaluator or policy is correct, and it never proves
-isolation.
+Authority/resource requirements must specify the exact
+`ax-runtime-requirements/v1` schema. Receipts are bound to a runtime identity
+and its captured method identities, deeply snapshot admitted values, and must
+be supplied out-of-band by the selecting host. Changing the candidate's
+language or executable methods after admission invalidates the receipt before
+selection. Security-aware selection returns the receipt's frozen executable
+facade, whose methods are bound to the admitted implementation, rather than the
+mutable candidate object. A runtime cannot make its declaration count as a
+receipt.
+
+The facade prevents method replacement from changing the selected executable;
+it cannot generically freeze or attest implementation-private mutable state.
+The receipt records what the host admitted; it does not prove that the
+evaluator or policy is correct, and it never proves isolation.
 
 ## Protocol layers
 

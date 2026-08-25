@@ -15,6 +15,7 @@ import {
   type AxRuntimeAdmissionReceipt,
   type AxRuntimeCapabilities,
   agent,
+  axRuntimeCapabilityRequirementsVersion,
   axSelectCodeRuntime,
   f,
   s,
@@ -28,6 +29,7 @@ import {
   const selected: AxCodeRuntime = axSelectCodeRuntime(
     [runtime],
     {
+      schemaVersion: axRuntimeCapabilityRequirementsVersion,
       inspect: true,
       language: ['JavaScript', 'Python'],
       authority: { network: 'denied' },

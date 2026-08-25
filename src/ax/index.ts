@@ -227,6 +227,7 @@ import {
   axReportRuntimeCapabilityContradictions,
   axRuntimeCapabilitiesToAxIR,
   axRuntimeCapabilitiesVersion,
+  axRuntimeCapabilityRequirementsVersion,
   axRuntimeProtocolFromToken,
   axSelectCodeRuntime,
 } from './agent/runtimeCapabilities.js';
@@ -1605,6 +1606,7 @@ export { axResolveOpenAIChatAudioConfig };
 export { axResolveOpenAIRealtimeAudioConfig };
 export { axRuntimeCapabilitiesToAxIR };
 export { axRuntimeCapabilitiesVersion };
+export { axRuntimeCapabilityRequirementsVersion };
 export { axRuntimePrimitives };
 export { axRuntimeProtocolFromToken };
 export { axScoreProvidersForRequest };

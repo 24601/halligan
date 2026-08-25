@@ -15,6 +15,7 @@ import {
   axReportRuntimeCapabilityContradictions,
   axRuntimeCapabilitiesToAxIR,
   axRuntimeCapabilitiesVersion,
+  axRuntimeCapabilityRequirementsVersion,
   axRuntimeProtocolFromToken,
   axSelectCodeRuntime,
 } from './runtimeCapabilities.js';
@@ -265,6 +266,7 @@ describe('axSelectCodeRuntime', () => {
       })
     );
     const requirements = {
+      schemaVersion: axRuntimeCapabilityRequirementsVersion,
       resources: { maxTimeoutMs: 100, timeoutEnforcement: 'hard' as const },
       authority: { host: 'denied' as const, network: 'denied' as const },
     };
@@ -308,6 +310,7 @@ describe('axSelectCodeRuntime', () => {
     declaration.authority.host = 'denied';
     const spoof = { ...admission, authority: admissionEvidence().authority };
     const requirements = {
+      schemaVersion: axRuntimeCapabilityRequirementsVersion,
       authority: { host: 'denied' as const, network: 'denied' as const },
     };
 
@@ -341,11 +344,143 @@ describe('axSelectCodeRuntime', () => {
     (value) => {
       expect(() =>
         axSelectCodeRuntime([runtime(capabilities())], {
+          schemaVersion: axRuntimeCapabilityRequirementsVersion,
           resources: { maxTimeoutMs: value },
         })
       ).toThrow(/Invalid runtime capability requirements/);
     }
   );
+
+  it('rejects missing or unsupported security requirement versions', () => {
+    const candidate = runtime(capabilities());
+    expect(() =>
+      axSelectCodeRuntime([candidate], {
+        authority: { network: 'denied' },
+      })
+    ).toThrow(/security requirements require schemaVersion/);
+    expect(() =>
+      axSelectCodeRuntime([candidate], {
+        schemaVersion: 'ax-runtime-requirements/v2',
+        authority: { network: 'denied' },
+      } as never)
+    ).toThrow(/security requirements require schemaVersion/);
+  });
+
+  it.each([
+    ['requirements', { inspect: true, futureCapability: true }],
+    [
+      'protocol',
+      {
+        protocol: {
+          name: axCodeRuntimeProtocol,
+          version: axCodeRuntimeProtocolVersion,
+          futureProtocol: true,
+        },
+      },
+    ],
+    ['persistence', { persistence: { session: true, futureStore: true } }],
+    [
+      'resources',
+      {
+        schemaVersion: axRuntimeCapabilityRequirementsVersion,
+        resources: { maxTimeoutMs: 100, futureLimit: true },
+      },
+    ],
+    [
+      'authority',
+      {
+        schemaVersion: axRuntimeCapabilityRequirementsVersion,
+        authority: { host: 'denied', futureAuthority: 'denied' },
+      },
+    ],
+    [
+      'authority.platform',
+      {
+        schemaVersion: axRuntimeCapabilityRequirementsVersion,
+        authority: {
+          platform: { filesystem: 'denied', futurePermission: 'denied' },
+        },
+      },
+    ],
+  ] as const)(
+    'rejects unsupported %s requirement fields',
+    (_path, requirements) => {
+      expect(() =>
+        axSelectCodeRuntime([runtime(capabilities())], requirements as never)
+      ).toThrow(/contains unsupported field/);
+    }
+  );
+
+  it('rejects a receipt after the admitted implementation is replaced', () => {
+    const candidate = runtime(
+      capabilities({
+        authority: admissionEvidence().authority,
+        resources: admissionEvidence().resources,
+      })
+    );
+    const admission = axCreateRuntimeAdmissionReceipt(
+      candidate,
+      admissionEvidence()
+    );
+    let replacementExecutions = 0;
+    (
+      candidate as { createSession: AxCodeRuntime['createSession'] }
+    ).createSession = () => {
+      replacementExecutions++;
+      return unsupportedSession;
+    };
+
+    expect(() =>
+      axSelectCodeRuntime(
+        [candidate],
+        {
+          schemaVersion: axRuntimeCapabilityRequirementsVersion,
+          authority: { host: 'denied' },
+        },
+        { admissions: [admission] }
+      )
+    ).toThrow(/admission no longer matches runtime implementation/);
+    expect(replacementExecutions).toBe(0);
+  });
+
+  it('returns a frozen admitted executable immune to later method replacement', () => {
+    let admittedExecutions = 0;
+    let replacementExecutions = 0;
+    const candidate = runtime(
+      capabilities({ authority: admissionEvidence().authority })
+    );
+    (
+      candidate as { createSession: AxCodeRuntime['createSession'] }
+    ).createSession = () => {
+      admittedExecutions++;
+      return unsupportedSession;
+    };
+    const admission = axCreateRuntimeAdmissionReceipt(
+      candidate,
+      admissionEvidence()
+    );
+    const selected = axSelectCodeRuntime(
+      [candidate],
+      {
+        schemaVersion: axRuntimeCapabilityRequirementsVersion,
+        authority: { host: 'denied' },
+      },
+      { admissions: [admission] }
+    );
+
+    expect(selected.runtime).toBe(admission.executable);
+    expect(selected.runtime).not.toBe(candidate);
+    expect(Object.isFrozen(selected.runtime)).toBe(true);
+    (
+      candidate as { createSession: AxCodeRuntime['createSession'] }
+    ).createSession = () => {
+      replacementExecutions++;
+      return unsupportedSession;
+    };
+    selected.runtime.createSession();
+    expect(admittedExecutions).toBe(1);
+    expect(replacementExecutions).toBe(0);
+  });
 
   it('matches base and feature protocols through one path', () => {
     const candidate = runtime(

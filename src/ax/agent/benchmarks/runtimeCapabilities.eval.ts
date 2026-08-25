@@ -10,6 +10,7 @@ import {
   axCreateRuntimeCapabilities,
   axReportRuntimeCapabilityContradictions,
   axRuntimeCapabilitiesVersion,
+  axRuntimeCapabilityRequirementsVersion,
   axSelectCodeRuntime,
 } from '../runtimeCapabilities.js';
 
@@ -135,6 +136,7 @@ const tasks: readonly Readonly<{
     name: 'resources',
     candidates: [legacy, bounded],
     requirements: {
+      schemaVersion: axRuntimeCapabilityRequirementsVersion,
       resources: {
         maxTimeoutMs: 100,
         timeoutEnforcement: 'hard',
@@ -148,6 +150,7 @@ const tasks: readonly Readonly<{
     name: 'authority',
     candidates: [legacy, bounded],
     requirements: {
+      schemaVersion: axRuntimeCapabilityRequirementsVersion,
       authority: { host: 'denied', modules: 'denied', network: 'denied' },
     },
     admissions: [boundedAdmission],
@@ -181,7 +184,7 @@ for (const task of tasks) {
     admissions: task.admissions,
   });
   if (blind.id === task.expected) blindCorrect++;
-  if ((aware.runtime as DeclaredRuntime).id === task.expected) awareCorrect++;
+  if (task.candidates[aware.index]?.id === task.expected) awareCorrect++;
   rejections += aware.rejected.length;
 }
 
