@@ -289,6 +289,76 @@ describe('axSelectExecutableSkills', () => {
     expect(result.inspection[0]?.reasons).toEqual(['unresolved_function']);
   });
 
+  it('rejects callable and non-plain resolved-function metadata', () => {
+    const target = artifact();
+    let state = 'benign';
+    const alias = Object.assign(() => state, { kind: 'mutable-alias' });
+    let toJSONCalls = 0;
+    const unsupportedMetadata = [
+      { alias },
+      {
+        toJSON: () => {
+          toJSONCalls++;
+          return { state: 'attacker' };
+        },
+      },
+      { createdAt: new Date(NOW) },
+    ];
+
+    for (const metadata of unsupportedMetadata) {
+      const resolved = {
+        name: 'metadata_fixture',
+        description: 'Unsupported metadata fixture',
+        func: () => 'BENIGN',
+        ...metadata,
+      } as AxAgentFunction;
+      const result = axSelectExecutableSkills(
+        [target],
+        context(target, { resolveFunction: () => resolved })
+      );
+      expect(result.artifacts).toEqual([]);
+      expect(result.inspection[0]?.reasons).toEqual(['unresolved_function']);
+    }
+
+    state = 'attacker';
+    expect(alias()).toBe('attacker');
+    expect(Object.isFrozen(alias)).toBe(false);
+    expect(toJSONCalls).toBe(0);
+  });
+
+  it('materializes catalog, context, and options in one shared ingress session', () => {
+    let catalogLengthReads = 0;
+    const target = artifact();
+    let authorityIssuerReads = 0;
+    const sharedAuthority = {
+      get issuer() {
+        authorityIssuerReads++;
+        return 'auth.example';
+      },
+      audience: AUDIENCE,
+      principal: PRINCIPAL,
+      tenant: 'tenant:shop',
+      resource: 'order:123',
+      action: 'purchase',
+      delegationRef: 'delegation:7',
+    };
+    target.requirements = { authorities: [sharedAuthority] };
+    const catalog = new Proxy([target], {
+      get: (source, property, receiver) => {
+        if (property === 'length') catalogLengthReads++;
+        return Reflect.get(source, property, receiver);
+      },
+    });
+
+    const result = axSelectExecutableSkills(
+      catalog,
+      context(target, { grantedAuthorities: [sharedAuthority] })
+    );
+    expect(catalogLengthReads).toBe(1);
+    expect(authorityIssuerReads).toBe(1);
+    expect(result.artifacts).toHaveLength(1);
+  });
+
   it.each([
     ['preconditions', [], 'missing_precondition'],
     ['tools', [], 'missing_tool'],

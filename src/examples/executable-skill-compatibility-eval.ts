@@ -100,7 +100,7 @@ const catalog: readonly unknown[] = [
     version: '1',
     name: 'legacy upload',
     description: 'Upload a legacy file',
-    function: noop,
+    function: 'legacy-inline-code',
   },
 ];
 

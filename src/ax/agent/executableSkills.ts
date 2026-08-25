@@ -476,22 +476,44 @@ function missingAny(
   return required?.some((item) => !available.has(item)) ?? false;
 }
 
+class MetadataLimitError extends Error {}
+
 function materializeDetached(
   value: unknown,
   copies = new WeakMap<object, unknown>(),
   visiting = new WeakSet<object>(),
-  arrayLimit = MAX_LIST_ENTRIES
+  arrayLimit = MAX_LIST_ENTRIES,
+  contextRoot?: object,
+  allowContextResolver = false
 ): unknown {
-  if (!value || typeof value !== 'object') return value;
-  if (visiting.has(value)) throw new TypeError('cyclic metadata');
-  const existing = copies.get(value);
+  if (value === null) return value;
+  const valueType = typeof value;
+  if (
+    valueType === 'string' ||
+    valueType === 'boolean' ||
+    valueType === 'undefined'
+  )
+    return value;
+  if (valueType === 'number') {
+    if (!Number.isFinite(value)) throw new TypeError('non-finite metadata');
+    return value;
+  }
+  if (valueType === 'function') {
+    if (allowContextResolver) return value;
+    throw new TypeError('callable metadata is unsupported');
+  }
+  if (valueType !== 'object')
+    throw new TypeError('unsupported metadata primitive');
+  const objectValue = value as object;
+  if (visiting.has(objectValue)) throw new TypeError('cyclic metadata');
+  const existing = copies.get(objectValue);
   if (existing !== undefined) return existing;
 
-  visiting.add(value);
+  visiting.add(objectValue);
   if (Array.isArray(value)) {
     const length = value.length;
     if (length > arrayLimit)
-      throw new TypeError('array metadata exceeds limit');
+      throw new MetadataLimitError('array metadata exceeds limit');
     const keys = Reflect.ownKeys(value);
     if (
       keys.some(
@@ -502,49 +524,112 @@ function materializeDetached(
     )
       throw new TypeError('unsupported array metadata');
     const copy: unknown[] = [];
-    copies.set(value, copy);
+    copies.set(objectValue, copy);
     for (let index = 0; index < length; index++) {
-      copy[index] = materializeDetached(value[index], copies, visiting);
+      copy[index] = materializeDetached(
+        value[index],
+        copies,
+        visiting,
+        MAX_LIST_ENTRIES,
+        contextRoot
+      );
     }
-    visiting.delete(value);
+    visiting.delete(objectValue);
     return Object.freeze(copy);
   }
 
-  const copy: Record<string, unknown> = {};
-  copies.set(value, copy);
-  for (const key of Reflect.ownKeys(value)) {
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null)
+    throw new TypeError('non-plain metadata object');
+  const copy: Record<string, unknown> = Object.create(prototype);
+  copies.set(objectValue, copy);
+  for (const key of Reflect.ownKeys(objectValue)) {
     if (typeof key !== 'string')
       throw new TypeError('symbol metadata is unsupported');
     Object.defineProperty(copy, key, {
       value: materializeDetached(
         (value as Record<string, unknown>)[key],
         copies,
-        visiting
+        visiting,
+        MAX_LIST_ENTRIES,
+        contextRoot,
+        value === contextRoot && key === 'resolveFunction'
       ),
       enumerable: true,
     });
   }
-  visiting.delete(value);
+  visiting.delete(objectValue);
   return Object.freeze(copy);
 }
 
-function tryMaterializeDetached(
-  value: unknown,
-  rootArrayLimit = MAX_LIST_ENTRIES
-): { ok: true; value: unknown } | { ok: false } {
+type MaterializedIngress = Readonly<{
+  catalog: readonly unknown[];
+  context: AxExecutableSkillContext;
+  options: AxSelectExecutableSkillsOptions;
+}>;
+
+function tryMaterializeIngress(
+  catalog: unknown,
+  context: unknown,
+  options: unknown
+):
+  | { ok: true; value: MaterializedIngress }
+  | {
+      ok: false;
+      phase: 'catalog' | 'context' | 'options';
+      limit?: boolean;
+    } {
+  if (!Array.isArray(catalog)) return { ok: false, phase: 'catalog' };
+  const copies = new WeakMap<object, unknown>();
+  const visiting = new WeakSet<object>();
+  let catalogSnapshot: unknown;
   try {
+    catalogSnapshot = materializeDetached(
+      catalog,
+      copies,
+      visiting,
+      MAX_CATALOG_ENTRIES,
+      context as object
+    );
+  } catch (error) {
     return {
-      ok: true,
-      value: materializeDetached(
-        value,
-        new WeakMap(),
-        new WeakSet(),
-        rootArrayLimit
-      ),
+      ok: false,
+      phase: 'catalog',
+      limit: error instanceof MetadataLimitError,
     };
-  } catch {
-    return { ok: false };
   }
+  let contextSnapshot: unknown;
+  try {
+    contextSnapshot = materializeDetached(
+      context,
+      copies,
+      visiting,
+      MAX_LIST_ENTRIES,
+      context as object
+    );
+  } catch {
+    return { ok: false, phase: 'context' };
+  }
+  let optionsSnapshot: unknown;
+  try {
+    optionsSnapshot = materializeDetached(
+      options,
+      copies,
+      visiting,
+      MAX_LIST_ENTRIES,
+      context as object
+    );
+  } catch {
+    return { ok: false, phase: 'options' };
+  }
+  return {
+    ok: true,
+    value: Object.freeze({
+      catalog: catalogSnapshot as readonly unknown[],
+      context: contextSnapshot as AxExecutableSkillContext,
+      options: optionsSnapshot as AxSelectExecutableSkillsOptions,
+    }),
+  };
 }
 
 function snapshotFunction(
@@ -634,43 +719,30 @@ export function axSelectExecutableSkills(
   context: AxExecutableSkillContext,
   options: AxSelectExecutableSkillsOptions = {}
 ): AxExecutableSkillSelection {
-  if (!Array.isArray(catalog) || catalog.length > MAX_CATALOG_ENTRIES) {
+  const ingress = tryMaterializeIngress(catalog, context, options);
+  if (!ingress.ok) {
     return {
       artifacts: [],
       inspection: [
         {
           eligible: false,
           selected: false,
-          reasons: ['limit_exceeded'],
+          reasons: [
+            ingress.limit
+              ? 'limit_exceeded'
+              : ingress.phase === 'context'
+                ? 'invalid_context'
+                : ingress.phase === 'options'
+                  ? 'invalid_options'
+                  : 'malformed',
+          ],
         },
       ],
     };
   }
-  const catalogSnapshotResult = tryMaterializeDetached(
-    catalog,
-    MAX_CATALOG_ENTRIES
-  );
-  if (
-    !catalogSnapshotResult.ok ||
-    !Array.isArray(catalogSnapshotResult.value)
-  ) {
-    return {
-      artifacts: [],
-      inspection: [
-        {
-          eligible: false,
-          selected: false,
-          reasons: ['malformed'],
-        },
-      ],
-    };
-  }
-  const catalogSnapshot = catalogSnapshotResult.value;
-  const contextSnapshotResult = tryMaterializeDetached(context);
-  if (
-    !contextSnapshotResult.ok ||
-    !isValidContext(contextSnapshotResult.value)
-  ) {
+  const { catalog: catalogSnapshot, context: contextSnapshot } = ingress.value;
+  const optionsSnapshot = ingress.value.options;
+  if (!isValidContext(contextSnapshot)) {
     return {
       artifacts: [],
       inspection: [
@@ -682,12 +754,7 @@ export function axSelectExecutableSkills(
       ],
     };
   }
-  const contextSnapshot = contextSnapshotResult.value;
-  const optionsSnapshotResult = tryMaterializeDetached(options);
-  if (
-    !optionsSnapshotResult.ok ||
-    !isValidOptions(optionsSnapshotResult.value)
-  ) {
+  if (!isValidOptions(optionsSnapshot)) {
     return {
       artifacts: [],
       inspection: [
@@ -699,8 +766,6 @@ export function axSelectExecutableSkills(
       ],
     };
   }
-  const optionsSnapshot = optionsSnapshotResult.value;
-
   const admitted = new Set(contextSnapshot.admittedArtifacts.map(refKey));
   const preconditions = new Set(contextSnapshot.preconditions ?? []);
   const tools = new Set(contextSnapshot.tools ?? []);
