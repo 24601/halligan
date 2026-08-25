@@ -1168,8 +1168,8 @@
       "status": "open",
       "title": "Port playbook historical retention policy and receipts",
       "createdAt": "2026-08-25",
-      "sourcePR": null,
-      "sourceCommit": "ca760294f5ea4f207052c39c2218e1195103bc2a",
+      "sourcePR": 14,
+      "sourceCommit": "e5174ff8a33503e7c71b9beb1c048c12972c8245",
       "tsPaths": [
         "src/ax/agent/agentInternal/playbookEvolve/playbookEvolve.ts"
       ],
