@@ -1,8 +1,12 @@
 import type { AxCodeRuntime, AxCodeSession } from '../agent/rlm.js';
 import {
+  type AxRuntimeAuthority,
+  type AxRuntimeCapabilities,
+  type AxRuntimePlatformAuthority,
   axCodeRuntimeProtocol,
   axCodeRuntimeProtocolVersion,
-  type RuntimeCapabilities,
+  axCreateRuntimeCapabilities,
+  axRuntimeCapabilitiesVersion,
 } from '../agent/runtimeCapabilities.js';
 import type { AxFunction } from '../ai/types.js';
 import {
@@ -45,7 +49,7 @@ export type AxJSRuntimeOutputMode = 'return' | 'stdout';
  */
 export class AxJSRuntime implements AxCodeRuntime {
   readonly language = 'JavaScript';
-  readonly capabilities: RuntimeCapabilities;
+  readonly capabilities: AxRuntimeCapabilities;
   private readonly timeout: number;
   private readonly permissions: readonly AxJSRuntimePermission[];
   private readonly allowUnsafeNodeHostAccess: boolean;
@@ -177,22 +181,90 @@ export class AxJSRuntime implements AxCodeRuntime {
     this.nodePermissionAllowlist = options?.nodePermissionAllowlist;
     this.resourceLimits = options?.resourceLimits;
     this.allowDenoRemoteImport = options?.allowDenoRemoteImport ?? false;
-    const hasWorkerEscalation = this.permissions.includes(
-      AxJSRuntimePermission.WORKERS
-    );
-    const hasCodeLoading =
-      this.permissions.includes(AxJSRuntimePermission.CODE_LOADING) ||
-      (this.allowDenoRemoteImport &&
-        this.permissions.includes(AxJSRuntimePermission.NETWORK));
-    this.capabilities = {
+    const granted = new Set(this.permissions);
+    const permissionAuthority = (permission: AxJSRuntimePermission) =>
+      granted.has(permission) ? 'unrestricted' : 'denied';
+    const filesystemAuthority: AxRuntimeAuthority = granted.has(
+      AxJSRuntimePermission.FILESYSTEM
+    )
+      ? 'unrestricted'
+      : (this.nodePermissionAllowlist?.fsRead?.length ?? 0) > 0 ||
+          (this.nodePermissionAllowlist?.fsWrite?.length ?? 0) > 0
+        ? 'allowlist'
+        : 'denied';
+    const platformAuthority: AxRuntimePlatformAuthority = {
+      filesystem: filesystemAuthority,
+      childProcess:
+        granted.has(AxJSRuntimePermission.CHILD_PROCESS) ||
+        this.nodePermissionAllowlist?.childProcess
+          ? 'unrestricted'
+          : 'denied',
+      storage: permissionAuthority(AxJSRuntimePermission.STORAGE),
+      communication: permissionAuthority(AxJSRuntimePermission.COMMUNICATION),
+      timing: permissionAuthority(AxJSRuntimePermission.TIMING),
+      workers: permissionAuthority(AxJSRuntimePermission.WORKERS),
+      codeLoading:
+        granted.has(AxJSRuntimePermission.CODE_LOADING) ||
+        !this.blockDynamicImport ||
+        (this.allowDenoRemoteImport &&
+          granted.has(AxJSRuntimePermission.NETWORK))
+          ? 'unrestricted'
+          : this.allowedModules.length > 0
+            ? 'allowlist'
+            : 'denied',
+      nativeAddons: this.nodePermissionAllowlist?.addons
+        ? 'unrestricted'
+        : 'denied',
+      wasi: this.nodePermissionAllowlist?.wasi ? 'unrestricted' : 'denied',
+    };
+    const maxAuthority = (
+      values: readonly AxRuntimeAuthority[]
+    ): AxRuntimeAuthority => {
+      if (values.includes('unknown')) return 'unknown';
+      if (values.includes('unrestricted')) return 'unrestricted';
+      if (values.includes('allowlist')) return 'allowlist';
+      return 'denied';
+    };
+    const modules = maxAuthority([
+      this.allowUnsafeNodeHostAccess ? 'unrestricted' : 'denied',
+      platformAuthority.workers,
+      platformAuthority.codeLoading,
+      platformAuthority.nativeAddons,
+      platformAuthority.wasi,
+    ]);
+    const network = maxAuthority([
+      this.allowUnsafeNodeHostAccess ? 'unrestricted' : 'denied',
+      platformAuthority.workers,
+      platformAuthority.codeLoading,
+      permissionAuthority(AxJSRuntimePermission.NETWORK),
+    ]);
+    const host = maxAuthority([
+      this.allowUnsafeNodeHostAccess ? 'unrestricted' : 'denied',
+      modules,
+      network,
+      ...Object.values(platformAuthority),
+    ]);
+    const platform = (globalThis as { Deno?: { version?: { deno?: string } } })
+      .Deno?.version?.deno
+      ? 'deno'
+      : isNodeRuntime()
+        ? 'node'
+        : canUseWebWorker()
+          ? 'browser'
+          : 'unknown';
+    this.capabilities = axCreateRuntimeCapabilities({
+      schemaVersion: axRuntimeCapabilitiesVersion,
       inspect: true,
       snapshot: true,
       patch: true,
       abort: true,
       language: this.language,
+      usageInstructions: this.getUsageInstructions(),
+      platform,
       protocol: {
         name: axCodeRuntimeProtocol,
         version: axCodeRuntimeProtocolVersion,
+        features: [],
       },
       persistence: { session: true, restart: false },
       resources: {
@@ -200,25 +272,12 @@ export class AxJSRuntime implements AxCodeRuntime {
         timeoutEnforcement: 'hard',
       },
       authority: {
-        host: this.allowUnsafeNodeHostAccess ? 'unrestricted' : 'denied',
-        modules:
-          this.allowUnsafeNodeHostAccess ||
-          hasWorkerEscalation ||
-          hasCodeLoading ||
-          !this.blockDynamicImport
-            ? 'unrestricted'
-            : this.allowedModules.length > 0
-              ? 'allowlist'
-              : 'denied',
-        network:
-          this.allowUnsafeNodeHostAccess ||
-          hasWorkerEscalation ||
-          hasCodeLoading ||
-          this.permissions.includes(AxJSRuntimePermission.NETWORK)
-            ? 'unrestricted'
-            : 'denied',
+        host,
+        modules,
+        network,
+        platform: platformAuthority,
       },
-    };
+    });
   }
 
   /**

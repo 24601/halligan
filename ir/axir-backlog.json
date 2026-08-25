@@ -1179,7 +1179,7 @@
         "src/ax/agent/runtimeCapabilities.ts"
       ],
       "portableSurface": "axagent",
-      "impact": "TypeScript AxCodeRuntime now exposes the AxIR-aligned inspect/snapshot/patch/abort/language/protocol/persistence/resource/authority declaration, opt-in fail-closed selection, and deterministic false-confidence reporting; generated Python, Java, C++, Go, and Rust RuntimeCapabilities records and selectors do not yet expose the extended vocabulary or matching behavior.",
+      "impact": "TypeScript AxCodeRuntime now exposes an explicitly versioned superset and conversion path for the generated AxIR inspect/snapshot/patch/abort/language/usage-instructions record, plus protocol/platform/persistence/resource/authority declarations, host-admitted security selection, and deterministic contradiction reporting; generated Python, Java, C++, Go, and Rust RuntimeCapabilities records and selectors do not yet expose the v1 extension or matching behavior.",
       "suggestedAxirWork": [
         "Add or update the TS-derived conformance fixture.",
         "Update AxIR/Core or descriptor data to match the portable TS behavior.",

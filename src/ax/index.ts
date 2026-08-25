@@ -202,16 +202,32 @@ import {
   axBuildResponderDefinition,
 } from './agent/rlm.js';
 import {
+  type AxIRRuntimeCapabilities,
+  type AxIRRuntimeCapabilitiesInput,
+  type AxRuntimeAdmissionEvidence,
+  type AxRuntimeAdmissionReceipt,
   type AxRuntimeAuthority,
   type AxRuntimeCapabilities,
+  type AxRuntimeCapabilitiesV1,
+  type AxRuntimeCapabilityContradictionReport,
+  type AxRuntimeCapabilityExtensions,
+  type AxRuntimeCapabilityObservations,
   type AxRuntimeCapabilityRequirements,
-  type AxRuntimeConformanceObservations,
-  type AxRuntimeConformanceReport,
+  type AxRuntimePlatform,
+  type AxRuntimePlatformAuthority,
+  type AxRuntimeProtocol,
   type AxRuntimeSelection,
   type AxRuntimeTimeoutEnforcement,
   axCodeRuntimeProtocol,
   axCodeRuntimeProtocolVersion,
-  axEvaluateRuntimeConformance,
+  axCreateRuntimeAdmissionReceipt,
+  axCreateRuntimeCapabilities,
+  axExtendAxIRRuntimeCapabilities,
+  axNormalizeAxIRRuntimeCapabilities,
+  axReportRuntimeCapabilityContradictions,
+  axRuntimeCapabilitiesToAxIR,
+  axRuntimeCapabilitiesVersion,
+  axRuntimeProtocolFromToken,
   axSelectCodeRuntime,
 } from './agent/runtimeCapabilities.js';
 import {
@@ -1505,13 +1521,14 @@ export { axCreateGeminiLiveAudioApi };
 export { axCreateGrokRealtimeApi };
 export { axCreateJSRuntime };
 export { axCreateOpenAIRealtimeApi };
+export { axCreateRuntimeAdmissionReceipt };
+export { axCreateRuntimeCapabilities };
 export { axDefaultFlowLogger };
 export { axDefaultMetricsConfig };
 export { axDefaultOptimizerLogger };
 export { axDefaultOptimizerMetricsConfig };
 export { axDeserializeOptimizedProgram };
 export { axEmitUsageEvent };
-export { axEvaluateRuntimeConformance };
 export { axEventErrorMessage };
 export { axEventId };
 export { axEventIdentityScope };
@@ -1519,6 +1536,7 @@ export { axEventMatches };
 export { axEventScopedCorrelationKey };
 export { axEventScopedDedupeKey };
 export { axEventSizeBytes };
+export { axExtendAxIRRuntimeCapabilities };
 export { axFetchJsonSpeech };
 export { axFetchMultipartTranscription };
 export { axGetAIProfile };
@@ -1570,12 +1588,14 @@ export { axModelInfoOpenAI };
 export { axModelInfoOpenAIResponses };
 export { axModelInfoReka };
 export { axModelInfoWebLLM };
+export { axNormalizeAxIRRuntimeCapabilities };
 export { axNormalizeOpenAIUsage };
 export { axNormalizeTranscriptionResponse };
 export { axOpenAIChatAudioDefaults };
 export { axOptimizableValidators };
 export { axPlaybookFailureSection };
 export { axProcessContentForProvider };
+export { axReportRuntimeCapabilityContradictions };
 export { axResolveAIProfileFeatures };
 export { axResolveAIProfileId };
 export { axResolveGeminiLiveAudioConfig };
@@ -1583,7 +1603,10 @@ export { axResolveGrokRealtimeAudioConfig };
 export { axResolveMCPExecutionContext };
 export { axResolveOpenAIChatAudioConfig };
 export { axResolveOpenAIRealtimeAudioConfig };
+export { axRuntimeCapabilitiesToAxIR };
+export { axRuntimeCapabilitiesVersion };
 export { axRuntimePrimitives };
+export { axRuntimeProtocolFromToken };
 export { axScoreProvidersForRequest };
 export { axSelectCodeRuntime };
 export { axSelectOptimalProvider };
@@ -2118,6 +2141,8 @@ export type { AxGenStreamingOut };
 export type { AxGenerateErrorDetails };
 export type { AxGenerateResult };
 export type { AxIField };
+export type { AxIRRuntimeCapabilities };
+export type { AxIRRuntimeCapabilitiesInput };
 export type { AxInMemoryEventStoreOptions };
 export type { AxInputFunctionType };
 export type { AxJSRuntimeNodePermissionAllowlist };
@@ -2345,18 +2370,25 @@ export type { AxRewardFn };
 export type { AxRewardFnArgs };
 export type { AxRolloutTrace };
 export type { AxRoutingResult };
+export type { AxRuntimeAdmissionEvidence };
+export type { AxRuntimeAdmissionReceipt };
 export type { AxRuntimeAuthority };
 export type { AxRuntimeCallableFormatArgs };
 export type { AxRuntimeCapabilities };
+export type { AxRuntimeCapabilitiesV1 };
+export type { AxRuntimeCapabilityContradictionReport };
+export type { AxRuntimeCapabilityExtensions };
+export type { AxRuntimeCapabilityObservations };
 export type { AxRuntimeCapabilityRequirements };
-export type { AxRuntimeConformanceObservations };
-export type { AxRuntimeConformanceReport };
 export type { AxRuntimeLanguageInfo };
+export type { AxRuntimePlatform };
+export type { AxRuntimePlatformAuthority };
 export type { AxRuntimePrimitive };
 export type { AxRuntimePrimitiveExample };
 export type { AxRuntimePrimitiveOverrideMap };
 export type { AxRuntimePrimitiveSignature };
 export type { AxRuntimePrimitiveStage };
+export type { AxRuntimeProtocol };
 export type { AxRuntimeSelection };
 export type { AxRuntimeTimeoutEnforcement };
 export type { AxSamplePickerOptions };

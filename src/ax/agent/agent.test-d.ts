@@ -12,6 +12,7 @@ import {
   type AxCodeRuntime,
   type AxFunction,
   type AxFunctionProvider,
+  type AxRuntimeAdmissionReceipt,
   type AxRuntimeCapabilities,
   agent,
   axSelectCodeRuntime,
@@ -23,11 +24,16 @@ import {
 {
   const capabilities = {} as AxRuntimeCapabilities;
   const runtime = {} as AxCodeRuntime;
-  const selected: AxCodeRuntime = axSelectCodeRuntime([runtime], {
-    inspect: true,
-    language: ['JavaScript', 'Python'],
-    authority: { network: 'denied' },
-  }).runtime;
+  const admission = {} as AxRuntimeAdmissionReceipt;
+  const selected: AxCodeRuntime = axSelectCodeRuntime(
+    [runtime],
+    {
+      inspect: true,
+      language: ['JavaScript', 'Python'],
+      authority: { network: 'denied' },
+    },
+    { admissions: [admission] }
+  ).runtime;
   const _inspect: boolean = capabilities.inspect;
   const _protocolVersion: string = capabilities.protocol.version;
   void selected;

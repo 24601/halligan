@@ -1,36 +1,61 @@
 import type { AxCodeRuntime } from '../rlm.js';
 import {
+  type AxRuntimeAdmissionReceipt,
+  type AxRuntimeCapabilities,
+  type AxRuntimeCapabilityObservations,
   type AxRuntimeCapabilityRequirements,
-  type AxRuntimeConformanceObservations,
   axCodeRuntimeProtocol,
   axCodeRuntimeProtocolVersion,
-  axEvaluateRuntimeConformance,
+  axCreateRuntimeAdmissionReceipt,
+  axCreateRuntimeCapabilities,
+  axReportRuntimeCapabilityContradictions,
+  axRuntimeCapabilitiesVersion,
   axSelectCodeRuntime,
-  type RuntimeCapabilities,
 } from '../runtimeCapabilities.js';
 
-const baseCapabilities: RuntimeCapabilities = {
+const deniedPlatform = {
+  filesystem: 'denied',
+  childProcess: 'denied',
+  storage: 'denied',
+  communication: 'denied',
+  timing: 'denied',
+  workers: 'denied',
+  codeLoading: 'denied',
+  nativeAddons: 'denied',
+  wasi: 'denied',
+} as const;
+
+const baseCapabilities: AxRuntimeCapabilities = axCreateRuntimeCapabilities({
+  schemaVersion: axRuntimeCapabilitiesVersion,
   inspect: false,
   snapshot: false,
   patch: true,
   abort: false,
   language: 'JavaScript',
+  usageInstructions: 'Use JavaScript.',
+  platform: 'node',
   protocol: {
     name: axCodeRuntimeProtocol,
     version: axCodeRuntimeProtocolVersion,
+    features: [],
   },
   persistence: { session: true, restart: false },
   resources: { timeoutEnforcement: 'none' },
-  authority: { host: 'unknown', modules: 'unknown', network: 'unknown' },
-};
+  authority: {
+    host: 'unknown',
+    modules: 'unknown',
+    network: 'unknown',
+    platform: deniedPlatform,
+  },
+});
 
 type DeclaredRuntime = AxCodeRuntime & {
   id: string;
-  capabilities: RuntimeCapabilities;
+  capabilities: AxRuntimeCapabilities;
 };
 
 const runtime = (
-  capabilities: RuntimeCapabilities,
+  capabilities: AxRuntimeCapabilities,
   id: string
 ): DeclaredRuntime => ({
   id,
@@ -44,36 +69,43 @@ const runtime = (
   }),
 });
 
-const bounded = runtime(
-  {
-    ...baseCapabilities,
-    inspect: true,
-    snapshot: true,
-    abort: true,
-    persistence: { session: true, restart: true },
-    resources: {
-      timeoutMs: 100,
-      timeoutEnforcement: 'hard',
-      memoryMb: 64,
-    },
-    authority: { host: 'denied', modules: 'denied', network: 'denied' },
+const boundedCapabilities = axCreateRuntimeCapabilities({
+  ...baseCapabilities,
+  inspect: true,
+  snapshot: true,
+  abort: true,
+  persistence: { session: true, restart: true },
+  resources: { timeoutMs: 100, timeoutEnforcement: 'hard', memoryMb: 64 },
+  authority: {
+    host: 'denied',
+    modules: 'denied',
+    network: 'denied',
+    platform: deniedPlatform,
   },
-  'bounded'
-);
+});
+const bounded = runtime(boundedCapabilities, 'bounded');
 const legacy = runtime(baseCapabilities, 'legacy');
 const protocolV2 = runtime(
-  {
-    ...bounded.capabilities,
-    protocol: { name: axCodeRuntimeProtocol, version: '2' },
-  },
+  axCreateRuntimeCapabilities({
+    ...boundedCapabilities,
+    protocol: { name: axCodeRuntimeProtocol, version: '2', features: [] },
+  }),
   'protocol-v2'
 );
+
+const boundedAdmission = axCreateRuntimeAdmissionReceipt(bounded, {
+  evaluator: 'fixed host-policy fixture',
+  source: 'host-policy',
+  resources: boundedCapabilities.resources,
+  authority: boundedCapabilities.authority,
+});
 
 const tasks: readonly Readonly<{
   name: string;
   candidates: readonly DeclaredRuntime[];
   requirements: AxRuntimeCapabilityRequirements;
   expected: string;
+  admissions?: readonly AxRuntimeAdmissionReceipt[];
 }>[] = [
   {
     name: 'inspect',
@@ -109,6 +141,7 @@ const tasks: readonly Readonly<{
         maxMemoryMb: 64,
       },
     },
+    admissions: [boundedAdmission],
     expected: 'bounded',
   },
   {
@@ -117,6 +150,7 @@ const tasks: readonly Readonly<{
     requirements: {
       authority: { host: 'denied', modules: 'denied', network: 'denied' },
     },
+    admissions: [boundedAdmission],
     expected: 'bounded',
   },
   {
@@ -143,23 +177,39 @@ let awareCorrect = 0;
 let rejections = 0;
 for (const task of tasks) {
   const blind = axSelectCodeRuntime(task.candidates).runtime as DeclaredRuntime;
-  const aware = axSelectCodeRuntime(task.candidates, task.requirements);
+  const aware = axSelectCodeRuntime(task.candidates, task.requirements, {
+    admissions: task.admissions,
+  });
   if (blind.id === task.expected) blindCorrect++;
-  if ((aware.runtime as DeclaredRuntime).id === task.expected) {
-    awareCorrect++;
-  }
+  if ((aware.runtime as DeclaredRuntime).id === task.expected) awareCorrect++;
   rejections += aware.rejected.length;
 }
 
-const incorrectDeclarationObservations: AxRuntimeConformanceObservations = {
+const observedPlatform = Object.fromEntries(
+  Object.keys(deniedPlatform).map((key) => [key, { observed: 'denied' }])
+) as AxRuntimeCapabilityObservations['authority']['platform'];
+const incorrectObservations: AxRuntimeCapabilityObservations = {
+  provenance: { evaluator: 'fixed contradiction fixture', source: 'synthetic' },
   language: 'JavaScript',
+  platform: 'node',
   inspect: false,
   snapshot: false,
   patch: true,
   abort: false,
   persistence: { session: true, restart: false },
-  timeout: { requestedMs: 100, observedMs: 140, interrupted: false },
-  authority: { hostDenied: false, modulesDenied: false, networkDenied: false },
+  timeout: {
+    requestedMs: 100,
+    observedMs: 140,
+    interrupted: false,
+    enforcement: 'cooperative',
+  },
+  memory: { limitMb: 128, observedPeakMb: 80, terminated: false },
+  authority: {
+    host: 'unrestricted',
+    modules: 'unrestricted',
+    network: 'unrestricted',
+    platform: observedPlatform,
+  },
   protocol: {
     name: axCodeRuntimeProtocol,
     version: axCodeRuntimeProtocolVersion,
@@ -168,9 +218,9 @@ const incorrectDeclarationObservations: AxRuntimeConformanceObservations = {
   },
   cleanup: true,
 };
-const falseConfidence = axEvaluateRuntimeConformance(
+const contradictionReport = axReportRuntimeCapabilityContradictions(
   bounded.capabilities,
-  incorrectDeclarationObservations
+  incorrectObservations
 );
 
 console.log(
@@ -182,15 +232,22 @@ console.log(
         correctSelection: awareCorrect,
         rejected: rejections,
       },
-      falseConfidence: falseConfidence.falseConfidence.length,
+      contradictions: contradictionReport.contradictions.length,
       overhead: {
         declarationBytes: JSON.stringify(bounded.capabilities).length,
+        admissionBytes: JSON.stringify({
+          evaluator: boundedAdmission.evaluator,
+          source: boundedAdmission.source,
+          authority: boundedAdmission.authority,
+          resources: boundedAdmission.resources,
+        }).length,
         requirementChecks: tasks.length,
         runtimeExecutions: 0,
       },
-      isolationProven: falseConfidence.isolationProven,
+      executableObservations: contradictionReport.executableObservations,
+      isolationProven: contradictionReport.isolationProven,
       scope:
-        'Deterministic selector/conformance mechanics only; declarations cannot prove isolation.',
+        'Deterministic selector/contradiction mechanics only; declarations and receipts cannot prove isolation.',
     },
     null,
     2

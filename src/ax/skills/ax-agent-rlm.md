@@ -52,19 +52,25 @@ Treat both actor stages as long-running code runtime sessions that the actor ste
 
 ### Runtime capability selection
 
-Custom runtimes may expose an `AxRuntimeCapabilities` declaration covering
-inspect/snapshot/patch/abort, language, protocol, persistence, resources, and
-ambient host/module/network authority. The declaration uses the shared AxIR
-vocabulary but is untrusted metadata, not proof or certification of sandbox
-isolation.
+Custom runtimes may expose a versioned `AxRuntimeCapabilities` superset of the
+generated AxIR inspect/snapshot/patch/abort/language/usage-instructions record.
+The v1 extension covers platform, base/feature protocols, persistence,
+resources, aggregate authority, and individual platform-authority dimensions.
+Declarations are frozen snapshots of untrusted metadata, not attestations.
 
 - `axSelectCodeRuntime(candidates)` keeps legacy behavior and returns the first
   candidate without requiring declarations.
 - Pass explicit requirements to opt into fail-closed matching. Missing,
   malformed, or non-matching declarations are rejected; no match throws.
-- Use `axEvaluateRuntimeConformance(...)` to compare adapter-owned observations
-  with claims and expose false confidence. Its `isolationProven` result is
-  always `false`.
+- Authority and resource requirements additionally require a host-minted,
+  runtime-bound `AxRuntimeAdmissionReceipt`; self-declarations cannot satisfy
+  them. The receipt records host admission and is not security proof.
+- Use `axReportRuntimeCapabilityContradictions(...)` to compare provenanced
+  observations with claims. Its `isolationProven` result is always `false`.
+- Convert base generated records explicitly with
+  `axNormalizeAxIRRuntimeCapabilities(...)`,
+  `axExtendAxIRRuntimeCapabilities(...)`, and
+  `axRuntimeCapabilitiesToAxIR(...)`; generated targets currently diverge.
 - Keep sandbox permissions, process/container policy, cancellation enforcement,
   package loading, and host access controls in the adapter. Do not treat a
   declaration as enforcement.

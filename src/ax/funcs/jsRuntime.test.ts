@@ -94,30 +94,69 @@ describe('AxJSRuntime secure defaults', () => {
 });
 
 describe('AxJSRuntime', () => {
-  it('declares canonical runtime capabilities without claiming certification', () => {
+  it('keeps the default declaration denied and conservative', () => {
+    expect(new AxJSRuntime().capabilities.authority).toEqual({
+      host: 'denied',
+      modules: 'denied',
+      network: 'denied',
+      platform: {
+        filesystem: 'denied',
+        childProcess: 'denied',
+        storage: 'denied',
+        communication: 'denied',
+        timing: 'denied',
+        workers: 'denied',
+        codeLoading: 'denied',
+        nativeAddons: 'denied',
+        wasi: 'denied',
+      },
+    });
+  });
+
+  it('declares a frozen versioned AxIR superset without claiming certification', () => {
     const runtime = new AxJSRuntime({
       timeout: 250,
       allowedModules: ['safe-module'],
     });
 
-    expect(runtime.capabilities).toEqual({
+    expect(runtime.capabilities).toMatchObject({
+      schemaVersion: 'ax-runtime-capabilities/v1',
       inspect: true,
       snapshot: true,
       patch: true,
       abort: true,
       language: 'JavaScript',
-      protocol: { name: 'ax-code-runtime', version: '1' },
+      platform: 'node',
+      protocol: {
+        name: 'ax-code-runtime',
+        version: '1',
+        features: [],
+      },
       persistence: { session: true, restart: false },
       resources: {
         timeoutMs: 250,
         timeoutEnforcement: 'hard',
       },
       authority: {
-        host: 'denied',
+        host: 'allowlist',
         modules: 'allowlist',
-        network: 'denied',
+        network: 'allowlist',
+        platform: {
+          filesystem: 'denied',
+          childProcess: 'denied',
+          storage: 'denied',
+          communication: 'denied',
+          timing: 'denied',
+          workers: 'denied',
+          codeLoading: 'allowlist',
+          nativeAddons: 'denied',
+          wasi: 'denied',
+        },
       },
     });
+    expect(runtime.capabilities.usageInstructions.length).toBeGreaterThan(0);
+    expect(Object.isFrozen(runtime.capabilities)).toBe(true);
+    expect(Object.isFrozen(runtime.capabilities.authority.platform)).toBe(true);
   });
 
   it('conservatively declares worker and code-loading authority', () => {
@@ -126,9 +165,65 @@ describe('AxJSRuntime', () => {
     });
 
     expect(runtime.capabilities.authority).toEqual({
-      host: 'denied',
+      host: 'unrestricted',
       modules: 'unrestricted',
       network: 'unrestricted',
+      platform: {
+        filesystem: 'denied',
+        childProcess: 'denied',
+        storage: 'denied',
+        communication: 'denied',
+        timing: 'denied',
+        workers: 'unrestricted',
+        codeLoading: 'denied',
+        nativeAddons: 'denied',
+        wasi: 'denied',
+      },
+    });
+  });
+
+  it.each([
+    AxJSRuntimePermission.FILESYSTEM,
+    AxJSRuntimePermission.CHILD_PROCESS,
+    AxJSRuntimePermission.STORAGE,
+    AxJSRuntimePermission.COMMUNICATION,
+    AxJSRuntimePermission.TIMING,
+  ])(
+    'never declares host denied with the %s privilege enabled',
+    (permission) => {
+      const runtime = new AxJSRuntime({ permissions: [permission] });
+      expect(runtime.capabilities.authority.host).toBe('unrestricted');
+    }
+  );
+
+  it('declares Node, browser, and Deno platform fixtures', () => {
+    const node = new AxJSRuntime({
+      permissions: [AxJSRuntimePermission.FILESYSTEM],
+    }).capabilities;
+    expect(node.platform).toBe('node');
+    expect(node.authority).toMatchObject({
+      host: 'unrestricted',
+      platform: { filesystem: 'unrestricted' },
+    });
+
+    vi.stubGlobal('process', undefined);
+    const browser = new AxJSRuntime({
+      permissions: [AxJSRuntimePermission.FILESYSTEM],
+    }).capabilities;
+    expect(browser.platform).toBe('browser');
+    expect(browser.authority).toMatchObject({
+      host: 'unrestricted',
+      platform: { filesystem: 'unrestricted' },
+    });
+
+    vi.stubGlobal('Deno', { version: { deno: '2.0.0' } });
+    const deno = new AxJSRuntime({
+      permissions: [AxJSRuntimePermission.FILESYSTEM],
+    }).capabilities;
+    expect(deno.platform).toBe('deno');
+    expect(deno.authority).toMatchObject({
+      host: 'unrestricted',
+      platform: { filesystem: 'unrestricted' },
     });
   });
 
@@ -143,6 +238,17 @@ describe('AxJSRuntime', () => {
       host: 'unrestricted',
       modules: 'unrestricted',
       network: 'unrestricted',
+      platform: {
+        filesystem: 'denied',
+        childProcess: 'denied',
+        storage: 'denied',
+        communication: 'denied',
+        timing: 'denied',
+        workers: 'denied',
+        codeLoading: 'unrestricted',
+        nativeAddons: 'denied',
+        wasi: 'denied',
+      },
     });
   });
 
