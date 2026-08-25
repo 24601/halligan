@@ -85,6 +85,28 @@ describe('axVisualPerceptualDigest', () => {
       axVisualPerceptualDigest({ width: 9, height: 8, luma: crossRealm })
     ).toEqual({ algorithm: 'dhash-64', value: '0000000000000000' });
   });
+
+  it('rejects DataView and other typed-array brands, including tag spoofs', () => {
+    const dataView = new DataView(new ArrayBuffer(72));
+    Object.defineProperty(dataView, 'length', { value: 72 });
+    Object.defineProperty(dataView, Symbol.toStringTag, {
+      value: 'Uint8Array',
+    });
+
+    for (const invalid of [
+      dataView,
+      new Uint16Array(72),
+      new Uint8ClampedArray(72),
+    ]) {
+      expect(() =>
+        axVisualPerceptualDigest({
+          width: 9,
+          height: 8,
+          luma: invalid as unknown as Uint8Array,
+        })
+      ).toThrow(/9 x 8/);
+    }
+  });
 });
 
 describe('AxFrameSampler', () => {
@@ -236,6 +258,26 @@ describe('AxFrameSampler', () => {
     }
   });
 
+  it('keeps a newer authority revision when payload snapshotting throws', () => {
+    const policy = sampler();
+    policy.observe(frame(1, 0));
+    const observation = frame(2, 100, {
+      authority: {
+        authorityRef: 'authority-b',
+        consentRef: 'consent-b',
+        revision: 2,
+      },
+    });
+    Object.defineProperty(observation, 'digest', {
+      get: () => {
+        throw new Error('synthetic payload getter failure');
+      },
+    });
+
+    expect(policy.observe(observation).reason).toBe('malformed');
+    expect(policy.observe(frame(3, 200)).reason).toBe('stale_authority');
+  });
+
   it('does not bind a stream until a frame passes payload validation and budget', () => {
     const policy = sampler();
     expect(
@@ -259,6 +301,22 @@ describe('AxFrameSampler', () => {
         })
       ).reason
     ).toBe('malformed');
+  });
+
+  it('snapshots a stateful digest getter once without perceptual fallback', () => {
+    const observation = frame(1, 0);
+    let reads = 0;
+    Object.defineProperty(observation, 'digest', {
+      get: () => {
+        reads++;
+        return reads === 1
+          ? { algorithm: 'dhash-64', value: 'malformed' }
+          : undefined;
+      },
+    });
+
+    expect(sampler().observe(observation).reason).toBe('malformed');
+    expect(reads).toBe(1);
   });
 
   it('copies and freezes supplied digests and decisions', () => {
@@ -315,6 +373,32 @@ describe('AxFrameSampler', () => {
     });
     tokens.observe(changed(1, 0));
     expect(tokens.observe(changed(2, 100)).reason).toBe('budget_tokens');
+  });
+
+  it('copies and freezes options so callers cannot change enforcement', () => {
+    const options = {
+      maxObservationBytes: 1_000,
+      budget: { maxFrames: 1 },
+    };
+    const policy = new AxFrameSampler(options);
+    options.maxObservationBytes = 1;
+    options.budget.maxFrames = 10;
+
+    expect(Object.isFrozen(policy.options)).toBe(true);
+    expect(Object.isFrozen(policy.options.budget)).toBe(true);
+    expect(() => {
+      (policy.options.budget as { maxFrames: number }).maxFrames = 10;
+    }).toThrow(TypeError);
+
+    expect(policy.observe(frame(1, 0)).reason).toBe('initial');
+    expect(
+      policy.observe(
+        frame(2, 100, {
+          digest: { algorithm: 'dhash-64', value: 'ffffffffffffffff' },
+          perceptualInput: undefined,
+        })
+      ).reason
+    ).toBe('budget_frames');
   });
 
   it('allows a budget-rejected revision to retry after the rolling window clears', () => {

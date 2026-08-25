@@ -31,8 +31,50 @@ type BudgetEntry = {
   tokens: number;
 };
 
-const isNonNegativeInteger = (value: number): boolean =>
-  Number.isSafeInteger(value) && value >= 0;
+type AuthoritySnapshot = Readonly<{
+  sourceId: string;
+  streamId: string;
+  authority: AxVisualAuthority;
+}>;
+
+type ObservationSnapshot = Readonly<{
+  frameId: string;
+  revision: number;
+  freshness: AxVisualObservation['freshness'];
+  dimensions: AxVisualObservation['dimensions'];
+  mediaType: string;
+  byteLength: number;
+  tokenEstimate: number;
+  digest?: AxVisualChangeDigest;
+  perceptualInput?: AxVisualPerceptualInput;
+}>;
+
+type IntrinsicGetter = (this: unknown) => unknown;
+
+const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype);
+const typedArrayTagGetter = Object.getOwnPropertyDescriptor(
+  typedArrayPrototype,
+  Symbol.toStringTag
+)?.get as IntrinsicGetter | undefined;
+const typedArrayLengthGetter = Object.getOwnPropertyDescriptor(
+  typedArrayPrototype,
+  'length'
+)?.get as IntrinsicGetter | undefined;
+const typedArrayByteOffsetGetter = Object.getOwnPropertyDescriptor(
+  typedArrayPrototype,
+  'byteOffset'
+)?.get as IntrinsicGetter | undefined;
+const typedArrayByteLengthGetter = Object.getOwnPropertyDescriptor(
+  typedArrayPrototype,
+  'byteLength'
+)?.get as IntrinsicGetter | undefined;
+const typedArrayBufferGetter = Object.getOwnPropertyDescriptor(
+  typedArrayPrototype,
+  'buffer'
+)?.get as IntrinsicGetter | undefined;
+
+const isNonNegativeInteger = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 
 const isPositiveFinite = (value: number): boolean =>
   Number.isFinite(value) && value > 0;
@@ -73,13 +115,10 @@ const validateOptions = (options: AxFrameSamplerOptions): void => {
 export const axVisualPerceptualDigest = (
   input: AxVisualPerceptualInput
 ): AxVisualChangeDigest => {
-  if (
-    input.width !== 9 ||
-    input.height !== 8 ||
-    !ArrayBuffer.isView(input.luma) ||
-    Object.prototype.toString.call(input.luma) !== '[object Uint8Array]' ||
-    input.luma.length !== 72
-  ) {
+  const width = input.width;
+  const height = input.height;
+  const luma = copyUint8Array(input.luma);
+  if (width !== 9 || height !== 8 || !luma || luma.length !== 72) {
     throw new Error('dhash-64 requires a 9 x 8 Uint8Array luminance grid');
   }
 
@@ -88,9 +127,7 @@ export const axVisualPerceptualDigest = (
   let bit = 0;
   for (let y = 0; y < 8; y++) {
     for (let x = 0; x < 8; x++) {
-      nibble =
-        (nibble << 1) |
-        Number(input.luma[y * 9 + x]! > input.luma[y * 9 + x + 1]!);
+      nibble = (nibble << 1) | Number(luma[y * 9 + x]! > luma[y * 9 + x + 1]!);
       bit++;
       if (bit === 4) {
         value += nibble.toString(16);
@@ -101,6 +138,34 @@ export const axVisualPerceptualDigest = (
   }
   return Object.freeze({ algorithm: 'dhash-64', value });
 };
+
+function copyUint8Array(value: unknown): Uint8Array | undefined {
+  if (
+    !typedArrayTagGetter ||
+    !typedArrayLengthGetter ||
+    !typedArrayByteOffsetGetter ||
+    !typedArrayByteLengthGetter ||
+    !typedArrayBufferGetter
+  ) {
+    return undefined;
+  }
+  if (typedArrayTagGetter.call(value) !== 'Uint8Array') return undefined;
+  const length = typedArrayLengthGetter.call(value);
+  const byteOffset = typedArrayByteOffsetGetter.call(value);
+  const byteLength = typedArrayByteLengthGetter.call(value);
+  const buffer = typedArrayBufferGetter.call(value);
+  if (
+    !isNonNegativeInteger(length) ||
+    !isNonNegativeInteger(byteOffset) ||
+    !isNonNegativeInteger(byteLength) ||
+    byteLength !== length
+  ) {
+    return undefined;
+  }
+  return new Uint8Array(
+    new Uint8Array(buffer as ArrayBufferLike, byteOffset, byteLength)
+  );
+}
 
 const normalizeDigest = (digest: unknown): AxVisualChangeDigest | undefined => {
   if (!digest || typeof digest !== 'object') {
@@ -134,21 +199,16 @@ const digestDistance = (
 };
 
 const observationError = (
-  observation: AxVisualObservation | null | undefined,
+  observation: ObservationSnapshot,
   nowMs: number,
   maxBytes: number
 ): AxFrameSamplerReason | undefined => {
-  if (!observation || typeof observation !== 'object') return 'malformed';
   const { freshness, dimensions } = observation;
   if (
     !freshness ||
     typeof freshness !== 'object' ||
     !dimensions ||
     typeof dimensions !== 'object' ||
-    typeof observation.sourceId !== 'string' ||
-    !observation.sourceId ||
-    typeof observation.streamId !== 'string' ||
-    !observation.streamId ||
     typeof observation.frameId !== 'string' ||
     !observation.frameId ||
     !isNonNegativeInteger(observation.revision) ||
@@ -173,9 +233,8 @@ const observationError = (
 };
 
 const normalizeAuthority = (
-  observation: AxVisualObservation | null | undefined
+  observation: AuthoritySnapshot
 ): AxVisualAuthority | undefined => {
-  if (!observation || typeof observation !== 'object') return undefined;
   const authority = observation.authority;
   if (!authority || typeof authority !== 'object') return undefined;
   const revision = authority.revision;
@@ -193,6 +252,68 @@ const normalizeAuthority = (
     return undefined;
   }
   return Object.freeze({ authorityRef, consentRef, revision, revoked });
+};
+
+const snapshotAuthority = (
+  observation: AxVisualObservation
+): AuthoritySnapshot => {
+  const sourceId = observation.sourceId;
+  const streamId = observation.streamId;
+  const authority = observation.authority;
+  const authoritySnapshot =
+    authority && typeof authority === 'object'
+      ? Object.freeze({
+          authorityRef: authority.authorityRef,
+          consentRef: authority.consentRef,
+          revision: authority.revision,
+          revoked: authority.revoked,
+        })
+      : authority;
+  return Object.freeze({
+    sourceId,
+    streamId,
+    authority: authoritySnapshot,
+  });
+};
+
+const snapshotObservation = (
+  observation: AxVisualObservation
+): ObservationSnapshot => {
+  const freshness = observation.freshness;
+  const dimensions = observation.dimensions;
+  const digest = observation.digest;
+  const perceptualInput = observation.perceptualInput;
+  return Object.freeze({
+    frameId: observation.frameId,
+    revision: observation.revision,
+    freshness: Object.freeze({
+      capturedAtMs: freshness.capturedAtMs,
+      observedAtMs: freshness.observedAtMs,
+      expiresAtMs: freshness.expiresAtMs,
+    }),
+    dimensions: Object.freeze({
+      width: dimensions.width,
+      height: dimensions.height,
+    }),
+    mediaType: observation.mediaType,
+    byteLength: observation.byteLength,
+    tokenEstimate: observation.tokenEstimate,
+    digest:
+      digest === undefined
+        ? undefined
+        : Object.freeze({
+            algorithm: digest.algorithm,
+            value: digest.value,
+          }),
+    perceptualInput:
+      perceptualInput === undefined
+        ? undefined
+        : Object.freeze({
+            width: perceptualInput.width,
+            height: perceptualInput.height,
+            luma: copyUint8Array(perceptualInput.luma) as Uint8Array,
+          }),
+  });
 };
 
 /**
@@ -215,8 +336,12 @@ export class AxFrameSampler {
       budget?: Partial<AxFrameSamplerBudget>;
     }
   ) {
-    this.options = mergeOptions(options);
-    validateOptions(this.options);
+    const merged = mergeOptions(options);
+    validateOptions(merged);
+    this.options = Object.freeze({
+      ...merged,
+      budget: Object.freeze({ ...merged.budget }),
+    });
   }
 
   observe(
@@ -234,15 +359,23 @@ export class AxFrameSampler {
     observation: AxVisualObservation,
     nowMs?: number
   ): AxFrameSamplerDecision {
-    const resolvedNowMs =
-      nowMs ?? observation?.freshness?.observedAtMs ?? Number.NaN;
-    const authority = normalizeAuthority(observation);
+    const authoritySnapshot = snapshotAuthority(observation);
+    const authority = normalizeAuthority(authoritySnapshot);
     if (!authority) return this.decision('suppress', 'malformed');
+
+    const { sourceId, streamId } = authoritySnapshot;
+    if (
+      typeof sourceId !== 'string' ||
+      !sourceId ||
+      typeof streamId !== 'string' ||
+      !streamId
+    ) {
+      return this.decision('suppress', 'malformed');
+    }
 
     if (
       this.stream &&
-      (this.stream.sourceId !== observation.sourceId ||
-        this.stream.streamId !== observation.streamId)
+      (this.stream.sourceId !== sourceId || this.stream.streamId !== streamId)
     ) {
       return this.decision('suppress', 'stream_mismatch');
     }
@@ -259,17 +392,19 @@ export class AxFrameSampler {
       return this.decision('suppress', 'revoked');
     }
 
+    const snapshot = snapshotObservation(observation);
+    const resolvedNowMs = nowMs ?? snapshot.freshness.observedAtMs;
     const malformed = observationError(
-      observation,
+      snapshot,
       resolvedNowMs,
       this.options.maxObservationBytes
     );
     if (malformed) return this.decision('suppress', malformed);
 
-    const age = resolvedNowMs - observation.freshness.capturedAtMs;
+    const age = resolvedNowMs - snapshot.freshness.capturedAtMs;
     if (
       age < -this.options.maxFutureSkewMs ||
-      resolvedNowMs - observation.freshness.observedAtMs <
+      resolvedNowMs - snapshot.freshness.observedAtMs <
         -this.options.maxFutureSkewMs
     ) {
       return this.decision('suppress', 'future_time');
@@ -277,25 +412,25 @@ export class AxFrameSampler {
     if (age > this.options.maxObservationAgeMs) {
       return this.decision('suppress', 'stale_time');
     }
-    if (resolvedNowMs > observation.freshness.expiresAtMs) {
+    if (resolvedNowMs > snapshot.freshness.expiresAtMs) {
       return this.decision('suppress', 'expired');
     }
 
     let digest: AxVisualChangeDigest;
     try {
-      const suppliedDigest = observation.digest;
+      const suppliedDigest = snapshot.digest;
       if (suppliedDigest !== undefined) {
         const normalized = normalizeDigest(suppliedDigest);
         if (!normalized) return this.decision('suppress', 'malformed');
         digest = normalized;
       } else {
-        digest = axVisualPerceptualDigest(observation.perceptualInput!);
+        digest = axVisualPerceptualDigest(snapshot.perceptualInput!);
       }
     } catch {
       return this.decision('suppress', 'malformed');
     }
     if (!digest) return this.decision('suppress', 'malformed');
-    if (observation.revision <= this.latestRevision) {
+    if (snapshot.revision <= this.latestRevision) {
       return this.decision('suppress', 'stale_revision');
     }
     if (
@@ -336,7 +471,7 @@ export class AxFrameSampler {
       action = 'sample';
       reason = 'max_interval';
     } else {
-      this.latestRevision = observation.revision;
+      this.latestRevision = snapshot.revision;
       return this.decision(
         'suppress',
         changeScore! >= this.options.changeThreshold
@@ -347,22 +482,22 @@ export class AxFrameSampler {
       );
     }
 
-    const budgetReason = this.budgetReason(observation);
+    const budgetReason = this.budgetReason(snapshot);
     if (budgetReason) {
       return this.decision('suppress', budgetReason, digest, changeScore);
     }
 
     this.stream ??= {
-      sourceId: observation.sourceId,
-      streamId: observation.streamId,
+      sourceId,
+      streamId,
     };
-    this.latestRevision = observation.revision;
+    this.latestRevision = snapshot.revision;
     this.lastDigest = digest;
     this.lastSampleAtMs = resolvedNowMs;
     this.budgetEntries.push({
       atMs: resolvedNowMs,
-      bytes: observation.byteLength,
-      tokens: observation.tokenEstimate,
+      bytes: snapshot.byteLength,
+      tokens: snapshot.tokenEstimate,
     });
     return this.decision(action, reason, digest, changeScore);
   }
@@ -386,7 +521,7 @@ export class AxFrameSampler {
   }
 
   private budgetReason(
-    observation: AxVisualObservation
+    observation: ObservationSnapshot
   ): AxFrameSamplerReason | undefined {
     const usage = this.usage();
     if (usage.frames + 1 > this.options.budget.maxFrames)
