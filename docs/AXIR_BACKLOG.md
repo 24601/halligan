@@ -27,7 +27,7 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
 - `axir-2026-08-25-port-host-owned-authority-boundary` [axai] Port host-owned authority boundary
   - Status: open
   - Source commit: `ca760294f5ea4f207052c39c2218e1195103bc2a`
-  - TS paths: `src/ax/authority`
+  - TS paths: `src/ax/agent/agentInternal/initialization.ts`, `src/ax/agent/agentInternal/runtimeExecution.ts`, `src/ax/agent/agentInternal/runtimeGlobals.authority.test.ts`, `src/ax/agent/agentInternal/runtimeGlobals.ts`, `src/ax/ai/types.ts`, `src/ax/authority`, `src/ax/dsp/functions.test.ts`, `src/ax/dsp/functions.ts`, `src/ax/dsp/generate.ts`, `src/ax/dsp/response/finalize.ts`, `src/ax/dsp/response/nonStreaming.ts`, `src/ax/dsp/response/types.ts`, `src/ax/dsp/types.ts`, `src/ax/mcp/execution.ts`
   - Impact: Generated language backends need equivalent principal, scoped grant, receipt binding, event, tool, and child attenuation behavior.
   - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 
