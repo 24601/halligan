@@ -219,6 +219,7 @@ describe('applyCuratorOperations', () => {
               verifierId: 'policy-eval',
               testId: 'case-2',
               result: 'passed',
+              summary: `  ${'x'.repeat(600)}  `,
             },
           ],
         },
@@ -241,6 +242,7 @@ describe('applyCuratorOperations', () => {
           verifierId: 'policy-eval',
           testId: 'case-2',
           result: 'passed',
+          summary: 'x'.repeat(500),
         },
       ],
     });
@@ -303,6 +305,29 @@ describe('applyCuratorOperations', () => {
       playbook.sections.Guidelines.find((bullet) => bullet.id === 'public')
         ?.evidence?.lifecycle
     ).toMatchObject({ status: 'superseded', supersededBy: 'replacement' });
+  });
+
+  it('fails closed for expiring guidance when the render clock is invalid', () => {
+    const playbook = createEmptyPlaybook();
+    applyCuratorOperations(playbook, [
+      {
+        type: 'ADD',
+        section: 'Guidelines',
+        bulletId: 'expiring',
+        content: 'Temporary future rule',
+        evidence: { lifecycle: { expiresAt: '2099-01-01T00:00:00.000Z' } },
+      },
+      {
+        type: 'ADD',
+        section: 'Guidelines',
+        bulletId: 'plain',
+        content: 'Non-expiring rule',
+      },
+    ]);
+
+    const rendered = renderPlaybook(playbook, { now: 'not-a-date' });
+    expect(rendered).not.toContain('Temporary future rule');
+    expect(rendered).toContain('Non-expiring rule');
   });
 
   it('serializes normalized evidence deterministically', () => {

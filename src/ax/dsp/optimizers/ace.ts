@@ -835,7 +835,7 @@ export class AxACE extends AxBaseOptimizer {
     return curatorResult;
   }
 
-  /** Attach authoritative host/evaluator evidence without another LM call. */
+  /** Attach trusted host/evaluator evidence without another LM call. */
   public recordEvidence(
     bulletIds: readonly string[],
     evidence: Readonly<AxACEHostEvidence>

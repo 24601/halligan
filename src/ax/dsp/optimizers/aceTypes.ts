@@ -20,7 +20,7 @@ export type AxACEVerificationResult = {
   testId?: string;
   result: 'passed' | 'failed' | 'unknown';
   timestamp?: string;
-  /** Bounded host/evaluator summary; raw traces should not be stored here. */
+  /** Host/evaluator summary, trimmed to 500 characters on trusted updates. */
   summary?: string;
 };
 
@@ -41,7 +41,10 @@ export type AxACEBulletEvidence = {
   lifecycle?: AxACEBulletLifecycle;
 };
 
-/** Host/evaluator-owned evidence attached at the ACE boundary. */
+/**
+ * Evidence supplied by a trusted host/evaluator caller. This is an authority
+ * boundary, not a cryptographic attestation.
+ */
 export type AxACEHostEvidence = {
   source?: AxACEProvenance['source'];
   sourceRunId?: string;

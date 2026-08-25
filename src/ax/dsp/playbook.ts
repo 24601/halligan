@@ -186,7 +186,7 @@ export class AxPlaybook<IN = any, OUT extends AxGenOut = AxGenOut> {
     return renderPlaybook(this.engine.getPlaybook(), options);
   }
 
-  /** Attach authoritative host/evaluator evidence without invoking the LM. */
+  /** Attach trusted host/evaluator evidence without invoking the LM. */
   public recordEvidence(
     bulletIds: readonly string[],
     evidence: Readonly<AxACEHostEvidence>

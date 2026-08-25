@@ -71,7 +71,7 @@ export class AxAgentPlaybook<
     this.handle.applyTo(undefined, options);
   }
 
-  /** Attach authoritative host/evaluator evidence without invoking the LM. */
+  /** Attach trusted host/evaluator evidence without invoking the LM. */
   public recordEvidence(
     bulletIds: readonly string[],
     evidence: Readonly<AxACEHostEvidence>

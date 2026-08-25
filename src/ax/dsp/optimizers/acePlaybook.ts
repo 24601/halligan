@@ -10,12 +10,14 @@ import type {
   AxACEVerificationResult,
 } from './aceTypes.js';
 
+const MAX_VERIFICATION_SUMMARY_CHARS = 500;
+
 interface ApplyOperationsOptions {
   maxSectionSize?: number;
   allowDynamicSections?: boolean;
   enableAutoPrune?: boolean;
   protectedBulletIds?: ReadonlySet<string>;
-  /** Authoritative host/evaluator evidence; never accepted from curator JSON. */
+  /** Trusted caller evidence; never accepted from curator JSON. */
   hostEvidence?: Readonly<AxACEHostEvidence>;
 }
 
@@ -303,39 +305,84 @@ export function isBulletApplicable(
     return true;
   }
 
-  const lifecycle = bullet.evidence?.lifecycle;
+  const evidence = bullet.evidence as unknown;
+  if (evidence !== undefined && !isRecord(evidence)) {
+    return false;
+  }
+
+  const lifecycle = evidence?.lifecycle;
+  if (lifecycle !== undefined && !isRecord(lifecycle)) {
+    return false;
+  }
+  if (
+    lifecycle?.status !== undefined &&
+    !['active', 'deprecated', 'superseded'].includes(lifecycle.status as string)
+  ) {
+    return false;
+  }
   if (
     lifecycle?.status === 'deprecated' ||
     lifecycle?.status === 'superseded'
   ) {
     return false;
   }
-  if (lifecycle?.expiresAt) {
+  if (lifecycle?.expiresAt !== undefined) {
+    if (typeof lifecycle.expiresAt !== 'string') {
+      return false;
+    }
     const expiry = Date.parse(lifecycle.expiresAt);
     const now = Date.parse(options?.now ?? new Date().toISOString());
-    if (!Number.isFinite(expiry) || (Number.isFinite(now) && expiry <= now)) {
+    if (!Number.isFinite(expiry) || !Number.isFinite(now) || expiry <= now) {
       return false;
     }
   }
 
-  const applicability = bullet.evidence?.applicability;
-  if (!applicability) {
+  const applicability = evidence?.applicability;
+  if (applicability === undefined) {
     return true;
   }
-  const conditions = new Set(options?.conditions ?? []);
-  if (applicability.allOf?.some((condition) => !conditions.has(condition))) {
+  if (!isRecord(applicability)) {
     return false;
   }
+  const allOf = conditionList(applicability.allOf);
+  const anyOf = conditionList(applicability.anyOf);
+  const noneOf = conditionList(applicability.noneOf);
+  if (allOf === null || anyOf === null || noneOf === null) {
+    return false;
+  }
+  const runtimeConditions = options?.conditions;
   if (
-    applicability.anyOf?.length &&
-    !applicability.anyOf.some((condition) => conditions.has(condition))
+    runtimeConditions !== undefined &&
+    (!Array.isArray(runtimeConditions) ||
+      runtimeConditions.some((condition) => typeof condition !== 'string'))
   ) {
     return false;
   }
-  if (applicability.noneOf?.some((condition) => conditions.has(condition))) {
+  const conditions = new Set(runtimeConditions ?? []);
+  if (allOf?.some((condition) => !conditions.has(condition))) {
+    return false;
+  }
+  if (anyOf?.length && !anyOf.some((condition) => conditions.has(condition))) {
+    return false;
+  }
+  if (noneOf?.some((condition) => conditions.has(condition))) {
     return false;
   }
   return true;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function conditionList(value: unknown): string[] | undefined | null {
+  if (value === undefined) {
+    return undefined;
+  }
+  return Array.isArray(value) &&
+    value.every((condition) => typeof condition === 'string')
+    ? value
+    : null;
 }
 
 /**
@@ -547,7 +594,13 @@ function normalizeVerification(
       ...(value.testId?.trim() ? { testId: value.testId.trim() } : {}),
       result: value.result,
       ...(value.timestamp ? { timestamp: value.timestamp } : {}),
-      ...(value.summary?.trim() ? { summary: value.summary.trim() } : {}),
+      ...(value.summary?.trim()
+        ? {
+            summary: value.summary
+              .trim()
+              .slice(0, MAX_VERIFICATION_SUMMARY_CHARS),
+          }
+        : {}),
     }));
   const unique = new Map(
     normalized.map((value) => [

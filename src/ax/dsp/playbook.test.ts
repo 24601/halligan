@@ -95,6 +95,38 @@ describe('playbook handle', () => {
     expect(restored.render()).toContain('Legacy plain bullet');
   });
 
+  it('preserves malformed snapshot metadata but fails closed when rendering', () => {
+    const content = buildPlaybook({
+      Guidelines: [
+        'Malformed applicability',
+        'Malformed lifecycle',
+        'Valid legacy guidance',
+      ],
+    });
+    (content.sections.Guidelines[0] as any).evidence = {
+      applicability: { allOf: 'tenant:paid' },
+    };
+    (content.sections.Guidelines[1] as any).evidence = {
+      lifecycle: { expiresAt: 42 },
+    };
+    const snapshot = {
+      playbook: content,
+      artifact: emptyArtifact(content),
+    };
+
+    const restored = playbook(createProgram(), { studentAI: mockAI }).load(
+      JSON.parse(JSON.stringify(snapshot))
+    );
+
+    expect(restored.getState()).toEqual(snapshot);
+    expect(restored.render()).not.toContain('Malformed applicability');
+    expect(restored.render()).not.toContain('Malformed lifecycle');
+    expect(restored.render()).toContain('Valid legacy guidance');
+    expect(restored.render({ includeInactive: true })).toContain(
+      'Malformed applicability'
+    );
+  });
+
   it('records host evidence and restores it exactly on rollback load', () => {
     const content = buildPlaybook({ Guidelines: ['Verified rule'] });
     const pb = playbook(createProgram(), { studentAI: mockAI }).load({

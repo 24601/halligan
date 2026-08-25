@@ -31,7 +31,7 @@ Use this skill to generate context-playbook code. A playbook grows an evolving b
 - Keep the offline `metric` deterministic and cheap, like a GEPA metric.
 - A playbook is plain JSON. Persist `pb.toJSON()` and `load(...)` it into a fresh program for production.
 - Legacy snapshots and plain bullets load unchanged. Evidence fields are optional; loading does not invent provenance or verifier receipts.
-- Curators may propose confidence, inert applicability condition tokens, lifecycle state, and supersession links. Provenance, evidence counts, and verification receipts are host/evaluator-owned and curator JSON cannot set them.
+- Curators may propose confidence, inert applicability condition tokens, lifecycle state, and supersession links. Curator JSON cannot set provenance, evidence counts, or verification receipts; those fields come from trusted host/evaluator APIs. This is an authority boundary, not cryptographic authenticity: callers that supply `initialPlaybook`, call `load()`, or call `recordEvidence()` are trusted and can provide arbitrary persisted values.
 - The playbook engine, construction-time agent attachment, failure harvesting,
   and verified agent evolution are available in TypeScript and the generated
   Python, Java, C++, Go, and Rust packages. Use each package's native casing and
@@ -98,7 +98,7 @@ type AxACEBullet = {
       testId?: string;
       result: 'passed' | 'failed' | 'unknown';
       timestamp?: string;
-      summary?: string;        // bounded summary, not a raw trace
+      summary?: string;        // trimmed to 500 chars on trusted updates
     }>;
     lifecycle?: {
       status?: 'active' | 'deprecated' | 'superseded';
@@ -128,7 +128,7 @@ apb.applyTo({ conditions: ['tenant:paid', 'region:us'] });
 
 const auditMarkdown = pb.render({ includeInactive: true });
 
-// Host/evaluator-only: no curator/model call.
+// Trusted host/evaluator authority: no curator/model call or cryptographic proof.
 pb.recordEvidence(['guidel-1234'], {
   source: 'manual',
   feedbackIds: ['eval-case-9'],
@@ -166,8 +166,11 @@ npx vitest run src/ax/dsp/optimizers/aceEvidenceEval.test.ts
 
 Metadata helps only when the host provides accurate conditions and lifecycle or
 verification evidence. It cannot prove that guidance content is semantically
-correct, detect missing preconditions, or replace representative held-out/live
-evaluation. The durable JSON grows, even though filtered prompts can shrink.
+correct, authenticate caller-supplied snapshots/receipts, detect missing
+preconditions, or replace representative held-out/live evaluation. Malformed
+persisted applicability/lifecycle metadata is preserved for exact rollback but
+the affected bullet fails closed during normal rendering. The durable JSON
+grows, even though filtered prompts can shrink.
 
 ## Persist And Restore
 
@@ -184,7 +187,7 @@ playbook(prodProgram, { studentAI }).load(snapshot).applyTo(prodProgram);
 - Continuous (trust): the construction-time `playbook` option (see `ax-agent`) harvests each run's failures automatically — no dataset.
 - On-demand (trust): `apb.update({ example, prediction, feedback })`.
 - Batch verified (proof): `apb.evolve(dataset, options)` runs the full agent over a task set, mines failure clusters, and proposes one playbook bullet per weakness; with `verify` (default on) it keeps a bullet only if held-in improves AND the `validation` held-out set does not regress, else exact rollback. `verify: false` = trust-batch. Bullets-only.
-- Accepted verified proposals receive a host-owned `agent.playbook.evolve` verification receipt. Rejected proposals restore the exact pre-proposal snapshot, including evidence metadata.
+- Accepted verified proposals receive an `agent.playbook.evolve` receipt from the trusted evaluator boundary. Rejected proposals restore the exact pre-proposal snapshot, including evidence metadata.
 
 ```typescript
 const a = agent('ticket:string -> reply:string', { ai });
