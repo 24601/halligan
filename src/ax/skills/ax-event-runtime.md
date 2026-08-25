@@ -74,7 +74,9 @@ await source.publish({ event, identity, trust: 'authenticated' });
   parent with its child for capacity accounting and carries chain state through
   the owned continuation. Its immutable operation journal binds the canonical
   full request to a deterministic child and resolves lost commit
-  acknowledgements; it does not make arbitrary external I/O exactly once.
+  acknowledgements. Confirmation requires the complete fenced request and
+  returns only a validated minimal receipt; SQLite identity records outlive
+  payload retention. This does not make arbitrary external I/O exactly once.
 - Set explicit verifier run/token/wall-time/cost limits. Exhaustion, verifier
   error/timeout, and unchanged fingerprints fail closed; abort stays cancelled.
 - Host `usage`, `fingerprint`, and `verify` callbacks share timeout and abort

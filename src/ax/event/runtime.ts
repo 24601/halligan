@@ -264,7 +264,7 @@ export class AxEventRuntime {
         this.store.capabilities.verifierTransitions !==
           'axevent-verifier-transition-v2' ||
         !this.store.transitionVerifier ||
-        !this.store.getVerifierTransition
+        !this.store.confirmVerifierTransition
       ) {
         throw new Error(
           'Verifier targets require an AxEventStore with axevent-verifier-transition-v2 fenced transitions'
@@ -924,13 +924,20 @@ export class AxEventRuntime {
   private async verifierTransitionCommitted(
     request: Readonly<import('./types.js').AxEventVerifierTransitionRequest>
   ): Promise<boolean> {
-    const record = await this.store.getVerifierTransition!(request.operationId);
-    if (!record) return false;
+    const receipt = await this.store.confirmVerifierTransition!(request);
+    if (!receipt) return false;
     if (
-      axEventCanonicalJson(record.request) !== axEventCanonicalJson(request)
+      axEventCanonicalJson(receipt) !==
+      axEventCanonicalJson({
+        eventId: request.child.ingress.event.id,
+        accepted: true,
+        duplicate: false,
+        durability: this.store.capabilities.durability,
+        deliveryIds: [request.childDeliveryId],
+      })
     ) {
       throw new Error(
-        `Verifier transition operation is already owned: ${request.operationId}`
+        `Verifier transition confirmation is invalid: ${request.operationId}`
       );
     }
     return true;

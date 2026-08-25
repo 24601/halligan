@@ -251,8 +251,12 @@ continuation consumption. Each operation has a deterministic child ID and an
 immutable store journal containing its canonical full request and receipt.
 Conflicting reuse is rejected; a committed operation is read back from the
 journal after lost acknowledgements instead of regressing its parent to
-`outcome_unknown`. These guarantees do not make arbitrary target or sink I/O
-exactly once.
+`outcome_unknown`. Confirmation requires the complete expected request,
+including its parent fence, returns only the minimal receipt, and validates the
+receipt plus deterministic child projection internally; operation IDs alone
+cannot retrieve run or output data. SQLite retains these identity records for
+the lifetime of the database, independently of event/result payload pruning.
+These guarantees do not make arbitrary target or sink I/O exactly once.
 
 ### Deterministic Evaluation
 

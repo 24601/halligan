@@ -614,9 +614,10 @@ export interface AxEventStore {
   transitionVerifier?(
     request: Readonly<AxEventVerifierTransitionRequest>
   ): Promise<AxEventPublishReceipt>;
-  getVerifierTransition?(
-    operationId: string
-  ): Promise<Readonly<AxEventVerifierTransitionRecord> | undefined>;
+  /** Confirms an exact, authority-bearing V2 request without exposing journal data. */
+  confirmVerifierTransition?(
+    request: Readonly<AxEventVerifierTransitionRequest>
+  ): Promise<Readonly<AxEventPublishReceipt> | undefined>;
   claim(
     workerId: string,
     now: number,

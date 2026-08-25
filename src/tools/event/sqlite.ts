@@ -253,10 +253,13 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
     })();
   }
 
-  async getVerifierTransition(
-    operationId: string
-  ): Promise<Readonly<AxEventVerifierTransitionRecord> | undefined> {
-    return this.readVerifierTransition(operationId);
+  async confirmVerifierTransition(
+    request: Readonly<AxEventVerifierTransitionRequest>
+  ): Promise<Readonly<AxEventPublishReceipt> | undefined> {
+    const record = this.readVerifierTransition(request.operationId);
+    if (!record) return;
+    this.assertVerifierTransitionRequest(record, request);
+    return record.receipt;
   }
 
   async claim(
@@ -1011,9 +1014,6 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
       const eventCutoff = now - retention.eventAndResultMs;
       this.db
         .prepare('DELETE FROM event_dedupe WHERE created_at < ?')
-        .run(eventCutoff);
-      this.db
-        .prepare('DELETE FROM event_verifier_transitions WHERE created_at < ?')
         .run(eventCutoff);
       this.db
         .prepare(

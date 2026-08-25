@@ -324,11 +324,13 @@ export class AxInMemoryEventStore implements AxEventStore {
     return receipt;
   }
 
-  async getVerifierTransition(
-    operationId: string
-  ): Promise<Readonly<AxEventVerifierTransitionRecord> | undefined> {
-    const value = this.verifierTransitions.get(operationId);
-    return value ? structuredClone(value) : undefined;
+  async confirmVerifierTransition(
+    request: Readonly<AxEventVerifierTransitionRequest>
+  ): Promise<Readonly<AxEventPublishReceipt> | undefined> {
+    const value = this.verifierTransitions.get(request.operationId);
+    if (!value) return;
+    this.assertVerifierTransition(value, request);
+    return structuredClone(value.receipt);
   }
 
   async claim(

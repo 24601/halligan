@@ -212,15 +212,19 @@ describe('AxSQLiteEventStore', () => {
   it('journals immutable transitions across repeated commit-ack loss', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
     directories.push(directory);
-    const store = new AxSQLiteEventStore({
+    const retention = {
+      ...AX_SQLITE_EVENT_STANDARD_RETENTION,
+      eventAndResultMs: 1,
+    };
+    let store = new AxSQLiteEventStore({
       filename: join(directory, 'transition-journal.sqlite'),
-      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+      retention,
     });
     const transition = store.transitionVerifier.bind(store);
-    const readTransition = store.getVerifierTransition.bind(store);
-    vi.spyOn(store, 'getVerifierTransition')
+    const confirmTransition = store.confirmVerifierTransition.bind(store);
+    vi.spyOn(store, 'confirmVerifierTransition')
       .mockResolvedValueOnce(undefined)
-      .mockImplementation(readTransition);
+      .mockImplementation(confirmTransition);
     vi.spyOn(store, 'transitionVerifier').mockImplementation(
       async (request) => {
         await transition(request);
@@ -275,8 +279,9 @@ describe('AxSQLiteEventStore', () => {
     expect(verify).toHaveBeenCalledTimes(2);
     expect(store.transitionVerifier).toHaveBeenCalledTimes(2);
     const request = (store.transitionVerifier as any).mock.calls[0]![0];
-    const record = await readTransition(request.operationId);
-    expect(record?.child.id).toBe(request.childDeliveryId);
+    expect((await confirmTransition(request))?.deliveryIds).toEqual([
+      request.childDeliveryId,
+    ]);
     await expect(
       transition({
         ...request,
@@ -286,7 +291,40 @@ describe('AxSQLiteEventStore', () => {
         },
       })
     ).rejects.toThrow('already owned');
+    await expect(
+      confirmTransition({
+        ...request,
+        parent: {
+          ...request.parent,
+          expectedFencingToken: request.parent.expectedFencingToken + 1,
+        },
+      })
+    ).rejects.toThrow('already owned');
     await runtime.close({ drain: false });
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    store = new AxSQLiteEventStore({
+      filename: join(directory, 'transition-journal.sqlite'),
+      retention,
+    });
+    expect(
+      (await store.confirmVerifierTransition(request))?.deliveryIds
+    ).toEqual([request.childDeliveryId]);
+    const db = (store as any).db;
+    const row = db
+      .prepare(
+        'SELECT record_json FROM event_verifier_transitions WHERE operation_id=?'
+      )
+      .get(request.operationId);
+    const corrupted = JSON.parse(row.record_json);
+    corrupted.receipt.deliveryIds = ['corrupted-child'];
+    db.prepare(
+      'UPDATE event_verifier_transitions SET record_json=? WHERE operation_id=?'
+    ).run(JSON.stringify(corrupted), request.operationId);
+    await expect(store.confirmVerifierTransition(request)).rejects.toThrow(
+      'already owned'
+    );
+    await store.close();
   });
 
   it('persists output before isolated sink retries', async () => {

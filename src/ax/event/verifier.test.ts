@@ -669,12 +669,12 @@ describe('AxEventRuntime verifier continuation policy', () => {
     async (fault) => {
       const store = new AxInMemoryEventStore();
       const transition = store.transitionVerifier.bind(store);
-      const readTransition = store.getVerifierTransition.bind(store);
+      const confirmTransition = store.confirmVerifierTransition.bind(store);
       let injected = false;
       if (fault === 'double-commit-ack-loss') {
-        vi.spyOn(store, 'getVerifierTransition')
+        vi.spyOn(store, 'confirmVerifierTransition')
           .mockResolvedValueOnce(undefined)
-          .mockImplementation(readTransition);
+          .mockImplementation(confirmTransition);
       }
       vi.spyOn(store, 'transitionVerifier').mockImplementation(
         async (request) => {
@@ -719,6 +719,24 @@ describe('AxEventRuntime verifier continuation policy', () => {
           },
         })
       ).rejects.toThrow('already owned');
+      await expect(
+        confirmTransition({
+          ...operation,
+          parent: {
+            ...operation.parent,
+            expectedFencingToken: operation.parent.expectedFencingToken + 1,
+          },
+        })
+      ).rejects.toThrow('already owned');
+      if (fault === 'double-commit-ack-loss') {
+        const journal = (store as any).verifierTransitions.get(
+          operation.operationId
+        );
+        journal.receipt.deliveryIds = ['corrupted-child'];
+        await expect(confirmTransition(operation)).rejects.toThrow(
+          'already owned'
+        );
+      }
       await runtime.close();
     }
   );

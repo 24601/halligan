@@ -53,7 +53,7 @@ export async function runAxEventStoreConformance(
       store.capabilities.verifierTransitions ===
         'axevent-verifier-transition-v2' &&
         Boolean(store.transitionVerifier) &&
-        Boolean(store.getVerifierTransition),
+        Boolean(store.confirmVerifierTransition),
       'verifier transition v2'
     );
 
@@ -258,7 +258,7 @@ export async function runAxEventStoreConformance(
       'verifier transition acknowledgement replay is idempotent'
     );
     assert(
-      (await store.getVerifierTransition!(transition.operationId))?.child.id ===
+      (await store.confirmVerifierTransition!(transition))?.deliveryIds[0] ===
         transition.childDeliveryId,
       'verifier transition journal binds deterministic child identity'
     );
