@@ -32,7 +32,8 @@ type Metric = {
   scenario: string;
   expectedCompleted: boolean;
   completed: boolean;
-  outcomeCorrect: boolean;
+  protocolOutcomeCorrect: boolean;
+  taskOutputCorrect: boolean;
   exactToolCalls: boolean;
   historyIdsValid: boolean;
   resultPairsOrdered: boolean;
@@ -109,8 +110,10 @@ const makeTools = (observed: string[], delayMs = 0): AxFunction[] =>
 
 type Scenario = {
   name: string;
+  question: string;
   calls: Call[][];
   expected: string[];
+  expectedAnswer: string | null;
   expectedCompleted?: boolean;
   expectedTermination?: AxReactTerminationReason;
   maxIterations?: number;
@@ -119,61 +122,75 @@ type Scenario = {
 const scenarios: Scenario[] = [
   {
     name: 'native-capable-tools',
+    question: 'Look up value 7 and answer with the returned number.',
     calls: [
       [{ name: 'lookup', args: { value: 7 } }],
-      [{ name: 'submit', args: { answer: 'seven' } }],
+      [{ name: 'submit', args: { answer: '7' } }],
     ],
     expected: ['lookup:7'],
+    expectedAnswer: '7',
   },
   {
     name: 'misleading-decoy',
+    question: 'Use lookup, not the misleading decoy, to read value 2.',
     calls: [
       [{ name: 'lookup', args: { value: 2 } }],
-      [{ name: 'submit', args: { answer: 'correct' } }],
+      [{ name: 'submit', args: { answer: '2' } }],
     ],
     expected: ['lookup:2'],
+    expectedAnswer: '2',
   },
   {
     name: 'recoverable-tool-error',
+    question: 'Recover from explode by looking up value 3, then answer 3.',
     calls: [
       [{ name: 'explode', args: { value: 1 } }],
       [{ name: 'lookup', args: { value: 3 } }],
-      [{ name: 'submit', args: { answer: 'recovered' } }],
+      [{ name: 'submit', args: { answer: '3' } }],
     ],
     expected: ['explode:1', 'lookup:3'],
+    expectedAnswer: '3',
   },
   {
     name: 'forced-submit',
+    question: 'Look up value 4 and answer with the returned number.',
     calls: [
       [{ name: 'lookup', args: { value: 4 } }],
-      [{ name: 'submit', args: { answer: 'forced' } }],
+      [{ name: 'submit', args: { answer: '4' } }],
     ],
     expected: ['lookup:4'],
+    expectedAnswer: '4',
     maxIterations: 1,
     expectedTermination: 'forced_submit',
   },
   {
     name: 'bounded-parallel-async',
+    question: 'Read 1, 2, and 3 concurrently with slow and answer their sum.',
     calls: [
       [
         { name: 'slow', args: { value: 1 } },
         { name: 'slow', args: { value: 2 } },
         { name: 'slow', args: { value: 3 } },
       ],
-      [{ name: 'submit', args: { answer: 'parallel' } }],
+      [{ name: 'submit', args: { answer: '6' } }],
     ],
     expected: ['slow:1', 'slow:2', 'slow:3'],
+    expectedAnswer: '6',
     delayMs: 30,
   },
   {
     name: 'direct-submit-no-benefit',
-    calls: [[{ name: 'submit', args: { answer: 'direct' } }]],
+    question: 'Answer directly: what is 2 + 2?',
+    calls: [[{ name: 'submit', args: { answer: '4' } }]],
     expected: [],
+    expectedAnswer: '4',
   },
   {
     name: 'invalid-forced-submit-failure-contract',
+    question: 'Demonstrate the typed failure contract.',
     calls: [[], [{ name: 'submit', args: { wrongField: 'invalid' } }]],
     expected: [],
+    expectedAnswer: null,
     expectedCompleted: false,
     expectedTermination: 'forced_submit_failed',
     maxIterations: 1,
@@ -247,7 +264,7 @@ async function runScripted(
     functions: makeTools(observed, scenario.delayMs),
     maxIterations: scenario.maxIterations ?? 4,
     maxParallelTools: 2,
-  }).forward(ai, { question: scenario.name }, { functionCallMode: mode });
+  }).forward(ai, { question: scenario.question }, { functionCallMode: mode });
   const expectedCompleted = scenario.expectedCompleted ?? true;
   const expectedTermination =
     scenario.expectedTermination ??
@@ -258,7 +275,10 @@ async function runScripted(
     scenario: scenario.name,
     expectedCompleted,
     completed: result.success,
-    outcomeCorrect: result.success === expectedCompleted,
+    protocolOutcomeCorrect: result.success === expectedCompleted,
+    taskOutputCorrect:
+      result.output.answer === scenario.expectedAnswer &&
+      result.success === expectedCompleted,
     exactToolCalls:
       JSON.stringify(observed) === JSON.stringify(scenario.expected),
     historyIdsValid: protocol.idsValid,
@@ -328,7 +348,8 @@ async function runResume(
     scenario: 'resume-history-continuity',
     expectedCompleted: true,
     completed: resumed.success,
-    outcomeCorrect: resumed.success,
+    protocolOutcomeCorrect: resumed.success,
+    taskOutputCorrect: resumed.success && resumed.output.answer === 'resumed',
     exactToolCalls: JSON.stringify(observed) === JSON.stringify(['lookup:9']),
     historyIdsValid: protocol.idsValid,
     resultPairsOrdered: protocol.pairsOrdered,
@@ -358,8 +379,10 @@ function print(metrics: Metric[], heading: string): void {
         tasks: rows.length,
         completionRate:
           rows.filter((row) => row.completed).length / rows.length,
-        expectedOutcomeRate:
-          rows.filter((row) => row.outcomeCorrect).length / rows.length,
+        expectedProtocolOutcomeRate:
+          rows.filter((row) => row.protocolOutcomeCorrect).length / rows.length,
+        taskOutputCorrectRate:
+          rows.filter((row) => row.taskOutputCorrect).length / rows.length,
         exactToolCallRate:
           rows.filter((row) => row.exactToolCalls).length / rows.length,
         validHistoryIdRate:
@@ -405,8 +428,10 @@ async function deterministic(): Promise<void> {
     await runScripted(
       {
         name: 'text-only-auto-fallback',
-        calls: [[{ name: 'submit', args: { answer: 'fallback' } }]],
+        question: 'Answer directly: what is 2 + 3?',
+        calls: [[{ name: 'submit', args: { answer: '5' } }]],
         expected: [],
+        expectedAnswer: '5',
       },
       'text-only-auto→prompt',
       'auto',
@@ -426,7 +451,8 @@ async function deterministic(): Promise<void> {
   if (
     metrics.some(
       (metric) =>
-        !metric.outcomeCorrect ||
+        !metric.protocolOutcomeCorrect ||
+        !metric.taskOutputCorrect ||
         !metric.exactToolCalls ||
         !metric.historyIdsValid ||
         !metric.resultPairsOrdered ||
@@ -442,17 +468,29 @@ const liveTasks = [
   {
     question: 'Look up value 2 and answer with the returned value.',
     expected: ['lookup:2'],
+    expectedAnswer: '2',
   },
   {
     question: 'Look up value 7 and answer with the returned value.',
     expected: ['lookup:7'],
+    expectedAnswer: '7',
   },
-  { question: 'Answer directly: what is 2 + 2?', expected: [] },
+  {
+    question: 'Answer directly: what is 2 + 2?',
+    expected: [],
+    expectedAnswer: '4',
+  },
   {
     question: 'Look up value 11 and report it concisely.',
     expected: ['lookup:11'],
+    expectedAnswer: '11',
   },
 ];
+
+function containsAnswer(value: string, expected: string): boolean {
+  const escaped = expected.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(^|\\D)${escaped}($|\\D)`).test(value);
+}
 
 async function live(provider: string): Promise<void> {
   const configs = {
@@ -532,7 +570,10 @@ async function live(provider: string): Promise<void> {
         scenario: `live-${index + 1}`,
         expectedCompleted: true,
         completed: result.success,
-        outcomeCorrect: result.success,
+        protocolOutcomeCorrect: result.success,
+        taskOutputCorrect:
+          result.success &&
+          containsAnswer(result.output.answer, task.expectedAnswer),
         exactToolCalls:
           JSON.stringify(observed) === JSON.stringify(task.expected),
         historyIdsValid: protocol.idsValid,
@@ -555,7 +596,10 @@ async function live(provider: string): Promise<void> {
       });
     }
   }
-  print(metrics, 'OPTIONAL LIVE MODEL-QUALITY EVIDENCE');
+  print(
+    metrics,
+    'OPTIONAL BOUNDED LIVE TASK EVIDENCE — MODEL/PROFILE SPECIFIC'
+  );
 }
 
 if (liveArg) await live(liveArg.slice('--live='.length));

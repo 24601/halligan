@@ -96,10 +96,16 @@ Rules:
   `terminationReason`, canonical complete `history`, and `error`.
 - Resume with `{ history: previous.history }`. Ax IDs remain collision-safe
   across runs; unique native provider IDs are retained separately for replay.
-  Compaction retains only complete assistant/tool groups.
+  Compaction retains only complete assistant/tool groups. Resume is bound to
+  the executable catalog, replay provider/model protocol, and a host authority
+  digest. Set a stable non-secret `historyAuthority` to recreate the module
+  across processes, override it per run for shared multi-scope modules, and
+  version it when permissions or tool semantics change.
 - `abortSignal` cancels one run; `program.stop()` cancels all its active runs.
 - Canonical JSON stabilizes prompt-cache input, tool arguments/results, and
-  persisted history. Treat tool results and stored history as sensitive data.
+  persisted history. Structural validation does not authenticate semantic
+  history edits; callers must verify storage integrity and treat resumed
+  content as untrusted input.
 
 See `docs/REACT.md` for protocol, compaction, security, provider limitations,
 and the bounded `npm run eval:react` comparison.

@@ -62,10 +62,10 @@ type AxReactResult<Output> =
 
 Every runtime failure includes every declared public output key set to `null`,
 a termination reason, and the last complete canonical history. Invalid caller
-inputs, incompatible/tampered histories, invalid constructor configuration, and
-reserved or ambiguous tool names are rejected before a run starts and therefore
-throw. Per-run provider/configuration failures retain the structured result
-contract.
+inputs, malformed or incompatible histories, invalid constructor configuration,
+and reserved or ambiguous tool names are rejected before a run starts and
+therefore throw. Per-run provider/configuration failures retain the structured
+result contract.
 
 ## Native And Prompt Protocols
 
@@ -123,7 +123,11 @@ Duplicate, empty, or oversized provider IDs fall back to the Ax ID. The
 transcript also keeps its own namespace and allocation counter. Forked or
 sequential resumed runs therefore do not collide even when provider IDs repeat.
 Arguments, results, inputs, and `axReactSerializeHistory(...)` use recursive
-key-sorted canonical JSON.
+key-sorted canonical JSON. The history header binds replay to hashes of the
+signature, canonical executable tool catalog (names, schemas, protocol
+metadata, and the reserved `submit`), host authority/version, and replay mode.
+Native replay additionally binds the provider name and selected model so
+provider-specific call IDs are not replayed into a different native protocol.
 
 Pass a prior history to resume:
 
@@ -133,10 +137,27 @@ const resumed = await answer.forward(llm, input, {
 });
 ```
 
-The signature hash and canonical input must match. Ax clones caller-owned
-history before appending. It retains the full canonical transcript for
-persistence while replaying only bounded recent context. Compaction drops only
-complete assistant/result groups, never an orphan call or result. Tune
+The signature, canonical input, current executable catalog, authority, and
+replay protocol must match. By default authority is scoped to one `AxReact`
+instance. To persist history across process restarts or recreate the module,
+provide a stable, non-secret host authority/version:
+
+```typescript
+const answer = react('question:string -> answer:string', {
+  functions: [lookup],
+  historyAuthority: 'support-assistant:tenant-a:tools-v3',
+});
+```
+
+Change that value whenever tool implementation semantics, credentials,
+permissions, tenant scope, or host-provided context authority changes. Matching
+the value is an authorization decision by the host; it is not a credential or
+an integrity signature. A per-run `historyAuthority` forward option overrides
+the module default; use it on both the initial and resumed calls when one module
+serves multiple authorization scopes. Ax clones caller-owned history before
+appending. It retains the full canonical transcript for persistence while
+replaying only bounded recent context. Compaction drops only complete
+assistant/result groups, never an orphan call or result. Tune
 `maxPromptHistoryGroups`, `maxPromptHistoryCharacters`, and
 `maxPromptValueCharacters` for the selected model.
 
@@ -158,6 +179,12 @@ during tool execution does not commit a partial call/result group.
 - The stored transcript is complete and may contain application data even when
   replay values are truncated. Protect it according to the sensitivity of tool
   inputs and results.
+- History validation rejects malformed structure and incompatible execution
+  scope; it does not authenticate semantic content. Canonical edits to prior
+  assistant text, arguments, results, or errors remain structurally valid and
+  are replayed as untrusted evidence. The caller owns storage integrity and
+  must verify its own MAC/signature before passing history when tampering is in
+  scope.
 - Keep effects idempotent when a caller may retry a failed or aborted run. Ax
   guarantees transcript atomicity, not rollback of external side effects.
 
@@ -169,17 +196,19 @@ Run the free deterministic protocol/task suite:
 npm run eval:react
 ```
 
-It compares native and prompt lanes on completion, exact tool calls, canonical
-and replay ID uniqueness, call/result ordering, termination reasons, model
-turns, forced submit, resume determinism, bounded async latency, recoverable
-errors, final failures, and serialized prompt size. Cases include a text-only
-provider, misleading tools, handler failure/recovery, parallel async calls, and
-a direct-submit case where tools provide no benefit.
+It compares native and prompt lanes on protocol completion, task-specific final
+output correctness, exact tool calls, canonical and replay ID uniqueness,
+call/result ordering, termination reasons, model turns, forced submit, resume
+determinism, bounded async latency, recoverable errors, final failures, and
+serialized prompt size. Cases include a text-only provider, misleading tools,
+handler failure/recovery, parallel async calls, and a direct-submit case where
+tools provide no benefit.
 
 The scripted provider results are reproducible mechanism evidence, **not**
-evidence that one protocol improves real-model quality. To run the optional
-bounded live comparison (four read-only tasks, four normal iterations each),
-explicitly select one provider and supply its credential:
+evidence that one protocol improves real-model quality. The optional live lane
+reports bounded, task-specific output checks rather than a general quality
+score. To run it (four read-only tasks, four normal iterations each), explicitly
+select one provider and supply its credential:
 
 ```bash
 OPENAI_APIKEY=... npm run eval:react -- --live=openai

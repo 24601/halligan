@@ -684,6 +684,174 @@ describe('react', () => {
     expect(forkIds[0]).not.toBe(secondNewIds[0]);
   });
 
+  it('binds resume to the executable catalog and host authority', async () => {
+    const privilegedLookup = tool(
+      'privilegedLookup',
+      async ({ value }: { value: number }) => ({ value })
+    );
+    let firstTurn = 0;
+    const firstAI = new AxMockAIService({
+      name: 'native-provider',
+      features: { functions: true },
+      chatResponse: async () => {
+        firstTurn++;
+        return firstTurn === 1
+          ? nativeTurn([{ name: 'privilegedLookup', args: { value: 7 } }])
+          : nativeTurn([]);
+      },
+    });
+    const first = await react('question:string -> answer:string', {
+      functions: [privilegedLookup],
+      historyAuthority: 'tenant-a:privileged:v1',
+      maxIterations: 1,
+    }).forward(firstAI, { question: 'Authorized resume' });
+    expect(first.success).toBe(false);
+
+    const resumeAI = new AxMockAIService({
+      name: 'native-provider',
+      features: { functions: true },
+      chatResponse: async () =>
+        nativeTurn([{ name: 'submit', args: { answer: 'resumed' } }]),
+    });
+    const recreated = react('question:string -> answer:string', {
+      functions: [
+        tool('privilegedLookup', async ({ value }: { value: number }) => ({
+          value,
+        })),
+      ],
+      historyAuthority: 'tenant-a:privileged:v1',
+    });
+    await expect(
+      recreated.forward(
+        resumeAI,
+        { question: 'Authorized resume' },
+        { history: first.history }
+      )
+    ).resolves.toMatchObject({ success: true, output: { answer: 'resumed' } });
+
+    const noTools = react('question:string -> answer:string', {
+      historyAuthority: 'tenant-a:privileged:v1',
+    });
+    await expect(
+      noTools.forward(
+        resumeAI,
+        { question: 'Authorized resume' },
+        { history: first.history }
+      )
+    ).rejects.toThrow('current executable tool catalog');
+
+    const changedSchema = react('question:string -> answer:string', {
+      functions: [
+        tool('privilegedLookup', async () => 'changed', {
+          parameters: {
+            type: 'object',
+            properties: {
+              query: { type: 'string', description: 'Changed input' },
+            },
+            required: ['query'],
+            additionalProperties: false,
+          },
+        }),
+      ],
+      historyAuthority: 'tenant-a:privileged:v1',
+    });
+    await expect(
+      changedSchema.forward(
+        resumeAI,
+        { question: 'Authorized resume' },
+        { history: first.history }
+      )
+    ).rejects.toThrow('current executable tool catalog');
+
+    await expect(
+      recreated.forward(
+        resumeAI,
+        { question: 'Authorized resume' },
+        {
+          history: first.history,
+          historyAuthority: 'tenant-a:privileged:v2',
+        }
+      )
+    ).rejects.toThrow('current host authority/version');
+
+    const changedProvider = new AxMockAIService({
+      name: 'other-native-provider',
+      features: { functions: true },
+      chatResponse: async () =>
+        nativeTurn([{ name: 'submit', args: { answer: 'wrong protocol' } }]),
+    });
+    await expect(
+      recreated.forward(
+        changedProvider,
+        { question: 'Authorized resume' },
+        { history: first.history }
+      )
+    ).rejects.toThrow('current replay provider/model protocol');
+  });
+
+  it('accepts canonical semantic history edits as caller-owned input', async () => {
+    let firstTurn = 0;
+    const requests: AxChatRequest<unknown>[] = [];
+    const ai = new AxMockAIService({
+      name: 'native-provider',
+      features: { functions: true },
+      chatResponse: async (request) => {
+        requests.push(request);
+        firstTurn++;
+        if (firstTurn === 1) {
+          return nativeTurn(
+            [{ name: 'lookup', args: { value: 1 } }],
+            'original assistant text'
+          );
+        }
+        if (firstTurn === 2) return nativeTurn([]);
+        return nativeTurn([
+          { name: 'submit', args: { answer: 'caller-authorized resume' } },
+        ]);
+      },
+    });
+    const program = react('question:string -> answer:string', {
+      functions: [
+        tool('lookup', async ({ value }: { value: number }) => ({ value })),
+      ],
+      maxIterations: 1,
+    });
+    const first = await program.forward(ai, { question: 'Semantic integrity' });
+    const edited = structuredClone(first.history);
+    const assistant = edited.events[0];
+    const result = edited.events[1];
+    if (assistant?.role !== 'assistant' || result?.role !== 'tool') {
+      throw new Error('expected one complete tool group');
+    }
+    assistant.content = 'caller-edited assistant text';
+    assistant.calls[0]!.arguments = '{"value":99}';
+    result.result = '{"value":999}';
+
+    await expect(
+      program.forward(
+        ai,
+        { question: 'Semantic integrity' },
+        { history: edited }
+      )
+    ).resolves.toMatchObject({
+      success: true,
+      output: { answer: 'caller-authorized resume' },
+    });
+    const replay = requests.at(-1)?.chatPrompt ?? [];
+    expect(replay).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: 'assistant',
+          content: 'caller-edited assistant text',
+        }),
+        expect.objectContaining({
+          role: 'function',
+          result: '{"value":999}',
+        }),
+      ])
+    );
+  });
+
   it('serializes arguments, results, and history canonically', async () => {
     let turn = 0;
     const ai = new AxMockAIService({
