@@ -12,17 +12,19 @@ import {
   type AxEventPublishReceipt,
   type AxEventRun,
   type AxEventStore,
+  type AxEventVerifierTransitionRecord,
   type AxEventVerifierTransitionRequest,
   type AxProgramStateEnvelope,
   type AxProgramStateStore,
   AxSystemEventClock,
+  axEventCanonicalJson,
   axEventIdentityScope,
   axEventScopedCorrelationKey,
   axEventScopedDedupeKey,
 } from '@ax-llm/ax';
 import Database from 'better-sqlite3';
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 const MULTI_WORKER_CONFORMANCE = 'axevent-store-v1';
 const TERMINAL = [
   'waiting_event',
@@ -187,48 +189,14 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
       );
     }
     return this.db.transaction(() => {
+      const journal = this.readVerifierTransition(request.operationId);
+      if (journal) {
+        this.assertVerifierTransitionRequest(journal, request);
+        return { ...journal.receipt, duplicate: true };
+      }
       const parent = this.db
         .prepare('SELECT * FROM event_deliveries WHERE id=?')
         .get(request.parent.delivery.id) as DeliveryRow | undefined;
-      if (
-        parent?.status === 'waiting_event' &&
-        parent.fencing_token === request.parent.expectedFencingToken
-      ) {
-        const duplicate = this.getDuplicateReceipt(request.child.ingress);
-        if (!duplicate) {
-          throw new Error(
-            `Verifier transition ${request.operationId} is incomplete`
-          );
-        }
-        this.assertContinuationMatch(request.continuation);
-        const persistedRun = this.db
-          .prepare('SELECT run_json FROM event_runs WHERE id=?')
-          .get(request.parent.run.id) as { run_json: string } | undefined;
-        if (
-          !persistedRun ||
-          (() => {
-            const value = JSON.parse(persistedRun.run_json) as AxEventRun;
-            return (
-              value.deliveryId !== request.parent.run.deliveryId ||
-              value.status !== request.parent.run.status ||
-              JSON.stringify(value.verification) !==
-                JSON.stringify(request.parent.run.verification)
-            );
-          })() ||
-          (request.consumeContinuationId !== undefined &&
-            this.db
-              .prepare(
-                `SELECT 1 FROM event_continuations
-                 WHERE id=? AND completed_at IS NULL`
-              )
-              .get(request.consumeContinuationId))
-        ) {
-          throw new Error(
-            `Verifier transition ${request.operationId} does not match committed state`
-          );
-        }
-        return duplicate;
-      }
       if (
         !parent ||
         parent.fencing_token !== request.parent.expectedFencingToken ||
@@ -247,19 +215,48 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
       }
 
       this.updateDelivery(request.parent.delivery);
-      const receipt = this.tryEnqueue(request.child);
+      const receipt = this.tryEnqueue(request.child, [request.childDeliveryId]);
       if (!receipt) throw new AxEventBackpressureError();
       if (receipt.duplicate) {
-        this.assertContinuationMatch(request.continuation);
-      } else {
-        this.insertContinuation(request.continuation);
+        throw new Error(
+          `Verifier transition child is already owned: ${request.childDeliveryId}`
+        );
       }
+      this.insertContinuation(request.continuation);
       if (request.consumeContinuationId) {
         this.completeContinuationNow(request.consumeContinuationId);
       }
       this.saveTransitionRun(request.parent.run);
+      const child = this.db
+        .prepare('SELECT * FROM event_deliveries WHERE id=?')
+        .get(request.childDeliveryId) as DeliveryRow | undefined;
+      if (!child)
+        throw new Error('Verifier transition child was not persisted');
+      const record: AxEventVerifierTransitionRecord = {
+        request,
+        receipt,
+        child: this.rowToDelivery(child),
+      };
+      this.db
+        .prepare(
+          `INSERT INTO event_verifier_transitions
+           (operation_id, request_json, record_json, created_at)
+           VALUES(?,?,?,?)`
+        )
+        .run(
+          request.operationId,
+          axEventCanonicalJson(request),
+          JSON.stringify(record),
+          this.clock.now()
+        );
       return receipt;
     })();
+  }
+
+  async getVerifierTransition(
+    operationId: string
+  ): Promise<Readonly<AxEventVerifierTransitionRecord> | undefined> {
+    return this.readVerifierTransition(operationId);
   }
 
   async claim(
@@ -606,7 +603,8 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
   }
 
   private tryEnqueue(
-    request: Readonly<AxEventEnqueueRequest>
+    request: Readonly<AxEventEnqueueRequest>,
+    deliveryIdsOverride?: readonly string[]
   ): AxEventPublishReceipt | undefined {
     return this.db.transaction((): AxEventPublishReceipt | undefined => {
       const dedupeKey = axEventScopedDedupeKey(request.ingress);
@@ -643,6 +641,12 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
         return;
       }
       const deliveryIds: string[] = [];
+      if (
+        deliveryIdsOverride &&
+        deliveryIdsOverride.length !== request.deliveries.length
+      ) {
+        throw new Error('Explicit event delivery IDs do not match deliveries');
+      }
       const insert = this.db.prepare(
         `INSERT INTO event_deliveries(
           id, ingress_json, identity_scope, route_id, action, target_id,
@@ -650,8 +654,8 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
           retry_safety, ordering_mode
         ) VALUES(?,?,?,?,?,?,?,'queued',0,?,?,?,?,?)`
       );
-      for (const descriptor of request.deliveries) {
-        const id = randomUUID();
+      for (const [index, descriptor] of request.deliveries.entries()) {
+        const id = deliveryIdsOverride?.[index] ?? randomUUID();
         deliveryIds.push(id);
         insert.run(
           id,
@@ -808,6 +812,72 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
     }
   }
 
+  private readVerifierTransition(
+    operationId: string
+  ): AxEventVerifierTransitionRecord | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT request_json, record_json FROM event_verifier_transitions
+         WHERE operation_id=?`
+      )
+      .get(operationId) as
+      | { request_json: string; record_json: string }
+      | undefined;
+    if (!row) return;
+    const record = JSON.parse(
+      row.record_json
+    ) as AxEventVerifierTransitionRecord;
+    if (
+      record.request.operationId !== operationId ||
+      row.request_json !== axEventCanonicalJson(record.request)
+    ) {
+      throw new Error(`Verifier transition journal is corrupt: ${operationId}`);
+    }
+    return record;
+  }
+
+  private assertVerifierTransitionRequest(
+    record: Readonly<AxEventVerifierTransitionRecord>,
+    request: Readonly<AxEventVerifierTransitionRequest>
+  ): void {
+    const descriptor = request.child.deliveries[0]!;
+    const { sequence: _sequence, ...child } = record.child;
+    if (
+      axEventCanonicalJson(record.request) !== axEventCanonicalJson(request) ||
+      axEventCanonicalJson(record.receipt) !==
+        axEventCanonicalJson({
+          eventId: request.child.ingress.event.id,
+          accepted: true,
+          duplicate: false,
+          durability: 'persistent',
+          deliveryIds: [request.childDeliveryId],
+        }) ||
+      axEventCanonicalJson(child) !==
+        axEventCanonicalJson({
+          id: request.childDeliveryId,
+          ingress: request.child.ingress,
+          identityScope: axEventIdentityScope(request.child.ingress.identity),
+          routeId: descriptor.routeId,
+          action: descriptor.action,
+          ...(descriptor.targetId ? { targetId: descriptor.targetId } : {}),
+          instanceKey: descriptor.instanceKey,
+          status: 'queued',
+          attempt: 0,
+          availableAt: descriptor.availableAt ?? request.child.acceptedAt,
+          acceptedAt: request.child.acceptedAt,
+          sizeBytes: descriptor.sizeBytes,
+          retrySafety: descriptor.retrySafety ?? 'unknown',
+          ordering: descriptor.ordering ?? 'strict',
+          fencingToken: 0,
+          invocationStarted: false,
+        })
+    ) {
+      throw new Error(
+        `Verifier transition operation is already owned: ${request.operationId}`
+      );
+    }
+  }
+
   private rowToDelivery(row: DeliveryRow): AxEventDelivery {
     return {
       id: row.id,
@@ -914,7 +984,23 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
           state_json TEXT NOT NULL,
           updated_at INTEGER NOT NULL
         );
-        PRAGMA user_version = 1;
+        CREATE TABLE event_verifier_transitions (
+          operation_id TEXT PRIMARY KEY,
+          request_json TEXT NOT NULL,
+          record_json TEXT NOT NULL,
+          created_at INTEGER NOT NULL
+        );
+        PRAGMA user_version = 2;
+      `);
+    } else if (version === 1) {
+      this.db.exec(`
+        CREATE TABLE event_verifier_transitions (
+          operation_id TEXT PRIMARY KEY,
+          request_json TEXT NOT NULL,
+          record_json TEXT NOT NULL,
+          created_at INTEGER NOT NULL
+        );
+        PRAGMA user_version = 2;
       `);
     }
   }
@@ -925,6 +1011,9 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
       const eventCutoff = now - retention.eventAndResultMs;
       this.db
         .prepare('DELETE FROM event_dedupe WHERE created_at < ?')
+        .run(eventCutoff);
+      this.db
+        .prepare('DELETE FROM event_verifier_transitions WHERE created_at < ?')
         .run(eventCutoff);
       this.db
         .prepare(

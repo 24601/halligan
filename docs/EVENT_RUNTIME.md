@@ -247,8 +247,12 @@ occurred. Stores must advertise `axevent-verifier-transition-v2`; the runtime
 startup-gates verifier routes rather than silently using process-local policy
 state. The transition is fence-checked, idempotent, capacity-aware, and atomic
 for the parent run/delivery, continuation ownership, child delivery, and old
-continuation consumption. These guarantees do not make arbitrary target or sink
-I/O exactly once.
+continuation consumption. Each operation has a deterministic child ID and an
+immutable store journal containing its canonical full request and receipt.
+Conflicting reuse is rejected; a committed operation is read back from the
+journal after lost acknowledgements instead of regressing its parent to
+`outcome_unknown`. These guarantees do not make arbitrary target or sink I/O
+exactly once.
 
 ### Deterministic Evaluation
 

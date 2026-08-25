@@ -660,14 +660,28 @@ describe('AxEventRuntime verifier continuation policy', () => {
     await runtime.close();
   });
 
-  it.each(['before-commit', 'after-commit-ack-loss'] as const)(
+  it.each([
+    'before-commit',
+    'after-commit-ack-loss',
+    'double-commit-ack-loss',
+  ] as const)(
     'converges one verifier chain when transition fails %s',
     async (fault) => {
       const store = new AxInMemoryEventStore();
       const transition = store.transitionVerifier.bind(store);
+      const readTransition = store.getVerifierTransition.bind(store);
       let injected = false;
+      if (fault === 'double-commit-ack-loss') {
+        vi.spyOn(store, 'getVerifierTransition')
+          .mockResolvedValueOnce(undefined)
+          .mockImplementation(readTransition);
+      }
       vi.spyOn(store, 'transitionVerifier').mockImplementation(
         async (request) => {
+          if (fault === 'double-commit-ack-loss') {
+            await transition(request);
+            throw new Error(fault);
+          }
           if (!injected) {
             injected = true;
             if (fault === 'after-commit-ack-loss') await transition(request);
@@ -692,7 +706,19 @@ describe('AxEventRuntime verifier continuation policy', () => {
       await runtime.waitForIdle();
       expect(verify).toHaveBeenCalledTimes(2);
       expect(new Set(chainIds).size).toBe(2);
-      expect(store.transitionVerifier).toHaveBeenCalledTimes(2);
+      expect(store.transitionVerifier).toHaveBeenCalledTimes(
+        fault === 'after-commit-ack-loss' ? 1 : 2
+      );
+      const operation = (store.transitionVerifier as any).mock.calls[0]![0];
+      await expect(
+        transition({
+          ...operation,
+          continuation: {
+            ...operation.continuation,
+            metadata: { conflicting: true },
+          },
+        })
+      ).rejects.toThrow('already owned');
       await runtime.close();
     }
   );

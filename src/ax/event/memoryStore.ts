@@ -10,12 +10,14 @@ import {
   type AxEventPublishReceipt,
   type AxEventRun,
   type AxEventStore,
+  type AxEventVerifierTransitionRecord,
   type AxEventVerifierTransitionRequest,
   type AxProgramStateEnvelope,
   type AxProgramStateStore,
   AxSystemEventClock,
 } from './types.js';
 import {
+  axEventCanonicalJson,
   axEventId,
   axEventIdentityScope,
   axEventScopedCorrelationKey,
@@ -56,6 +58,10 @@ export class AxInMemoryEventStore implements AxEventStore {
   private readonly runs = new Map<string, AxEventRun>();
   private readonly continuations = new Map<string, AxEventContinuation>();
   private readonly continuationKeys = new Map<string, string>();
+  private readonly verifierTransitions = new Map<
+    string,
+    AxEventVerifierTransitionRecord
+  >();
   private readonly deadLetters = new Map<string, AxEventDeadLetter>();
   private readonly workWaiters = new Set<Waiter>();
   private readonly capacityWaiters = new Set<Waiter>();
@@ -193,38 +199,13 @@ export class AxInMemoryEventStore implements AxEventStore {
   async transitionVerifier(
     request: Readonly<AxEventVerifierTransitionRequest>
   ): Promise<AxEventPublishReceipt> {
+    const committed = this.verifierTransitions.get(request.operationId);
+    if (committed) {
+      this.assertVerifierTransition(committed, request);
+      return { ...structuredClone(committed.receipt), duplicate: true };
+    }
     const dedupeKey = axEventScopedDedupeKey(request.child.ingress);
     const parent = this.deliveries.get(request.parent.delivery.id);
-    if (
-      parent?.status === 'waiting_event' &&
-      parent.fencingToken === request.parent.expectedFencingToken
-    ) {
-      const duplicate = this.dedupe.get(dedupeKey);
-      const existing = this.continuations.get(request.continuation.id);
-      const persistedRun = this.runs.get(request.parent.run.id);
-      if (!duplicate || !existing || !persistedRun) {
-        throw new Error(
-          `Verifier transition ${request.operationId} is incomplete`
-        );
-      }
-      this.assertContinuationMatch(existing, request.continuation);
-      if (
-        JSON.stringify(persistedRun) !== JSON.stringify(request.parent.run) ||
-        (request.consumeContinuationId !== undefined &&
-          this.continuations.has(request.consumeContinuationId))
-      ) {
-        throw new Error(
-          `Verifier transition ${request.operationId} does not match committed state`
-        );
-      }
-      return {
-        eventId: duplicate.eventId,
-        accepted: true,
-        duplicate: true,
-        durability: 'volatile',
-        deliveryIds: [...duplicate.deliveryIds],
-      };
-    }
     if (
       !parent ||
       parent.fencingToken !== request.parent.expectedFencingToken ||
@@ -242,6 +223,14 @@ export class AxInMemoryEventStore implements AxEventStore {
       throw new Error('Verifier transition requires one waiting child');
     }
     const descriptor = request.child.deliveries[0]!;
+    if (
+      this.deliveries.has(request.childDeliveryId) ||
+      this.dedupe.has(dedupeKey)
+    ) {
+      throw new Error(
+        `Verifier transition child is already owned: ${request.childDeliveryId}`
+      );
+    }
     const eventBytes = descriptor.sizeBytes;
     if (eventBytes > this.maxEventBytes) {
       throw new AxEventBackpressureError(
@@ -292,9 +281,8 @@ export class AxInMemoryEventStore implements AxEventStore {
         request.continuation.id
       );
     }
-    const deliveryId = `verifier-delivery:${request.operationId}`;
     const delivery: AxEventDelivery = {
-      id: deliveryId,
+      id: request.childDeliveryId,
       sequence: ++this.sequence,
       ingress: structuredClone(request.child.ingress),
       identityScope: axEventIdentityScope(request.child.ingress.identity),
@@ -310,24 +298,37 @@ export class AxInMemoryEventStore implements AxEventStore {
       retrySafety: descriptor.retrySafety ?? 'unknown',
       ordering: descriptor.ordering ?? 'strict',
     };
-    this.deliveries.set(deliveryId, delivery);
-    this.deliveryOrdering.set(deliveryId, delivery.ordering);
-    this.deliveryOrder.push(deliveryId);
+    this.deliveries.set(delivery.id, delivery);
+    this.deliveryOrdering.set(delivery.id, delivery.ordering);
+    this.deliveryOrder.push(delivery.id);
     this.pendingDeliveries++;
     this.pendingBytes += delivery.sizeBytes;
     this.dedupe.set(dedupeKey, {
       eventId: request.child.ingress.event.id,
-      deliveryIds: [deliveryId],
+      deliveryIds: [delivery.id],
     });
     this.notify(this.workWaiters);
     this.notify(this.capacityWaiters);
-    return {
+    const receipt: AxEventPublishReceipt = {
       eventId: request.child.ingress.event.id,
       accepted: true,
       duplicate: false,
       durability: 'volatile',
-      deliveryIds: [deliveryId],
+      deliveryIds: [delivery.id],
     };
+    this.verifierTransitions.set(request.operationId, {
+      request: structuredClone(request),
+      receipt: structuredClone(receipt),
+      child: structuredClone(delivery),
+    });
+    return receipt;
+  }
+
+  async getVerifierTransition(
+    operationId: string
+  ): Promise<Readonly<AxEventVerifierTransitionRecord> | undefined> {
+    const value = this.verifierTransitions.get(operationId);
+    return value ? structuredClone(value) : undefined;
   }
 
   async claim(
@@ -654,6 +655,46 @@ export class AxInMemoryEventStore implements AxEventStore {
     if (JSON.stringify(existing) !== JSON.stringify(requested)) {
       throw new Error(
         `Event continuation id is already owned: ${requested.id}`
+      );
+    }
+  }
+
+  private assertVerifierTransition(
+    record: Readonly<AxEventVerifierTransitionRecord>,
+    request: Readonly<AxEventVerifierTransitionRequest>
+  ): void {
+    const descriptor = request.child.deliveries[0]!;
+    const { sequence: _sequence, ...child } = record.child;
+    if (
+      axEventCanonicalJson(record.request) !== axEventCanonicalJson(request) ||
+      axEventCanonicalJson(record.receipt) !==
+        axEventCanonicalJson({
+          eventId: request.child.ingress.event.id,
+          accepted: true,
+          duplicate: false,
+          durability: 'volatile',
+          deliveryIds: [request.childDeliveryId],
+        }) ||
+      axEventCanonicalJson(child) !==
+        axEventCanonicalJson({
+          id: request.childDeliveryId,
+          ingress: request.child.ingress,
+          identityScope: axEventIdentityScope(request.child.ingress.identity),
+          routeId: descriptor.routeId,
+          action: descriptor.action,
+          ...(descriptor.targetId ? { targetId: descriptor.targetId } : {}),
+          instanceKey: descriptor.instanceKey,
+          status: 'queued',
+          attempt: 0,
+          availableAt: descriptor.availableAt ?? request.child.acceptedAt,
+          acceptedAt: request.child.acceptedAt,
+          sizeBytes: descriptor.sizeBytes,
+          retrySafety: descriptor.retrySafety ?? 'unknown',
+          ordering: descriptor.ordering ?? 'strict',
+        })
+    ) {
+      throw new Error(
+        `Verifier transition operation is already owned: ${request.operationId}`
       );
     }
   }

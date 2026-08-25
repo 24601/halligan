@@ -51,7 +51,9 @@ export async function runAxEventStoreConformance(
     assert(store.capabilities.outputPersistence, 'output persistence');
     assert(
       store.capabilities.verifierTransitions ===
-        'axevent-verifier-transition-v2' && Boolean(store.transitionVerifier),
+        'axevent-verifier-transition-v2' &&
+        Boolean(store.transitionVerifier) &&
+        Boolean(store.getVerifierTransition),
       'verifier transition v2'
     );
 
@@ -193,6 +195,7 @@ export async function runAxEventStoreConformance(
     );
     const transition: AxEventVerifierTransitionRequest = {
       operationId: `${key}-transition`,
+      childDeliveryId: `${key}-transition-child`,
       parent: {
         delivery: {
           ...takeover!,
@@ -254,6 +257,28 @@ export async function runAxEventStoreConformance(
           JSON.stringify(resumed.deliveryIds),
       'verifier transition acknowledgement replay is idempotent'
     );
+    assert(
+      (await store.getVerifierTransition!(transition.operationId))?.child.id ===
+        transition.childDeliveryId,
+      'verifier transition journal binds deterministic child identity'
+    );
+    await expectReject(
+      peer.store.transitionVerifier!({
+        ...transition,
+        child: {
+          ...transition.child,
+          ingress: {
+            ...transition.child.ingress,
+            event: {
+              ...transition.child.ingress.event,
+              data: { conflicting: true },
+            },
+          },
+        },
+      }),
+      'conflicting verifier operation reuse'
+    );
+    assertions++;
 
     const run: AxEventRun = {
       id: `${key}-run`,
@@ -339,6 +364,7 @@ export async function runAxEventStoreConformance(
     };
     const replacement = await bounded.store.transitionVerifier!({
       operationId: `${key}-capacity-transition`,
+      childDeliveryId: `${key}-capacity-transition-child`,
       parent: {
         delivery: {
           ...capacityParent!,

@@ -42,6 +42,7 @@ import {
   AxSystemEventClock,
 } from './types.js';
 import {
+  axEventCanonicalJson,
   axEventErrorMessage,
   axEventId,
   axEventIdentityScope,
@@ -262,7 +263,8 @@ export class AxEventRuntime {
       if (
         this.store.capabilities.verifierTransitions !==
           'axevent-verifier-transition-v2' ||
-        !this.store.transitionVerifier
+        !this.store.transitionVerifier ||
+        !this.store.getVerifierTransition
       ) {
         throw new Error(
           'Verifier targets require an AxEventStore with axevent-verifier-transition-v2 fenced transitions'
@@ -880,6 +882,7 @@ export class AxEventRuntime {
     };
     const request = {
       operationId: `${outcome.verification.chainId}:${outcome.verification.run}`,
+      childDeliveryId: `verifier-delivery:${outcome.verification.chainId}:${outcome.verification.run}`,
       parent: {
         delivery,
         run,
@@ -908,15 +911,29 @@ export class AxEventRuntime {
     try {
       await this.store.transitionVerifier!(request);
     } catch (error) {
-      // A lost commit acknowledgement is indistinguishable from a failed
-      // commit. V2 transitions are idempotent and validate every artifact, so
-      // replay the same operation rather than accepting a partial read-back.
+      if (await this.verifierTransitionCommitted(request)) return;
       try {
         await this.store.transitionVerifier!(request);
       } catch {
+        if (await this.verifierTransitionCommitted(request)) return;
         throw error;
       }
     }
+  }
+
+  private async verifierTransitionCommitted(
+    request: Readonly<import('./types.js').AxEventVerifierTransitionRequest>
+  ): Promise<boolean> {
+    const record = await this.store.getVerifierTransition!(request.operationId);
+    if (!record) return false;
+    if (
+      axEventCanonicalJson(record.request) !== axEventCanonicalJson(request)
+    ) {
+      throw new Error(
+        `Verifier transition operation is already owned: ${request.operationId}`
+      );
+    }
+    return true;
   }
 
   private async persistVerifierInput(run: Readonly<AxEventRun>): Promise<void> {

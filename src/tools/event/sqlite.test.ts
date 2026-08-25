@@ -13,7 +13,7 @@ import {
   runAxEventStoreConformance,
   s,
 } from '@ax-llm/ax';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   AX_SQLITE_EVENT_STANDARD_RETENTION,
   AxSQLiteEventStore,
@@ -133,7 +133,7 @@ describe('AxSQLiteEventStore', () => {
       maxInlinePayloadBytes: 8_192,
     });
     const huge = '🔥'.repeat(20_000);
-    const runIds: string[] = [];
+    const runIds = new Map<string, string>();
     const signature = s('trigger?:string -> resultText:string');
     const program = {
       getId: () => 'bounded-verifier-output',
@@ -160,7 +160,10 @@ describe('AxSQLiteEventStore', () => {
               maxRuns: 1,
               fingerprint: () => huge,
               verify: (_output, context) => {
-                runIds.push(context.run.id);
+                runIds.set(
+                  context.eventContext.ingress.event.id,
+                  context.run.id
+                );
                 if (context.eventContext.ingress.event.id === 'huge-error') {
                   throw new Error(huge);
                 }
@@ -186,9 +189,10 @@ describe('AxSQLiteEventStore', () => {
       });
     }
     await runtime.waitForIdle();
-    const [failure, error] = await Promise.all(
-      runIds.map((id) => runtime.getRun(id))
-    );
+    const [failure, error] = await Promise.all([
+      runtime.getRun(runIds.get('huge-failure')!),
+      runtime.getRun(runIds.get('huge-error')!),
+    ]);
     expect(failure?.status).toBe('verification_failed');
     expect(
       Buffer.byteLength(failure!.verification!.failure!.code)
@@ -202,6 +206,86 @@ describe('AxSQLiteEventStore', () => {
     expect(Buffer.byteLength(error!.verification!.error!)).toBeLessThanOrEqual(
       1_024
     );
+    await runtime.close({ drain: false });
+  });
+
+  it('journals immutable transitions across repeated commit-ack loss', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const store = new AxSQLiteEventStore({
+      filename: join(directory, 'transition-journal.sqlite'),
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    const transition = store.transitionVerifier.bind(store);
+    const readTransition = store.getVerifierTransition.bind(store);
+    vi.spyOn(store, 'getVerifierTransition')
+      .mockResolvedValueOnce(undefined)
+      .mockImplementation(readTransition);
+    vi.spyOn(store, 'transitionVerifier').mockImplementation(
+      async (request) => {
+        await transition(request);
+        throw new Error('commit acknowledgement lost');
+      }
+    );
+    let attempts = 0;
+    const verify = vi.fn(() =>
+      attempts++ === 0
+        ? {
+            status: 'fail' as const,
+            failure: { code: 'retry_once' },
+          }
+        : { status: 'pass' as const }
+    );
+    const signature = s('trigger?:string -> resultText:string');
+    const program = {
+      getId: () => 'journal-verifier-output',
+      getSignature: () => signature,
+      forward: async () => ({ resultText: 'small' }),
+      streamingForward: async function* () {},
+    } as unknown as AxProgrammable<any, any>;
+    const runtime = new AxEventRuntime({
+      store,
+      workerConcurrency: 1,
+      routes: [
+        eventRoute({
+          id: 'journal-verifier-route',
+          match: { types: ['journal.verifier'] },
+          action: 'wake',
+          target: eventTarget({
+            id: 'journal-verifier-target',
+            ai: {} as never,
+            program,
+            mapInput: () => ({}),
+            retrySafety: 'idempotent',
+            verifier: { id: 'journal-verifier', verify },
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    await runtime.publish({
+      event: {
+        specversion: '1.0',
+        id: 'journal-event',
+        source: 'test://sqlite',
+        type: 'journal.verifier',
+      },
+    });
+    await runtime.waitForIdle();
+    expect(verify).toHaveBeenCalledTimes(2);
+    expect(store.transitionVerifier).toHaveBeenCalledTimes(2);
+    const request = (store.transitionVerifier as any).mock.calls[0]![0];
+    const record = await readTransition(request.operationId);
+    expect(record?.child.id).toBe(request.childDeliveryId);
+    await expect(
+      transition({
+        ...request,
+        child: {
+          ...request.child,
+          acceptedAt: request.child.acceptedAt + 1,
+        },
+      })
+    ).rejects.toThrow('already owned');
     await runtime.close({ drain: false });
   });
 

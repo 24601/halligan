@@ -584,6 +584,7 @@ export interface AxEventContinuationEnqueueRequest {
 
 export interface AxEventVerifierTransitionRequest {
   operationId: string;
+  childDeliveryId: string;
   parent: Readonly<{
     delivery: AxEventDelivery;
     run: AxEventRun;
@@ -592,6 +593,12 @@ export interface AxEventVerifierTransitionRequest {
   continuation: Readonly<AxEventContinuation>;
   child: Readonly<AxEventEnqueueRequest>;
   consumeContinuationId?: string;
+}
+
+export interface AxEventVerifierTransitionRecord {
+  request: Readonly<AxEventVerifierTransitionRequest>;
+  receipt: Readonly<AxEventPublishReceipt>;
+  child: Readonly<AxEventDelivery>;
 }
 
 export interface AxEventStore {
@@ -607,6 +614,9 @@ export interface AxEventStore {
   transitionVerifier?(
     request: Readonly<AxEventVerifierTransitionRequest>
   ): Promise<AxEventPublishReceipt>;
+  getVerifierTransition?(
+    operationId: string
+  ): Promise<Readonly<AxEventVerifierTransitionRecord> | undefined>;
   claim(
     workerId: string,
     now: number,

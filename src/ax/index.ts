@@ -973,6 +973,7 @@ import {
   type AxEventVerifierContext,
   type AxEventVerifierPolicy,
   type AxEventVerifierResult,
+  type AxEventVerifierTransitionRecord,
   type AxEventVerifierTransitionRequest,
   AxManualEventClock,
   type AxProgramStateEnvelope,
@@ -984,6 +985,7 @@ import {
   type AxUCPWebhookEventSourceOptions,
 } from './event/ucpSource.js';
 import {
+  axEventCanonicalJson,
   axEventErrorMessage,
   axEventId,
   axEventIdentityScope,
@@ -1504,6 +1506,7 @@ export { axDefaultOptimizerLogger };
 export { axDefaultOptimizerMetricsConfig };
 export { axDeserializeOptimizedProgram };
 export { axEmitUsageEvent };
+export { axEventCanonicalJson };
 export { axEventErrorMessage };
 export { axEventId };
 export { axEventIdentityScope };
@@ -2046,6 +2049,7 @@ export type { AxEventVerificationUsage };
 export type { AxEventVerifierContext };
 export type { AxEventVerifierPolicy };
 export type { AxEventVerifierResult };
+export type { AxEventVerifierTransitionRecord };
 export type { AxEventVerifierTransitionRequest };
 export type { AxEvidenceDescriptor };
 export type { AxExample };

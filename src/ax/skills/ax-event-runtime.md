@@ -72,7 +72,9 @@ await source.publish({ event, identity, trust: 'authenticated' });
 - Verifier targets are non-streaming and require a store advertising the fenced,
   atomic `axevent-verifier-transition-v2` handoff. The transition replaces the
   parent with its child for capacity accounting and carries chain state through
-  the owned continuation; it does not make arbitrary external I/O exactly once.
+  the owned continuation. Its immutable operation journal binds the canonical
+  full request to a deterministic child and resolves lost commit
+  acknowledgements; it does not make arbitrary external I/O exactly once.
 - Set explicit verifier run/token/wall-time/cost limits. Exhaustion, verifier
   error/timeout, and unchanged fingerprints fail closed; abort stays cancelled.
 - Host `usage`, `fingerprint`, and `verify` callbacks share timeout and abort
