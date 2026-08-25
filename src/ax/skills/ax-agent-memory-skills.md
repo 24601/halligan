@@ -310,6 +310,13 @@ object depth 8, object/array width 64, and `topK` 20. Corpus and structural
 limits are checked before host callbacks or ranking. The values are exported as
 `axPreferenceEvidenceLimits`.
 
+All verification and policy callbacks are synchronous and invoked inline.
+Selector limits bound Ax-owned validation and ranking work, but do not bound
+trusted-host callback latency. Hosts must keep callbacks bounded and
+non-blocking, avoid reentrancy and lock cycles, and prefetch/cache authority
+state or complete asynchronous verification before selection when external I/O
+is required.
+
 This mechanism is useful for small, auditable preference catalogs where the
 host already owns identity, authority, privacy, retention, and safety policy.
 Do not use it as a universal memory store, an authorization decision, or a
@@ -330,28 +337,46 @@ Run:
 npm run evaluate:preference-evidence
 ```
 
-The zero-provider-call fixture freezes policy on three development cases, then
-uses 16 separately declared cases from a disjoint held-out principal and later
-time slice to compare static/no personalization, naive latest-value, and
-evidence-aware selection. Host safety decisions are event-bound and do not
-inspect expected output text; held-out harmful examples use unseen paraphrases.
+The final corpus, expected outcomes, and event-bound host policy live in the
+separately authored post-baseline artifact
+`scripts/fixtures/preference-evidence-later-v1.json`. The artifact was committed
+at `0b304636348533e62f66ba8067f1fb6d98452081` after mechanism baseline
+`8e1152f8974231ea7e81d8078acbd7e84386c438`; its frozen SHA-256 is
+`613da6a2b29256575b872a367021df59b3b2e905192ea6026c4457d354e17f46`.
+The evaluator checks that digest before parsing and records the provenance in
+its output. Artifact-owned expectations include exact exclusions and callback
+counts/purposes, so an empty applied set rejected for the wrong reason fails.
 Cases cover stable benefit, contradiction, expiry, cross-principal leakage,
-forged consent and destructive authority, retraction, erasure and stale replay,
-explicit epoch renewal, uncertain inference, harmful/sycophantic preferences,
-equal-time ambiguity, no-benefit, and noisy small-data. Separate stress probes
-exercise count, query, total-byte, and cyclic-shape rejection before callbacks.
-Output reports every failure plus exact retrieval/application, false and missed
-personalization, retention/forgetting, lifecycle/erasure fidelity, serialized
-bytes, measured latency, and negative controls.
+forged consent/provenance and destructive authority, retraction, erasure and
+stale replay, explicit epoch renewal, uncertain inference, unseen
+harmful/sycophantic paraphrases, equal-time ambiguity, no-benefit, and noisy
+small-data. Separate stress probes exercise count, query, total-byte, and
+cyclic-shape rejection before callbacks.
 
-The default bound is 16 cases × 1,000 iterations = 16,000 local selections,
-four one-shot stress probes, zero
-provider calls/tokens, and $0 provider cost. Latency is descriptive and
-machine-dependent. The fixture demonstrates selector mechanics only; it makes
-no model-quality, security-proof, semantic-retrieval, authority-authenticity,
-privacy-system, or production-latency claim. This small synthetic set is useful
-for deterministic regression detection, not statistical generalization. Split
-independence and contamination control remain host responsibilities.
+On the 17-case artifact, static/no personalization scores 14/17 exact with
+three missed-personalization cases; naive latest-value and evidence-aware
+selection both score 16/17 by applied IDs with two correct applications, zero
+false personalization cases, and one missed-personalization case. Exact
+applied-ID, exclusion-reason, and callback evidence passes 13/17 cases. Three
+additional cases match applied IDs but fail their artifact-owned exclusion
+reason: unresolved observation contradiction, uncertain inference threshold,
+and equal-time observation supersession. The noisy weak-contradiction case is
+the fourth preserved failure: the corpus expects the stronger confirmed
+preference, while the mechanism applies nothing. Retention/expiry,
+retraction/erasure, stale replay, renewal, authority, and stress checks pass
+their exact expectations. The artifact is 27,045 UTF-8 bytes. The evaluator
+reports measured latency, every exclusion/callback check, and failures without
+suppressing them.
+
+The default bound is 17 cases × 1,000 iterations = 17,000 local selections,
+four one-shot stress probes, zero provider calls/tokens, and $0 provider cost.
+Latency is descriptive and machine-dependent. This is deterministic
+adversarial mechanism regression coverage, not independent held-out
+personalization accuracy. It makes no model-quality, security-proof,
+semantic-retrieval, authority-authenticity, privacy-system, or
+production-latency claim. The small synthetic set is useful for regression
+detection, not statistical generalization; contamination control and genuine
+independent evaluation remain host responsibilities.
 
 ## Skills Search
 

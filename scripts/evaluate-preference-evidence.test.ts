@@ -1,41 +1,44 @@
 import { describe, expect, it } from 'vitest';
-import { runPreferenceEvidenceEvaluation } from './evaluate-preference-evidence.js';
+import {
+  evaluatePreferenceEvidenceExpectation,
+  runPreferenceEvidenceEvaluation,
+} from './evaluate-preference-evidence.js';
 
 describe('preference evidence evaluation', () => {
-  it('passes the frozen later principal/temporal mechanism fixture', () => {
+  it('runs the digest-frozen post-baseline artifact and preserves failures', () => {
     const result = runPreferenceEvidenceEvaluation(10);
 
-    expect(result.split).toMatchObject({
-      developmentCases: 3,
-      heldOutCases: 16,
-      frozenLaterSet: true,
-      principalDisjoint: true,
-      policyUsesExpectedText: false,
+    expect(result.artifact).toMatchObject({
+      id: 'preference-evidence-later-v1',
+      commit: '0b304636348533e62f66ba8067f1fb6d98452081',
+      sha256:
+        '613da6a2b29256575b872a367021df59b3b2e905192ea6026c4457d354e17f46',
+      digestVerifiedBeforeParse: true,
+      mechanismBaselineCommit: '8e1152f8974231ea7e81d8078acbd7e84386c438',
+      policyAuthority: 'synthetic-event-policy-v1',
+      cases: 17,
     });
-    expect(result.developmentEvidenceAware).toEqual({
-      exactRetrieval: 3,
-      correctApplications: 1,
-      falsePersonalizationCases: 0,
-      missedPersonalizationCases: 0,
-    });
-    expect(result.staticNoPersonalization).toMatchObject({
+    expect(result.staticNoPersonalization).toEqual({
       exactRetrieval: 14,
+      correctApplications: 0,
       falsePersonalizationCases: 0,
-      missedPersonalizationCases: 2,
+      missedPersonalizationCases: 3,
     });
-    expect(result.naiveLatestValue.falsePersonalizationCases).toBeGreaterThan(
-      0
-    );
+    expect(result.naiveLatestValue).toEqual({
+      exactRetrieval: 16,
+      correctApplications: 2,
+      falsePersonalizationCases: 0,
+      missedPersonalizationCases: 1,
+    });
     expect(result.evidenceAware).toEqual({
       exactRetrieval: 16,
       correctApplications: 2,
       falsePersonalizationCases: 0,
-      missedPersonalizationCases: 0,
+      missedPersonalizationCases: 1,
     });
     expect(result.retentionAndForgetting).toEqual({
       stablePreferenceRetained: true,
       expiredEvidenceForgotten: true,
-      ambiguousAndNoisyEvidenceWithheld: true,
     });
     expect(result.lifecycle).toEqual({
       retractionWithheld: true,
@@ -57,8 +60,55 @@ describe('preference evidence evaluation', () => {
       shapeBound: true,
       callbacksBeforeRejection: 0,
     });
-    expect(result.failures).toEqual([]);
+    expect(result.negativeResults).toEqual({
+      noBenefitControlTiesStatic: true,
+      uncertainInferenceNotApplied: true,
+      noisySmallDataFailurePreserved: true,
+    });
+    expect(result.caseResults.filter(({ passed }) => !passed)).toHaveLength(4);
+    expect(result.reasonCoverage).toEqual({
+      exactCases: 13,
+      wrongReasonCases: 3,
+      uncheckedAppliedOnlyCases: 1,
+    });
     expect(result.resources.providerCalls).toBe(0);
     expect(result.resources.costUsd).toBe(0);
+    expect(result.claimScope).toContain(
+      'no independent personalization-accuracy'
+    );
+  });
+
+  it('fails a wrong-reason rejection even when applied IDs match', () => {
+    expect(
+      evaluatePreferenceEvidenceExpectation(
+        {
+          applied: [],
+          exclusions: [{ recordId: 'record-1', reason: 'stale-stream' }],
+          callbacks: {
+            stream: 1,
+            receipt: 0,
+            destructive: 0,
+            policy: 0,
+            receiptPurposes: [],
+          },
+        },
+        {
+          applied: [],
+          exclusions: [{ recordId: 'record-1', reason: 'expired' }],
+          callbacks: {
+            stream: 1,
+            receipt: 1,
+            destructive: 0,
+            policy: 0,
+            receiptPurposes: ['source'],
+          },
+        }
+      )
+    ).toEqual({
+      applied: true,
+      exclusions: false,
+      callbacks: false,
+      passed: false,
+    });
   });
 });
