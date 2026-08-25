@@ -81,6 +81,7 @@ export type AxFrameSamplerReason =
   | 'stale_revision'
   | 'stale_authority'
   | 'stale_time'
+  | 'clock_rollback'
   | 'future_time'
   | 'expired'
   | 'revoked'

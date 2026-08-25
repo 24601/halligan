@@ -3,6 +3,7 @@ import type {
   AxFrameSamplerDecision,
   AxFrameSamplerOptions,
   AxFrameSamplerReason,
+  AxVisualAuthority,
   AxVisualChangeDigest,
   AxVisualObservation,
   AxVisualPerceptualInput,
@@ -75,7 +76,8 @@ export const axVisualPerceptualDigest = (
   if (
     input.width !== 9 ||
     input.height !== 8 ||
-    !(input.luma instanceof Uint8Array) ||
+    !ArrayBuffer.isView(input.luma) ||
+    Object.prototype.toString.call(input.luma) !== '[object Uint8Array]' ||
     input.luma.length !== 72
   ) {
     throw new Error('dhash-64 requires a 9 x 8 Uint8Array luminance grid');
@@ -97,11 +99,24 @@ export const axVisualPerceptualDigest = (
       }
     }
   }
-  return { algorithm: 'dhash-64', value };
+  return Object.freeze({ algorithm: 'dhash-64', value });
 };
 
-const isDigest = (digest: AxVisualChangeDigest): boolean =>
-  digest.algorithm === 'dhash-64' && /^[0-9a-f]{16}$/.test(digest.value);
+const normalizeDigest = (digest: unknown): AxVisualChangeDigest | undefined => {
+  if (!digest || typeof digest !== 'object') {
+    return undefined;
+  }
+  const algorithm = 'algorithm' in digest ? digest.algorithm : undefined;
+  const value = 'value' in digest ? digest.value : undefined;
+  if (
+    algorithm !== 'dhash-64' ||
+    typeof value !== 'string' ||
+    !/^[0-9a-f]{16}$/.test(value)
+  ) {
+    return undefined;
+  }
+  return Object.freeze({ algorithm, value });
+};
 
 const digestDistance = (
   left: AxVisualChangeDigest,
@@ -124,14 +139,12 @@ const observationError = (
   maxBytes: number
 ): AxFrameSamplerReason | undefined => {
   if (!observation || typeof observation !== 'object') return 'malformed';
-  const { freshness, dimensions, authority } = observation;
+  const { freshness, dimensions } = observation;
   if (
     !freshness ||
     typeof freshness !== 'object' ||
     !dimensions ||
     typeof dimensions !== 'object' ||
-    !authority ||
-    typeof authority !== 'object' ||
     typeof observation.sourceId !== 'string' ||
     !observation.sourceId ||
     typeof observation.streamId !== 'string' ||
@@ -139,11 +152,6 @@ const observationError = (
     typeof observation.frameId !== 'string' ||
     !observation.frameId ||
     !isNonNegativeInteger(observation.revision) ||
-    !isNonNegativeInteger(authority.revision) ||
-    typeof authority.authorityRef !== 'string' ||
-    !authority.authorityRef ||
-    typeof authority.consentRef !== 'string' ||
-    !authority.consentRef ||
     !isNonNegativeInteger(observation.byteLength) ||
     !isNonNegativeInteger(observation.tokenEstimate) ||
     !isPositiveFinite(dimensions.width) ||
@@ -164,6 +172,29 @@ const observationError = (
   return undefined;
 };
 
+const normalizeAuthority = (
+  observation: AxVisualObservation | null | undefined
+): AxVisualAuthority | undefined => {
+  if (!observation || typeof observation !== 'object') return undefined;
+  const authority = observation.authority;
+  if (!authority || typeof authority !== 'object') return undefined;
+  const revision = authority.revision;
+  const authorityRef = authority.authorityRef;
+  const consentRef = authority.consentRef;
+  const revoked = authority.revoked;
+  if (
+    !isNonNegativeInteger(revision) ||
+    typeof authorityRef !== 'string' ||
+    !authorityRef ||
+    typeof consentRef !== 'string' ||
+    !consentRef ||
+    (revoked !== undefined && typeof revoked !== 'boolean')
+  ) {
+    return undefined;
+  }
+  return Object.freeze({ authorityRef, consentRef, revision, revoked });
+};
+
 /**
  * Stateful, single-stream visual sampling policy. The host owns capture, payloads,
  * clocks, consent decisions, and model calls; the sampler retains metadata only.
@@ -174,6 +205,7 @@ export class AxFrameSampler {
   private latestRevision = -1;
   private authorityRevision = -1;
   private authorityRevoked = false;
+  private latestClockMs?: number;
   private lastSampleAtMs?: number;
   private lastDigest?: AxVisualChangeDigest;
   private budgetEntries: BudgetEntry[] = [];
@@ -191,14 +223,21 @@ export class AxFrameSampler {
     observation: AxVisualObservation,
     nowMs?: number
   ): AxFrameSamplerDecision {
+    try {
+      return this.observeInternal(observation, nowMs);
+    } catch {
+      return this.decision('suppress', 'malformed');
+    }
+  }
+
+  private observeInternal(
+    observation: AxVisualObservation,
+    nowMs?: number
+  ): AxFrameSamplerDecision {
     const resolvedNowMs =
       nowMs ?? observation?.freshness?.observedAtMs ?? Number.NaN;
-    const malformed = observationError(
-      observation,
-      resolvedNowMs,
-      this.options.maxObservationBytes
-    );
-    if (malformed) return this.decision('suppress', malformed);
+    const authority = normalizeAuthority(observation);
+    if (!authority) return this.decision('suppress', 'malformed');
 
     if (
       this.stream &&
@@ -207,14 +246,25 @@ export class AxFrameSampler {
     ) {
       return this.decision('suppress', 'stream_mismatch');
     }
-    this.stream ??= {
-      sourceId: observation.sourceId,
-      streamId: observation.streamId,
-    };
-
-    if (observation.authority.revision < this.authorityRevision) {
+    if (authority.revision < this.authorityRevision) {
       return this.decision('suppress', 'stale_authority');
     }
+    if (authority.revision > this.authorityRevision) {
+      this.authorityRevision = authority.revision;
+      this.authorityRevoked = authority.revoked === true;
+    } else if (authority.revoked) {
+      this.authorityRevoked = true;
+    }
+    if (this.authorityRevoked || authority.revoked) {
+      return this.decision('suppress', 'revoked');
+    }
+
+    const malformed = observationError(
+      observation,
+      resolvedNowMs,
+      this.options.maxObservationBytes
+    );
+    if (malformed) return this.decision('suppress', malformed);
 
     const age = resolvedNowMs - observation.freshness.capturedAtMs;
     if (
@@ -233,27 +283,31 @@ export class AxFrameSampler {
 
     let digest: AxVisualChangeDigest;
     try {
-      digest =
-        observation.digest ??
-        axVisualPerceptualDigest(observation.perceptualInput!);
+      const suppliedDigest = observation.digest;
+      if (suppliedDigest !== undefined) {
+        const normalized = normalizeDigest(suppliedDigest);
+        if (!normalized) return this.decision('suppress', 'malformed');
+        digest = normalized;
+      } else {
+        digest = axVisualPerceptualDigest(observation.perceptualInput!);
+      }
     } catch {
       return this.decision('suppress', 'malformed');
     }
-    if (!isDigest(digest)) return this.decision('suppress', 'malformed');
-
-    if (observation.authority.revision > this.authorityRevision) {
-      this.authorityRevision = observation.authority.revision;
-      this.authorityRevoked = observation.authority.revoked === true;
-    } else if (observation.authority.revoked) {
-      this.authorityRevoked = true;
-    }
-    if (this.authorityRevoked || observation.authority.revoked) {
-      return this.decision('suppress', 'revoked');
-    }
+    if (!digest) return this.decision('suppress', 'malformed');
     if (observation.revision <= this.latestRevision) {
       return this.decision('suppress', 'stale_revision');
     }
-    this.latestRevision = observation.revision;
+    if (
+      this.latestClockMs !== undefined &&
+      resolvedNowMs < this.latestClockMs
+    ) {
+      this.latestClockMs = resolvedNowMs;
+      this.lastSampleAtMs = undefined;
+      this.budgetEntries = [];
+      return this.decision('suppress', 'clock_rollback');
+    }
+    this.latestClockMs = resolvedNowMs;
     this.pruneBudget(resolvedNowMs);
 
     const changeScore = this.lastDigest
@@ -282,6 +336,7 @@ export class AxFrameSampler {
       action = 'sample';
       reason = 'max_interval';
     } else {
+      this.latestRevision = observation.revision;
       return this.decision(
         'suppress',
         changeScore! >= this.options.changeThreshold
@@ -297,6 +352,11 @@ export class AxFrameSampler {
       return this.decision('suppress', budgetReason, digest, changeScore);
     }
 
+    this.stream ??= {
+      sourceId: observation.sourceId,
+      streamId: observation.streamId,
+    };
+    this.latestRevision = observation.revision;
     this.lastDigest = digest;
     this.lastSampleAtMs = resolvedNowMs;
     this.budgetEntries.push({
@@ -347,13 +407,16 @@ export class AxFrameSampler {
     digest?: AxVisualChangeDigest,
     changeScore?: number
   ): AxFrameSamplerDecision {
-    return {
+    const publishedDigest = digest
+      ? Object.freeze({ algorithm: digest.algorithm, value: digest.value })
+      : undefined;
+    return Object.freeze({
       action,
       reason,
-      digest,
+      digest: publishedDigest,
       changeScore,
-      budget: this.usage(),
-    };
+      budget: Object.freeze(this.usage()),
+    });
   }
 }
 

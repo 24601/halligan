@@ -9,6 +9,7 @@ type Fixture = {
   observation: AxVisualObservation;
   materialChange: boolean;
   sceneCut: boolean;
+  staleRevision: boolean;
 };
 
 type PolicyMetrics = {
@@ -55,43 +56,51 @@ const fixtures = (): Fixture[] => [
     observation: observation(1, 0, '0000000000000000'),
     materialChange: false,
     sceneCut: false,
+    staleRevision: false,
   },
   {
     observation: observation(2, 100, '0000000000000000'),
     materialChange: false,
     sceneCut: false,
+    staleRevision: false,
   },
   {
     observation: observation(3, 200, '0000000000000000'),
     materialChange: false,
     sceneCut: false,
+    staleRevision: false,
   },
   {
     observation: observation(4, 300, '0101010101010101'),
     materialChange: true,
     sceneCut: false,
+    staleRevision: false,
   },
   // Out of order after revision 4.
   {
     observation: observation(3, 400, '0101010101010101'),
     materialChange: false,
     sceneCut: false,
+    staleRevision: true,
   },
   // A dropped-frame gap is valid.
   {
     observation: observation(7, 500, '0101010101010101'),
     materialChange: false,
     sceneCut: false,
+    staleRevision: false,
   },
   {
     observation: observation(8, 600, 'f0f0f0f0f0f0f0f0'),
     materialChange: true,
     sceneCut: true,
+    staleRevision: false,
   },
   {
     observation: observation(9, 700, 'malformed'),
     materialChange: false,
     sceneCut: false,
+    staleRevision: false,
   },
   {
     observation: observation(10, 800, '0000000000000000', {
@@ -99,6 +108,7 @@ const fixtures = (): Fixture[] => [
     }),
     materialChange: false,
     sceneCut: false,
+    staleRevision: false,
   },
   {
     observation: observation(11, 900, 'f0f0f0f0f0f0f0f0', {
@@ -111,11 +121,13 @@ const fixtures = (): Fixture[] => [
     }),
     materialChange: false,
     sceneCut: false,
+    staleRevision: false,
   },
   {
     observation: observation(12, 1_000, 'f0f0f0f0f0f0f0f0'),
     materialChange: false,
     sceneCut: false,
+    staleRevision: false,
   },
   {
     observation: observation(13, 1_100, '0000000000000000', {
@@ -127,6 +139,7 @@ const fixtures = (): Fixture[] => [
     }),
     materialChange: true,
     sceneCut: true,
+    staleRevision: false,
   },
   {
     observation: observation(14, 1_150, 'ffffffffffffffff', {
@@ -138,13 +151,13 @@ const fixtures = (): Fixture[] => [
     }),
     materialChange: true,
     sceneCut: true,
+    staleRevision: false,
   },
 ];
 
 const metrics = (
   set: readonly Fixture[],
-  accepted: readonly boolean[],
-  staleAccepted: readonly boolean[]
+  accepted: readonly boolean[]
 ): PolicyMetrics => {
   const selected = set.filter((_, index) => accepted[index]);
   const material = set.filter((item) => item.materialChange);
@@ -172,7 +185,9 @@ const metrics = (
       ? set.filter((item, index) => item.sceneCut && accepted[index]).length /
         sceneCuts.length
       : 1,
-    staleAcceptance: staleAccepted.filter(Boolean).length,
+    staleAcceptance: set.filter(
+      (item, index) => item.staleRevision && accepted[index]
+    ).length,
     falseSuppressions: set.filter(
       (item, index) => item.materialChange && !accepted[index]
     ).length,
@@ -199,26 +214,13 @@ const adaptive = (set: readonly Fixture[]) => {
   const accepted = decisions.map((decision) => decision.action !== 'suppress');
   return {
     decisions,
-    metrics: metrics(
-      set,
-      accepted,
-      decisions.map(
-        (decision) =>
-          decision.reason === 'stale_revision' && decision.action !== 'suppress'
-      )
-    ),
+    metrics: metrics(set, accepted),
   };
 };
 
 const baseline = (set: readonly Fixture[], every: number): PolicyMetrics => {
   const accepted = set.map((_, index) => index % every === 0);
-  let latestRevision = -1;
-  const stale = set.map((item, index) => {
-    const isStale = item.observation.revision <= latestRevision;
-    latestRevision = Math.max(latestRevision, item.observation.revision);
-    return accepted[index]! && isStale;
-  });
-  return metrics(set, accepted, stale);
+  return metrics(set, accepted);
 };
 
 const latency = () => {
@@ -293,6 +295,7 @@ export const runFrameSamplerEvaluation = () => {
       observation: observation(index + 1, index * 100, '0000000000000000'),
       materialChange: false,
       sceneCut: false,
+      staleRevision: false,
     })
   );
   const noBenefitAdaptive = adaptive(noBenefitSet).metrics;

@@ -241,9 +241,13 @@ Create one sampler per source stream. Every observation carries source, stream,
 frame, monotonic revision, capture/observation/expiry times, dimensions, image
 media type, byte and token estimates, and opaque host authority/consent
 references with a monotonic authority revision. A revocation latches closed;
-only a newer non-revoked authority revision can resume sampling. Duplicate or
-out-of-order frame revisions and older authority revisions are refused. Dropped
-revision numbers are valid.
+only a newer non-revoked authority revision can resume sampling. Well-formed
+authority updates are applied independently before frame payload rejection.
+Duplicate or out-of-order frame revisions, clock rollback, and older authority
+revisions are refused. Dropped revision numbers are valid. A budget-rejected
+frame revision may be retried after the rolling window clears. A rejected clock
+rollback starts a fresh rolling-time budget epoch because timestamps from the
+two clock epochs cannot share a meaningful window.
 
 Supply either a `dhash-64` digest or a host-normalized 9 × 8 `Uint8Array`
 luminance grid. `axVisualPerceptualDigest(...)` computes the 64-bit difference

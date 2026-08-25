@@ -1,3 +1,4 @@
+import { runInNewContext } from 'node:vm';
 import { describe, expect, it } from 'vitest';
 import { AxFrameSampler, axVisualPerceptualDigest } from './sampler.js';
 import type { AxVisualObservation } from './types.js';
@@ -76,6 +77,13 @@ describe('axVisualPerceptualDigest', () => {
     expect(() =>
       axVisualPerceptualDigest({ width: 9, height: 8, luma: new Uint8Array(1) })
     ).toThrow(/9 x 8/);
+  });
+
+  it('accepts a Uint8Array created in another realm', () => {
+    const crossRealm = runInNewContext('new Uint8Array(72)') as Uint8Array;
+    expect(
+      axVisualPerceptualDigest({ width: 9, height: 8, luma: crossRealm })
+    ).toEqual({ algorithm: 'dhash-64', value: '0000000000000000' });
   });
 });
 
@@ -184,6 +192,99 @@ describe('AxFrameSampler', () => {
     expect(policy.observe(frame(1, 1_100)).reason).toBe('initial');
   });
 
+  it('latches well-formed revocation before payload rejection', () => {
+    const invalidFrames: Partial<AxVisualObservation>[] = [
+      { byteLength: 1_001 },
+      {
+        freshness: {
+          capturedAtMs: 100,
+          observedAtMs: 100,
+          expiresAtMs: 101,
+        },
+      },
+      {
+        freshness: {
+          capturedAtMs: 1_000,
+          observedAtMs: 1_000,
+          expiresAtMs: 2_000,
+        },
+      },
+      {
+        digest: { algorithm: 'dhash-64', value: 'malformed' },
+        perceptualInput: undefined,
+      },
+    ];
+
+    for (const invalid of invalidFrames) {
+      const policy = sampler();
+      policy.observe(frame(1, 0));
+      expect(
+        policy.observe(
+          frame(2, 100, {
+            ...invalid,
+            authority: {
+              authorityRef: 'authority-a',
+              consentRef: 'consent-a',
+              revision: 2,
+              revoked: true,
+            },
+          }),
+          200
+        ).reason
+      ).toBe('revoked');
+      expect(policy.observe(frame(3, 300)).reason).toBe('stale_authority');
+    }
+  });
+
+  it('does not bind a stream until a frame passes payload validation and budget', () => {
+    const policy = sampler();
+    expect(
+      policy.observe(
+        frame(1, 0, {
+          sourceId: 'attacker-source',
+          streamId: 'attacker-stream',
+          digest: { algorithm: 'dhash-64', value: 'malformed' },
+          perceptualInput: undefined,
+        })
+      ).reason
+    ).toBe('malformed');
+    expect(policy.observe(frame(1, 100)).reason).toBe('initial');
+  });
+
+  it('rejects an invalid supplied digest instead of falling back to perceptual input', () => {
+    expect(
+      sampler().observe(
+        frame(1, 0, {
+          digest: { algorithm: 'dhash-64', value: 'malformed' },
+        })
+      ).reason
+    ).toBe('malformed');
+  });
+
+  it('copies and freezes supplied digests and decisions', () => {
+    const digest = {
+      algorithm: 'dhash-64' as const,
+      value: '0000000000000000',
+    };
+    const policy = sampler();
+    const first = policy.observe(
+      frame(1, 0, { digest, perceptualInput: undefined })
+    );
+    digest.value = 'ffffffffffffffff';
+    const second = policy.observe(
+      frame(2, 100, {
+        digest: { algorithm: 'dhash-64', value: '0000000000000000' },
+        perceptualInput: undefined,
+      })
+    );
+
+    expect(second.reason).toBe('unchanged');
+    expect(first.digest?.value).toBe('0000000000000000');
+    expect(Object.isFrozen(first)).toBe(true);
+    expect(Object.isFrozen(first.digest)).toBe(true);
+    expect(Object.isFrozen(first.budget)).toBe(true);
+  });
+
   it('enforces frame, byte, and token budgets independently', () => {
     const changed = (
       revision: number,
@@ -214,6 +315,49 @@ describe('AxFrameSampler', () => {
     });
     tokens.observe(changed(1, 0));
     expect(tokens.observe(changed(2, 100)).reason).toBe('budget_tokens');
+  });
+
+  it('allows a budget-rejected revision to retry after the rolling window clears', () => {
+    const policy = sampler({
+      maxObservationAgeMs: 2_000,
+      budget: { windowMs: 1_000, maxFrames: 1 },
+    });
+    policy.observe(frame(1, 0));
+    const candidate = frame(2, 100, {
+      freshness: {
+        capturedAtMs: 100,
+        observedAtMs: 100,
+        expiresAtMs: 3_000,
+      },
+      digest: { algorithm: 'dhash-64', value: 'ffffffffffffffff' },
+      perceptualInput: undefined,
+    });
+    expect(policy.observe(candidate, 100).reason).toBe('budget_frames');
+    expect(policy.observe(candidate, 1_001).reason).toBe('scene_cut');
+  });
+
+  it('rejects clock rollback and starts a fresh rolling-time epoch', () => {
+    const policy = sampler({
+      maxObservationAgeMs: 2_000,
+      budget: { windowMs: 1_000, maxFrames: 1 },
+    });
+    policy.observe(frame(1, 1_000));
+    const candidate = frame(2, 100, {
+      digest: { algorithm: 'dhash-64', value: 'ffffffffffffffff' },
+      perceptualInput: undefined,
+    });
+    expect(policy.observe(candidate, 100).reason).toBe('clock_rollback');
+    expect(policy.observe(candidate, 101).reason).toBe('scene_cut');
+  });
+
+  it('converts throwing accessors into malformed suppression', () => {
+    const observation = frame(1, 0);
+    Object.defineProperty(observation, 'authority', {
+      get: () => {
+        throw new Error('synthetic getter failure');
+      },
+    });
+    expect(sampler().observe(observation).reason).toBe('malformed');
   });
 
   it('suppresses revoked authority, refuses stale authority, and resumes only on a newer grant', () => {
