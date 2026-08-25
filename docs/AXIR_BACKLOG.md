@@ -20,6 +20,7 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
 
 - `axir-2026-08-25-port-causal-candidate-evidence-artifacts` [axoptimize] Port causal candidate evidence artifacts
   - Status: open
+  - Source PR: #15
   - Source commit: `ca760294f5ea4f207052c39c2218e1195103bc2a`
   - TS paths: `src/ax/dsp/optimize.ts`, `src/ax/dsp/optimizer.ts`, `src/ax/dsp/optimizers/causalCandidateEvidence.test-d.ts`, `src/ax/dsp/optimizers/causalCandidateEvidence.test.ts`, `src/ax/dsp/optimizers/causalCandidateEvidence.ts`
   - Impact: TypeScript optimized-program artifacts can carry bounded immutable host-authored causal evidence linking evidence fingerprints, hypotheses, affected components, predictions, held-in and held-out outcomes, promotion decisions, and optional ablations; generated runtimes do not expose this manifest or attachment helper.
