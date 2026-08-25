@@ -37,12 +37,14 @@ export class AxAgentPlaybook<
    * Grow the playbook from a task set. `verify` (default) keeps only bullets
    * that provably help — re-scoring train + held-out after each candidate and
    * rolling back regressions. `verify: false` applies mined lessons without
-   * the gate (trust-batch). Produces only playbook bullets. Must not run
-   * concurrently with `forward()` on the same agent instance.
+   * the gate (trust-batch). `requireHeldOut` enables fail-closed production
+   * promotion and cannot be combined with `verify: false`. Produces only
+   * playbook bullets. Must not run concurrently with `forward()` on the same
+   * agent instance.
    */
   public evolve(
     dataset: Readonly<AxAgentEvalDataset<IN>>,
-    options?: Readonly<AxAgentPlaybookEvolveOptions>
+    options?: Readonly<AxAgentPlaybookEvolveOptions<IN>>
   ): Promise<AxAgentPlaybookEvolveResult<OUT>> {
     return evolveAgentPlaybook<IN, OUT>(this.agent, dataset, options);
   }

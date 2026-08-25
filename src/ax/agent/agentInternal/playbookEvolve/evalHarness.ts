@@ -28,6 +28,8 @@ export type AxAgentEvalBatchResult<
   mean: number;
   /** True when the budget ran out before every task executed. */
   exhausted: boolean;
+  /** True only when every requested run completed with a finite metric. */
+  complete: boolean;
 };
 
 export async function runAgentEvalBatch<
@@ -47,6 +49,7 @@ export async function runAgentEvalBatch<
   const records: AxAgentPlaybookEvolveRunRecord<IN, OUT>[] = [];
   const runsPerTask = Math.max(1, Math.floor(args.runsPerTask ?? 1));
   let exhausted = false;
+  let hadEvaluationError = false;
 
   for (const task of args.tasks) {
     const scores: number[] = [];
@@ -75,15 +78,19 @@ export async function runAgentEvalBatch<
           prediction: prediction as Record<string, unknown>,
           example: task as unknown as Parameters<AxMetricFn>[0]['example'],
         });
-        scores.push(
-          typeof score === 'number' && Number.isFinite(score) ? score : 0
-        );
+        const finiteScore = typeof score === 'number' && Number.isFinite(score);
+        scores.push(finiteScore ? score : 0);
+        if (!finiteScore) {
+          hadEvaluationError = true;
+          lastError = 'metric returned a non-finite score';
+        }
         lastPrediction = prediction;
       } catch (err) {
         if (args.abortSignal?.aborted) {
           throw err;
         }
         scores.push(0);
+        hadEvaluationError = true;
         lastError = err instanceof Error ? err.message : String(err);
       }
     }
@@ -118,5 +125,7 @@ export async function runAgentEvalBatch<
     records,
     mean: weightSum > 0 ? scoreSum / weightSum : 0,
     exhausted,
+    complete:
+      !exhausted && !hadEvaluationError && records.length === args.tasks.length,
   };
 }

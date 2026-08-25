@@ -83,11 +83,66 @@ const apb = a.playbook({ target: 'actor' }); // agent-aware handle; 'actor' (def
 await apb.update({ example, prediction, feedback }); // online: injected into the live stage prompt
 const result = await apb.evolve(
   { train, validation }, // AxAgentEvalDataset
-  { metric, runsPerTask: 2 }, // verify:true by default
+  {
+    metric,
+    runsPerTask: 2,
+    requireHeldOut: true, // production promotion: fail closed
+  },
 );
 ```
 
 The agent-level `evolve(dataset, options)` is distinct from the program-level `pb.evolve(examples, metric)` above: it takes an `AxAgentEvalDataset` plus options, runs the whole pipeline, and returns baseline/final held-in & held-out with per-bullet outcomes (no `{ bestScore }`). For full-pipeline tuning of agent instructions and demos (not the playbook) use `agent.optimize(...)` (GEPA).
+
+The default remains permissive for compatibility: verified proposals may be
+accepted on held-in gain when `validation` is absent. For production promotion,
+set `requireHeldOut: true`. This requires verification, a non-empty held-out
+set, semantic IDs for every task, disjoint train/validation IDs, enough metric
+budget for a complete baseline plus candidate evaluation, and complete finite
+scores from both splits. Missing or indeterminate evidence fails before
+mutation or rejects the candidate with exact rollback. `verify: false` is an
+error under this policy. Identity defaults to `task.id`; use
+`taskId: (task) => task.input.caseId` when identity lives in typed input or
+metadata. Ax deliberately does not treat object references or serialized
+objects as proof of semantic independence.
+
+### Strict promotion evaluation and trade-off
+
+Ax includes a deterministic offline hill-climbing sweep over six fixed
+candidate types: overfit, generalizing, no-benefit, harmful, small/noisy
+overfit, and small/noisy generalizing. It invokes the real evolve gate and
+rollback path with an external fixed scorer. On that synthetic set:
+
+- permissive held-in-only promotion accepted 2 of 3 held-out-regressing
+  candidates (66.7% false-promotion rate); strict promotion accepted 0 of 3;
+- permissive accepted held-out changes were `[-0.700, +0.400, -0.400,
+  +0.167]` (mean `-0.133`); strict accepted changes were `[+0.400, +0.167]`
+  (mean `+0.283`) with no accepted regression;
+- insufficient budget was rejected in both modes (strictly before any metric
+  call), strict overlap/contamination detection caught 1 of 1 known overlap,
+  and every rejected candidate restored the exact prior state;
+- with equal-size train and held-out sets, strict mode used 2× metric calls
+  (4 vs 2 normally, 12 vs 6 with three repeated runs). In general its
+  evaluation-call multiplier is `(train + validation) / train`.
+
+Run the evaluation from the repository root:
+
+```bash
+AX_PRINT_METRICS=1 npx vitest run src/ax/agent/benchmarks/playbook-promotion-policy.test.ts
+```
+
+These are deterministic synthetic policy checks, not a claim about production
+model quality or statistical power. Use strict mode when promoted playbooks are
+persistent, shared, or costly to regress and a representative held-out set can
+be afforded. The permissive default remains useful for exploration, low-impact
+local learning, or when no credible held-out corpus exists; strict mode cannot
+make an unrepresentative or tiny validation set representative.
+
+Identity checking detects only equality under `task.id` or the caller's
+`taskId` selector. Semantically duplicated tasks with different IDs remain
+undetected, while reused IDs for genuinely independent cases are conservatively
+rejected. Choose IDs from the data-generation lineage (not array position), and
+keep the scorer, metric budget, and split construction under host control; a
+proposal can edit only its candidate playbook bullet.
 
 Generated packages expose that same agent-bound loop with language-shaped APIs:
 
@@ -102,7 +157,8 @@ Generated packages expose that same agent-bound loop with language-shaped APIs:
 All five generated packages thread structured `failureSignals` through agent
 evaluation predictions. The default verify gate accepts a proposed bullet only
 when held-in score improves and held-out score stays within `epsilon`; rejection
-restores the exact prior snapshot. Scoring is host-shaped: TypeScript uses its
+restores the exact prior snapshot. Each outcome reports both `status`
+(`accepted` or `rejected`) and a stable human-readable `reason`. Scoring is host-shaped: TypeScript uses its
 metric, Python/Java/Go can accept a metric callback, and all generated ports can
 use task `score`/`scores` values plus the agent evaluation result.
 

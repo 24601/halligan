@@ -72,6 +72,9 @@ const TASKS = [
   { input: { question: 'q1' }, criteria: 'answers correctly', id: 't1' },
   { input: { question: 'q2' }, criteria: 'answers correctly', id: 't2' },
 ];
+const VALIDATION_TASKS = [
+  { input: { question: 'q3' }, criteria: 'answers correctly', id: 'v1' },
+];
 
 const scoreByAnswer = async ({ prediction }: any) =>
   prediction?.output?.answer === 'ok-fixed' ? 1 : 0.2;
@@ -143,6 +146,128 @@ describe('agent.playbook().evolve()', () => {
     expect(events.some((e) => e.startsWith('mining'))).toBe(true);
   });
 
+  it('keeps the permissive default when no held-out set is provided', async () => {
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(TASKS, {
+      metric: scoreByAnswer,
+      maxProposals: 1,
+    });
+    expect(result.outcomes[0]).toMatchObject({
+      status: 'accepted',
+      accepted: true,
+      reason: 'held-in improved (no held-out set provided — consider one)',
+    });
+  });
+
+  it.each([
+    ['missing', TASKS],
+    ['empty', { train: TASKS, validation: [] }],
+  ])(
+    'rejects a %s held-out set before evaluation when required',
+    async (_, data) => {
+      const { ag } = makeAgent();
+      let metricCalls = 0;
+      await expect(
+        ag.playbook().evolve(data, {
+          requireHeldOut: true,
+          metric: async (args: any) => {
+            metricCalls++;
+            return scoreByAnswer(args);
+          },
+        })
+      ).rejects.toThrow(/requires a non-empty validation set/);
+      expect(metricCalls).toBe(0);
+      expect(ag.getPlaybook().getState().playbook.stats.bulletCount).toBe(0);
+    }
+  );
+
+  it('rejects semantic train/held-out overlap before evaluation', async () => {
+    const { ag } = makeAgent();
+    await expect(
+      ag
+        .playbook()
+        .evolve(
+          { train: TASKS, validation: [{ ...TASKS[0] }] },
+          { requireHeldOut: true, metric: scoreByAnswer }
+        )
+    ).rejects.toThrow(/overlapping task id\(s\): t1/);
+    expect(ag.getPlaybook().getState().playbook.stats.bulletCount).toBe(0);
+  });
+
+  it('requires semantic ids and accepts an explicit taskId selector', async () => {
+    const withoutIds = [...TASKS, ...VALIDATION_TASKS].map(
+      ({ id: _, ...task }) => task
+    );
+    const { ag: missingIdAgent } = makeAgent();
+    await expect(
+      missingIdAgent
+        .playbook()
+        .evolve(
+          { train: withoutIds.slice(0, 2), validation: withoutIds.slice(2) },
+          { requireHeldOut: true, metric: scoreByAnswer }
+        )
+    ).rejects.toThrow(/has no semantic task id/);
+
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(
+      { train: withoutIds.slice(0, 2), validation: withoutIds.slice(2) },
+      {
+        requireHeldOut: true,
+        taskId: (task: any) => task.input.question,
+        metric: scoreByAnswer,
+        maxProposals: 1,
+      }
+    );
+    expect(result.outcomes[0]).toMatchObject({
+      status: 'accepted',
+      accepted: true,
+      reason: 'held-in improved, held-out non-regressing',
+    });
+  });
+
+  it('accepts held-in improvement with complete non-regressing held-out evidence', async () => {
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(
+      { train: TASKS, validation: VALIDATION_TASKS },
+      {
+        requireHeldOut: true,
+        metric: scoreByAnswer,
+        maxProposals: 1,
+      }
+    );
+    expect(result.outcomes[0]).toMatchObject({
+      status: 'accepted',
+      accepted: true,
+      reason: 'held-in improved, held-out non-regressing',
+      heldOut: { before: 0.2, after: 1 },
+    });
+  });
+
+  it.each([
+    ['errored', () => Promise.reject(new Error('judge unavailable'))],
+    ['incomplete', () => Promise.resolve(Number.NaN)],
+  ])(
+    'fails before mutation when held-out baseline evaluation is %s',
+    async (_, failMetric) => {
+      const { ag } = makeAgent();
+      const before = ag.getPlaybook().getState();
+      await expect(
+        ag.playbook().evolve(
+          { train: TASKS, validation: VALIDATION_TASKS },
+          {
+            requireHeldOut: true,
+            metric: async (args: any) =>
+              args.example.id === 'v1' ? failMetric() : scoreByAnswer(args),
+            maxProposals: 1,
+          }
+        )
+      ).rejects.toThrow(
+        /held-out baseline evaluation was incomplete or errored/
+      );
+      expect(ag.getPlaybook().getState()).toEqual(before);
+    }
+  );
+
   it('rejects a non-improving proposal and rolls the playbook back exactly', async () => {
     const { ag } = makeAgent();
     const result = await ag.playbook().evolve(TASKS, {
@@ -161,6 +286,7 @@ describe('agent.playbook().evolve()', () => {
     const result = await ag.playbook().evolve(
       { train: TASKS, validation: [{ ...TASKS[0]!, id: 'holdout' }] },
       {
+        requireHeldOut: true,
         metric: async ({ example, prediction }: any) =>
           example.id === 'holdout'
             ? prediction?.output?.answer === 'ok-fixed'
@@ -172,6 +298,7 @@ describe('agent.playbook().evolve()', () => {
         maxProposals: 1,
       }
     );
+    expect(result.outcomes[0]?.status).toBe('rejected');
     expect(result.outcomes[0]?.accepted).toBe(false);
     expect(result.outcomes[0]?.reason).toContain('held-out regressed');
     expect(ag.getPlaybook().getState().playbook.stats.bulletCount).toBe(0);
@@ -179,13 +306,18 @@ describe('agent.playbook().evolve()', () => {
 
   it('apply: false rolls the accepted bullet back but returns the snapshot', async () => {
     const { ag } = makeAgent();
-    const result = await ag.playbook().evolve(TASKS, {
-      metric: scoreByAnswer,
-      maxProposals: 1,
-      apply: false,
-    });
+    const before = ag.getPlaybook().getState();
+    const result = await ag.playbook().evolve(
+      { train: TASKS, validation: VALIDATION_TASKS },
+      {
+        requireHeldOut: true,
+        metric: scoreByAnswer,
+        maxProposals: 1,
+        apply: false,
+      }
+    );
     expect(result.outcomes[0]?.accepted).toBe(true);
-    expect(ag.getPlaybook().getState().playbook.stats.bulletCount).toBe(0);
+    expect(ag.getPlaybook().getState()).toEqual(before);
     expect(actorPromptOf(ag)).not.toContain(BULLET_MARKER);
     expect(result.playbookSnapshot?.playbook.stats.bulletCount).toBeGreaterThan(
       0
@@ -205,6 +337,21 @@ describe('agent.playbook().evolve()', () => {
     expect(actorPromptOf(ag)).toContain(BULLET_MARKER);
   });
 
+  it('does not allow verify: false to bypass required held-out promotion', async () => {
+    const { ag } = makeAgent();
+    await expect(
+      ag.playbook().evolve(
+        { train: TASKS, validation: VALIDATION_TASKS },
+        {
+          requireHeldOut: true,
+          verify: false,
+          metric: scoreByAnswer,
+        }
+      )
+    ).rejects.toThrow(/cannot be combined with verify: false/);
+    expect(ag.getPlaybook().getState().playbook.stats.bulletCount).toBe(0);
+  });
+
   it('skips validation when the metric budget is exhausted', async () => {
     const { ag } = makeAgent();
     const result = await ag.playbook().evolve(TASKS, {
@@ -215,6 +362,80 @@ describe('agent.playbook().evolve()', () => {
     expect(result.outcomes[0]?.accepted).toBe(false);
     expect(result.outcomes[0]?.reason).toContain('metric_budget');
     expect(ag.getPlaybook().getState().playbook.stats.bulletCount).toBe(0);
+  });
+
+  it('fails before evaluation when strict budget cannot cover baseline plus candidate', async () => {
+    const { ag } = makeAgent();
+    let metricCalls = 0;
+    await expect(
+      ag.playbook().evolve(
+        { train: TASKS, validation: VALIDATION_TASKS },
+        {
+          requireHeldOut: true,
+          metric: async (args: any) => {
+            metricCalls++;
+            return scoreByAnswer(args);
+          },
+          maxProposals: 1,
+          maxMetricCalls: 5,
+        }
+      )
+    ).rejects.toThrow(/needs at least 6 metric calls/);
+    expect(metricCalls).toBe(0);
+    expect(ag.getPlaybook().getState().playbook.stats.bulletCount).toBe(0);
+  });
+
+  it.each([
+    ['errored', () => Promise.reject(new Error('judge unavailable'))],
+    ['incomplete', () => Promise.resolve(Number.NaN)],
+  ])(
+    'rejects and rolls back when candidate held-out evaluation is %s',
+    async (_, failMetric) => {
+      const { ag } = makeAgent();
+      const before = ag.getPlaybook().getState();
+      const result = await ag.playbook().evolve(
+        { train: TASKS, validation: VALIDATION_TASKS },
+        {
+          requireHeldOut: true,
+          metric: async (args: any) => {
+            if (
+              args.example.id === 'v1' &&
+              args.prediction?.output?.answer === 'ok-fixed'
+            ) {
+              return failMetric();
+            }
+            return scoreByAnswer(args);
+          },
+          maxProposals: 1,
+        }
+      );
+      expect(result.outcomes[0]).toMatchObject({
+        status: 'rejected',
+        accepted: false,
+        reason: 'held-out evaluation incomplete or errored',
+      });
+      expect(ag.getPlaybook().getState()).toEqual(before);
+    }
+  );
+
+  it('requires complete evidence across repeated runs', async () => {
+    const { ag } = makeAgent();
+    let metricCalls = 0;
+    const result = await ag.playbook().evolve(
+      { train: TASKS, validation: VALIDATION_TASKS },
+      {
+        requireHeldOut: true,
+        metric: async (args: any) => {
+          metricCalls++;
+          return scoreByAnswer(args);
+        },
+        runsPerTask: 2,
+        maxProposals: 1,
+      }
+    );
+    expect(result.outcomes[0]?.status).toBe('accepted');
+    expect(result.metricCallsUsed).toBe(12);
+    expect(metricCalls).toBe(12);
   });
 
   it('throws without train tasks and without any AI', async () => {

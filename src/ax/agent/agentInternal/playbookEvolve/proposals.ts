@@ -66,14 +66,19 @@ export async function applyProposal(args: {
     );
   }
   const snapshot = handle.getState();
-  await handle.update({
-    example: {
-      task: 'playbook.evolve(): repair a diagnosed agent weakness',
-      failureSignatures: [proposal.clusterSignature],
-    },
-    prediction: {},
-    feedback: proposal.feedback,
-  });
+  try {
+    await handle.update({
+      example: {
+        task: 'playbook.evolve(): repair a diagnosed agent weakness',
+        failureSignatures: [proposal.clusterSignature],
+      },
+      prediction: {},
+      feedback: proposal.feedback,
+    });
+  } catch (err) {
+    handle.load(snapshot);
+    throw err;
+  }
   return {
     proposal,
     rollback: () => {

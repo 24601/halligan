@@ -1162,6 +1162,25 @@
       "completedAt": "2026-08-22",
       "completedByCommit": "040f954bce9c7dca44f7fd3436886d036f9e358b",
       "verification": "TS-derived native-image routing fixture; five-language AxIR dev verifier; npm run axir:check-packages; go test ./internal/axir; focused TypeScript router tests"
+    },
+    {
+      "id": "axir-2026-08-25-port-strict-held-out-playbook-promotion-policy",
+      "status": "open",
+      "title": "Port strict held-out playbook promotion policy",
+      "createdAt": "2026-08-25",
+      "sourcePR": null,
+      "sourceCommit": "ca760294f5ea4f207052c39c2218e1195103bc2a",
+      "tsPaths": ["src/ax/agent"],
+      "portableSurface": "axagent",
+      "impact": "TypeScript agent.playbook().evolve() can require semantic train/validation disjointness and complete held-out evidence, fail closed on insufficient budget or evaluator errors, and prevent verify:false bypass; generated language runtimes retain only the permissive verify gate.",
+      "suggestedAxirWork": [
+        "Add or update the TS-derived conformance fixture.",
+        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
+        "Run npm run axir:conformance:check and npm run test:axir."
+      ],
+      "completedAt": null,
+      "completedByCommit": null,
+      "verification": null
     }
   ],
   "nonPortableExemptions": [
