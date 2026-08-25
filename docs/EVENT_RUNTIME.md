@@ -258,7 +258,10 @@ request, including its parent fence, and returns only the minimal receipt;
 operation IDs alone cannot retrieve run or output data. SQLite retains these
 compact commitments for the database lifetime while ordinary payload pruning
 removes the underlying sensitive data. Schema migration rewrites legacy V2
-full-record journals to commitments and securely deletes the old rows.
+full-record journals to commitments and securely deletes the old rows. A
+durable cleanup-pending marker is committed with that migration; every later
+startup checkpoints and truncates the WAL before clearing the marker, so a
+crash between migration commit and cleanup cannot strand legacy payload frames.
 These guarantees do not make arbitrary target or sink I/O exactly once.
 
 ### Deterministic Evaluation

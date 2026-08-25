@@ -202,14 +202,15 @@ export class AxInMemoryEventStore implements AxEventStore {
   ): Promise<AxEventPublishReceipt> {
     const requestCommitment = await axEventCanonicalDigest(request);
     const childProjection = this.verifierChildProjection(request);
-    const childCommitment = await axEventCanonicalDigest(childProjection);
+    const expectedChildCommitment =
+      await axEventCanonicalDigest(childProjection);
     const committed = this.verifierTransitions.get(request.operationId);
     if (committed) {
       this.assertVerifierTransition(
         committed,
         request,
         requestCommitment,
-        childCommitment
+        expectedChildCommitment
       );
       return { ...structuredClone(committed.receipt), duplicate: true };
     }
@@ -316,8 +317,6 @@ export class AxInMemoryEventStore implements AxEventStore {
       eventId: request.child.ingress.event.id,
       deliveryIds: [delivery.id],
     });
-    this.notify(this.workWaiters);
-    this.notify(this.capacityWaiters);
     const receipt: AxEventPublishReceipt = {
       eventId: request.child.ingress.event.id,
       accepted: true,
@@ -325,13 +324,21 @@ export class AxInMemoryEventStore implements AxEventStore {
       durability: 'volatile',
       deliveryIds: [delivery.id],
     };
+    if (
+      axEventCanonicalJson(this.persistedChildProjection(delivery)) !==
+      axEventCanonicalJson(childProjection)
+    ) {
+      throw new Error('Verifier transition child does not match request');
+    }
     this.verifierTransitions.set(request.operationId, {
       operationId: request.operationId,
       requestCommitment,
       receipt: structuredClone(receipt),
       childDeliveryId: request.childDeliveryId,
-      childCommitment,
+      childCommitment: expectedChildCommitment,
     });
+    this.notify(this.workWaiters);
+    this.notify(this.capacityWaiters);
     return receipt;
   }
 
@@ -350,6 +357,16 @@ export class AxInMemoryEventStore implements AxEventStore {
       requestCommitment,
       childCommitment
     );
+    const child = this.deliveries.get(value.childDeliveryId);
+    if (
+      child &&
+      (await axEventCanonicalDigest(this.persistedChildProjection(child))) !==
+        value.childCommitment
+    ) {
+      throw new Error(
+        `Verifier transition child is corrupt: ${request.operationId}`
+      );
+    }
     return structuredClone(value.receipt);
   }
 
@@ -709,7 +726,19 @@ export class AxInMemoryEventStore implements AxEventStore {
 
   private verifierChildProjection(
     request: Readonly<AxEventVerifierTransitionRequest>
-  ): Omit<AxEventDelivery, 'sequence'> {
+  ): Omit<
+    AxEventDelivery,
+    | 'sequence'
+    | 'status'
+    | 'attempt'
+    | 'claimedBy'
+    | 'runId'
+    | 'error'
+    | 'leaseExpiresAt'
+    | 'fencingToken'
+    | 'invocationStarted'
+    | 'recoveredFromExpiredLease'
+  > {
     const descriptor = request.child.deliveries[0]!;
     return {
       id: request.childDeliveryId,
@@ -719,13 +748,30 @@ export class AxInMemoryEventStore implements AxEventStore {
       action: descriptor.action,
       ...(descriptor.targetId ? { targetId: descriptor.targetId } : {}),
       instanceKey: descriptor.instanceKey,
-      status: 'queued',
-      attempt: 0,
       availableAt: descriptor.availableAt ?? request.child.acceptedAt,
       acceptedAt: request.child.acceptedAt,
       sizeBytes: descriptor.sizeBytes,
       retrySafety: descriptor.retrySafety ?? 'unknown',
       ordering: descriptor.ordering ?? 'strict',
+    };
+  }
+
+  private persistedChildProjection(
+    delivery: Readonly<AxEventDelivery>
+  ): ReturnType<AxInMemoryEventStore['verifierChildProjection']> {
+    return {
+      id: delivery.id,
+      ingress: delivery.ingress,
+      identityScope: delivery.identityScope,
+      routeId: delivery.routeId,
+      action: delivery.action,
+      ...(delivery.targetId ? { targetId: delivery.targetId } : {}),
+      instanceKey: delivery.instanceKey,
+      availableAt: delivery.availableAt,
+      acceptedAt: delivery.acceptedAt,
+      sizeBytes: delivery.sizeBytes,
+      retrySafety: delivery.retrySafety,
+      ordering: delivery.ordering,
     };
   }
 

@@ -24,8 +24,9 @@ import {
 } from '@ax-llm/ax';
 import Database from 'better-sqlite3';
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 const MULTI_WORKER_CONFORMANCE = 'axevent-store-v1';
+const VERIFIER_MIGRATION_CLEANUP_KEY = 'verifier-v2-cleanup-pending';
 const TERMINAL = [
   'waiting_event',
   'succeeded',
@@ -124,6 +125,7 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('secure_delete = ON');
     this.migrate();
+    this.completeVerifierMigrationCleanup();
     this.prune(this.clock.now());
   }
 
@@ -190,7 +192,7 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
       );
     }
     const requestCommitment = this.canonicalCommitment(request);
-    const childCommitment = this.canonicalCommitment(
+    const expectedChildCommitment = this.canonicalCommitment(
       this.verifierChildProjection(request)
     );
     return this.db.transaction(() => {
@@ -200,7 +202,7 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
           journal,
           request,
           requestCommitment,
-          childCommitment
+          expectedChildCommitment
         );
         return { ...journal.receipt, duplicate: true };
       }
@@ -242,6 +244,13 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
         .get(request.childDeliveryId) as DeliveryRow | undefined;
       if (!child)
         throw new Error('Verifier transition child was not persisted');
+      const persistedChild = this.rowToDelivery(child);
+      const childCommitment = this.canonicalCommitment(
+        this.persistedChildProjection(persistedChild)
+      );
+      if (childCommitment !== expectedChildCommitment) {
+        throw new Error('Verifier transition child does not match request');
+      }
       const record: AxEventVerifierTransitionRecord = {
         operationId: request.operationId,
         requestCommitment,
@@ -272,7 +281,7 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
     request: Readonly<AxEventVerifierTransitionRequest>
   ): Promise<Readonly<AxEventPublishReceipt> | undefined> {
     const requestCommitment = this.canonicalCommitment(request);
-    const childCommitment = this.canonicalCommitment(
+    const expectedChildCommitment = this.canonicalCommitment(
       this.verifierChildProjection(request)
     );
     const record = this.readVerifierTransition(request.operationId);
@@ -281,8 +290,21 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
       record,
       request,
       requestCommitment,
-      childCommitment
+      expectedChildCommitment
     );
+    const child = this.db
+      .prepare('SELECT * FROM event_deliveries WHERE id=?')
+      .get(record.childDeliveryId) as DeliveryRow | undefined;
+    if (
+      child &&
+      this.canonicalCommitment(
+        this.persistedChildProjection(this.rowToDelivery(child))
+      ) !== record.childCommitment
+    ) {
+      throw new Error(
+        `Verifier transition child is corrupt: ${request.operationId}`
+      );
+    }
     return record.receipt;
   }
 
@@ -896,7 +918,19 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
 
   private verifierChildProjection(
     request: Readonly<AxEventVerifierTransitionRequest>
-  ): Omit<AxEventDelivery, 'sequence'> {
+  ): Omit<
+    AxEventDelivery,
+    | 'sequence'
+    | 'status'
+    | 'attempt'
+    | 'claimedBy'
+    | 'runId'
+    | 'error'
+    | 'leaseExpiresAt'
+    | 'fencingToken'
+    | 'invocationStarted'
+    | 'recoveredFromExpiredLease'
+  > {
     const descriptor = request.child.deliveries[0]!;
     return {
       id: request.childDeliveryId,
@@ -906,15 +940,30 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
       action: descriptor.action,
       ...(descriptor.targetId ? { targetId: descriptor.targetId } : {}),
       instanceKey: descriptor.instanceKey,
-      status: 'queued',
-      attempt: 0,
       availableAt: descriptor.availableAt ?? request.child.acceptedAt,
       acceptedAt: request.child.acceptedAt,
       sizeBytes: descriptor.sizeBytes,
       retrySafety: descriptor.retrySafety ?? 'unknown',
       ordering: descriptor.ordering ?? 'strict',
-      fencingToken: 0,
-      invocationStarted: false,
+    };
+  }
+
+  private persistedChildProjection(
+    delivery: Readonly<AxEventDelivery>
+  ): ReturnType<AxSQLiteEventStore['verifierChildProjection']> {
+    return {
+      id: delivery.id,
+      ingress: delivery.ingress,
+      identityScope: delivery.identityScope,
+      routeId: delivery.routeId,
+      action: delivery.action,
+      ...(delivery.targetId ? { targetId: delivery.targetId } : {}),
+      instanceKey: delivery.instanceKey,
+      availableAt: delivery.availableAt,
+      acceptedAt: delivery.acceptedAt,
+      sizeBytes: delivery.sizeBytes,
+      retrySafety: delivery.retrySafety,
+      ordering: delivery.ordering,
     };
   }
 
@@ -1038,7 +1087,11 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
           child_commitment TEXT NOT NULL,
           created_at INTEGER NOT NULL
         );
-        PRAGMA user_version = 3;
+        CREATE TABLE event_store_metadata (
+          metadata_key TEXT PRIMARY KEY,
+          metadata_value TEXT NOT NULL
+        );
+        PRAGMA user_version = 4;
       `);
     } else if (version === 1) {
       this.db.exec(`
@@ -1050,7 +1103,11 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
           child_commitment TEXT NOT NULL,
           created_at INTEGER NOT NULL
         );
-        PRAGMA user_version = 3;
+        CREATE TABLE event_store_metadata (
+          metadata_key TEXT PRIMARY KEY,
+          metadata_value TEXT NOT NULL
+        );
+        PRAGMA user_version = 4;
       `);
     } else if (version === 2) {
       this.db.transaction(() => {
@@ -1076,6 +1133,10 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
             child_commitment TEXT NOT NULL,
             created_at INTEGER NOT NULL
           );
+          CREATE TABLE IF NOT EXISTS event_store_metadata (
+            metadata_key TEXT PRIMARY KEY,
+            metadata_value TEXT NOT NULL
+          );
         `);
         const insert = this.db.prepare(
           `INSERT INTO event_verifier_transitions
@@ -1089,23 +1150,55 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
           ) as AxEventVerifierTransitionRequest;
           const legacy = JSON.parse(row.record_json) as {
             receipt: AxEventPublishReceipt;
+            child: AxEventDelivery;
           };
           insert.run(
             row.operation_id,
             this.canonicalCommitment(request),
             JSON.stringify(legacy.receipt),
-            request.childDeliveryId,
-            this.canonicalCommitment(this.verifierChildProjection(request)),
+            legacy.child.id,
+            this.canonicalCommitment(
+              this.persistedChildProjection(legacy.child)
+            ),
             row.created_at
           );
         }
         this.db.exec(`
           DROP TABLE event_verifier_transitions_v2;
-          PRAGMA user_version = 3;
+          INSERT INTO event_store_metadata(metadata_key, metadata_value)
+          VALUES('${VERIFIER_MIGRATION_CLEANUP_KEY}', '1');
+          PRAGMA user_version = 4;
         `);
       })();
-      this.db.pragma('wal_checkpoint(TRUNCATE)');
+    } else if (version === 3) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS event_store_metadata (
+          metadata_key TEXT PRIMARY KEY,
+          metadata_value TEXT NOT NULL
+        );
+        INSERT OR REPLACE INTO event_store_metadata(metadata_key, metadata_value)
+        VALUES('${VERIFIER_MIGRATION_CLEANUP_KEY}', '1');
+        PRAGMA user_version = 4;
+      `);
     }
+  }
+
+  private completeVerifierMigrationCleanup(): void {
+    const pending = this.db
+      .prepare(
+        'SELECT 1 FROM event_store_metadata WHERE metadata_key=? AND metadata_value=?'
+      )
+      .get(VERIFIER_MIGRATION_CLEANUP_KEY, '1');
+    if (!pending) return;
+    const [checkpoint] = this.db.pragma('wal_checkpoint(TRUNCATE)') as Array<{
+      busy: number;
+    }>;
+    if (checkpoint?.busy) {
+      throw new Error('Verifier journal migration cleanup is still pending');
+    }
+    this.db
+      .prepare('DELETE FROM event_store_metadata WHERE metadata_key=?')
+      .run(VERIFIER_MIGRATION_CLEANUP_KEY);
   }
 
   private prune(now: number): void {

@@ -76,8 +76,10 @@ await source.publish({ event, identity, trust: 'authenticated' });
   commitments to the canonical request and deterministic child plus a minimal
   receipt; it never duplicates payloads or verifier state. Confirmation
   requires the complete fenced request. SQLite commitments outlive payload
-  retention, and V2 migration securely removes legacy full journal rows. This
-  does not make arbitrary external I/O exactly once.
+  retention, and V2 migration securely removes legacy full journal rows. A
+  durable cleanup marker makes later startups finish WAL checkpoint/truncation
+  after a migration-time crash. This does not make arbitrary external I/O
+  exactly once.
 - Set explicit verifier run/token/wall-time/cost limits. Exhaustion, verifier
   error/timeout, and unchanged fingerprints fail closed; abort stays cancelled.
 - Host `usage`, `fingerprint`, and `verify` callbacks share timeout and abort

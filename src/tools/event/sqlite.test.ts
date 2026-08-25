@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -315,13 +315,41 @@ describe('AxSQLiteEventStore', () => {
     expect(JSON.stringify(compactJournal)).not.toContain(sensitive);
 
     const receipt = await confirmTransition(request);
+    const persistedChild = await store.getDelivery(request.childDeliveryId);
+    liveDb
+      .prepare('UPDATE event_deliveries SET route_id=? WHERE id=?')
+      .run('corrupted-route', request.childDeliveryId);
+    await expect(confirmTransition(request)).rejects.toThrow(
+      'child is corrupt'
+    );
+    liveDb
+      .prepare('UPDATE event_deliveries SET route_id=? WHERE id=?')
+      .run(persistedChild!.routeId, request.childDeliveryId);
     const legacyRecord = {
       request,
       receipt,
-      child: await store.getDelivery(request.childDeliveryId),
+      child: persistedChild,
+    };
+    const mismatchedRequest = {
+      ...request,
+      operationId: `${request.operationId}:mismatched-child`,
+      childDeliveryId: `${request.childDeliveryId}:mismatched-child`,
+    };
+    const mismatchedRecord = {
+      request: mismatchedRequest,
+      receipt: {
+        ...receipt,
+        deliveryIds: [mismatchedRequest.childDeliveryId],
+      },
+      child: {
+        ...persistedChild!,
+        id: mismatchedRequest.childDeliveryId,
+        routeId: 'legacy-mismatched-route',
+      },
     };
     liveDb.exec(`
       DROP TABLE event_verifier_transitions;
+      DROP TABLE event_store_metadata;
       CREATE TABLE event_verifier_transitions (
         operation_id TEXT PRIMARY KEY,
         request_json TEXT NOT NULL,
@@ -330,18 +358,23 @@ describe('AxSQLiteEventStore', () => {
       );
       PRAGMA user_version = 2;
     `);
-    liveDb
-      .prepare(
-        `INSERT INTO event_verifier_transitions
+    const insertLegacy = liveDb.prepare(
+      `INSERT INTO event_verifier_transitions
          (operation_id, request_json, record_json, created_at)
          VALUES(?,?,?,?)`
-      )
-      .run(
-        request.operationId,
-        axEventCanonicalJson(request),
-        JSON.stringify(legacyRecord),
-        Date.now()
-      );
+    );
+    insertLegacy.run(
+      request.operationId,
+      axEventCanonicalJson(request),
+      JSON.stringify(legacyRecord),
+      Date.now()
+    );
+    insertLegacy.run(
+      mismatchedRequest.operationId,
+      axEventCanonicalJson(mismatchedRequest),
+      JSON.stringify(mismatchedRecord),
+      Date.now()
+    );
     await runtime.close({ drain: false });
 
     await new Promise((resolve) => setTimeout(resolve, 5));
@@ -352,6 +385,9 @@ describe('AxSQLiteEventStore', () => {
     expect(
       (await store.confirmVerifierTransition(request))?.deliveryIds
     ).toEqual([request.childDeliveryId]);
+    await expect(
+      store.confirmVerifierTransition(mismatchedRequest)
+    ).rejects.toThrow('already owned');
     const db = (store as any).db;
     const retained = db
       .prepare(
@@ -369,6 +405,23 @@ describe('AxSQLiteEventStore', () => {
     expect(
       JSON.stringify(db.prepare('SELECT run_json FROM event_runs').all())
     ).not.toContain(sensitive);
+
+    db.exec(`
+      CREATE TABLE migration_crash_sentinel(value TEXT NOT NULL);
+      INSERT INTO migration_crash_sentinel(value)
+      VALUES('${sensitive}');
+      DROP TABLE migration_crash_sentinel;
+      INSERT OR REPLACE INTO event_store_metadata(metadata_key, metadata_value)
+      VALUES('verifier-v2-cleanup-pending', '1');
+    `);
+    expect(
+      readFileSync(`${filename}-wal`).includes(Buffer.from(sensitive))
+    ).toBe(true);
+    const cleanupStore = new AxSQLiteEventStore({ filename, retention });
+    expect(
+      (await cleanupStore.confirmVerifierTransition(request))?.deliveryIds
+    ).toEqual([request.childDeliveryId]);
+    await cleanupStore.close();
     const row = db
       .prepare(
         'SELECT receipt_json FROM event_verifier_transitions WHERE operation_id=?'
@@ -383,10 +436,10 @@ describe('AxSQLiteEventStore', () => {
       'already owned'
     );
     await store.close();
-    for (const path of [filename, `${filename}-wal`]) {
-      if (existsSync(path)) {
-        expect(readFileSync(path).includes(Buffer.from(sensitive))).toBe(false);
-      }
+    for (const entry of readdirSync(directory)) {
+      expect(
+        readFileSync(join(directory, entry)).includes(Buffer.from(sensitive))
+      ).toBe(false);
     }
   });
 
