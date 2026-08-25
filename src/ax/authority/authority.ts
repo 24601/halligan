@@ -658,34 +658,51 @@ export function axFunctionAuthorityTarget(
   authority: Readonly<AxAuthorityContext>,
   qualifiedName?: string
 ): Readonly<{ operation: string; resource: AxResourceScope }> {
-  const protocol = fn.protocol;
+  const protocol = fn?.protocol;
+  const protocolKind = protocol?.kind;
+  const protocolNamespace = protocol?.namespace;
+  const protocolName = protocol?.name;
+  const componentId = fn?.componentId;
+  const functionName = fn?.name;
+  const principal = authority?.principal;
+  const tenantId = principal?.tenantId;
+  if (
+    protocol !== undefined &&
+    protocolKind !== 'mcp' &&
+    protocolKind !== 'ucp'
+  ) {
+    throw new Error('AxFunction.protocol.kind must be mcp or ucp');
+  }
+  if (protocol) {
+    nonEmpty(protocolNamespace, 'AxFunction.protocol.namespace');
+    nonEmpty(protocolName, 'AxFunction.protocol.name');
+  }
   const operation =
-    protocol?.kind === 'mcp'
+    protocolKind === 'mcp'
       ? 'mcp.tool.call'
-      : protocol?.kind === 'ucp'
+      : protocolKind === 'ucp'
         ? 'ucp.operation.call'
-        : fn.componentId?.startsWith('agent:')
+        : componentId?.startsWith('agent:')
           ? 'agent.invoke'
           : 'function.call';
   const type =
-    protocol?.kind === 'mcp'
+    protocolKind === 'mcp'
       ? 'mcp.tool'
-      : protocol?.kind === 'ucp'
+      : protocolKind === 'ucp'
         ? 'ucp.operation'
         : operation === 'agent.invoke'
           ? 'agent'
           : 'function';
   const id = protocol
-    ? `${protocol.namespace}:${protocol.name}`
-    : (fn.componentId ?? qualifiedName ?? fn.name);
+    ? `${protocolNamespace}:${protocolName}`
+    : (componentId ?? qualifiedName ?? functionName);
+  nonEmpty(id, 'AxFunction authority resource ID');
   return {
     operation,
     resource: {
       type,
       id,
-      ...(authority.principal.tenantId
-        ? { tenantId: authority.principal.tenantId }
-        : {}),
+      ...(tenantId ? { tenantId } : {}),
     },
   };
 }

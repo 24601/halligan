@@ -7,6 +7,7 @@ import {
   axAttenuateAuthority,
   axAuthorityClaim,
   axAuthorize,
+  axFunctionAuthorityTarget,
   axSnapshotAuthority,
 } from '../src/ax/authority/authority.js';
 import type {
@@ -509,6 +510,65 @@ export async function runAuthorityEvaluation(
   );
   await axAuthorize(getterSnapshot, 'record.read', resource);
   assert(getterReads === 1, 'getter-backed grant post-validation reread');
+
+  let protocolReads = 0;
+  let protocolKindReads = 0;
+  const getterProtocol = {
+    get kind() {
+      protocolKindReads++;
+      return protocolKindReads === 1 ? 'mcp' : 'ucp';
+    },
+    namespace: 'synthetic',
+    name: 'effect',
+  } as unknown as NonNullable<AxFunction['protocol']>;
+  const getterFunction = {
+    name: 'effect',
+    description: 'Synthetic getter target',
+    get protocol() {
+      protocolReads++;
+      return getterProtocol;
+    },
+    func: () => undefined,
+  } as AxFunction;
+  const getterTarget = axFunctionAuthorityTarget(
+    getterFunction,
+    getterSnapshot
+  );
+  assert(
+    protocolReads === 1 && protocolKindReads === 1,
+    'function authority target single capture'
+  );
+  assert(
+    getterTarget.operation === 'mcp.tool.call' &&
+      getterTarget.resource.type === 'mcp.tool' &&
+      getterTarget.resource.id === 'synthetic:effect',
+    'function authority target coherent tuple'
+  );
+
+  let childAuthorityReads = 0;
+  let childInheritanceReads = 0;
+  const restrictedAuthority = context({ grants: [] });
+  const privilegedAuthority = context();
+  const getterChild = axMCPChildExecutionOptions({
+    get authority() {
+      childAuthorityReads++;
+      return childAuthorityReads === 1
+        ? restrictedAuthority
+        : privilegedAuthority;
+    },
+    get authorityInheritance() {
+      childInheritanceReads++;
+      return 'all' as const;
+    },
+  });
+  assert(
+    childAuthorityReads === 1 && childInheritanceReads === 1,
+    'child options single capture'
+  );
+  assert(
+    getterChild.authority?.grants.length === 0,
+    'restricted child capture'
+  );
 
   let timedOutSignal: AbortSignal | undefined;
   assert(

@@ -535,25 +535,25 @@ export function axMCPChildExecutionOptions<
     mcp: _mcp,
     ucp: _ucp,
     mcpContext: _context,
-    eventContext: _eventContext,
-    authority: _authority,
-    authorityInheritance: _authorityInheritance,
+    _mcpExecutionContext: executionContext,
+    eventContext,
+    eventInheritance,
+    authority,
+    authorityInheritance,
     ...rest
   } = options;
-  const child = options._mcpExecutionContext?.forChild();
-  const childAuthority = !options.authority
+  const child = executionContext?.forChild();
+  const childAuthority = !authority
     ? undefined
-    : options.authorityInheritance === 'none'
-      ? axSnapshotAuthority({ ...options.authority, grants: [] })
-      : typeof options.authorityInheritance === 'object'
-        ? axAttenuateAuthority(options.authority, options.authorityInheritance)
-        : axSnapshotAuthority(options.authority);
+    : authorityInheritance === 'none'
+      ? axSnapshotAuthority({ ...authority, grants: [] })
+      : typeof authorityInheritance === 'object'
+        ? axAttenuateAuthority(authority, authorityInheritance)
+        : axSnapshotAuthority(authority);
   return {
     ...rest,
     ...(child ? { _mcpExecutionContext: child } : {}),
-    ...(options.eventInheritance !== 'none' && options.eventContext
-      ? { eventContext: options.eventContext }
-      : {}),
+    ...(eventInheritance !== 'none' && eventContext ? { eventContext } : {}),
     ...(childAuthority ? { authority: childAuthority } : {}),
   } as unknown as T;
 }

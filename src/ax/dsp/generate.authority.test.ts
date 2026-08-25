@@ -220,4 +220,26 @@ describe('native model function authority inheritance', () => {
       'read-child',
     ]);
   });
+
+  it('captures child authority and inheritance getters once before branching', () => {
+    let authorityReads = 0;
+    let inheritanceReads = 0;
+    const restricted = { ...authority(), grants: [] };
+    const privileged = authority();
+    const options = {
+      get authority() {
+        authorityReads++;
+        return authorityReads === 1 ? restricted : privileged;
+      },
+      get authorityInheritance() {
+        inheritanceReads++;
+        return 'all' as const;
+      },
+    };
+
+    const child = axMCPChildExecutionOptions(options);
+    expect(authorityReads).toBe(1);
+    expect(inheritanceReads).toBe(1);
+    expect(child.authority?.grants).toEqual([]);
+  });
 });

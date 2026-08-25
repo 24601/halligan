@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import type { AxFunction } from '../ai/types.js';
 import { axMCPChildExecutionOptions } from '../mcp/execution.js';
 import {
   type AxAuthorizationDeniedError,
@@ -125,6 +126,98 @@ describe('Ax host authority boundary', () => {
         resource: { type: protocol.type, id: 'records:lookup' },
       });
     }
+  });
+
+  it('captures function authority target fields once into a coherent tuple', () => {
+    const reads = {
+      protocol: 0,
+      kind: 0,
+      namespace: 0,
+      protocolName: 0,
+      componentId: 0,
+      functionName: 0,
+      principal: 0,
+      tenantId: 0,
+    };
+    const protocol = {
+      get kind() {
+        reads.kind++;
+        return reads.kind === 1 ? 'mcp' : 'ucp';
+      },
+      get namespace() {
+        reads.namespace++;
+        return 'records';
+      },
+      get name() {
+        reads.protocolName++;
+        return 'lookup';
+      },
+    } as unknown as NonNullable<AxFunction['protocol']>;
+    const fn = {
+      get name() {
+        reads.functionName++;
+        return 'fallback';
+      },
+      get componentId() {
+        reads.componentId++;
+        return reads.componentId === 1 ? 'agent:first' : 'agent:forged';
+      },
+      get protocol() {
+        reads.protocol++;
+        return protocol;
+      },
+      description: 'getter-backed function',
+      func: () => undefined,
+    } as AxFunction;
+    const principal = {
+      id: 'principal-a',
+      get tenantId() {
+        reads.tenantId++;
+        return 'tenant-a';
+      },
+    };
+    const host = {
+      ...authority(),
+      get principal() {
+        reads.principal++;
+        return principal;
+      },
+    };
+
+    expect(axFunctionAuthorityTarget(fn, host)).toEqual({
+      operation: 'mcp.tool.call',
+      resource: {
+        type: 'mcp.tool',
+        id: 'records:lookup',
+        tenantId: 'tenant-a',
+      },
+    });
+    expect(reads).toEqual({
+      protocol: 1,
+      kind: 1,
+      namespace: 1,
+      protocolName: 1,
+      componentId: 1,
+      functionName: 1,
+      principal: 1,
+      tenantId: 1,
+    });
+
+    let componentReads = 0;
+    const componentFn = {
+      name: 'fallback',
+      get componentId() {
+        componentReads++;
+        return componentReads === 1 ? 'agent:first' : 'function:forged';
+      },
+      description: 'getter-backed component',
+      func: () => undefined,
+    } as AxFunction;
+    expect(axFunctionAuthorityTarget(componentFn, authority())).toMatchObject({
+      operation: 'agent.invoke',
+      resource: { type: 'agent', id: 'agent:first' },
+    });
+    expect(componentReads).toBe(1);
   });
 
   it('requires an active exact operation, resource, tenant, actor, and lease grant', async () => {

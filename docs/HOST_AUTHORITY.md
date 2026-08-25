@@ -159,8 +159,9 @@ It declares an **unscoped operation callback** as the baseline and compares it
 against exact scoped grants. It covers confused-deputy operation/resource
 attempts, stale/revoked/expired grants, tenant and human-vs-agent mismatch,
 delegation attenuation and no expansion, child cancellation, malformed legacy
-claims, getter-backed input capture, nested mutation, ignored abort, two-level
-attenuation, and forged model claims through production model request/response
+claims, getter-backed authority/function-target/child-option capture, nested
+mutation, ignored abort, two-level attenuation, and forged model claims through
+production model request/response
 dispatch for ordinary functions and attached MCP/UCP operations, native DSP,
 and redrive paths. It also covers exact receipt binding, audit redaction, and
 local callback overhead. Timing is an environment-specific observation, not a gate.
