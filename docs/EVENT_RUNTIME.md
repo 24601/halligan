@@ -124,40 +124,66 @@ limits. Map only consented, necessary fields, redact before this boundary, and
 set an application retention policy: cursor retention is not permission to
 collect or keep unrelated personal data.
 
+Detector and standing-grant callbacks receive separate deeply frozen copies;
+the store receives a different canonical clone, so callback mutation cannot
+rewrite retained identity, evidence, or provenance. Grant validation receives
+a structured context containing its opaque reference, observation, boundary
+scope, and abort signal. The scope always binds boundary ID, route ID, instance
+key, and principal identity around the host's local observation/dedupe key. A
+custom observation mapper cannot remove that authority scope.
+
 Observation validation and size failures reject explicitly before detector
 invocation; rejected host input is not retained. A detection's `confidence` is
 its estimated demand probability, not authority or an action score. Host
 disposition allowlists must contain `ignore` or `annotate`, and every fallback
 stays within that allowlist.
 
+Observation, provenance, and expiry times must be non-negative safe integer
+timestamps. Evidence beyond the configured future-skew allowance (five minutes
+by default) is ignored. Detector and grant callbacks are abortable and bounded
+to 30 seconds by default. A timeout is retained as fail-closed uncertainty;
+caller or runtime cancellation rejects the observation and is never converted
+into successful evidence.
+
 `AxInMemoryDemandStore` retains cursor-addressable records, supports snapshots
 for tests and process-managed restoration, and atomically deduplicates appended
-proposals in one process. It is volatile and concurrent duplicate calls may
-both reach the detector before one append wins. Production hosts that require
-durable or distributed exactly-once detection should supply an `AxDemandStore`
-with atomic dedupe and persistence. The detector itself remains host-supplied;
-Ax does not start a classifier, timer, notification system, or generic agent
-loop.
+proposals in one process. A boundary also single-flights concurrent callbacks
+for the same scoped key. Each waiter owns its cancellation independently; work
+is aborted only when no waiters remain. Pending work is bounded to 1,000 keys
+and 64 MiB by default. Separate processes or boundary instances still need a
+host reservation protocol if callback-level exactly-once behavior is required.
+
+The in-memory defaults retain at most 10,000 records, 64 MiB, 1,000 scopes,
+1,000 records per scope, and seven days. Oldest records/scopes are evicted when
+a bound is crossed; retention eviction also removes their dedupe keys, so a
+later replay can be evaluated again. Scope components default to a combined 16
+KiB bound. Production hosts should supply an `AxDemandStore` with explicit
+atomic dedupe, persistence, and retention. The detector itself remains
+host-supplied; Ax does not start a classifier, timer, notification system, or
+generic agent loop.
 
 Dedupe keys identify immutable observations. Replaying a key returns the
 original retained record even after its proposal expires; a genuinely new
 observation needs a new host-selected key. Expiry prevents a proposal from
-remaining current, not an event from remaining deduplicated.
+remaining current, not an event from remaining deduplicated. Duplicate receipts
+are explicitly `historical: true`; hosts must never treat a prior grant state as
+current authority.
 
-Run the deterministic, zero-network held-out evaluation with:
+Run the deterministic mechanism evaluation with:
 
 ```bash
 npm run event:demand:eval
 npx vitest run scripts/eval-demand-boundary.test.ts
 ```
 
-The fixed temporal split contains 40 synthetic observations (8 demand, 32
+The fixed ID-addressed fixture contains 40 synthetic observations (8 demand, 32
 no-demand) and reports confusion counts, precision/recall, Brier score, ECE,
-false fires, retained-but-not-fired demand, detector calls, latency, and bytes
-against reactive and naive confidence-threshold baselines. It is a policy
-characterization, not a model-quality claim: the deliberately misleading
-well-formed detector remains a false fire, while conservative handling reduces
-recall.
+false fires, retained-but-not-fired demand, measured callback counts/latency,
+and bytes against reactive and naive confidence-threshold baselines. Fixtures,
+labels, and outputs are checked in together: this characterizes policy
+mechanics and is explicitly **not** an independent model held-out evaluation or
+an improvement claim. The deliberately misleading well-formed detector remains
+a false fire, while conservative handling reduces recall.
 
 The checked-in fixed result is:
 
@@ -170,10 +196,12 @@ The checked-in fixed result is:
 False fire and false suppression are FP and FN respectively. Detector
 calibration over the 39 structurally valid detector scores is Brier 0.132826
 and 5-bucket ECE 0.230; the deliberately malformed score is excluded. The
-boundary retained all 40 records and made 40 deterministic detector calls, 0
-paid/network calls, and 0 effects. It measured 0 ms synthetic detector latency,
-10,106 observation bytes, and 13,523 detection bytes. These byte and latency
-values characterize this fixture and machine, not performance limits.
+boundary retained all 40 records, measured 40 detector and two grant-validator
+callbacks, 10,146 observation bytes, and 13,523 detection bytes. The command
+also reports monotonic detector and end-to-end evaluation latency for that run;
+latency is not asserted as a fixed-clock zero. No provider or effect callback is
+configured by this fixture. These values characterize the mechanism fixture,
+not model quality or performance limits.
 
 ## Signature-Aware Input Mapping
 

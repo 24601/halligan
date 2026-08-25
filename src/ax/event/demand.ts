@@ -55,18 +55,40 @@ export interface AxDemandDetector {
   version: string;
   detect(
     observation: Readonly<AxDemandObservation>,
-    context: Readonly<{ signal?: AbortSignal }>
+    context: Readonly<{
+      signal: AbortSignal;
+      scope: Readonly<AxDemandScope>;
+    }>
   ): Readonly<AxDemandDetection> | Promise<Readonly<AxDemandDetection>>;
 }
 
 export type AxDemandGrantState = 'valid' | 'revoked' | 'expired' | 'unknown';
 
+export interface AxDemandScope {
+  boundaryId: string;
+  routeId: string;
+  instanceKey: string;
+  principalScope: string;
+}
+
+export interface AxDemandGrantValidationContext {
+  reference: string;
+  observation: Readonly<AxDemandObservation>;
+  scope: Readonly<AxDemandScope>;
+  signal: AbortSignal;
+}
+
 export interface AxDemandPolicy {
   allowedDispositions?: readonly AxDemandDisposition[];
   minimumConfidence?: Partial<Readonly<Record<AxDemandDisposition, number>>>;
   maxObservationAgeMs?: number;
+  maxFutureSkewMs?: number;
   proposalTtlMs?: number;
+  callbackTimeoutMs?: number;
+  maxInFlight?: number;
+  maxInFlightBytes?: number;
   requireStandingGrantFor?: readonly AxDemandDisposition[];
+  maxScopeBytes?: number;
   maxObservationBytes?: number;
   maxDetectionBytes?: number;
 }
@@ -85,6 +107,7 @@ export interface AxDemandProposal {
 
 export interface AxDemandRecord {
   cursor: string;
+  scope: Readonly<AxDemandScope>;
   observation: Readonly<AxDemandObservation>;
   detection: Readonly<AxDemandDetection>;
   proposal: Readonly<AxDemandProposal>;
@@ -119,19 +142,32 @@ export interface AxDemandStore {
 }
 
 export interface AxDemandBoundaryOptions {
+  id?: string;
   detector: AxDemandDetector;
   store?: AxDemandStore;
   policy?: Readonly<AxDemandPolicy>;
   now?: () => number;
+  measureNow?: () => number;
   validateStandingGrant?: (
-    reference: string,
-    observation: Readonly<AxDemandObservation>
+    context: Readonly<AxDemandGrantValidationContext>
   ) => AxDemandGrantState | Promise<AxDemandGrantState>;
 }
 
 export interface AxDemandReceipt {
   record: Readonly<AxDemandRecord>;
   duplicate: boolean;
+  /** Duplicate receipts are historical snapshots and never fresh authority. */
+  historical: boolean;
+}
+
+export interface AxInMemoryDemandStoreOptions {
+  seed?: readonly Readonly<AxDemandRecord>[];
+  maxRecords?: number;
+  maxBytes?: number;
+  maxScopes?: number;
+  maxRecordsPerScope?: number;
+  retentionMs?: number;
+  now?: () => number;
 }
 
 const dispositions: readonly AxDemandDisposition[] = [
@@ -161,6 +197,19 @@ function clone<T>(value: T): T {
   return structuredClone(value);
 }
 
+function deepFreeze<T>(value: T, seen = new WeakSet<object>()): Readonly<T> {
+  if (typeof value !== 'object' || value === null || seen.has(value)) {
+    return value;
+  }
+  seen.add(value);
+  for (const child of Object.values(value)) deepFreeze(child, seen);
+  return Object.freeze(value);
+}
+
+function frozenClone<T>(value: T): Readonly<T> {
+  return deepFreeze(clone(value));
+}
+
 function finiteProbability(value: number, label: string): number {
   if (!Number.isFinite(value) || value < 0 || value > 1) {
     throw new Error(`${label} must be between 0 and 1`);
@@ -173,6 +222,13 @@ function nonEmpty(value: string, label: string): string {
   return value;
 }
 
+function finiteTimestamp(value: number, label: string): number {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${label} must be a non-negative safe integer timestamp`);
+  }
+  return value;
+}
+
 function validateProvenance(
   evidence: readonly Readonly<AxDemandProvenance>[],
   label: string
@@ -180,9 +236,7 @@ function validateProvenance(
   for (const [index, item] of evidence.entries()) {
     nonEmpty(item.source, `${label}[${index}].source`);
     nonEmpty(item.reference, `${label}[${index}].reference`);
-    if (!Number.isFinite(item.observedAt)) {
-      throw new Error(`${label}[${index}].observedAt must be finite`);
-    }
+    finiteTimestamp(item.observedAt, `${label}[${index}].observedAt`);
   }
 }
 
@@ -190,8 +244,9 @@ function validateObservation(observation: Readonly<AxDemandObservation>): void {
   nonEmpty(observation.id, 'AxDemandObservation.id');
   nonEmpty(observation.source, 'AxDemandObservation.source');
   nonEmpty(observation.type, 'AxDemandObservation.type');
-  if (!Number.isFinite(observation.observedAt)) {
-    throw new Error('AxDemandObservation.observedAt must be finite');
+  finiteTimestamp(observation.observedAt, 'AxDemandObservation.observedAt');
+  if (observation.expiresAt !== undefined) {
+    finiteTimestamp(observation.expiresAt, 'AxDemandObservation.expiresAt');
   }
   validateProvenance(observation.provenance, 'observation.provenance');
   axValidateEventEnvelope({
@@ -214,6 +269,9 @@ function validateDetection(detection: Readonly<AxDemandDetection>): void {
   }
   nonEmpty(detection.reasonCode, 'detection.reasonCode');
   validateProvenance(detection.evidence, 'detection.evidence');
+  if (detection.expiresAt !== undefined) {
+    finiteTimestamp(detection.expiresAt, 'detection.expiresAt');
+  }
   if (detection.calibration) {
     nonEmpty(detection.calibration.method, 'detection.calibration.method');
     nonEmpty(detection.calibration.version, 'detection.calibration.version');
@@ -248,19 +306,140 @@ function uncertainDetection(
   };
 }
 
-export class AxInMemoryDemandStore implements AxDemandStore {
-  private readonly records: AxDemandRecord[] = [];
-  private readonly byDedupeKey = new Map<string, AxDemandRecord>();
+class AxDemandCallbackTimeoutError extends Error {
+  constructor() {
+    super('Ax demand callback timed out');
+    this.name = 'AxDemandCallbackTimeoutError';
+  }
+}
 
-  constructor(seed: readonly Readonly<AxDemandRecord>[] = []) {
-    for (const record of seed) {
-      const copied = clone(record);
-      this.records.push(copied);
-      this.byDedupeKey.set(copied.proposal.dedupeKey, copied);
+class AxDemandCancelledError extends Error {
+  constructor(readonly reason: unknown) {
+    super('Ax demand observation was cancelled');
+    this.name = 'AbortError';
+  }
+}
+
+async function runBoundedCallback<T>(
+  callback: (signal: AbortSignal) => T | Promise<T>,
+  signal: AbortSignal | undefined,
+  timeoutMs: number
+): Promise<T> {
+  if (signal?.aborted) throw new AxDemandCancelledError(signal.reason);
+  const controller = new AbortController();
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  const cancellation = new Promise<never>((_, reject) => {
+    onAbort = () => {
+      const error = new AxDemandCancelledError(signal?.reason);
+      controller.abort(error);
+      reject(error);
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+  const deadline = new Promise<never>((_, reject) => {
+    timeout = setTimeout(() => {
+      const error = new AxDemandCallbackTimeoutError();
+      controller.abort(error);
+      reject(error);
+    }, timeoutMs);
+  });
+  const operation = Promise.resolve().then(() => callback(controller.signal));
+  try {
+    return await Promise.race([operation, cancellation, deadline]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+    if (onAbort) signal?.removeEventListener('abort', onAbort);
+  }
+}
+
+async function waitForSharedWork<T>(
+  promise: Promise<T>,
+  signal: AbortSignal | undefined
+): Promise<T> {
+  if (signal?.aborted) throw new AxDemandCancelledError(signal.reason);
+  let onAbort: (() => void) | undefined;
+  const cancellation = new Promise<never>((_, reject) => {
+    onAbort = () => reject(new AxDemandCancelledError(signal?.reason));
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([promise, cancellation]);
+  } finally {
+    if (onAbort) signal?.removeEventListener('abort', onAbort);
+  }
+}
+
+export class AxInMemoryDemandStore implements AxDemandStore {
+  private readonly records: Array<{
+    record: AxDemandRecord;
+    size: number;
+  }> = [];
+  private readonly byDedupeKey = new Map<string, AxDemandRecord>();
+  private readonly limits: Readonly<{
+    maxRecords: number;
+    maxBytes: number;
+    maxScopes: number;
+    maxRecordsPerScope: number;
+    retentionMs: number;
+  }>;
+  private readonly now: () => number;
+  private totalBytes = 0;
+  private nextCursor = 1;
+
+  constructor(
+    options:
+      | Readonly<AxInMemoryDemandStoreOptions>
+      | readonly Readonly<AxDemandRecord>[] = {}
+  ) {
+    const normalized: Readonly<AxInMemoryDemandStoreOptions> = Array.isArray(
+      options
+    )
+      ? { seed: options }
+      : (options as Readonly<AxInMemoryDemandStoreOptions>);
+    this.now = normalized.now ?? Date.now;
+    this.limits = {
+      maxRecords: normalized.maxRecords ?? 10_000,
+      maxBytes: normalized.maxBytes ?? 64 * 1024 * 1024,
+      maxScopes: normalized.maxScopes ?? 1_000,
+      maxRecordsPerScope: normalized.maxRecordsPerScope ?? 1_000,
+      retentionMs: normalized.retentionMs ?? 7 * 86_400_000,
+    };
+    if (
+      !Number.isSafeInteger(this.limits.maxRecords) ||
+      this.limits.maxRecords < 1 ||
+      !Number.isSafeInteger(this.limits.maxBytes) ||
+      this.limits.maxBytes < 1 ||
+      !Number.isSafeInteger(this.limits.maxScopes) ||
+      this.limits.maxScopes < 1 ||
+      !Number.isSafeInteger(this.limits.maxRecordsPerScope) ||
+      this.limits.maxRecordsPerScope < 1 ||
+      !Number.isSafeInteger(this.limits.retentionMs) ||
+      this.limits.retentionMs < 0
+    ) {
+      throw new Error('AxInMemoryDemandStore bounds are invalid');
     }
+    for (const record of normalized.seed ?? []) {
+      const copied = clone(record);
+      const size = bytes(copied);
+      this.records.push({ record: copied, size });
+      this.totalBytes += size;
+      this.byDedupeKey.set(copied.proposal.dedupeKey, copied);
+      const cursor = Number(copied.cursor);
+      if (!Number.isSafeInteger(cursor) || cursor < 1) {
+        throw new Error('AxInMemoryDemandStore seed cursor is invalid');
+      }
+      const following =
+        cursor === Number.MAX_SAFE_INTEGER
+          ? Number.POSITIVE_INFINITY
+          : cursor + 1;
+      this.nextCursor = Math.max(this.nextCursor, following);
+    }
+    this.enforceBounds();
   }
 
   getByDedupeKey(key: string): Promise<Readonly<AxDemandRecord> | undefined> {
+    this.pruneExpired();
     const record = this.byDedupeKey.get(key);
     return Promise.resolve(record ? clone(record) : undefined);
   }
@@ -268,16 +447,31 @@ export class AxInMemoryDemandStore implements AxDemandStore {
   append(
     value: Readonly<Omit<AxDemandRecord, 'cursor'>>
   ): Promise<Readonly<AxDemandAppendResult>> {
+    this.pruneExpired();
     const duplicate = this.byDedupeKey.get(value.proposal.dedupeKey);
     if (duplicate) {
       return Promise.resolve({ record: clone(duplicate), duplicate: true });
     }
+    if (!Number.isSafeInteger(this.nextCursor)) {
+      throw new Error('AxInMemoryDemandStore cursor capacity was exhausted');
+    }
+    const cursor = this.nextCursor;
+    this.nextCursor =
+      cursor === Number.MAX_SAFE_INTEGER
+        ? Number.POSITIVE_INFINITY
+        : cursor + 1;
     const record: AxDemandRecord = {
       ...clone(value),
-      cursor: String(this.records.length + 1),
+      cursor: String(cursor),
     };
-    this.records.push(record);
+    const size = bytes(record);
+    if (size > this.limits.maxBytes) {
+      throw new Error('AxDemandRecord exceeds the store byte bound');
+    }
+    this.records.push({ record, size });
+    this.totalBytes += size;
     this.byDedupeKey.set(record.proposal.dedupeKey, record);
+    this.enforceBounds();
     return Promise.resolve({ record: clone(record), duplicate: false });
   }
 
@@ -286,6 +480,7 @@ export class AxInMemoryDemandStore implements AxDemandStore {
   ): Promise<
     Readonly<{ records: readonly Readonly<AxDemandRecord>[]; next?: string }>
   > {
+    this.pruneExpired();
     const after = options.after === undefined ? 0 : Number(options.after);
     if (!Number.isSafeInteger(after) || after < 0) {
       throw new Error('AxDemandStore cursor is invalid');
@@ -294,37 +489,138 @@ export class AxInMemoryDemandStore implements AxDemandStore {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) {
       throw new Error('AxDemandStore limit must be between 1 and 1000');
     }
-    const records = this.records.slice(after, after + limit).map(clone);
+    const records = this.records
+      .filter(({ record }) => Number(record.cursor) > after)
+      .slice(0, limit)
+      .map(({ record }) => clone(record));
     const next = records.at(-1)?.cursor;
     return Promise.resolve({ records, ...(next ? { next } : {}) });
   }
 
   snapshot(): readonly Readonly<AxDemandRecord>[] {
-    return this.records.map(clone);
+    this.pruneExpired();
+    return this.records.map(({ record }) => clone(record));
+  }
+
+  private scopeKey(record: Readonly<AxDemandRecord>): string {
+    return JSON.stringify([
+      record.scope.boundaryId,
+      record.scope.routeId,
+      record.scope.instanceKey,
+      record.scope.principalScope,
+    ]);
+  }
+
+  private removeAt(index: number): void {
+    const removed = this.records.splice(index, 1)[0];
+    if (!removed) return;
+    this.totalBytes -= removed.size;
+    if (
+      this.byDedupeKey.get(removed.record.proposal.dedupeKey) === removed.record
+    ) {
+      this.byDedupeKey.delete(removed.record.proposal.dedupeKey);
+    }
+  }
+
+  private pruneExpired(): void {
+    const cutoff = this.now() - this.limits.retentionMs;
+    for (let index = this.records.length - 1; index >= 0; index--) {
+      if (this.records[index]!.record.createdAt < cutoff) this.removeAt(index);
+    }
+  }
+
+  private enforceBounds(): void {
+    const counts = () => {
+      const result = new Map<string, number>();
+      for (const { record } of this.records) {
+        const key = this.scopeKey(record);
+        result.set(key, (result.get(key) ?? 0) + 1);
+      }
+      return result;
+    };
+    let byScope = counts();
+    while (byScope.size > this.limits.maxScopes) {
+      const oldestScope = this.records[0]
+        ? this.scopeKey(this.records[0].record)
+        : undefined;
+      if (!oldestScope) break;
+      for (let index = this.records.length - 1; index >= 0; index--) {
+        if (this.scopeKey(this.records[index]!.record) === oldestScope) {
+          this.removeAt(index);
+        }
+      }
+      byScope = counts();
+    }
+    for (const [scope, count] of byScope) {
+      let excess = count - this.limits.maxRecordsPerScope;
+      for (let index = 0; excess > 0 && index < this.records.length; ) {
+        if (this.scopeKey(this.records[index]!.record) === scope) {
+          this.removeAt(index);
+          excess--;
+        } else {
+          index++;
+        }
+      }
+    }
+    while (
+      this.records.length > this.limits.maxRecords ||
+      this.totalBytes > this.limits.maxBytes
+    ) {
+      this.removeAt(0);
+    }
   }
 }
 
 export class AxDemandBoundary {
+  readonly id: string;
   readonly store: AxDemandStore;
   private readonly detector: AxDemandDetector;
+  private readonly detectorIdentity: Readonly<{ id: string; version: string }>;
   private readonly policy: Readonly<{
     allowedDispositions: readonly AxDemandDisposition[];
     minimumConfidence: Readonly<Record<AxDemandDisposition, number>>;
     maxObservationAgeMs: number;
+    maxFutureSkewMs: number;
     proposalTtlMs: number;
+    callbackTimeoutMs: number;
+    maxInFlight: number;
+    maxInFlightBytes: number;
     requireStandingGrantFor: readonly AxDemandDisposition[];
+    maxScopeBytes: number;
     maxObservationBytes: number;
     maxDetectionBytes: number;
   }>;
   private readonly now: () => number;
+  private readonly measureNow: () => number;
   private readonly validateStandingGrant?: AxDemandBoundaryOptions['validateStandingGrant'];
+  private readonly inFlight = new Map<
+    string,
+    {
+      promise: Promise<Readonly<AxDemandReceipt>>;
+      controller: AbortController;
+      waiters: number;
+      size: number;
+    }
+  >();
+  private inFlightBytes = 0;
 
   constructor(options: Readonly<AxDemandBoundaryOptions>) {
     nonEmpty(options.detector.id, 'AxDemandDetector.id');
     nonEmpty(options.detector.version, 'AxDemandDetector.version');
+    this.id = nonEmpty(
+      options.id ?? `${options.detector.id}@${options.detector.version}`,
+      'AxDemandBoundary.id'
+    );
     this.detector = options.detector;
-    this.store = options.store ?? new AxInMemoryDemandStore();
+    this.detectorIdentity = Object.freeze({
+      id: options.detector.id,
+      version: options.detector.version,
+    });
     this.now = options.now ?? Date.now;
+    this.measureNow =
+      options.measureNow ??
+      (() => globalThis.performance?.now?.() ?? Date.now());
+    this.store = options.store ?? new AxInMemoryDemandStore({ now: this.now });
     this.validateStandingGrant = options.validateStandingGrant;
     const allowed = options.policy?.allowedDispositions ?? dispositions;
     if (
@@ -347,18 +643,33 @@ export class AxDemandBoundary {
       allowedDispositions: [...allowed],
       minimumConfidence,
       maxObservationAgeMs: options.policy?.maxObservationAgeMs ?? 86_400_000,
+      maxFutureSkewMs: options.policy?.maxFutureSkewMs ?? 300_000,
       proposalTtlMs: options.policy?.proposalTtlMs ?? 3_600_000,
+      callbackTimeoutMs: options.policy?.callbackTimeoutMs ?? 30_000,
+      maxInFlight: options.policy?.maxInFlight ?? 1_000,
+      maxInFlightBytes: options.policy?.maxInFlightBytes ?? 64 * 1024 * 1024,
       requireStandingGrantFor: options.policy?.requireStandingGrantFor ?? [
         'act',
       ],
+      maxScopeBytes: options.policy?.maxScopeBytes ?? 16 * 1024,
       maxObservationBytes: options.policy?.maxObservationBytes ?? 1024 * 1024,
       maxDetectionBytes: options.policy?.maxDetectionBytes ?? 64 * 1024,
     };
     if (
-      !Number.isFinite(this.policy.maxObservationAgeMs) ||
+      !Number.isSafeInteger(this.policy.maxObservationAgeMs) ||
       this.policy.maxObservationAgeMs < 0 ||
-      !Number.isFinite(this.policy.proposalTtlMs) ||
+      !Number.isSafeInteger(this.policy.maxFutureSkewMs) ||
+      this.policy.maxFutureSkewMs < 0 ||
+      !Number.isSafeInteger(this.policy.proposalTtlMs) ||
       this.policy.proposalTtlMs <= 0 ||
+      !Number.isSafeInteger(this.policy.callbackTimeoutMs) ||
+      this.policy.callbackTimeoutMs <= 0 ||
+      !Number.isSafeInteger(this.policy.maxInFlight) ||
+      this.policy.maxInFlight < 1 ||
+      !Number.isSafeInteger(this.policy.maxInFlightBytes) ||
+      this.policy.maxInFlightBytes < 1 ||
+      !Number.isSafeInteger(this.policy.maxScopeBytes) ||
+      this.policy.maxScopeBytes < 1 ||
       !Number.isSafeInteger(this.policy.maxObservationBytes) ||
       this.policy.maxObservationBytes < 1 ||
       !Number.isSafeInteger(this.policy.maxDetectionBytes) ||
@@ -370,8 +681,14 @@ export class AxDemandBoundary {
 
   async observe(
     rawObservation: Readonly<AxDemandObservation>,
-    options: Readonly<{ signal?: AbortSignal }> = {}
+    options: Readonly<{
+      signal?: AbortSignal;
+      scope?: Readonly<Partial<Omit<AxDemandScope, 'boundaryId'>>>;
+    }> = {}
   ): Promise<Readonly<AxDemandReceipt>> {
+    if (options.signal?.aborted) {
+      throw new AxDemandCancelledError(options.signal.reason);
+    }
     validateObservation(rawObservation);
     const observation = clone(rawObservation);
     const observationBytes = bytes(observation);
@@ -380,14 +697,96 @@ export class AxDemandBoundary {
         `AxDemandObservation is ${observationBytes} bytes; maximum is ${this.policy.maxObservationBytes}`
       );
     }
-    const dedupeKey = observation.dedupeKey ?? observation.id;
+    const scope = deepFreeze({
+      boundaryId: this.id,
+      routeId: options.scope?.routeId ?? 'direct',
+      instanceKey: options.scope?.instanceKey ?? 'default',
+      principalScope: options.scope?.principalScope ?? 'anonymous',
+    });
+    nonEmpty(scope.routeId, 'AxDemandScope.routeId');
+    nonEmpty(scope.instanceKey, 'AxDemandScope.instanceKey');
+    nonEmpty(scope.principalScope, 'AxDemandScope.principalScope');
+    if (bytes(scope) > this.policy.maxScopeBytes) {
+      throw new Error('AxDemandScope exceeds the configured byte bound');
+    }
+    const localDedupeKey = observation.dedupeKey ?? observation.id;
+    nonEmpty(localDedupeKey, 'AxDemandObservation.dedupeKey');
+    const dedupeKey = JSON.stringify([
+      scope.boundaryId,
+      scope.routeId,
+      scope.instanceKey,
+      scope.principalScope,
+      localDedupeKey,
+    ]);
     const existing = await this.store.getByDedupeKey(dedupeKey);
-    if (existing) return { record: existing, duplicate: true };
+    if (existing) {
+      return { record: existing, duplicate: true, historical: true };
+    }
+    let pending = this.inFlight.get(dedupeKey);
+    const duplicate = Boolean(pending);
+    if (!pending) {
+      const size = observationBytes + bytes(scope) + bytes(dedupeKey);
+      if (
+        this.inFlight.size >= this.policy.maxInFlight ||
+        this.inFlightBytes + size > this.policy.maxInFlightBytes
+      ) {
+        throw new Error('AxDemandBoundary in-flight capacity was exhausted');
+      }
+      const controller = new AbortController();
+      const promise = this.process(
+        observation,
+        observationBytes,
+        scope,
+        dedupeKey,
+        controller.signal
+      );
+      pending = { promise, controller, waiters: 0, size };
+      this.inFlight.set(dedupeKey, pending);
+      this.inFlightBytes += size;
+      const cleanup = () => {
+        if (this.inFlight.get(dedupeKey) === pending) {
+          this.inFlight.delete(dedupeKey);
+          this.inFlightBytes -= size;
+        }
+      };
+      void promise.then(cleanup, cleanup);
+    }
+    pending.waiters++;
+    try {
+      const receipt = await waitForSharedWork(pending.promise, options.signal);
+      return duplicate
+        ? { ...receipt, duplicate: true, historical: true }
+        : receipt;
+    } finally {
+      pending.waiters--;
+      if (pending.waiters === 0 && this.inFlight.get(dedupeKey) === pending) {
+        pending.controller.abort('No observers remain for demand work');
+      }
+    }
+  }
 
-    const startedAt = this.now();
+  private async process(
+    observation: Readonly<AxDemandObservation>,
+    observationBytes: number,
+    scope: Readonly<AxDemandScope>,
+    dedupeKey: string,
+    signal: AbortSignal | undefined
+  ): Promise<Readonly<AxDemandReceipt>> {
+    const startedAt = this.measureNow();
+    if (!Number.isFinite(startedAt)) {
+      throw new Error('AxDemandBoundary.measureNow() must be finite');
+    }
     let detection: Readonly<AxDemandDetection>;
     try {
-      const candidate = await this.detector.detect(observation, options);
+      const candidate = await runBoundedCallback(
+        (callbackSignal) =>
+          this.detector.detect(
+            frozenClone(observation),
+            Object.freeze({ signal: callbackSignal, scope: frozenClone(scope) })
+          ),
+        signal,
+        this.policy.callbackTimeoutMs
+      );
       validateDetection(candidate);
       const candidateBytes = bytes(candidate);
       if (candidateBytes > this.policy.maxDetectionBytes) {
@@ -397,19 +796,32 @@ export class AxDemandBoundary {
       }
       detection = clone(candidate);
     } catch (error) {
+      if (error instanceof AxDemandCancelledError) throw error;
       detection = uncertainDetection(
-        'detector_invalid',
+        error instanceof AxDemandCallbackTimeoutError
+          ? 'detector_timeout'
+          : 'detector_invalid',
         error instanceof Error ? error.message : String(error)
       );
     }
-    const finishedAt = this.now();
-    const proposal = await this.propose(observation, detection, dedupeKey);
+    const finishedAt = this.measureNow();
+    if (!Number.isFinite(finishedAt)) {
+      throw new Error('AxDemandBoundary.measureNow() must be finite');
+    }
+    const proposal = await this.propose(
+      observation,
+      detection,
+      scope,
+      dedupeKey,
+      signal
+    );
     const appended = await this.store.append({
+      scope,
       observation,
       detection,
       proposal,
-      detector: { id: this.detector.id, version: this.detector.version },
-      createdAt: finishedAt,
+      detector: this.detectorIdentity,
+      createdAt: finiteTimestamp(this.now(), 'AxDemandBoundary.now()'),
       metrics: {
         detectorCalls: 1,
         detectorLatencyMs: Math.max(0, finishedAt - startedAt),
@@ -417,7 +829,10 @@ export class AxDemandBoundary {
         detectionBytes: bytes(detection),
       },
     });
-    return appended;
+    return {
+      ...appended,
+      historical: appended.duplicate,
+    };
   }
 
   list(options?: Readonly<{ after?: string; limit?: number }>) {
@@ -427,9 +842,11 @@ export class AxDemandBoundary {
   private async propose(
     observation: Readonly<AxDemandObservation>,
     detection: Readonly<AxDemandDetection>,
-    fallbackDedupeKey: string
+    scope: Readonly<AxDemandScope>,
+    fallbackDedupeKey: string,
+    signal: AbortSignal | undefined
   ): Promise<Readonly<AxDemandProposal>> {
-    const now = this.now();
+    const now = finiteTimestamp(this.now(), 'AxDemandBoundary.now()');
     const reasonCodes = [detection.reasonCode];
     let disposition = detection.requestedDisposition;
     let standingGrantState: AxDemandGrantState | undefined;
@@ -453,6 +870,10 @@ export class AxDemandBoundary {
     if (stale) {
       disposition = safeDisposition('ignore');
       reasonCodes.push('stale_observation');
+    }
+    if (observation.observedAt - now > this.policy.maxFutureSkewMs) {
+      disposition = safeDisposition('ignore');
+      reasonCodes.push('future_observation');
     }
     if (detection.expiresAt !== undefined && detection.expiresAt <= now) {
       disposition = safeDisposition('ignore');
@@ -483,11 +904,21 @@ export class AxDemandBoundary {
         standingGrantState = 'unknown';
       } else {
         try {
-          standingGrantState = await this.validateStandingGrant(
-            detection.standingGrantRef,
-            observation
+          standingGrantState = await runBoundedCallback(
+            (callbackSignal) =>
+              this.validateStandingGrant?.(
+                Object.freeze({
+                  reference: detection.standingGrantRef!,
+                  observation: frozenClone(observation),
+                  scope: frozenClone(scope),
+                  signal: callbackSignal,
+                })
+              ) ?? 'unknown',
+            signal,
+            this.policy.callbackTimeoutMs
           );
-        } catch {
+        } catch (error) {
+          if (error instanceof AxDemandCancelledError) throw error;
           standingGrantState = 'unknown';
         }
       }
@@ -500,9 +931,13 @@ export class AxDemandBoundary {
       detection.expiresAt ?? Number.POSITIVE_INFINITY,
       observation.expiresAt ?? Number.POSITIVE_INFINITY
     );
-    const expiresAt = Math.min(
-      now + this.policy.proposalTtlMs,
-      requestedExpiry
+    const policyExpiry =
+      this.policy.proposalTtlMs > Number.MAX_SAFE_INTEGER - now
+        ? Number.MAX_SAFE_INTEGER
+        : now + this.policy.proposalTtlMs;
+    const expiresAt = finiteTimestamp(
+      Math.min(policyExpiry, requestedExpiry),
+      'AxDemandProposal.expiresAt'
     );
     return Object.freeze({
       disposition,
@@ -534,7 +969,7 @@ export function axDemandEventObserver(
 ) => Promise<void> {
   return async (ingress, context) => {
     const observation = map?.(ingress, context) ?? {
-      id: `${axEventIdentityScope(ingress.identity)}\n${ingress.event.source}\n${ingress.event.id}`,
+      id: `${ingress.event.source}\n${ingress.event.id}`,
       source: ingress.event.source,
       type: ingress.event.type,
       observedAt: ingress.event.time
@@ -554,6 +989,13 @@ export function axDemandEventObserver(
         },
       ],
     };
-    await boundary.observe(observation, { signal: context.abortSignal });
+    await boundary.observe(observation, {
+      signal: context.abortSignal,
+      scope: {
+        routeId: context.routeId,
+        instanceKey: context.instanceKey,
+        principalScope: axEventIdentityScope(context.identity),
+      },
+    });
   };
 }

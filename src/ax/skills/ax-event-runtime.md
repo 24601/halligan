@@ -71,11 +71,23 @@ await source.publish({ event, identity, trust: 'authenticated' });
 - Detector confidence estimates demand probability; it is not authority. Require
   `ignore` or `annotate` in host disposition allowlists so fallback remains
   fail-closed.
+- Callbacks receive deeply frozen copies while a separate canonical clone is
+  retained. Route, instance, principal, and boundary scope wraps every local
+  dedupe key even when a custom mapper supplies the observation.
+- Keep callbacks within the configured timeout and propagate runtime
+  cancellation as cancellation, not successful uncertainty. One boundary
+  single-flights a scoped key with per-waiter cancellation and bounded pending
+  keys/bytes; distributed hosts need reservations for callback-level
+  exactly-once behavior.
 - Use a host `AxDemandStore` for durable/distributed cursor and dedupe
   guarantees. `AxInMemoryDemandStore` is volatile; its snapshots are suitable
   for deterministic restart tests, not a durable service.
+- Bound retention explicitly. In-memory defaults are 10,000 records, 64 MiB,
+  1,000 scopes, 1,000 records per scope, and seven days; eviction removes the
+  corresponding dedupe key.
 - Treat dedupe keys as immutable observation identities. Proposal expiry does
-  not reopen an event key; assign a new host key to a new observation.
+  not reopen an event key; duplicate receipts are historical, and a new
+  observation needs a new host key.
 - Minimize and redact observations before detection, lower the 1 MiB
   observation and 64 KiB detection defaults when practical, and enforce host
   privacy/retention policy on the backlog.
@@ -157,10 +169,11 @@ an output-capturing sink. Assert that unmatched or observe-only events never
 invoke the program, tenant scopes do not collide, outputs exist before sinks,
 and uncertain side effects become `outcome_unknown`.
 
-For advisory demand policy, run `npm run event:demand:eval`. Its temporal
-held-out synthetic split compares reactive and naive-threshold baselines and
-reports fixed confusion counts, calibration, false fires/suppression,
-calls/latency/bytes, and negative results without provider calls.
+For advisory demand policy, run `npm run event:demand:eval`. Its deterministic
+mechanism fixture compares reactive and naive-threshold baselines and reports
+fixed confusion counts, calibration, false fires/suppression, measured callback
+counts/latency/bytes, and negative results. It is not an independent model
+held-out set or an improvement claim.
 
 Persistent store implementations must pass
 `runAxEventStoreConformance(createStore, { clock })`. A store must not advertise

@@ -34,8 +34,8 @@ function detected(
     reasonCode: 'synthetic_rule',
     evidence: [support('support', 'supports')],
     calibration: {
-      method: 'temporal-held-out',
-      version: 'fixed-v1',
+      method: 'mechanism-fixture',
+      version: 'fixed-v2',
       expectedCalibrationError: 0.1,
       sampleSize: 20,
     },
@@ -158,7 +158,7 @@ const routineNegative: readonly Fixture[] = Array.from(
   })
 );
 
-export const demandHeldOutFixtures: readonly Fixture[] = [
+export const demandMechanismFixtures: readonly Fixture[] = [
   ...positive,
   ...specialNegative,
   ...routineNegative,
@@ -181,7 +181,7 @@ function counts(predictions: readonly boolean[]): Counts {
   let tn = 0;
   let fn = 0;
   for (const [index, predicted] of predictions.entries()) {
-    const actual = demandHeldOutFixtures[index]!.demand;
+    const actual = demandMechanismFixtures[index]!.demand;
     if (predicted && actual) tp++;
     else if (predicted) fp++;
     else if (actual) fn++;
@@ -210,7 +210,7 @@ function calibration(): Readonly<{
   ece: number;
   examples: number;
 }> {
-  const valid = demandHeldOutFixtures.flatMap((fixture) => {
+  const valid = demandMechanismFixtures.flatMap((fixture) => {
     const probability = demandProbability(fixture);
     return probability === undefined
       ? []
@@ -242,14 +242,16 @@ function calibration(): Readonly<{
 }
 
 export async function runDemandBoundaryEvaluation() {
+  const evaluationStartedAt = performance.now();
   const detectorCalls = { value: 0 };
+  const grantValidationCalls = { value: 0 };
   const byId = new Map(
-    demandHeldOutFixtures.map((fixture) => [fixture.id, fixture])
+    demandMechanismFixtures.map((fixture) => [fixture.id, fixture])
   );
   const boundary = new AxDemandBoundary({
     detector: {
-      id: 'deterministic-synthetic-detector',
-      version: 'held-out-v1',
+      id: 'deterministic-mechanism-detector',
+      version: 'fixture-v2',
       detect: (observation) => {
         detectorCalls.value++;
         return byId.get(observation.id)!.detection;
@@ -257,15 +259,17 @@ export async function runDemandBoundaryEvaluation() {
     },
     now: () => now,
     policy: { maxObservationAgeMs: 7 * 86_400_000 },
-    validateStandingGrant: (reference) =>
-      reference === 'grant-valid' ? 'valid' : 'revoked',
+    validateStandingGrant: ({ reference }) => {
+      grantValidationCalls.value++;
+      return reference === 'grant-valid' ? 'valid' : 'revoked';
+    },
   });
 
   const proposals = [];
-  for (const fixture of demandHeldOutFixtures) {
+  for (const fixture of demandMechanismFixtures) {
     const observation: AxDemandObservation = {
       id: fixture.id,
-      source: 'app://synthetic-held-out',
+      source: 'app://synthetic-mechanism',
       type: 'synthetic.observation',
       observedAt: now - (fixture.ageMs ?? 0),
       provenance: [support(fixture.id, 'supports')],
@@ -278,19 +282,20 @@ export async function runDemandBoundaryEvaluation() {
     disposition === 'act';
   const records = (await boundary.list({ limit: 100 })).records;
   return {
-    split: {
-      policyDeclaredBefore: '2026-08-24T00:00:00.000Z',
-      heldOutStartsAt: '2026-08-25T00:00:00.000Z',
-      reusedForTuning: false,
-      examples: demandHeldOutFixtures.length,
-      positives: demandHeldOutFixtures.filter((fixture) => fixture.demand)
+    fixture: {
+      kind: 'deterministic-mechanism-characterization',
+      independentModelHeldOut: false,
+      examples: demandMechanismFixtures.length,
+      positives: demandMechanismFixtures.filter((fixture) => fixture.demand)
         .length,
-      negatives: demandHeldOutFixtures.filter((fixture) => !fixture.demand)
+      negatives: demandMechanismFixtures.filter((fixture) => !fixture.demand)
         .length,
     },
-    reactive: counts(demandHeldOutFixtures.map((fixture) => fixture.explicit)),
+    reactive: counts(
+      demandMechanismFixtures.map((fixture) => fixture.explicit)
+    ),
     naiveThreshold: counts(
-      demandHeldOutFixtures.map(
+      demandMechanismFixtures.map(
         (fixture) => fixture.detection.confidence >= 0.75
       )
     ),
@@ -298,10 +303,12 @@ export async function runDemandBoundaryEvaluation() {
     calibration: calibration(),
     overhead: {
       detectorCalls: detectorCalls.value,
-      detectorLatencyMs: records.reduce(
+      grantValidationCalls: grantValidationCalls.value,
+      recordedDetectorLatencyMs: records.reduce(
         (sum, record) => sum + record.metrics.detectorLatencyMs,
         0
       ),
+      evaluationLatencyMs: performance.now() - evaluationStartedAt,
       observationBytes: records.reduce(
         (sum, record) => sum + record.metrics.observationBytes,
         0
@@ -311,10 +318,9 @@ export async function runDemandBoundaryEvaluation() {
         0
       ),
       retainedRecords: records.length,
-      paidCalls: 0,
-      externalEffects: 0,
     },
     negativeResults: [
+      'This ID-addressed fixture characterizes policy mechanics; it is not an independent model held-out evaluation.',
       'The misleading well-formed detector output remains a false fire.',
       'Low-confidence, conflicting, uncertain, and revoked true demand is retained but not fired, reducing recall.',
       'The in-memory store is volatile unless the host snapshots it or supplies a durable AxDemandStore.',

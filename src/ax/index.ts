@@ -895,6 +895,7 @@ import {
   type AxDemandDetector,
   type AxDemandDisposition,
   type AxDemandGrantState,
+  type AxDemandGrantValidationContext,
   type AxDemandObservation,
   type AxDemandOutcome,
   type AxDemandPolicy,
@@ -902,8 +903,10 @@ import {
   type AxDemandProvenance,
   type AxDemandReceipt,
   type AxDemandRecord,
+  type AxDemandScope,
   type AxDemandStore,
   AxInMemoryDemandStore,
+  type AxInMemoryDemandStoreOptions,
   axDemandEventObserver,
 } from './event/demand.js';
 import {
@@ -2006,6 +2009,7 @@ export type { AxDemandDetection };
 export type { AxDemandDetector };
 export type { AxDemandDisposition };
 export type { AxDemandGrantState };
+export type { AxDemandGrantValidationContext };
 export type { AxDemandObservation };
 export type { AxDemandOutcome };
 export type { AxDemandPolicy };
@@ -2013,6 +2017,7 @@ export type { AxDemandProposal };
 export type { AxDemandProvenance };
 export type { AxDemandReceipt };
 export type { AxDemandRecord };
+export type { AxDemandScope };
 export type { AxDemandStore };
 export type { AxDiscoveryTurnSummary };
 export type { AxDockerContainer };
@@ -2139,6 +2144,7 @@ export type { AxGenStreamingOut };
 export type { AxGenerateErrorDetails };
 export type { AxGenerateResult };
 export type { AxIField };
+export type { AxInMemoryDemandStoreOptions };
 export type { AxInMemoryEventStoreOptions };
 export type { AxInputFunctionType };
 export type { AxJSRuntimeNodePermissionAllowlist };

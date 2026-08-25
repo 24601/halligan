@@ -69,6 +69,12 @@ Confidence estimates demand probability; it is not an action score. Host
 disposition allowlists must retain `ignore` or `annotate` as a fail-closed
 fallback. Observation validation failures reject explicitly before detection.
 
+Detector and grant callbacks receive deeply frozen copies while a separate
+canonical clone is retained. Boundary, route, instance, and principal scope
+wraps every local dedupe key even when a custom mapper supplies the observation.
+Callbacks have bounded timeouts, and runtime cancellation remains cancellation
+rather than successful evidence.
+
 The built-in demand store is process-local and volatile. Supply an application
 store when cursor/backlog and dedupe must survive a restart or coordinate
 workers. The event runtime remains responsible for scheduling; this API does
@@ -77,8 +83,15 @@ Observations and detections are bounded; applications should map only
 consented, necessary evidence and apply their own redaction and retention
 policy.
 
+One boundary single-flights concurrent callbacks for a scoped key with
+per-waiter cancellation and bounded pending keys/bytes. The in-memory store also
+bounds records, bytes, scopes, records per scope, and age, evicting oldest
+entries and their dedupe keys. Distributed callback-level exactly-once behavior
+still requires a host reservation protocol.
+
 Dedupe keys identify immutable observations: proposal expiry does not reopen a
-previously processed key. A new observation needs a new host-selected key.
+previously processed key. Duplicate receipts are historical, and a new
+observation needs a new host-selected key.
 
 ## Wake: Start A Program From An Event
 

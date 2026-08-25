@@ -105,8 +105,15 @@ const demandDetector: AxDemandDetector = {
 };
 const demandStore: AxDemandStore = new AxInMemoryDemandStore();
 const demandBoundary = new AxDemandBoundary({
+  id: 'typed-boundary',
   detector: demandDetector,
   store: demandStore,
+  validateStandingGrant: ({ reference, scope, signal }) => {
+    void reference;
+    void scope.principalScope;
+    void signal;
+    return 'unknown';
+  },
 });
 const demandObserver: ReturnType<typeof axDemandEventObserver> =
   axDemandEventObserver(demandBoundary);

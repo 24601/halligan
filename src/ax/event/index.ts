@@ -13,6 +13,7 @@ export type {
   AxDemandDetector,
   AxDemandDisposition,
   AxDemandGrantState,
+  AxDemandGrantValidationContext,
   AxDemandObservation,
   AxDemandOutcome,
   AxDemandPolicy,
@@ -20,7 +21,9 @@ export type {
   AxDemandProvenance,
   AxDemandReceipt,
   AxDemandRecord,
+  AxDemandScope,
   AxDemandStore,
+  AxInMemoryDemandStoreOptions,
 } from './demand.js';
 export {
   AxDemandBoundary,
