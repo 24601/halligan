@@ -27,10 +27,22 @@ import {
 import { getGEPAUpdateGroup } from './gepaDependencies.js';
 import {
   type AxGEPABatchEvaluation,
+  type AxGEPAEvaluationState,
   evaluateGEPABatch,
   normalizeGEPAScores,
   scalarizeGEPAScores,
 } from './gepaEvaluation.js';
+import {
+  type AxGEPACandidateEvaluation,
+  type AxGEPACandidateFailure,
+  type AxGEPACandidateLineageManifest,
+  type AxGEPACandidateLineageOptions,
+  type AxGEPACandidateLineageRecord,
+  buildGEPACandidateComponentDelta,
+  buildGEPACandidateFailure,
+  freezeGEPACandidateLineageManifest,
+  resolveGEPALineageOptions,
+} from './gepaLineage.js';
 import {
   proposeGEPAComponentValue,
   renderReflectiveValue,
@@ -331,6 +343,87 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
     };
 
     const optLogger = this.getOptimizerLogger(options);
+    const ownDataOption = <T>(key: string): T | undefined => {
+      try {
+        if (!options) return undefined;
+        const descriptor = Object.getOwnPropertyDescriptor(options, key);
+        return descriptor && 'value' in descriptor
+          ? (descriptor.value as T)
+          : undefined;
+      } catch {
+        throw new TypeError(
+          `AxGEPA: throwing getOwnPropertyDescriptor while inspecting own ${key} is unsupported`
+        );
+      }
+    };
+    const lineageInput = ownDataOption<boolean | AxGEPACandidateLineageOptions>(
+      'candidateLineage'
+    );
+    const gepaAbortSignal = ownDataOption<AbortSignal>('abortSignal');
+    const lineageEnabled =
+      lineageInput === true ||
+      (typeof lineageInput === 'object' && lineageInput !== null);
+    const lineageOptions = lineageEnabled
+      ? resolveGEPALineageOptions(
+          lineageInput === true ? undefined : lineageInput
+        )
+      : undefined;
+    const lineageRecords: AxGEPACandidateLineageRecord[] = [];
+    let omittedLineageRecords = 0;
+    let lineageRetentionExhausted = false;
+    let nextCandidateId = 0;
+    let stoppedReason: AxGEPACandidateLineageManifest['stoppedReason'] =
+      'completed';
+    let terminationPhase = 'num_trials_exhausted';
+    let terminationRound = this.numTrials;
+
+    const candidateEvaluation = lineageEnabled
+      ? (
+          phase: string,
+          evaluation: Readonly<AxGEPABatchEvaluation>,
+          metricCallsBefore: number
+        ): AxGEPACandidateEvaluation => ({
+          phase,
+          objectives: Object.fromEntries(
+            Object.entries(evaluation.avg).sort(([left], [right]) =>
+              left.localeCompare(right)
+            )
+          ),
+          scalarScore: scalarize(evaluation.avg),
+          metricCallsBefore,
+          metricCallsAfter: evaluationState.totalCalls,
+          metricCallBudget: rolloutBudgetPareto,
+          evaluatedExamples: evaluation.scalars.length,
+        })
+      : undefined;
+
+    const evaluationFailures = lineageEnabled
+      ? (
+          evaluation: Readonly<AxGEPABatchEvaluation> | undefined
+        ): AxGEPACandidateFailure[] =>
+          (evaluation?.failures ?? []).map((failure) =>
+            buildGEPACandidateFailure(
+              failure.kind,
+              failure.message,
+              lineageOptions!
+            )
+          )
+      : undefined;
+
+    const recordCandidate = lineageEnabled
+      ? (buildRecord: () => AxGEPACandidateLineageRecord): void => {
+          const record = buildRecord();
+          if (
+            !lineageRetentionExhausted &&
+            lineageRecords.length < lineageOptions!.maxRecords
+          ) {
+            lineageRecords.push(record);
+          } else {
+            lineageRetentionExhausted = true;
+            omittedLineageRecords += 1;
+          }
+        }
+      : undefined;
     const verboseLog =
       ((options as any)?.verbose ?? this.verbose)
         ? (msg: string) => console.log(`[GEPA] ${msg}`)
@@ -340,10 +433,26 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       | AxGEPAAdapter
       | undefined;
 
-    const evaluationState = {
+    const evaluationState: AxGEPAEvaluationState = {
       totalCalls: this.stats.totalCalls,
       observedScoreKeys: new Set<string>(),
     };
+    const stoppedCandidate = lineageEnabled
+      ? (budgetReason: string, phase: string, round: number) => {
+          const aborted = evaluationState.stopReason === 'aborted';
+          stoppedReason = aborted ? 'aborted' : 'budget_exhausted';
+          terminationPhase = phase;
+          terminationRound = round;
+          return {
+            reason: aborted ? 'abort_signal' : budgetReason,
+            failure: buildGEPACandidateFailure(
+              aborted ? 'abort' : 'budget',
+              undefined,
+              lineageOptions!
+            ),
+          } as const;
+        }
+      : undefined;
     let bootstrapMetricCalls = 0;
 
     const evalBatch = async (
@@ -369,6 +478,8 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
         verboseLog,
         throwIfInsufficient,
         captureTraces,
+        captureFailures: lineageEnabled,
+        abortSignal: gepaAbortSignal,
       });
       this.stats.totalCalls = bootstrapMetricCalls + evaluationState.totalCalls;
       return result;
@@ -404,25 +515,31 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       }
     }
 
+    const baseEvalCallsBefore = evaluationState.totalCalls;
     const baseEval = await evalBatch(
       baseCfg,
       paretoSet,
       'initial Pareto evaluation',
       true
     );
+    if (!baseEval) {
+      throw new Error('AxGEPA: optimization aborted before initial evaluation');
+    }
     const candidates: {
+      id?: string;
       cfg: Record<string, string>;
       parent?: number;
       scores: Record<string, number>;
     }[] = [
       {
+        id: lineageEnabled ? `c${nextCandidateId++}` : undefined,
         cfg: { ...baseCfg },
         parent: undefined,
-        scores: baseEval!.avg,
+        scores: baseEval.avg,
       },
     ];
 
-    const perInstanceScores: number[][] = [baseEval!.scalars];
+    const perInstanceScores: number[][] = [baseEval.scalars];
 
     optLogger?.({
       name: 'OptimizationStart',
@@ -439,6 +556,32 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       },
     });
 
+    recordCandidate?.(() => {
+      const seedDelta = buildGEPACandidateComponentDelta(
+        undefined,
+        baseCfg,
+        lineageOptions!
+      );
+      const failures = evaluationFailures!(baseEval);
+      return {
+        id: candidates[0]!.id!,
+        parentIds: [],
+        round: 0,
+        strategy: 'seed',
+        componentDelta: seedDelta.delta,
+        omittedComponentCount: seedDelta.omittedComponentCount,
+        evaluations: [
+          candidateEvaluation!('initial_pareto', baseEval, baseEvalCallsBefore),
+        ],
+        metricCallsAtDecision: this.stats.totalCalls,
+        metricCallBudget: rolloutBudgetPareto,
+        decision: 'accepted',
+        reason: 'initial_candidate',
+        disposition: 'archived',
+        failures: failures.length ? failures : undefined,
+      };
+    });
+
     verboseLog(
       `Starting GEPA optimization: ${examples.length} train, ${paretoSet.length} validation, maxCalls=${rolloutBudgetPareto}`
     );
@@ -452,13 +595,118 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       this.tieEpsilon
     ).map((p) => p.idx);
 
+    const buildLineageManifest = (
+      selectedCandidateIdx?: number
+    ): AxGEPACandidateLineageManifest | undefined => {
+      if (!lineageEnabled) return undefined;
+      const selectedCandidateId =
+        selectedCandidateIdx === undefined
+          ? undefined
+          : candidates[selectedCandidateIdx]?.id;
+      const fullParetoIds = new Set(archive.map((idx) => candidates[idx]!.id!));
+      let records = lineageRecords.map((record) => ({
+        ...record,
+        disposition:
+          record.decision === 'rejected'
+            ? ('rejected' as const)
+            : record.decision === 'aborted'
+              ? ('aborted' as const)
+              : record.id === selectedCandidateId
+                ? ('selected' as const)
+                : fullParetoIds.has(record.id)
+                  ? ('pareto' as const)
+                  : ('archived' as const),
+        dispositionReason:
+          record.decision === 'rejected'
+            ? record.reason
+            : record.decision === 'aborted'
+              ? record.reason
+              : record.id === selectedCandidateId
+                ? 'selected_by_scalarized_frontier_score'
+                : fullParetoIds.has(record.id)
+                  ? 'retained_on_pareto_frontier'
+                  : 'not_on_final_pareto_frontier',
+      }));
+      let omittedRecordCount = omittedLineageRecords;
+      const makeManifest = (): AxGEPACandidateLineageManifest => {
+        const retainedIds = new Set(records.map((record) => record.id));
+        return {
+          version: 1,
+          records,
+          maxRecords: lineageOptions!.maxRecords,
+          maxArtifactBytes: lineageOptions!.maxArtifactBytes,
+          omittedRecordCount,
+          selectedCandidateId,
+          selectedCandidateRetained:
+            selectedCandidateId !== undefined &&
+            retainedIds.has(selectedCandidateId),
+          paretoCandidateIds: [...fullParetoIds].filter((id) =>
+            retainedIds.has(id)
+          ),
+          metricCallsUsed: this.stats.totalCalls,
+          metricCallBudget: rolloutBudgetPareto,
+          stoppedReason:
+            selectedCandidateIdx === undefined ? 'in_progress' : stoppedReason,
+          termination: {
+            phase:
+              selectedCandidateIdx === undefined
+                ? 'checkpoint_snapshot'
+                : terminationPhase,
+            round:
+              selectedCandidateIdx === undefined
+                ? this.currentRound
+                : terminationRound,
+            metricCallsUsed: this.stats.totalCalls,
+          },
+          checkpointSemantics: 'snapshot_only',
+          privacy: {
+            componentValues: lineageOptions!.includeComponentValues
+              ? 'bounded_values'
+              : 'fingerprints',
+            failureMessages: lineageOptions!.includeFailureMessages
+              ? 'bounded_messages'
+              : 'fingerprints',
+          },
+        };
+      };
+      let manifest = makeManifest();
+      const encoder = new TextEncoder();
+      let serialized = JSON.stringify(manifest);
+      let serializedBytes = encoder.encode(serialized).byteLength;
+      while (
+        serializedBytes > lineageOptions!.maxArtifactBytes &&
+        records.length > 0
+      ) {
+        records = records.slice(0, -1);
+        omittedRecordCount += 1;
+        manifest = makeManifest();
+        serialized = JSON.stringify(manifest);
+        serializedBytes = encoder.encode(serialized).byteLength;
+      }
+      if (serializedBytes > lineageOptions!.maxArtifactBytes) {
+        throw new Error(
+          `AxGEPA: candidate lineage metadata exceeds maxArtifactBytes=${lineageOptions!.maxArtifactBytes}`
+        );
+      }
+      return freezeGEPACandidateLineageManifest(manifest);
+    };
+
     let _prevHypervolume: number | undefined;
 
     for (let t = 0; t < this.numTrials; t++) {
+      if (gepaAbortSignal?.aborted) {
+        stoppedReason = 'aborted';
+        terminationPhase = 'loop_boundary';
+        terminationRound = t;
+        break;
+      }
       if (
         rolloutBudgetPareto !== undefined &&
         this.stats.totalCalls >= Math.max(1, Math.floor(rolloutBudgetPareto))
       ) {
+        stoppedReason = 'budget_exhausted';
+        terminationPhase = 'loop_boundary';
+        terminationRound = t;
         break;
       }
       // Parent selection via per-instance fronts (frequency sampling)
@@ -582,6 +830,13 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
             j,
             (ia, ib) => (perProgScores[ia]! >= perProgScores[ib]! ? ia : ib)
           );
+          const mergeCandidateId = lineageEnabled
+            ? `c${nextCandidateId++}`
+            : undefined;
+          const mergeEvaluations: AxGEPACandidateEvaluation[] | undefined =
+            lineageEnabled ? [] : undefined;
+          const mergeFailures: AxGEPACandidateFailure[] | undefined =
+            lineageEnabled ? [] : undefined;
           const compKey = `${Math.min(i, j)}|${Math.max(i, j)}|${descSig}`;
           if (this.mergeCompositionKeys.has(compKey)) continue;
           this.mergeCompositionKeys.add(compKey);
@@ -622,12 +877,53 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
           }
           const idxs = chosen.slice(0, Math.min(K, allIdx.length));
           const subsample = idxs.map((z) => paretoSet[z]!);
+          const mergeEvalCallsBefore = evaluationState.totalCalls;
           const mergeEval = await evalBatch(
             mergedCfg,
             subsample as readonly AxTypedExample<IN>[],
             'merge subsample'
           );
-          if (!mergeEval) break;
+          if (!mergeEval) {
+            if (lineageEnabled) {
+              const stopped = stoppedCandidate!(
+                'metric_call_budget_exhausted',
+                'merge_subsample',
+                t + 1
+              );
+              recordCandidate?.(() => {
+                const delta = buildGEPACandidateComponentDelta(
+                  candidates[a]!.cfg,
+                  mergedCfg,
+                  lineageOptions!
+                );
+                return {
+                  id: mergeCandidateId!,
+                  parentIds: [candidates[i]!.id!, candidates[j]!.id!],
+                  commonAncestorId: candidates[a]!.id!,
+                  round: t + 1,
+                  strategy: 'system_merge',
+                  componentDelta: delta.delta,
+                  omittedComponentCount: delta.omittedComponentCount,
+                  evaluations: mergeEvaluations!,
+                  metricCallsAtDecision: this.stats.totalCalls,
+                  metricCallBudget: rolloutBudgetPareto,
+                  decision: 'aborted',
+                  reason: stopped.reason,
+                  disposition: 'aborted',
+                  failures: [stopped.failure],
+                };
+              });
+            }
+            break;
+          }
+          mergeEvaluations?.push(
+            candidateEvaluation!(
+              'merge_subsample',
+              mergeEval,
+              mergeEvalCallsBefore
+            )
+          );
+          mergeFailures?.push(...evaluationFailures!(mergeEval));
 
           const newSum = mergeEval.sum;
           const id1Sum = idxs.reduce((sum, z) => sum + (s1[z] ?? 0), 0);
@@ -640,13 +936,55 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
             verboseLog(
               `Iteration ${t + 1}: Merge accepted (programs ${i} + ${j} via ancestor ${a})`
             );
+            const childEvalCallsBefore = evaluationState.totalCalls;
             const childEval = await evalBatch(
               mergedCfg,
               paretoSet,
               'merge validation'
             );
-            if (!childEval) break;
+            if (!childEval) {
+              if (lineageEnabled) {
+                const stopped = stoppedCandidate!(
+                  'validation_budget_exhausted',
+                  'merge_validation',
+                  t + 1
+                );
+                recordCandidate?.(() => {
+                  const delta = buildGEPACandidateComponentDelta(
+                    candidates[a]!.cfg,
+                    mergedCfg,
+                    lineageOptions!
+                  );
+                  return {
+                    id: mergeCandidateId!,
+                    parentIds: [candidates[i]!.id!, candidates[j]!.id!],
+                    commonAncestorId: candidates[a]!.id!,
+                    round: t + 1,
+                    strategy: 'system_merge',
+                    componentDelta: delta.delta,
+                    omittedComponentCount: delta.omittedComponentCount,
+                    evaluations: mergeEvaluations!,
+                    metricCallsAtDecision: this.stats.totalCalls,
+                    metricCallBudget: rolloutBudgetPareto,
+                    decision: 'aborted',
+                    reason: stopped.reason,
+                    disposition: 'aborted',
+                    failures: [...mergeFailures!, stopped.failure],
+                  };
+                });
+              }
+              break;
+            }
+            mergeEvaluations?.push(
+              candidateEvaluation!(
+                'merge_validation',
+                childEval,
+                childEvalCallsBefore
+              )
+            );
+            mergeFailures?.push(...evaluationFailures!(childEval));
             candidates.push({
+              id: mergeCandidateId,
               cfg: { ...mergedCfg },
               parent: a,
               scores: childEval.avg,
@@ -668,10 +1006,56 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
             this.totalMergesTested += 1;
             triedMerges.add(triKey);
             mergeAccepted = true;
+            recordCandidate?.(() => {
+              const delta = buildGEPACandidateComponentDelta(
+                candidates[a]!.cfg,
+                mergedCfg,
+                lineageOptions!
+              );
+              return {
+                id: mergeCandidateId!,
+                parentIds: [candidates[i]!.id!, candidates[j]!.id!],
+                commonAncestorId: candidates[a]!.id!,
+                round: t + 1,
+                strategy: 'system_merge',
+                componentDelta: delta.delta,
+                omittedComponentCount: delta.omittedComponentCount,
+                evaluations: mergeEvaluations!,
+                metricCallsAtDecision: this.stats.totalCalls,
+                metricCallBudget: rolloutBudgetPareto,
+                decision: 'accepted',
+                reason: 'improved_over_both_parents',
+                disposition: 'archived',
+                failures: mergeFailures!.length ? mergeFailures : undefined,
+              };
+            });
           }
           if (mergeAccepted) {
             continue;
           }
+          recordCandidate?.(() => {
+            const delta = buildGEPACandidateComponentDelta(
+              candidates[a]!.cfg,
+              mergedCfg,
+              lineageOptions!
+            );
+            return {
+              id: mergeCandidateId!,
+              parentIds: [candidates[i]!.id!, candidates[j]!.id!],
+              commonAncestorId: candidates[a]!.id!,
+              round: t + 1,
+              strategy: 'system_merge',
+              componentDelta: delta.delta,
+              omittedComponentCount: delta.omittedComponentCount,
+              evaluations: mergeEvaluations!,
+              metricCallsAtDecision: this.stats.totalCalls,
+              metricCallBudget: rolloutBudgetPareto,
+              decision: 'rejected',
+              reason: 'insufficient_subsample_improvement',
+              disposition: 'rejected',
+              failures: mergeFailures!.length ? mergeFailures : undefined,
+            };
+          });
         }
       }
 
@@ -696,7 +1080,16 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
         false,
         true
       );
-      if (!parentMiniEval) break;
+      if (!parentMiniEval) {
+        if (lineageEnabled) {
+          stoppedCandidate!(
+            'metric_call_budget_exhausted',
+            'parent_minibatch',
+            t + 1
+          );
+        }
+        break;
+      }
 
       if ((options as any)?.skipPerfectScore ?? true) {
         const perfect = Number((options as any)?.perfectScore ?? 1);
@@ -711,6 +1104,13 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       const proposedCfg: Record<string, string> = {
         ...candidates[parentIdx]!.cfg,
       };
+      const mutationCandidateId = lineageEnabled
+        ? `c${nextCandidateId++}`
+        : undefined;
+      const mutationEvaluations: AxGEPACandidateEvaluation[] | undefined =
+        lineageEnabled ? [] : undefined;
+      const mutationFailures: AxGEPACandidateFailure[] | undefined =
+        lineageEnabled ? evaluationFailures!(parentMiniEval) : undefined;
       const strategy: 'reflective_mutation' | 'system_merge' =
         'reflective_mutation';
       const target = componentSelector.pick(t, () => this.rand());
@@ -776,7 +1176,17 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
               }
             }
           }
-        } catch {}
+        } catch (error) {
+          if (lineageEnabled) {
+            mutationFailures!.push(
+              buildGEPACandidateFailure(
+                'adapter',
+                error instanceof Error ? error.message : String(error),
+                lineageOptions!
+              )
+            );
+          }
+        }
       }
 
       for (const groupTarget of targetGroup) {
@@ -813,29 +1223,98 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
             preserve: groupTarget.preserve,
             maxLength: groupTarget.maxLength,
             format: groupTarget.format,
-          }
+          },
+          lineageEnabled
+            ? (failure) => {
+                mutationFailures!.push(
+                  buildGEPACandidateFailure(
+                    failure.kind,
+                    failure.message,
+                    lineageOptions!
+                  )
+                );
+              }
+            : undefined
         );
       }
 
+      const childMiniEvalCallsBefore = evaluationState.totalCalls;
       const childMiniEval = await evalBatch(
         proposedCfg,
         mini as readonly AxTypedExample<IN>[],
         'child minibatch'
       );
-      if (!childMiniEval) break;
+      if (!childMiniEval) {
+        if (lineageEnabled) {
+          const stopped = stoppedCandidate!(
+            'metric_call_budget_exhausted',
+            'child_minibatch',
+            t + 1
+          );
+          recordCandidate?.(() => {
+            const delta = buildGEPACandidateComponentDelta(
+              candidates[parentIdx]!.cfg,
+              proposedCfg,
+              lineageOptions!
+            );
+            return {
+              id: mutationCandidateId!,
+              parentIds: [candidates[parentIdx]!.id!],
+              round: t + 1,
+              strategy,
+              componentDelta: delta.delta,
+              omittedComponentCount: delta.omittedComponentCount,
+              evaluations: mutationEvaluations!,
+              metricCallsAtDecision: this.stats.totalCalls,
+              metricCallBudget: rolloutBudgetPareto,
+              decision: 'aborted',
+              reason: stopped.reason,
+              disposition: 'aborted',
+              failures: [...mutationFailures!, stopped.failure],
+            };
+          });
+        }
+        break;
+      }
+      mutationEvaluations?.push(
+        candidateEvaluation!(
+          'child_minibatch',
+          childMiniEval,
+          childMiniEvalCallsBefore
+        )
+      );
+      mutationFailures?.push(...evaluationFailures!(childMiniEval));
+
+      const accepted =
+        childMiniEval.sum > parentMiniEval.sum + this.minImprovementThreshold;
 
       this.currentRound = t + 1;
+      const progressConfiguration = {
+        instructionLen: targetGroup
+          .map((groupTarget) => proposedCfg[groupTarget.id]?.length ?? 0)
+          .reduce((sum, length) => sum + length, 0),
+        target: targetGroup.map((groupTarget) => groupTarget.id).join(','),
+        parent: parentIdx,
+        totalRounds: this.numTrials,
+        ...(lineageEnabled
+          ? {
+              candidateId: mutationCandidateId,
+              parentIds: [candidates[parentIdx]!.id!],
+              strategy,
+              decision: accepted
+                ? ('accepted' as const)
+                : ('rejected' as const),
+            }
+          : {}),
+      };
+      const checkpointLineage =
+        lineageEnabled && this.shouldSaveCheckpoint(this.currentRound)
+          ? buildLineageManifest()
+          : undefined;
       await this.updateOptimizationProgress(
         this.currentRound,
         childMiniEval.sum,
-        {
-          instructionLen: targetGroup
-            .map((groupTarget) => proposedCfg[groupTarget.id]?.length ?? 0)
-            .reduce((sum, length) => sum + length, 0),
-          target: targetGroup.map((groupTarget) => groupTarget.id).join(','),
-          parent: parentIdx,
-          totalRounds: this.numTrials,
-        },
+        progressConfiguration,
         'GEPA',
         {
           strategy,
@@ -851,12 +1330,16 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
             )
             .reduce((sum, length) => sum + length, 0),
           idx: parentIdx,
+          ...(lineageEnabled
+            ? { candidateId: candidates[parentIdx]!.id! }
+            : {}),
         },
-        { ...(options ?? {}), maxIterations: this.numTrials }
+        {
+          ...(options ?? {}),
+          maxIterations: this.numTrials,
+          ...(checkpointLineage ? { candidateLineage: checkpointLineage } : {}),
+        }
       );
-
-      const accepted =
-        childMiniEval.sum > parentMiniEval.sum + this.minImprovementThreshold;
 
       if (!accepted) {
         for (const groupTarget of targetGroup) {
@@ -865,7 +1348,35 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
         verboseLog(
           `Iteration ${t + 1}: Rejected (child=${childMiniEval.sum.toFixed(3)} <= parent=${parentMiniEval.sum.toFixed(3)})`
         );
+        recordCandidate?.(() => {
+          const delta = buildGEPACandidateComponentDelta(
+            candidates[parentIdx]!.cfg,
+            proposedCfg,
+            lineageOptions!
+          );
+          return {
+            id: mutationCandidateId!,
+            parentIds: [candidates[parentIdx]!.id!],
+            round: t + 1,
+            strategy,
+            componentDelta: delta.delta,
+            omittedComponentCount: delta.omittedComponentCount,
+            evaluations: mutationEvaluations!,
+            metricCallsAtDecision: this.stats.totalCalls,
+            metricCallBudget: rolloutBudgetPareto,
+            decision: 'rejected',
+            reason:
+              delta.delta.length === 0
+                ? 'no_component_change'
+                : 'insufficient_minibatch_improvement',
+            disposition: 'rejected',
+            failures: mutationFailures!.length ? mutationFailures : undefined,
+          };
+        });
         if (++stagnation >= this.earlyStoppingTrials) {
+          stoppedReason = 'early_stopping';
+          terminationPhase = 'early_stopping';
+          terminationRound = t + 1;
           verboseLog(
             `Early stopping: ${stagnation} iterations without improvement`
           );
@@ -882,13 +1393,50 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       }
 
       // Full evaluation on validation set (vector) and archive update
+      const childEvalCallsBefore = evaluationState.totalCalls;
       const childEval = await evalBatch(
         proposedCfg,
         paretoSet,
         'validation evaluation'
       );
-      if (!childEval) break;
+      if (!childEval) {
+        if (lineageEnabled) {
+          const stopped = stoppedCandidate!(
+            'validation_budget_exhausted',
+            'validation',
+            t + 1
+          );
+          recordCandidate?.(() => {
+            const delta = buildGEPACandidateComponentDelta(
+              candidates[parentIdx]!.cfg,
+              proposedCfg,
+              lineageOptions!
+            );
+            return {
+              id: mutationCandidateId!,
+              parentIds: [candidates[parentIdx]!.id!],
+              round: t + 1,
+              strategy,
+              componentDelta: delta.delta,
+              omittedComponentCount: delta.omittedComponentCount,
+              evaluations: mutationEvaluations!,
+              metricCallsAtDecision: this.stats.totalCalls,
+              metricCallBudget: rolloutBudgetPareto,
+              decision: 'aborted',
+              reason: stopped.reason,
+              disposition: 'aborted',
+              failures: [...mutationFailures!, stopped.failure],
+            };
+          });
+        }
+        break;
+      }
+      mutationEvaluations?.push(
+        candidateEvaluation!('validation', childEval, childEvalCallsBefore)
+      );
+      mutationFailures?.push(...evaluationFailures!(childEval));
       candidates.push({
+        id: mutationCandidateId,
         cfg: { ...proposedCfg },
         parent: parentIdx,
         scores: childEval.avg,
@@ -905,6 +1453,29 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       const hvAfter =
         hypervolume2D(archive.map((idx) => candidates[idx]!.scores)) ?? 0;
 
+      recordCandidate?.(() => {
+        const delta = buildGEPACandidateComponentDelta(
+          candidates[parentIdx]!.cfg,
+          proposedCfg,
+          lineageOptions!
+        );
+        return {
+          id: mutationCandidateId!,
+          parentIds: [candidates[parentIdx]!.id!],
+          round: t + 1,
+          strategy,
+          componentDelta: delta.delta,
+          omittedComponentCount: delta.omittedComponentCount,
+          evaluations: mutationEvaluations!,
+          metricCallsAtDecision: this.stats.totalCalls,
+          metricCallBudget: rolloutBudgetPareto,
+          decision: 'accepted',
+          reason: 'improved_minibatch_score',
+          disposition: 'archived',
+          failures: mutationFailures!.length ? mutationFailures : undefined,
+        };
+      });
+
       // Reset stagnation if archive improved (hypervolume or size)
       if (archive.length > beforeSize || hvAfter > hvBefore + 1e-6) {
         stagnation = 0;
@@ -917,6 +1488,9 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
           `Iteration ${t + 1}: Archive unchanged (stagnation=${stagnation}/${this.earlyStoppingTrials})`
         );
         if (stagnation >= this.earlyStoppingTrials) {
+          stoppedReason = 'early_stopping';
+          terminationPhase = 'early_stopping';
+          terminationRound = t + 1;
           verboseLog(
             `Early stopping: ${stagnation} iterations without archive improvement`
           );
@@ -977,6 +1551,8 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       customLabels
     );
 
+    const candidateLineage = buildLineageManifest(bestCandidateIdx);
+
     // Build a unified optimized program (mirrors MiPRO) for the selected best candidate
     const optimizationTime = Date.now() - _startTime;
     const optimizedProgram =
@@ -986,6 +1562,7 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
             stats: this.stats,
             componentMap: { ...candidates[bestCandidateIdx]!.cfg },
             selectorState: componentSelector.snapshot(),
+            candidateLineage,
             demos: bootstrappedDemos,
             examples: examples as unknown as any[],
             modelConfig: undefined,
@@ -995,6 +1572,41 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
             converged: this.stats.convergenceInfo.converged,
           })
         : undefined;
+
+    if (lineageEnabled) {
+      await this.saveFinalCheckpoint(
+        'GEPA',
+        {
+          numTrials: this.numTrials,
+          paretoSetSize: paretoSet.length,
+          tunableCount: targets.length,
+        },
+        bestScore,
+        bestCandidateIdx === undefined
+          ? undefined
+          : { candidateId: candidates[bestCandidateIdx]!.id! },
+        { candidateLineage },
+        options
+      );
+
+      optLogger?.({
+        name: 'OptimizationComplete',
+        value: {
+          optimizerType: 'GEPA',
+          bestScore,
+          bestConfiguration:
+            bestCandidateIdx === undefined
+              ? {}
+              : {
+                  candidateId: candidates[bestCandidateIdx]!.id!,
+                  candidateLineage:
+                    optimizedProgram?.candidateLineage ?? candidateLineage,
+                },
+          totalCalls: this.stats.totalCalls,
+          stats: this.stats,
+        },
+      });
+    }
 
     // Generate optimization insights report
     const report = this.generateOptimizationReport(
@@ -1141,7 +1753,13 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       format?: string;
       validate?: (value: string) => true | string;
       traceDataset?: readonly unknown[];
-    }>
+    }>,
+    onFailure?: (
+      failure: Readonly<{
+        kind: 'runtime' | 'validator';
+        message: string;
+      }>
+    ) => void
   ): Promise<string> {
     const tuples: Array<{
       input: AxExample;
@@ -1236,6 +1854,7 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       feedbackSummary,
       traceDataset: targetMeta?.traceDataset,
       maxAttempts: 2,
+      onFailure,
     });
 
     return proposed ?? currentInstruction;

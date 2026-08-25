@@ -25,11 +25,16 @@ export type AxGEPABatchEvaluation = {
   scalars: number[];
   sum: number;
   trajectories?: readonly unknown[];
+  failures?: readonly {
+    kind: 'runtime' | 'adapter';
+    message: string;
+  }[];
 };
 
 export type AxGEPAEvaluationState = {
   totalCalls: number;
   observedScoreKeys: Set<string>;
+  stopReason?: 'budget_exhausted' | 'aborted';
 };
 
 const avgVec = (
@@ -111,7 +116,20 @@ export async function evaluateGEPABatch<IN, OUT extends AxGenOut>(args: {
   verboseLog?: (message: string) => void;
   throwIfInsufficient?: boolean;
   captureTraces?: boolean;
+  captureFailures?: boolean;
+  abortSignal?: AbortSignal;
 }): Promise<AxGEPABatchEvaluation | undefined> {
+  const failures:
+    | Array<{
+        kind: 'runtime' | 'adapter';
+        message: string;
+      }>
+    | undefined = args.captureFailures ? [] : undefined;
+  args.state.stopReason = undefined;
+  if (args.abortSignal?.aborted) {
+    args.state.stopReason = 'aborted';
+    return undefined;
+  }
   const requiredCalls = args.set.length;
   if (args.state.totalCalls + requiredCalls > args.maxMetricCalls) {
     if (args.throwIfInsufficient) {
@@ -119,6 +137,7 @@ export async function evaluateGEPABatch<IN, OUT extends AxGenOut>(args: {
         `AxGEPA: options.maxMetricCalls=${args.maxMetricCalls} is too small to evaluate the initial Pareto set; need at least ${requiredCalls} metric calls`
       );
     }
+    args.state.stopReason = 'budget_exhausted';
     return undefined;
   }
 
@@ -133,6 +152,10 @@ export async function evaluateGEPABatch<IN, OUT extends AxGenOut>(args: {
         args.cfg,
         args.captureTraces
       );
+      if (args.abortSignal?.aborted) {
+        args.state.stopReason = 'aborted';
+        return undefined;
+      }
       const rows: AxGEPABatchRow[] = [];
       for (const [index, ex] of args.set.entries()) {
         const prediction = evalBatch.outputs[index];
@@ -163,6 +186,14 @@ export async function evaluateGEPABatch<IN, OUT extends AxGenOut>(args: {
         trajectories: evalBatch.trajectories ?? undefined,
       };
     } catch (error) {
+      if (args.abortSignal?.aborted) {
+        args.state.stopReason = 'aborted';
+        return undefined;
+      }
+      failures?.push({
+        kind: 'adapter',
+        message: error instanceof Error ? error.message : String(error),
+      });
       args.verboseLog?.(
         `Evaluation adapter failed during ${args.phase}; falling back to direct evaluation. Error: ${
           error instanceof Error ? error.message : String(error)
@@ -178,6 +209,10 @@ export async function evaluateGEPABatch<IN, OUT extends AxGenOut>(args: {
     error?: string;
   }> = [];
   for (const [index, ex] of args.set.entries()) {
+    if (args.abortSignal?.aborted) {
+      args.state.stopReason = 'aborted';
+      return undefined;
+    }
     args.applyConfig(args.cfg);
     let prediction: unknown;
     let scores: Record<string, number>;
@@ -194,6 +229,7 @@ export async function evaluateGEPABatch<IN, OUT extends AxGenOut>(args: {
                 calls.push({ ...call });
               }
             : undefined,
+          abortSignal: args.abortSignal,
         } as any
       );
       scores = await normalizeGEPAScores(
@@ -205,7 +241,12 @@ export async function evaluateGEPABatch<IN, OUT extends AxGenOut>(args: {
         args.state.observedScoreKeys.add(key);
       if (args.captureTraces) trajectories.push({ calls, output: prediction });
     } catch (error) {
+      if (args.abortSignal?.aborted) {
+        args.state.stopReason = 'aborted';
+        return undefined;
+      }
       const message = error instanceof Error ? error.message : String(error);
+      failures?.push({ kind: 'runtime', message });
       prediction = { error: message };
       scores = zeroScoreVector(args.state.observedScoreKeys);
       if (args.captureTraces) trajectories.push({ calls, error: message });
@@ -233,5 +274,6 @@ export async function evaluateGEPABatch<IN, OUT extends AxGenOut>(args: {
     scalars: rows.map((row) => row.scalar),
     sum: rows.reduce((total, row) => total + row.scalar, 0),
     trajectories: args.captureTraces ? trajectories : undefined,
+    failures: failures?.length ? failures : undefined,
   };
 }

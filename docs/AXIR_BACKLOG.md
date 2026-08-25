@@ -18,7 +18,12 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
 
 ## Open
 
-No entries.
+- `axir-2026-08-25-port-gepa-candidate-lineage-manifests` [axoptimize] Port GEPA candidate lineage manifests
+  - Status: open
+  - Source commit: `ca760294f5ea4f207052c39c2218e1195103bc2a`
+  - TS paths: `src/ax/dsp/common_types.ts`, `src/ax/dsp/optimize.ts`, `src/ax/dsp/optimizer.ts`, `src/ax/dsp/optimizerTypes.ts`, `src/ax/dsp/optimizers/gepa.test.ts`, `src/ax/dsp/optimizers/gepa.ts`, `src/ax/dsp/optimizers/gepaEvaluation.ts`, `src/ax/dsp/optimizers/gepaLineage.test.ts`, `src/ax/dsp/optimizers/gepaLineage.ts`, `src/ax/dsp/optimizers/gepaReflection.test.ts`, `src/ax/dsp/optimizers/gepaReflection.ts`
+  - Impact: Portable GEPA optimizers now emit bounded serializable candidate decision lineage in artifacts, checkpoints, and optimizer logs.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 
 ## Done
 

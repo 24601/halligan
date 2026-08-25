@@ -88,6 +88,12 @@ export async function proposeGEPAComponentValue(args: {
   feedbackSummary?: string;
   traceDataset?: readonly unknown[];
   maxAttempts?: number;
+  onFailure?: (
+    failure: Readonly<{
+      kind: 'runtime' | 'validator';
+      message: string;
+    }>
+  ) => void;
 }): Promise<string | undefined> {
   const refl = ax(
     `componentKey:string "Component key", componentKind:string "Free-form component kind hint", componentDescription?:string "What this string is used for", constraints?:string "Hard constraints on the new value", currentValue:string "Current value of the component", feedbackSummary?:string "Summarized feedback", previousValidationError?:string "Why the previous proposal was rejected; avoid repeating it", minibatch:json "Array of {input,prediction,score}", traceDataset?:json "Compact actionable execution trace summaries relevant to this component" -> newValue:string "Improved value for the component"`
@@ -130,7 +136,13 @@ export async function proposeGEPAComponentValue(args: {
       const validation = args.target.validate?.(candidate) ?? true;
       if (validation === true) return candidate;
       previousValidationError = validation;
-    } catch {}
+      args.onFailure?.({ kind: 'validator', message: validation });
+    } catch (error) {
+      args.onFailure?.({
+        kind: 'runtime',
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
   return undefined;
 }

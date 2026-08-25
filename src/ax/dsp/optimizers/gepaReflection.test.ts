@@ -38,6 +38,7 @@ describe('GEPA reflection helpers', () => {
 
   it('passes validation errors into retry prompts and accepts a corrected value', async () => {
     const seenPrompts: string[] = [];
+    const failures: Array<{ kind: string; message: string }> = [];
     let calls = 0;
     const ai = new AxMockAIService({
       chatResponse: async (req) => {
@@ -69,9 +70,13 @@ describe('GEPA reflection helpers', () => {
       currentValue: 'lookup',
       tuples: [],
       maxAttempts: 2,
+      onFailure: (failure) => failures.push(failure),
     });
 
     expect(proposed).toBe('good_value');
     expect(seenPrompts[1]).toContain('must be snake_case');
+    expect(failures).toEqual([
+      { kind: 'validator', message: 'must be snake_case' },
+    ]);
   });
 });
