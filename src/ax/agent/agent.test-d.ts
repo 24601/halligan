@@ -974,6 +974,7 @@ import {
   };
   const result = a.playbook().evolve([task], {
     retentionPolicy: {
+      evaluatorId: 'refund-metric-v1',
       slices: [{ name: 'refunds', version: '2026-08', tasks: [task] }],
       minCurrentGain: 0.05,
       maxWorstHistoricalLoss: 0.02,
@@ -984,6 +985,7 @@ import {
 
   a.playbook().evolve([task], {
     retentionPolicy: {
+      evaluatorId: 'refund-metric-v1',
       // @ts-expect-error retention slices require a caller-managed version
       slices: [{ name: 'refunds', tasks: [task] }],
       minCurrentGain: 0.05,

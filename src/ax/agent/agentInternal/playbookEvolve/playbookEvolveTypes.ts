@@ -61,7 +61,7 @@ export type AxAgentPlaybookEvolveProposal = {
   feedback: string;
 };
 
-/** A caller-owned, frozen historical evaluation slice used as a retention anchor. */
+/** A historical slice Ax clones and freezes before establishing its anchor. */
 export type AxAgentPlaybookRetentionSlice = {
   /** Stable human-readable identity, for example `billing-refunds`. */
   name: string;
@@ -77,6 +77,8 @@ export type AxAgentPlaybookRetentionSlice = {
  * does not promote or deploy anything outside the existing evolve call.
  */
 export type AxAgentPlaybookRetentionPolicy = {
+  /** Caller-managed identity/version of the metric or judge configuration. */
+  evaluatorId: string;
   slices: readonly AxAgentPlaybookRetentionSlice[];
   /** Plasticity: minimum gain on the current training task set. */
   minCurrentGain: number;
@@ -91,6 +93,10 @@ export type AxAgentPlaybookRetentionAnchor = {
   name: string;
   version: string;
   taskCount: number;
+  taskSetDigest: string;
+  policyDigest: string;
+  evaluatorId: string;
+  sequence: number;
   score: number;
   evidence: {
     executedRuns: number;
@@ -101,11 +107,53 @@ export type AxAgentPlaybookRetentionAnchor = {
 
 /** Per-slice evidence and aggregate accounting for one promotion decision. */
 export type AxAgentPlaybookRetentionReceipt = {
-  currentTask: { before: number; after: number; gain: number };
+  policy: {
+    digest: string;
+    evaluatorId: string;
+    currentTaskSetDigest: string;
+    heldOutTaskSetDigest?: string;
+  };
+  sequence: number;
+  currentTask: {
+    before: number;
+    after: number;
+    gain: number;
+    taskSetDigest: string;
+    anchorSequence: number;
+    candidateSequence: number;
+    anchorEvidence: {
+      executedRuns: number;
+      expectedRuns: number;
+      complete: true;
+    };
+    candidateEvidence: {
+      executedRuns: number;
+      expectedRuns: number;
+      complete: true;
+    };
+  };
+  heldOut?: {
+    taskSetDigest: string;
+    anchorSequence: number;
+    candidateSequence: number;
+    anchorEvidence: {
+      executedRuns: number;
+      expectedRuns: number;
+      complete: true;
+    };
+    candidateEvidence: {
+      executedRuns: number;
+      expectedRuns: number;
+      complete: true;
+    };
+  };
   slices: readonly {
     name: string;
     version: string;
     taskCount: number;
+    taskSetDigest: string;
+    anchorSequence: number;
+    candidateSequence: number;
     anchorScore: number;
     candidateScore: number;
     historicalLoss: number;
@@ -168,11 +216,12 @@ export type AxAgentPlaybookEvolveOptions = {
   /**
    * Budget counting (agent run + judge) pairs across baseline and
    * re-evaluations. Default `max(100, (maxProposals + 1) * (train + validation)
-   * * runsPerTask)`.
+   * * runsPerTask)`. Must be a positive safe integer at most 1,000,000.
    */
   maxMetricCalls?: number;
   /**
-   * Times each task runs per evaluation, with scores averaged. Default 1.
+   * Times each task runs per evaluation, with scores averaged. Must be a
+   * positive safe integer at most 100. Default 1.
    * Use 2-3 when the dataset is small: accept/reject compares mean scores,
    * and on a handful of tasks a single lucky or unlucky run can otherwise
    * decide the gate. Each repeat spends budget.

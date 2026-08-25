@@ -46,6 +46,111 @@ const DEFAULT_MAX_PROPOSALS = 4;
 const DEFAULT_EPSILON = 0.01;
 const DEFAULT_MIN_HELD_IN_GAIN = 0.05;
 const DEFAULT_SCORE_THRESHOLD = 0.7;
+const MAX_RUNS_PER_TASK = 100;
+const MAX_METRIC_CALLS = 1_000_000;
+
+function positiveSafeInteger(
+  value: number,
+  name: 'runsPerTask' | 'maxMetricCalls',
+  maximum: number
+): number {
+  if (!Number.isSafeInteger(value) || value <= 0 || value > maximum) {
+    throw new Error(
+      `AxAgent.playbook().evolve(): ${name} must be a positive safe integer at most ${maximum}.`
+    );
+  }
+  return value;
+}
+
+function deepFreeze<T>(value: T, seen = new WeakSet<object>()): Readonly<T> {
+  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+    if (seen.has(value)) return value;
+    seen.add(value);
+    for (const child of Object.values(value)) {
+      deepFreeze(child, seen);
+    }
+    Object.freeze(value);
+  }
+  return value;
+}
+
+function cloneAndFreeze<T>(value: T, label: string): Readonly<T> {
+  try {
+    return deepFreeze(structuredClone(value));
+  } catch (err) {
+    throw new Error(
+      `AxAgent.playbook().evolve(): ${label} must be structured-cloneable: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+}
+
+function canonicalSerialize(
+  value: unknown,
+  seen = new WeakSet<object>()
+): string {
+  if (value === null) return 'null';
+  if (value === undefined) return 'undefined';
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  if (typeof value === 'string') return `string:${JSON.stringify(value)}`;
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) {
+      throw new Error(
+        'AxAgent.playbook().evolve(): retention digest values must be finite.'
+      );
+    }
+    return `number:${Object.is(value, -0) ? '-0' : String(value)}`;
+  }
+  if (Array.isArray(value)) {
+    if (seen.has(value)) {
+      throw new Error(
+        'AxAgent.playbook().evolve(): retention digest values must not contain cycles.'
+      );
+    }
+    seen.add(value);
+    const serialized = `array:[${value
+      .map((item) => canonicalSerialize(item, seen))
+      .join(',')}]`;
+    seen.delete(value);
+    return serialized;
+  }
+  if (typeof value === 'object') {
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw new Error(
+        'AxAgent.playbook().evolve(): retention digest values must be plain objects, arrays, and primitives.'
+      );
+    }
+    if (seen.has(value)) {
+      throw new Error(
+        'AxAgent.playbook().evolve(): retention digest values must not contain cycles.'
+      );
+    }
+    seen.add(value);
+    const record = value as Record<string, unknown>;
+    const serialized = `object:{${Object.keys(record)
+      .sort()
+      .map(
+        (key) =>
+          `${JSON.stringify(key)}:${canonicalSerialize(record[key], seen)}`
+      )
+      .join(',')}}`;
+    seen.delete(value);
+    return serialized;
+  }
+  throw new Error(
+    `AxAgent.playbook().evolve(): unsupported retention digest value type ${typeof value}.`
+  );
+}
+
+function canonicalDigest(value: unknown): string {
+  const input = canonicalSerialize(value);
+  let hash = 0xcbf29ce484222325n;
+  for (let index = 0; index < input.length; index++) {
+    hash ^= BigInt(input.charCodeAt(index));
+    hash = BigInt.asUintN(64, hash * 0x100000001b3n);
+  }
+  return `fnv1a64:${hash.toString(16).padStart(16, '0')}`;
+}
 
 function validateRetentionWeights(
   tasks: readonly { weight?: number }[],
@@ -81,6 +186,11 @@ function validateRetentionPolicy(
   if (policy.slices.length === 0) {
     throw new Error(
       'AxAgent.playbook().evolve(): retentionPolicy requires at least one slice.'
+    );
+  }
+  if (!policy.evaluatorId.trim() || policy.evaluatorId.length > 200) {
+    throw new Error(
+      'AxAgent.playbook().evolve(): retentionPolicy.evaluatorId must be 1-200 characters.'
     );
   }
   const thresholds = [
@@ -156,42 +266,80 @@ export async function evolveAgentPlaybook<
     options?.metric ?? createAgentOptimizeMetric(self, judgeAI, judgeOptions);
 
   const verify = options?.verify !== false;
-  const retentionPolicy = options?.retentionPolicy;
+  const retentionPolicy = options?.retentionPolicy
+    ? cloneAndFreeze(options.retentionPolicy, 'retentionPolicy')
+    : undefined;
+  const trainTasks = retentionPolicy
+    ? cloneAndFreeze(normalized.train, 'retention current-task set')
+    : normalized.train;
+  const validationTasks = retentionPolicy
+    ? normalized.validation
+      ? cloneAndFreeze(normalized.validation, 'retention held-out set')
+      : undefined
+    : normalized.validation;
   if (retentionPolicy) {
-    validateRetentionPolicy(retentionPolicy, verify, normalized.train);
+    validateRetentionPolicy(retentionPolicy, verify, trainTasks);
   }
   const maxProposals = Math.max(
     1,
     Math.floor(options?.maxProposals ?? DEFAULT_MAX_PROPOSALS)
   );
-  const runsPerTask = Math.max(1, Math.floor(options?.runsPerTask ?? 1));
+  const runsPerTask = positiveSafeInteger(
+    options?.runsPerTask ?? 1,
+    'runsPerTask',
+    MAX_RUNS_PER_TASK
+  );
   const retentionTaskCount =
     retentionPolicy?.slices.reduce(
       (sum, slice) => sum + slice.tasks.length,
       0
     ) ?? 0;
   const datasetSize =
-    (normalized.train.length +
-      (normalized.validation?.length ?? 0) +
-      retentionTaskCount) *
+    (trainTasks.length + (validationTasks?.length ?? 0) + retentionTaskCount) *
     runsPerTask;
-  const maxMetricCalls = Math.max(
-    1,
-    Math.floor(
-      options?.maxMetricCalls ?? Math.max(100, (maxProposals + 1) * datasetSize)
-    )
+  const maxMetricCalls = positiveSafeInteger(
+    options?.maxMetricCalls ?? Math.max(100, (maxProposals + 1) * datasetSize),
+    'maxMetricCalls',
+    MAX_METRIC_CALLS
   );
   const epsilon = options?.epsilon ?? DEFAULT_EPSILON;
   const minHeldInGain = options?.minHeldInGain ?? DEFAULT_MIN_HELD_IN_GAIN;
   const currentGainThreshold = retentionPolicy?.minCurrentGain ?? minHeldInGain;
   const scoreThreshold = options?.scoreThreshold ?? DEFAULT_SCORE_THRESHOLD;
+  const currentTaskSetDigest = retentionPolicy
+    ? canonicalDigest(trainTasks)
+    : undefined;
+  const heldOutTaskSetDigest =
+    retentionPolicy && validationTasks
+      ? canonicalDigest(validationTasks)
+      : undefined;
+  const sliceTaskSetDigests =
+    retentionPolicy?.slices.map((slice) => canonicalDigest(slice.tasks)) ?? [];
+  const retentionPolicyDigest = retentionPolicy
+    ? canonicalDigest({
+        schema: 'ax-agent-playbook-retention-v1',
+        evaluatorId: retentionPolicy.evaluatorId,
+        currentTaskSetDigest,
+        heldOutTaskSetDigest,
+        thresholds: {
+          minCurrentGain: retentionPolicy.minCurrentGain,
+          maxWorstHistoricalLoss: retentionPolicy.maxWorstHistoricalLoss,
+          maxMeanHistoricalLoss: retentionPolicy.maxMeanHistoricalLoss,
+          heldOutEpsilon: epsilon,
+        },
+        slices: retentionPolicy.slices.map((slice, index) => ({
+          name: slice.name,
+          version: slice.version,
+          taskSetDigest: sliceTaskSetDigests[index],
+        })),
+      })
+    : undefined;
+  let retentionSequence = 0;
   const budget: AxAgentEvalBudget = { remaining: maxMetricCalls };
   const usedCalls = () => maxMetricCalls - budget.remaining;
 
   const baselineRequiredCalls =
-    (normalized.train.length +
-      (normalized.validation?.length ?? 0) +
-      retentionTaskCount) *
+    (trainTasks.length + (validationTasks?.length ?? 0) + retentionTaskCount) *
     runsPerTask;
   if (retentionPolicy && maxMetricCalls < baselineRequiredCalls) {
     throw new Error(
@@ -235,10 +383,10 @@ export async function evolveAgentPlaybook<
     })();
 
   // ---- Baseline ----
-  progress('baseline', `evaluating ${normalized.train.length} train tasks`);
+  progress('baseline', `evaluating ${trainTasks.length} train tasks`);
   const baselineTrain = await runAgentEvalBatch<IN, OUT>({
     ...batchArgs,
-    tasks: normalized.train,
+    tasks: trainTasks,
   });
   if (
     retentionPolicy &&
@@ -248,17 +396,35 @@ export async function evolveAgentPlaybook<
       'AxAgent.playbook().evolve(): retention current-task anchor requires complete, finite evaluator evidence.'
     );
   }
+  let currentTaskAnchorSequence = retentionPolicy
+    ? ++retentionSequence
+    : undefined;
+  let currentTaskAnchorEvidence = retentionPolicy
+    ? {
+        executedRuns: baselineTrain.executedRuns,
+        expectedRuns: baselineTrain.expectedRuns,
+        complete: true as const,
+      }
+    : undefined;
   let heldIn = baselineTrain.mean;
   let heldOut: number | undefined;
   let baselineHeldOutBatch: AxAgentEvalBatchResult<IN, OUT> | undefined;
-  if (normalized.validation?.length) {
+  let heldOutAnchorSequence: number | undefined;
+  let heldOutAnchorEvidence:
+    | {
+        executedRuns: number;
+        expectedRuns: number;
+        complete: true;
+      }
+    | undefined;
+  if (validationTasks?.length) {
     progress(
       'baseline',
-      `evaluating ${normalized.validation.length} validation tasks`
+      `evaluating ${validationTasks.length} validation tasks`
     );
     baselineHeldOutBatch = await runAgentEvalBatch<IN, OUT>({
       ...batchArgs,
-      tasks: normalized.validation,
+      tasks: validationTasks,
     });
     if (
       retentionPolicy &&
@@ -269,6 +435,14 @@ export async function evolveAgentPlaybook<
       );
     }
     heldOut = baselineHeldOutBatch.mean;
+    if (retentionPolicy) {
+      heldOutAnchorSequence = ++retentionSequence;
+      heldOutAnchorEvidence = {
+        executedRuns: baselineHeldOutBatch.executedRuns,
+        expectedRuns: baselineHeldOutBatch.expectedRuns,
+        complete: true,
+      };
+    }
   }
   const baseline = {
     heldIn,
@@ -276,7 +450,7 @@ export async function evolveAgentPlaybook<
   };
   const retentionAnchors: AxAgentPlaybookRetentionAnchor[] = [];
   if (retentionPolicy) {
-    for (const slice of retentionPolicy.slices) {
+    for (const [index, slice] of retentionPolicy.slices.entries()) {
       progress(
         'baseline',
         `evaluating retention slice ${slice.name}@${slice.version} (${slice.tasks.length} tasks)`
@@ -290,17 +464,23 @@ export async function evolveAgentPlaybook<
           `AxAgent.playbook().evolve(): retention slice ${slice.name}@${slice.version} requires complete, finite evaluator evidence.`
         );
       }
-      retentionAnchors.push({
-        name: slice.name,
-        version: slice.version,
-        taskCount: slice.tasks.length,
-        score: result.mean,
-        evidence: {
-          executedRuns: result.executedRuns,
-          expectedRuns: result.expectedRuns,
-          complete: true,
-        },
-      });
+      retentionAnchors.push(
+        deepFreeze({
+          name: slice.name,
+          version: slice.version,
+          taskCount: slice.tasks.length,
+          taskSetDigest: sliceTaskSetDigests[index]!,
+          policyDigest: retentionPolicyDigest!,
+          evaluatorId: retentionPolicy.evaluatorId,
+          sequence: ++retentionSequence,
+          score: result.mean,
+          evidence: {
+            executedRuns: result.executedRuns,
+            expectedRuns: result.expectedRuns,
+            complete: true as const,
+          },
+        })
+      );
     }
   }
 
@@ -354,8 +534,8 @@ export async function evolveAgentPlaybook<
     }
     const proposal = buildProposal(weakness);
     const requiredCalls =
-      (normalized.train.length +
-        (normalized.validation?.length ?? 0) +
+      (trainTasks.length +
+        (validationTasks?.length ?? 0) +
         retentionTaskCount) *
       runsPerTask;
     if (verify && budget.remaining < requiredCalls) {
@@ -400,26 +580,38 @@ export async function evolveAgentPlaybook<
     try {
       const revalTrain = await runAgentEvalBatch<IN, OUT>({
         ...batchArgs,
-        tasks: normalized.train,
+        tasks: trainTasks,
       });
+      const candidateCurrentSequence = retentionPolicy
+        ? ++retentionSequence
+        : undefined;
       let revalHeldOut: number | undefined;
       let revalHeldOutBatch: AxAgentEvalBatchResult<IN, OUT> | undefined;
-      if (normalized.validation?.length) {
+      let candidateHeldOutSequence: number | undefined;
+      if (validationTasks?.length) {
         revalHeldOutBatch = await runAgentEvalBatch<IN, OUT>({
           ...batchArgs,
-          tasks: normalized.validation,
+          tasks: validationTasks,
         });
         revalHeldOut = revalHeldOutBatch.mean;
+        if (retentionPolicy) {
+          candidateHeldOutSequence = ++retentionSequence;
+        }
       }
-      const candidateRetentionBatches: AxAgentEvalBatchResult<IN, OUT>[] = [];
+      const candidateRetentionBatches: {
+        batch: AxAgentEvalBatchResult<IN, OUT>;
+        sequence: number;
+      }[] = [];
       if (retentionPolicy) {
         for (const slice of retentionPolicy.slices) {
-          candidateRetentionBatches.push(
-            await runAgentEvalBatch<IN, OUT>({
-              ...batchArgs,
-              tasks: slice.tasks,
-            })
-          );
+          const batch = await runAgentEvalBatch<IN, OUT>({
+            ...batchArgs,
+            tasks: slice.tasks,
+          });
+          candidateRetentionBatches.push({
+            batch,
+            sequence: ++retentionSequence,
+          });
         }
       }
 
@@ -430,12 +622,12 @@ export async function evolveAgentPlaybook<
         retentionPolicy &&
           (!revalTrain.validEvidence ||
             (revalHeldOutBatch && !revalHeldOutBatch.validEvidence) ||
-            candidateRetentionBatches.some((batch) => !batch.validEvidence))
+            candidateRetentionBatches.some(({ batch }) => !batch.validEvidence))
       );
       const revalComplete =
         !revalTrain.exhausted &&
         !revalHeldOutBatch?.exhausted &&
-        !candidateRetentionBatches.some((batch) => batch.exhausted) &&
+        !candidateRetentionBatches.some(({ batch }) => batch.exhausted) &&
         !retentionEvidenceInvalid;
       const currentGain = revalTrain.mean - heldIn;
       const gainOk = revalComplete && currentGain >= currentGainThreshold;
@@ -452,13 +644,16 @@ export async function evolveAgentPlaybook<
             name: anchor.name,
             version: anchor.version,
             taskCount: anchor.taskCount,
+            taskSetDigest: anchor.taskSetDigest,
+            anchorSequence: anchor.sequence,
+            candidateSequence: candidate.sequence,
             anchorScore: anchor.score,
-            candidateScore: candidate.mean,
-            historicalLoss: anchor.score - candidate.mean,
+            candidateScore: candidate.batch.mean,
+            historicalLoss: anchor.score - candidate.batch.mean,
             anchorEvidence: anchor.evidence,
             candidateEvidence: {
-              executedRuns: candidate.executedRuns,
-              expectedRuns: candidate.expectedRuns,
+              executedRuns: candidate.batch.executedRuns,
+              expectedRuns: candidate.batch.expectedRuns,
               complete: true as const,
             },
           };
@@ -471,12 +666,43 @@ export async function evolveAgentPlaybook<
           worstHistoricalLoss <= retentionPolicy.maxWorstHistoricalLoss &&
           meanHistoricalLoss <= retentionPolicy.maxMeanHistoricalLoss;
         const accepted = gainOk && heldOutOk && retentionOk;
-        retentionReceipt = {
+        retentionReceipt = deepFreeze({
+          policy: {
+            digest: retentionPolicyDigest!,
+            evaluatorId: retentionPolicy.evaluatorId,
+            currentTaskSetDigest: currentTaskSetDigest!,
+            ...(heldOutTaskSetDigest ? { heldOutTaskSetDigest } : {}),
+          },
+          sequence: ++retentionSequence,
           currentTask: {
             before: heldIn,
             after: revalTrain.mean,
             gain: currentGain,
+            taskSetDigest: currentTaskSetDigest!,
+            anchorSequence: currentTaskAnchorSequence!,
+            candidateSequence: candidateCurrentSequence!,
+            anchorEvidence: currentTaskAnchorEvidence!,
+            candidateEvidence: {
+              executedRuns: revalTrain.executedRuns,
+              expectedRuns: revalTrain.expectedRuns,
+              complete: true,
+            },
           },
+          ...(heldOutTaskSetDigest && baselineHeldOutBatch && revalHeldOutBatch
+            ? {
+                heldOut: {
+                  taskSetDigest: heldOutTaskSetDigest,
+                  anchorSequence: heldOutAnchorSequence!,
+                  candidateSequence: candidateHeldOutSequence!,
+                  anchorEvidence: heldOutAnchorEvidence!,
+                  candidateEvidence: {
+                    executedRuns: revalHeldOutBatch.executedRuns,
+                    expectedRuns: revalHeldOutBatch.expectedRuns,
+                    complete: true as const,
+                  },
+                },
+              }
+            : {}),
           slices,
           worstHistoricalLoss,
           meanHistoricalLoss,
@@ -486,7 +712,7 @@ export async function evolveAgentPlaybook<
             maxMeanHistoricalLoss: retentionPolicy.maxMeanHistoricalLoss,
           },
           accepted,
-        };
+        });
       }
       const accept = revalComplete && gainOk && heldOutOk && retentionOk;
 
@@ -517,11 +743,30 @@ export async function evolveAgentPlaybook<
         ...(retentionReceipt ? { retention: retentionReceipt } : {}),
       });
 
+      if (options?.abortSignal?.aborted) {
+        throw new Error('AxAgent.playbook().evolve(): aborted');
+      }
       if (accept) {
         accepted.push(applied);
         heldIn = revalTrain.mean;
+        if (retentionPolicy) {
+          currentTaskAnchorSequence = candidateCurrentSequence;
+          currentTaskAnchorEvidence = {
+            executedRuns: revalTrain.executedRuns,
+            expectedRuns: revalTrain.expectedRuns,
+            complete: true,
+          };
+        }
         if (revalHeldOut !== undefined) {
           heldOut = revalHeldOut;
+          if (retentionPolicy) {
+            heldOutAnchorSequence = candidateHeldOutSequence;
+            heldOutAnchorEvidence = {
+              executedRuns: revalHeldOutBatch!.executedRuns,
+              expectedRuns: revalHeldOutBatch!.expectedRuns,
+              complete: true,
+            };
+          }
         }
         progress('validation', `${weakness.id}: ACCEPTED`);
       } else {
@@ -530,7 +775,7 @@ export async function evolveAgentPlaybook<
         progress('validation', `${weakness.id}: rejected, rolled back`);
       }
     } catch (err) {
-      if (retentionPolicy && !rolledBack) {
+      if (!rolledBack) {
         applied.rollback();
       }
       throw err;

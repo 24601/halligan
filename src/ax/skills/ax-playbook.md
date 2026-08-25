@@ -99,6 +99,7 @@ const result = await apb.evolve(
   {
     metric,
     retentionPolicy: {
+      evaluatorId: 'support-quality-v3',
       slices: [
         { name: 'refunds', version: '2026-07', tasks: refundAnchors },
         { name: 'routing', version: '3', tasks: routingAnchors },
@@ -112,21 +113,39 @@ const result = await apb.evolve(
 ```
 
 Ax scores each slice before any proposal and keeps those scores fixed as the
-run's anchors. Each fully evaluated proposal gets `outcome.retention` with its
-current-task gain, every named/versioned anchor and candidate score, per-slice
-loss, expected/executed run counts, evidence completeness, worst/mean
-historical loss, thresholds, and the final gate decision. Rejected proposals
-use the existing exact snapshot rollback. The result also exposes
-`retentionAnchors`. `minCurrentGain` replaces `minHeldInGain` for this optional
-gate and compares each proposal with the last accepted current-task score;
-fixed historical anchors prevent sequentially accepted losses from resetting.
-The existing validation-set `epsilon` gate still applies independently.
+run's anchors. Ax structured-clones and recursively freezes the policy plus
+current, held-out, and slice tasks before the first evaluation, so later caller
+or metric mutation cannot change the corpus or thresholds. Each fully
+evaluated proposal gets `outcome.retention` with its current-task gain, every
+named/versioned anchor and candidate score, per-slice loss, expected/executed
+run counts, evidence completeness, worst/mean historical loss, thresholds,
+and the final gate decision. Rejected proposals use the existing exact
+snapshot rollback. The result also exposes `retentionAnchors`.
+
+`evaluatorId` is a required caller-managed metric/judge configuration identity.
+Receipts include it with canonical current/held-out/slice corpus digests, a
+policy digest, and deterministic evaluation sequence numbers. Digests cover
+the cloned task fields—including weights—and thresholds. They use
+`fnv1a64`, a deterministic non-cryptographic identity/checksum, not proof of
+authenticity; retain the referenced evaluator and corpus versions externally.
+Sequence numbers cover baseline and candidate current-task, held-out, and
+historical-slice evaluations plus the final decision. Receipts and anchors are
+recursively frozen at runtime.
+
+`minCurrentGain` replaces `minHeldInGain` for this optional gate and compares
+each proposal with the last accepted current-task score; fixed historical
+anchors prevent sequentially accepted losses from resetting. The existing
+validation-set `epsilon` gate still applies independently.
 
 Retention is optional and default-off. It requires verified evolution, adds
 one baseline and one candidate evaluation per anchor task (times
 `runsPerTask`), and fails before mutation when the metric budget cannot
 establish complete anchors. Invalid weights, evaluator errors, and non-finite
-scores fail closed; an interrupted candidate evaluation rolls back. It does
+scores fail closed; abort is checked after every candidate-evaluation
+AI/metric await and again before acceptance, so an interrupted candidate
+evaluation rolls back.
+`runsPerTask` is capped at 100 and `maxMetricCalls` at 1,000,000; both must be
+positive safe integers. It does
 not change the metric or judge, expose anchor examples to weakness mining,
 generate candidates, auto-deploy, or promote outside this `evolve` call. Slice
 names, versions, task collection, semantic train/validation disjointness, and

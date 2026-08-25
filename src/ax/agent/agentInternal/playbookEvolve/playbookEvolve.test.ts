@@ -149,6 +149,7 @@ const retentionMetric =
   };
 
 const retentionPolicy = (stabilityLimit: number) => ({
+  evaluatorId: 'fixture-metric-v1',
   slices: RETENTION_TASKS,
   minCurrentGain: 0.5,
   maxWorstHistoricalLoss: stabilityLimit,
@@ -299,19 +300,30 @@ describe('agent.playbook().evolve()', () => {
       const retentionMs = performance.now() - retentionStartedAt;
 
       if (process.env.AX_PRINT_METRICS) {
+        const currentOnlyAccepted = currentOnly.outcomes[0]?.accepted === true;
+        const stabilityAccepted = result.outcomes[0]?.accepted === true;
+        const measuredHistoricalRegression =
+          (result.outcomes[0]?.retention?.worstHistoricalLoss ?? 0) > 0;
         console.log(
           JSON.stringify({
             currentOnly: {
-              accepted: true,
+              accepted: currentOnlyAccepted,
               metricCalls: currentOnly.metricCallsUsed,
               elapsedMs: Number(baselineMs.toFixed(2)),
             },
             stabilityPolicy: {
-              accepted: false,
+              accepted: stabilityAccepted,
               metricCalls: result.metricCallsUsed,
               elapsedMs: Number(retentionMs.toFixed(2)),
             },
-            falsePromotions: { currentOnly: 1, stabilityPolicy: 0 },
+            falsePromotions: {
+              currentOnly: Number(
+                currentOnlyAccepted && measuredHistoricalRegression
+              ),
+              stabilityPolicy: Number(
+                stabilityAccepted && measuredHistoricalRegression
+              ),
+            },
             metricCallOverhead:
               result.metricCallsUsed - currentOnly.metricCallsUsed,
           })
@@ -319,11 +331,13 @@ describe('agent.playbook().evolve()', () => {
       }
 
       expect(result.metricCallsUsed).toBe(8);
-      expect(result.retentionAnchors).toEqual([
+      expect(result.retentionAnchors).toMatchObject([
         {
           name: 'legacy-refunds',
           version: '2026-07',
           taskCount: 1,
+          evaluatorId: 'fixture-metric-v1',
+          sequence: 2,
           score: 1,
           evidence: { executedRuns: 1, expectedRuns: 1, complete: true },
         },
@@ -331,6 +345,8 @@ describe('agent.playbook().evolve()', () => {
           name: 'legacy-routing',
           version: '3',
           taskCount: 1,
+          evaluatorId: 'fixture-metric-v1',
+          sequence: 3,
           score: 1,
           evidence: { executedRuns: 1, expectedRuns: 1, complete: true },
         },
@@ -338,7 +354,15 @@ describe('agent.playbook().evolve()', () => {
       expect(result.outcomes[0]?.accepted).toBe(false);
       const receipt = result.outcomes[0]?.retention;
       expect(receipt).toMatchObject({
-        currentTask: { before: 0.2, after: 1, gain: 0.8 },
+        policy: { evaluatorId: 'fixture-metric-v1' },
+        sequence: 7,
+        currentTask: {
+          before: 0.2,
+          after: 1,
+          gain: 0.8,
+          anchorSequence: 1,
+          candidateSequence: 4,
+        },
         accepted: false,
         slices: [
           {
@@ -346,6 +370,8 @@ describe('agent.playbook().evolve()', () => {
             version: '2026-07',
             anchorScore: 1,
             candidateScore: 0.7,
+            anchorSequence: 2,
+            candidateSequence: 5,
             anchorEvidence: {
               executedRuns: 1,
               expectedRuns: 1,
@@ -362,9 +388,25 @@ describe('agent.playbook().evolve()', () => {
             version: '3',
             anchorScore: 1,
             candidateScore: 0.9,
+            anchorSequence: 3,
+            candidateSequence: 6,
           },
         ],
       });
+      expect(receipt?.policy.digest).toMatch(/^fnv1a64:[0-9a-f]{16}$/);
+      expect(receipt?.policy.currentTaskSetDigest).toBe(
+        receipt?.currentTask.taskSetDigest
+      );
+      expect(result.retentionAnchors?.[0]?.policyDigest).toBe(
+        receipt?.policy.digest
+      );
+      expect(result.retentionAnchors?.[0]?.taskSetDigest).toBe(
+        receipt?.slices[0]?.taskSetDigest
+      );
+      expect(Object.isFrozen(result.retentionAnchors?.[0])).toBe(true);
+      expect(Object.isFrozen(receipt)).toBe(true);
+      expect(Object.isFrozen(receipt?.policy)).toBe(true);
+      expect(Object.isFrozen(receipt?.slices)).toBe(true);
       expect(receipt?.worstHistoricalLoss).toBeCloseTo(0.3);
       expect(receipt?.meanHistoricalLoss).toBeCloseTo(0.2);
       expect(receipt?.slices[0]?.historicalLoss).toBeCloseTo(0.3);
@@ -375,20 +417,30 @@ describe('agent.playbook().evolve()', () => {
 
     it('accepts the same candidate under an explicit plasticity-favoring policy', async () => {
       const { ag } = makeAgent();
-      const result = await ag.playbook().evolve(TASKS, {
-        metric: retentionMetric({
-          'history-refunds': 0.7,
-          'history-routing': 0.9,
-        }),
-        maxProposals: 1,
-        retentionPolicy: retentionPolicy(0.35),
-      });
+      const result = await ag.playbook().evolve(
+        { train: TASKS, validation: [{ ...TASKS[0]!, id: 'holdout' }] },
+        {
+          metric: retentionMetric({
+            'history-refunds': 0.7,
+            'history-routing': 0.9,
+          }),
+          maxProposals: 1,
+          retentionPolicy: retentionPolicy(0.35),
+        }
+      );
 
       expect(result.outcomes[0]?.accepted).toBe(true);
       expect(result.outcomes[0]?.retention?.accepted).toBe(true);
       expect(result.outcomes[0]?.retention?.worstHistoricalLoss).toBeCloseTo(
         0.3
       );
+      expect(result.outcomes[0]?.retention?.heldOut).toMatchObject({
+        anchorSequence: 2,
+        candidateSequence: 6,
+        anchorEvidence: { complete: true },
+        candidateEvidence: { complete: true },
+      });
+      expect(result.outcomes[0]?.retention?.sequence).toBe(9);
       expect(actorPromptOf(ag)).toContain(BULLET_MARKER);
     });
 
@@ -529,7 +581,7 @@ describe('agent.playbook().evolve()', () => {
       expect(ag.getPlaybook().toJSON()).toEqual(before);
     });
 
-    it('rolls back exactly when aborted between candidate retention slices', async () => {
+    it('rolls back when the final candidate metric aborts then returns a valid score', async () => {
       const { ag } = makeAgent();
       const before = ag.getPlaybook().toJSON();
       const controller = new AbortController();
@@ -540,7 +592,7 @@ describe('agent.playbook().evolve()', () => {
             const fixed = prediction?.output?.answer === 'ok-fixed';
             if (
               fixed &&
-              example.id === 'history-refunds' &&
+              example.id === 'history-routing' &&
               !controller.signal.aborted
             ) {
               controller.abort();
@@ -561,6 +613,56 @@ describe('agent.playbook().evolve()', () => {
       expect(actorPromptOf(ag)).not.toContain(BULLET_MARKER);
     });
 
+    it('uses an immutable policy and task snapshot despite caller mutation', async () => {
+      const { ag } = makeAgent();
+      const policy = {
+        evaluatorId: 'mutation-fixture-v1',
+        slices: RETENTION_TASKS.map((slice) => ({
+          ...slice,
+          tasks: slice.tasks.map((task) => ({ ...task })),
+        })),
+        minCurrentGain: 0.5,
+        maxWorstHistoricalLoss: 0.35,
+        maxMeanHistoricalLoss: 0.35,
+      };
+      let mutated = false;
+      const result = await ag.playbook().evolve(TASKS, {
+        metric: async ({ example, prediction }: any) => {
+          if (!mutated) {
+            mutated = true;
+            policy.maxWorstHistoricalLoss = 0;
+            policy.slices[0]!.tasks[0]!.id = 'caller-mutated';
+            policy.slices[0]!.tasks.push({
+              input: { question: 'injected task' },
+              criteria: 'must not enter the snapshot',
+              id: 'caller-injected',
+            });
+          }
+          const fixed = prediction?.output?.answer === 'ok-fixed';
+          if (String(example.id).startsWith('history-')) {
+            return fixed ? 0.8 : 1;
+          }
+          return fixed ? 1 : 0.2;
+        },
+        maxProposals: 1,
+        retentionPolicy: policy,
+      });
+
+      expect(policy.slices[0]?.tasks).toHaveLength(2);
+      expect(result.retentionAnchors?.[0]).toMatchObject({
+        taskCount: 1,
+        evaluatorId: 'mutation-fixture-v1',
+      });
+      expect(result.outcomes[0]?.retention).toMatchObject({
+        thresholds: { maxWorstHistoricalLoss: 0.35 },
+        accepted: true,
+      });
+      expect(result.outcomes[0]?.retention?.slices).toHaveLength(2);
+      expect(result.outcomes[0]?.retention?.slices[0]).toMatchObject({
+        taskCount: 1,
+      });
+    });
+
     it('rejects invalid policy authority and identity configurations', async () => {
       const { ag } = makeAgent();
       await expect(
@@ -570,6 +672,15 @@ describe('agent.playbook().evolve()', () => {
           retentionPolicy: retentionPolicy(0.1),
         })
       ).rejects.toThrow(/requires verify: true/);
+      await expect(
+        ag.playbook().evolve(TASKS, {
+          metric: scoreByAnswer,
+          retentionPolicy: {
+            ...retentionPolicy(0.1),
+            evaluatorId: '',
+          },
+        })
+      ).rejects.toThrow(/evaluatorId must be 1-200 characters/);
       await expect(
         ag.playbook().evolve(TASKS, {
           metric: scoreByAnswer,
@@ -602,6 +713,21 @@ describe('agent.playbook().evolve()', () => {
           },
         })
       ).rejects.toThrow(/task weights must be finite and non-negative/);
+      for (const [name, value] of [
+        ['runsPerTask', Number.NaN],
+        ['runsPerTask', Number.POSITIVE_INFINITY],
+        ['runsPerTask', 101],
+        ['maxMetricCalls', Number.NaN],
+        ['maxMetricCalls', Number.POSITIVE_INFINITY],
+        ['maxMetricCalls', 1_000_001],
+      ] as const) {
+        await expect(
+          ag.playbook().evolve(TASKS, {
+            metric: scoreByAnswer,
+            [name]: value,
+          })
+        ).rejects.toThrow(/positive safe integer/);
+      }
     });
   });
 });

@@ -19,6 +19,15 @@ import type { AxAgentPlaybookEvolveRunRecord } from './playbookEvolveTypes.js';
 /** Mutable (run + judge) pair budget shared across all improve() batches. */
 export type AxAgentEvalBudget = { remaining: number };
 
+const MAX_RUNS_PER_TASK = 100;
+const MAX_METRIC_CALLS = 1_000_000;
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new Error('AxAgent.playbook().evolve(): aborted');
+  }
+}
+
 export type AxAgentEvalBatchResult<
   IN extends AxGenIn = AxGenIn,
   OUT extends AxGenOut = AxGenOut,
@@ -51,7 +60,25 @@ export async function runAgentEvalBatch<
   abortSignal?: AbortSignal;
 }): Promise<AxAgentEvalBatchResult<IN, OUT>> {
   const records: AxAgentPlaybookEvolveRunRecord<IN, OUT>[] = [];
-  const runsPerTask = Math.max(1, Math.floor(args.runsPerTask ?? 1));
+  const runsPerTask = args.runsPerTask ?? 1;
+  if (
+    !Number.isSafeInteger(runsPerTask) ||
+    runsPerTask <= 0 ||
+    runsPerTask > MAX_RUNS_PER_TASK
+  ) {
+    throw new Error(
+      `AxAgent.playbook().evolve(): runsPerTask must be a positive safe integer at most ${MAX_RUNS_PER_TASK}.`
+    );
+  }
+  if (
+    !Number.isSafeInteger(args.budget.remaining) ||
+    args.budget.remaining < 0 ||
+    args.budget.remaining > MAX_METRIC_CALLS
+  ) {
+    throw new Error(
+      `AxAgent.playbook().evolve(): metric budget must be a non-negative safe integer at most ${MAX_METRIC_CALLS}.`
+    );
+  }
   let exhausted = false;
   let executedRuns = 0;
   let validEvidence = true;
@@ -62,9 +89,7 @@ export async function runAgentEvalBatch<
     let lastError: string | undefined;
 
     for (let run = 0; run < runsPerTask; run++) {
-      if (args.abortSignal?.aborted) {
-        throw new Error('AxAgent.playbook().evolve(): aborted');
-      }
+      throwIfAborted(args.abortSignal);
       if (args.budget.remaining <= 0) {
         exhausted = true;
         break;
@@ -80,10 +105,12 @@ export async function runAgentEvalBatch<
             ...(args.abortSignal ? { abortSignal: args.abortSignal } : {}),
           }
         );
+        throwIfAborted(args.abortSignal);
         const score = await args.metric({
           prediction: prediction as Record<string, unknown>,
           example: task as unknown as Parameters<AxMetricFn>[0]['example'],
         });
+        throwIfAborted(args.abortSignal);
         const validScore = typeof score === 'number' && Number.isFinite(score);
         scores.push(validScore ? score : 0);
         validEvidence &&= validScore;
