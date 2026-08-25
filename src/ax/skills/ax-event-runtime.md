@@ -61,6 +61,24 @@ await source.publish({ event, identity, trust: 'authenticated' });
 - Use `.wakeInput()` and `.resumeInput()` when the two actions need different
   contracts. Neither action silently uses the other action's mapping.
 - Use `observe` for progress/logs and `invalidate` for catalog changes.
+- For proactive demand evidence, connect `AxDemandBoundary` through
+  `axDemandEventObserver(...)` on an `observe` route. Treat every disposition,
+  including `act`, as an advisory proposal. Host authorization and effect
+  settlement remain separate and mandatory.
+- Keep detector free text non-authoritative. Retain explicit `no_demand` and
+  `uncertain` records; downgrade stale, conflicting, low-confidence, malformed,
+  or revoked-grant evidence instead of silently dropping it.
+- Detector confidence estimates demand probability; it is not authority. Require
+  `ignore` or `annotate` in host disposition allowlists so fallback remains
+  fail-closed.
+- Use a host `AxDemandStore` for durable/distributed cursor and dedupe
+  guarantees. `AxInMemoryDemandStore` is volatile; its snapshots are suitable
+  for deterministic restart tests, not a durable service.
+- Treat dedupe keys as immutable observation identities. Proposal expiry does
+  not reopen an event key; assign a new host key to a new observation.
+- Minimize and redact observations before detection, lower the 1 MiB
+  observation and 64 KiB detection defaults when practical, and enforce host
+  privacy/retention policy on the backlog.
 - Use `resume` only with an owned continuation correlation key.
 - Use `createProgram(instance)` for stateful multi-tenant Agents.
 - Declare `retrySafety: 'idempotent'` only when stable delivery keys protect
@@ -138,6 +156,11 @@ Use `AxManualEventClock`, `AxInMemoryEventStore`, deterministic event IDs, and
 an output-capturing sink. Assert that unmatched or observe-only events never
 invoke the program, tenant scopes do not collide, outputs exist before sinks,
 and uncertain side effects become `outcome_unknown`.
+
+For advisory demand policy, run `npm run event:demand:eval`. Its temporal
+held-out synthetic split compares reactive and naive-threshold baselines and
+reports fixed confusion counts, calibration, false fires/suppression,
+calls/latency/bytes, and negative results without provider calls.
 
 Persistent store implementations must pass
 `runAxEventStoreConformance(createStore, { clock })`. A store must not advertise

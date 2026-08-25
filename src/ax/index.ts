@@ -887,6 +887,26 @@ import {
   runAxEventStoreConformance,
 } from './event/conformance.js';
 import {
+  type AxDemandAppendResult,
+  AxDemandBoundary,
+  type AxDemandBoundaryOptions,
+  type AxDemandCalibration,
+  type AxDemandDetection,
+  type AxDemandDetector,
+  type AxDemandDisposition,
+  type AxDemandGrantState,
+  type AxDemandObservation,
+  type AxDemandOutcome,
+  type AxDemandPolicy,
+  type AxDemandProposal,
+  type AxDemandProvenance,
+  type AxDemandReceipt,
+  type AxDemandRecord,
+  type AxDemandStore,
+  AxInMemoryDemandStore,
+  axDemandEventObserver,
+} from './event/demand.js';
+import {
   AxEventRouteBuilder,
   AxEventTargetBuilder,
   eventInput,
@@ -1369,6 +1389,7 @@ export { AxBootstrapFewShot };
 export { AxContentProcessingError };
 export { AxContextMetricsCollector };
 export { AxDefaultCostTracker };
+export { AxDemandBoundary };
 export { AxDockerSession };
 export { AxEmbeddingAdapter };
 export { AxEvalUtil };
@@ -1389,6 +1410,7 @@ export { AxGEPAComponentSelector };
 export { AxGen };
 export { AxGenerateError };
 export { AxInMemoryBalancerStatsStore };
+export { AxInMemoryDemandStore };
 export { AxInMemoryEventStore };
 export { AxInMemoryProgramStateStore };
 export { AxJSRuntime };
@@ -1494,6 +1516,7 @@ export { axDefaultFlowLogger };
 export { axDefaultMetricsConfig };
 export { axDefaultOptimizerLogger };
 export { axDefaultOptimizerMetricsConfig };
+export { axDemandEventObserver };
 export { axDeserializeOptimizedProgram };
 export { axEmitUsageEvent };
 export { axEventErrorMessage };
@@ -1976,6 +1999,21 @@ export type { AxCostTrackerOptions };
 export type { AxDateRange };
 export type { AxDateRangeValue };
 export type { AxDebugChatResponseUsage };
+export type { AxDemandAppendResult };
+export type { AxDemandBoundaryOptions };
+export type { AxDemandCalibration };
+export type { AxDemandDetection };
+export type { AxDemandDetector };
+export type { AxDemandDisposition };
+export type { AxDemandGrantState };
+export type { AxDemandObservation };
+export type { AxDemandOutcome };
+export type { AxDemandPolicy };
+export type { AxDemandProposal };
+export type { AxDemandProvenance };
+export type { AxDemandReceipt };
+export type { AxDemandRecord };
+export type { AxDemandStore };
 export type { AxDiscoveryTurnSummary };
 export type { AxDockerContainer };
 export type { AxEmbedRequest };

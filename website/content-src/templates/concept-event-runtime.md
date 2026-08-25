@@ -49,6 +49,37 @@ database, queue, callback, or other destination.
 The core rule is simple: an event invokes a model only when a route you wrote
 chooses `wake` or `resume`.
 
+## Advisory Demand Proposals
+
+TypeScript applications can attach `axDemandEventObserver(boundary)` to an
+`observe` route when a host-supplied detector should turn observations into a
+retained, reviewable proposal. `AxDemandBoundary` records explicit `demand`,
+`no_demand`, or `uncertain` evidence; confidence and calibration; provenance;
+expiry; an opaque standing-grant reference; and an `ignore`, `annotate`,
+`notify`, `propose`, or `act` disposition.
+
+These names describe proposals, not effects. Every record says
+`authority: 'advisory'` and `requiresHostReview: true`; the boundary has no
+target, tool, sink, notification, or effect callback. The host must authorize
+again and settle any effect separately. Detector prose is retained but never
+becomes policy or authority, malformed output becomes explicit uncertainty,
+and only the host-owned observation can choose dedupe identity.
+
+Confidence estimates demand probability; it is not an action score. Host
+disposition allowlists must retain `ignore` or `annotate` as a fail-closed
+fallback. Observation validation failures reject explicitly before detection.
+
+The built-in demand store is process-local and volatile. Supply an application
+store when cursor/backlog and dedupe must survive a restart or coordinate
+workers. The event runtime remains responsible for scheduling; this API does
+not add a timer, notification product, user profile, or autonomous loop.
+Observations and detections are bounded; applications should map only
+consented, necessary evidence and apply their own redaction and retention
+policy.
+
+Dedupe keys identify immutable observations: proposal expiry does not reopen a
+previously processed key. A new observation needs a new host-selected key.
+
 ## Wake: Start A Program From An Event
 
 A `wake` route starts a new run. This minimal assembly creates a source, maps

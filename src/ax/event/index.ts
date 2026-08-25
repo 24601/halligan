@@ -5,6 +5,28 @@ export type {
   AxEventStoreConformanceReport,
 } from './conformance.js';
 export { runAxEventStoreConformance } from './conformance.js';
+export type {
+  AxDemandAppendResult,
+  AxDemandBoundaryOptions,
+  AxDemandCalibration,
+  AxDemandDetection,
+  AxDemandDetector,
+  AxDemandDisposition,
+  AxDemandGrantState,
+  AxDemandObservation,
+  AxDemandOutcome,
+  AxDemandPolicy,
+  AxDemandProposal,
+  AxDemandProvenance,
+  AxDemandReceipt,
+  AxDemandRecord,
+  AxDemandStore,
+} from './demand.js';
+export {
+  AxDemandBoundary,
+  AxInMemoryDemandStore,
+  axDemandEventObserver,
+} from './demand.js';
 export {
   AxEventRouteBuilder,
   AxEventTargetBuilder,

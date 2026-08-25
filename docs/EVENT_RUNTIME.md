@@ -95,6 +95,86 @@ program signature. The immutable
 `eventContext` remains available to nested programs and tool handlers for
 identity, trust, causation, cancellation, and idempotency.
 
+## Advisory Demand Detection
+
+`AxDemandBoundary` is an optional provider-neutral boundary for turning an
+observation into retained detector evidence and a host-reviewable disposition
+proposal. Connect it through an `observe` route with
+`axDemandEventObserver(boundary)`: the event runtime still owns ingress,
+dedupe, debounce, and scheduling, while the boundary records `demand`,
+`no_demand`, or `uncertain` plus confidence, calibration, provenance, expiry,
+and one of `ignore`, `annotate`, `notify`, `propose`, or `act`.
+
+Every disposition is advisory, including `act`. The proposal is always marked
+`authority: 'advisory'` and `requiresHostReview: true`. The boundary has no
+target, tool, sink, notification, or effect callback, so it cannot perform or
+authorize an action. A host must re-check current authorization and settle any
+effect at its own boundary. A standing-grant reference is opaque; the optional
+validator only records whether that reference was valid when the proposal was
+created. Revocation after creation is therefore another reason the host must
+authorize again at review time.
+
+Detector output is untrusted structured evidence. Free-text reasons are stored
+but never parsed as policy, and detectors cannot select dedupe keys. Invalid
+detector output becomes an explicit `uncertain` record with a fail-closed
+fallback. Explicit no-demand and stale evidence prefer `ignore`; low-confidence
+or conflicting evidence prefers `annotate`. None disappears silently.
+Observations default to 1 MiB and detections to 64 KiB; hosts can lower both
+limits. Map only consented, necessary fields, redact before this boundary, and
+set an application retention policy: cursor retention is not permission to
+collect or keep unrelated personal data.
+
+Observation validation and size failures reject explicitly before detector
+invocation; rejected host input is not retained. A detection's `confidence` is
+its estimated demand probability, not authority or an action score. Host
+disposition allowlists must contain `ignore` or `annotate`, and every fallback
+stays within that allowlist.
+
+`AxInMemoryDemandStore` retains cursor-addressable records, supports snapshots
+for tests and process-managed restoration, and atomically deduplicates appended
+proposals in one process. It is volatile and concurrent duplicate calls may
+both reach the detector before one append wins. Production hosts that require
+durable or distributed exactly-once detection should supply an `AxDemandStore`
+with atomic dedupe and persistence. The detector itself remains host-supplied;
+Ax does not start a classifier, timer, notification system, or generic agent
+loop.
+
+Dedupe keys identify immutable observations. Replaying a key returns the
+original retained record even after its proposal expires; a genuinely new
+observation needs a new host-selected key. Expiry prevents a proposal from
+remaining current, not an event from remaining deduplicated.
+
+Run the deterministic, zero-network held-out evaluation with:
+
+```bash
+npm run event:demand:eval
+npx vitest run scripts/eval-demand-boundary.test.ts
+```
+
+The fixed temporal split contains 40 synthetic observations (8 demand, 32
+no-demand) and reports confusion counts, precision/recall, Brier score, ECE,
+false fires, retained-but-not-fired demand, detector calls, latency, and bytes
+against reactive and naive confidence-threshold baselines. It is a policy
+characterization, not a model-quality claim: the deliberately misleading
+well-formed detector remains a false fire, while conservative handling reduces
+recall.
+
+The checked-in fixed result is:
+
+| Policy | TP | FP | TN | FN | Precision | Recall |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Reactive explicit-request baseline | 2 | 0 | 32 | 6 | 1.000 | 0.250 |
+| Naive confidence ≥ 0.75 | 7 | 5 | 27 | 1 | 0.583 | 0.875 |
+| Advisory boundary | 4 | 1 | 31 | 4 | 0.800 | 0.500 |
+
+False fire and false suppression are FP and FN respectively. Detector
+calibration over the 39 structurally valid detector scores is Brier 0.132826
+and 5-bucket ECE 0.230; the deliberately malformed score is excluded. The
+boundary retained all 40 records and made 40 deterministic detector calls, 0
+paid/network calls, and 0 effects. It measured 0 ms synthetic detector latency,
+10,106 observation bytes, and 13,523 detection bytes. These byte and latency
+values characterize this fixture and machine, not performance limits.
+
 ## Signature-Aware Input Mapping
 
 The program signature is the destination contract. `eventPath` describes
