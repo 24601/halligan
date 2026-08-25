@@ -1162,6 +1162,32 @@
       "completedAt": "2026-08-22",
       "completedByCommit": "040f954bce9c7dca44f7fd3436886d036f9e358b",
       "verification": "TS-derived native-image routing fixture; five-language AxIR dev verifier; npm run axir:check-packages; go test ./internal/axir; focused TypeScript router tests"
+    },
+    {
+      "id": "axir-2026-08-25-port-shared-runtime-capability-selection-and-conformance-observa",
+      "status": "open",
+      "title": "Port shared runtime capability selection and conformance observations",
+      "createdAt": "2026-08-25",
+      "sourcePR": null,
+      "sourceCommit": "ca760294f5ea4f207052c39c2218e1195103bc2a",
+      "tsPaths": [
+        "src/ax/agent/AxAgent.ts",
+        "src/ax/agent/agent.test-d.ts",
+        "src/ax/agent/benchmarks/runtimeCapabilities.eval.ts",
+        "src/ax/agent/rlm.ts",
+        "src/ax/agent/runtimeCapabilities.test.ts",
+        "src/ax/agent/runtimeCapabilities.ts"
+      ],
+      "portableSurface": "axagent",
+      "impact": "TypeScript AxCodeRuntime now exposes the AxIR-aligned inspect/snapshot/patch/abort/language/protocol/persistence/resource/authority declaration, opt-in fail-closed selection, and deterministic false-confidence reporting; generated Python, Java, C++, Go, and Rust RuntimeCapabilities records and selectors do not yet expose the extended vocabulary or matching behavior.",
+      "suggestedAxirWork": [
+        "Add or update the TS-derived conformance fixture.",
+        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
+        "Run npm run axir:conformance:check and npm run test:axir."
+      ],
+      "completedAt": null,
+      "completedByCommit": null,
+      "verification": null
     }
   ],
   "nonPortableExemptions": [

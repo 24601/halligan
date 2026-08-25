@@ -12,10 +12,28 @@ import {
   type AxCodeRuntime,
   type AxFunction,
   type AxFunctionProvider,
+  type AxRuntimeCapabilities,
   agent,
+  axSelectCodeRuntime,
   f,
   s,
 } from '../index.js';
+
+// Runtime declarations and requirement-aware selection are public and opt-in.
+{
+  const capabilities = {} as AxRuntimeCapabilities;
+  const runtime = {} as AxCodeRuntime;
+  const selected: AxCodeRuntime = axSelectCodeRuntime([runtime], {
+    inspect: true,
+    language: ['JavaScript', 'Python'],
+    authority: { network: 'denied' },
+  }).runtime;
+  const _inspect: boolean = capabilities.inspect;
+  const _protocolVersion: string = capabilities.protocol.version;
+  void selected;
+  void _inspect;
+  void _protocolVersion;
+}
 
 // Basic agent with string signature — forward() returns typed output
 {

@@ -1,4 +1,9 @@
 import type { AxCodeRuntime, AxCodeSession } from '../agent/rlm.js';
+import {
+  axCodeRuntimeProtocol,
+  axCodeRuntimeProtocolVersion,
+  type RuntimeCapabilities,
+} from '../agent/runtimeCapabilities.js';
 import type { AxFunction } from '../ai/types.js';
 import {
   type AxJSRuntimeNodePermissionAllowlist,
@@ -40,6 +45,7 @@ export type AxJSRuntimeOutputMode = 'return' | 'stdout';
  */
 export class AxJSRuntime implements AxCodeRuntime {
   readonly language = 'JavaScript';
+  readonly capabilities: RuntimeCapabilities;
   private readonly timeout: number;
   private readonly permissions: readonly AxJSRuntimePermission[];
   private readonly allowUnsafeNodeHostAccess: boolean;
@@ -171,6 +177,48 @@ export class AxJSRuntime implements AxCodeRuntime {
     this.nodePermissionAllowlist = options?.nodePermissionAllowlist;
     this.resourceLimits = options?.resourceLimits;
     this.allowDenoRemoteImport = options?.allowDenoRemoteImport ?? false;
+    const hasWorkerEscalation = this.permissions.includes(
+      AxJSRuntimePermission.WORKERS
+    );
+    const hasCodeLoading =
+      this.permissions.includes(AxJSRuntimePermission.CODE_LOADING) ||
+      (this.allowDenoRemoteImport &&
+        this.permissions.includes(AxJSRuntimePermission.NETWORK));
+    this.capabilities = {
+      inspect: true,
+      snapshot: true,
+      patch: true,
+      abort: true,
+      language: this.language,
+      protocol: {
+        name: axCodeRuntimeProtocol,
+        version: axCodeRuntimeProtocolVersion,
+      },
+      persistence: { session: true, restart: false },
+      resources: {
+        timeoutMs: this.timeout,
+        timeoutEnforcement: 'hard',
+      },
+      authority: {
+        host: this.allowUnsafeNodeHostAccess ? 'unrestricted' : 'denied',
+        modules:
+          this.allowUnsafeNodeHostAccess ||
+          hasWorkerEscalation ||
+          hasCodeLoading ||
+          !this.blockDynamicImport
+            ? 'unrestricted'
+            : this.allowedModules.length > 0
+              ? 'allowlist'
+              : 'denied',
+        network:
+          this.allowUnsafeNodeHostAccess ||
+          hasWorkerEscalation ||
+          hasCodeLoading ||
+          this.permissions.includes(AxJSRuntimePermission.NETWORK)
+            ? 'unrestricted'
+            : 'denied',
+      },
+    };
   }
 
   /**

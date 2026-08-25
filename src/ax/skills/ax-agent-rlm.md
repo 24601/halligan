@@ -50,6 +50,25 @@ Treat both actor stages as long-running code runtime sessions that the actor ste
 - `actionLog`, `liveRuntimeState`, and checkpoint summaries only control what the actor can see again in the prompt.
 - Rebuild state only after an explicit runtime restart notice or when you intentionally need to overwrite a value.
 
+### Runtime capability selection
+
+Custom runtimes may expose an `AxRuntimeCapabilities` declaration covering
+inspect/snapshot/patch/abort, language, protocol, persistence, resources, and
+ambient host/module/network authority. The declaration uses the shared AxIR
+vocabulary but is untrusted metadata, not proof or certification of sandbox
+isolation.
+
+- `axSelectCodeRuntime(candidates)` keeps legacy behavior and returns the first
+  candidate without requiring declarations.
+- Pass explicit requirements to opt into fail-closed matching. Missing,
+  malformed, or non-matching declarations are rejected; no match throws.
+- Use `axEvaluateRuntimeConformance(...)` to compare adapter-owned observations
+  with claims and expose false confidence. Its `isolationProven` result is
+  always `false`.
+- Keep sandbox permissions, process/container policy, cancellation enforcement,
+  package loading, and host access controls in the adapter. Do not treat a
+  declaration as enforcement.
+
 ## RLM Actor Code Rules
 
 Use these rules when generating actor JavaScript for RLM in `AxJSRuntime` stdout mode. For custom runtimes, follow the runtime's `getUsageInstructions()`, primitive overrides, and callable formatter instead.

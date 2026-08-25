@@ -202,6 +202,19 @@ import {
   axBuildResponderDefinition,
 } from './agent/rlm.js';
 import {
+  type AxRuntimeAuthority,
+  type AxRuntimeCapabilities,
+  type AxRuntimeCapabilityRequirements,
+  type AxRuntimeConformanceObservations,
+  type AxRuntimeConformanceReport,
+  type AxRuntimeSelection,
+  type AxRuntimeTimeoutEnforcement,
+  axCodeRuntimeProtocol,
+  axCodeRuntimeProtocolVersion,
+  axEvaluateRuntimeConformance,
+  axSelectCodeRuntime,
+} from './agent/runtimeCapabilities.js';
+import {
   type AxRuntimePrimitive,
   type AxRuntimePrimitiveExample,
   type AxRuntimePrimitiveSignature,
@@ -1479,6 +1492,8 @@ export { axBuildDistillerDefinition };
 export { axBuildExecutorDefinition };
 export { axBuildResponderDefinition };
 export { axCheckMetricsHealth };
+export { axCodeRuntimeProtocol };
+export { axCodeRuntimeProtocolVersion };
 export { axConcatBase64 };
 export { axCreateDefaultColorLogger };
 export { axCreateDefaultOptimizerColorLogger };
@@ -1496,6 +1511,7 @@ export { axDefaultOptimizerLogger };
 export { axDefaultOptimizerMetricsConfig };
 export { axDeserializeOptimizedProgram };
 export { axEmitUsageEvent };
+export { axEvaluateRuntimeConformance };
 export { axEventErrorMessage };
 export { axEventId };
 export { axEventIdentityScope };
@@ -1569,6 +1585,7 @@ export { axResolveOpenAIChatAudioConfig };
 export { axResolveOpenAIRealtimeAudioConfig };
 export { axRuntimePrimitives };
 export { axScoreProvidersForRequest };
+export { axSelectCodeRuntime };
 export { axSelectOptimalProvider };
 export { axSerializeOptimizedProgram };
 export { axShouldUseGeminiLiveAudio };
@@ -2328,13 +2345,20 @@ export type { AxRewardFn };
 export type { AxRewardFnArgs };
 export type { AxRolloutTrace };
 export type { AxRoutingResult };
+export type { AxRuntimeAuthority };
 export type { AxRuntimeCallableFormatArgs };
+export type { AxRuntimeCapabilities };
+export type { AxRuntimeCapabilityRequirements };
+export type { AxRuntimeConformanceObservations };
+export type { AxRuntimeConformanceReport };
 export type { AxRuntimeLanguageInfo };
 export type { AxRuntimePrimitive };
 export type { AxRuntimePrimitiveExample };
 export type { AxRuntimePrimitiveOverrideMap };
 export type { AxRuntimePrimitiveSignature };
 export type { AxRuntimePrimitiveStage };
+export type { AxRuntimeSelection };
+export type { AxRuntimeTimeoutEnforcement };
 export type { AxSamplePickerOptions };
 export type { AxSelfTuningConfig };
 export type { AxSerializedOptimizedProgram };

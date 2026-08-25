@@ -94,6 +94,58 @@ describe('AxJSRuntime secure defaults', () => {
 });
 
 describe('AxJSRuntime', () => {
+  it('declares canonical runtime capabilities without claiming certification', () => {
+    const runtime = new AxJSRuntime({
+      timeout: 250,
+      allowedModules: ['safe-module'],
+    });
+
+    expect(runtime.capabilities).toEqual({
+      inspect: true,
+      snapshot: true,
+      patch: true,
+      abort: true,
+      language: 'JavaScript',
+      protocol: { name: 'ax-code-runtime', version: '1' },
+      persistence: { session: true, restart: false },
+      resources: {
+        timeoutMs: 250,
+        timeoutEnforcement: 'hard',
+      },
+      authority: {
+        host: 'denied',
+        modules: 'allowlist',
+        network: 'denied',
+      },
+    });
+  });
+
+  it('conservatively declares worker and code-loading authority', () => {
+    const runtime = new AxJSRuntime({
+      permissions: [AxJSRuntimePermission.WORKERS],
+    });
+
+    expect(runtime.capabilities.authority).toEqual({
+      host: 'denied',
+      modules: 'unrestricted',
+      network: 'unrestricted',
+    });
+  });
+
+  it('declares explicitly enabled ambient authority', () => {
+    const runtime = new AxJSRuntime({
+      permissions: [AxJSRuntimePermission.NETWORK],
+      allowUnsafeNodeHostAccess: true,
+      blockDynamicImport: false,
+    });
+
+    expect(runtime.capabilities.authority).toEqual({
+      host: 'unrestricted',
+      modules: 'unrestricted',
+      network: 'unrestricted',
+    });
+  });
+
   it('provides runtime usage instructions for RLM prompts', () => {
     const interp = new AxJSRuntime();
     const instructions = interp.getUsageInstructions();
