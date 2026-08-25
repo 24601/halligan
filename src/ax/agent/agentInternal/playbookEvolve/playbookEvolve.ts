@@ -36,7 +36,6 @@ import type {
 } from './playbookEvolveTypes.js';
 import type { AxAppliedProposal } from './proposals.js';
 import {
-  AxAgentPlaybookRestorationError,
   applyProposal,
   buildProposal,
   currentPlaybookText,
@@ -49,6 +48,9 @@ const DEFAULT_MIN_HELD_IN_GAIN = 0.05;
 const DEFAULT_SCORE_THRESHOLD = 0.7;
 const MAX_RUNS_PER_TASK = 100;
 const MAX_METRIC_CALLS = 1_000_000;
+const RESTORATION_FAILURE = Symbol.for(
+  '@ax-llm/ax/agent-playbook-restoration-failure'
+);
 
 function positiveSafeInteger(
   value: number,
@@ -555,7 +557,12 @@ export async function evolveAgentPlaybook<
     try {
       applied = await applyProposal({ proposal, playbookHandle });
     } catch (err) {
-      if (err instanceof AxAgentPlaybookRestorationError) {
+      if (
+        err &&
+        typeof err === 'object' &&
+        RESTORATION_FAILURE in err &&
+        (err as Record<symbol, unknown>)[RESTORATION_FAILURE] === true
+      ) {
         throw err;
       }
       outcomes.push({
