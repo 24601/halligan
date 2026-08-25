@@ -76,6 +76,8 @@ await source.publish({ event, identity, trust: 'authenticated' });
   dedupe key even when a custom mapper supplies the observation.
 - Host observations and detector outputs are read once into plain snapshots;
   validation, byte measurement, and retention use the same frozen values.
+- Detector ID, version, and callback are captured once at construction and bind
+  boundary identity, callback `this`, and retained detector metadata.
 - Keep callbacks within the configured timeout and propagate runtime
   cancellation as cancellation, not successful uncertainty. One boundary
   single-flights a scoped key with per-waiter cancellation and bounded pending

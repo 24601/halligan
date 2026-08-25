@@ -758,16 +758,24 @@ export class AxDemandBoundary {
   private inFlightBytes = 0;
 
   constructor(options: Readonly<AxDemandBoundaryOptions>) {
-    nonEmpty(options.detector.id, 'AxDemandDetector.id');
-    nonEmpty(options.detector.version, 'AxDemandDetector.version');
+    const rawDetector = options.detector;
+    const detectorId = rawDetector.id;
+    const detectorVersion = rawDetector.version;
+    const detect = rawDetector.detect;
+    nonEmpty(detectorId, 'AxDemandDetector.id');
+    nonEmpty(detectorVersion, 'AxDemandDetector.version');
     this.id = nonEmpty(
-      options.id ?? `${options.detector.id}@${options.detector.version}`,
+      options.id ?? `${detectorId}@${detectorVersion}`,
       'AxDemandBoundary.id'
     );
-    this.detector = options.detector;
+    this.detector = Object.freeze({
+      id: detectorId,
+      version: detectorVersion,
+      detect,
+    });
     this.detectorIdentity = Object.freeze({
-      id: options.detector.id,
-      version: options.detector.version,
+      id: detectorId,
+      version: detectorVersion,
     });
     this.now = options.now ?? Date.now;
     this.measureNow =

@@ -134,7 +134,10 @@ custom observation mapper cannot remove that authority scope. Host observations
 and detector outputs are schema-snapshotted into detached plain records with one
 read per declared field; validation, byte limits, freezing, and retention all
 use that same snapshot. Throwing detector getters become explicit uncertainty,
-while throwing host getters reject before detector invocation.
+while throwing host getters reject before detector invocation. Detector ID,
+version, and callback are likewise captured once at boundary construction;
+default boundary identity, callback binding, and retained detector metadata use
+only that frozen descriptor.
 
 Observation validation and size failures reject explicitly before detector
 invocation; rejected host input is not retained. A detection's `confidence` is

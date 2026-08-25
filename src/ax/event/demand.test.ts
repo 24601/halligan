@@ -267,6 +267,74 @@ describe('AxDemandBoundary', () => {
     expect(validateStandingGrant).toHaveBeenCalledOnce();
   });
 
+  it('snapshots detector metadata once for identity, callback binding, and retention', async () => {
+    let idReads = 0;
+    let versionReads = 0;
+    const rawDetector = {
+      get id() {
+        idReads++;
+        return idReads === 1 ? 'stable-detector' : 'changed-detector';
+      },
+      get version() {
+        versionReads++;
+        return versionReads === 1 ? 'stable-version' : 'changed-version';
+      },
+      detect(this: AxDemandDetector) {
+        expect(this.id).toBe('stable-detector');
+        expect(this.version).toBe('stable-version');
+        return detection();
+      },
+    } satisfies AxDemandDetector;
+    const value = new AxDemandBoundary({
+      detector: rawDetector,
+      now: () => now,
+    });
+    const record = (await value.observe(observation('metadata-once'))).record;
+    expect(idReads).toBe(1);
+    expect(versionReads).toBe(1);
+    expect(value.id).toBe('stable-detector@stable-version');
+    expect(record.scope.boundaryId).toBe('stable-detector@stable-version');
+    expect(record.detector).toEqual({
+      id: 'stable-detector',
+      version: 'stable-version',
+    });
+  });
+
+  it('reads throwing detector metadata getters exactly once', () => {
+    let idReads = 0;
+    const throwingId = {
+      get id(): string {
+        idReads++;
+        throw new Error('detector id getter failed');
+      },
+      version: '1',
+      detect: () => detection(),
+    };
+    expect(() => new AxDemandBoundary({ detector: throwingId })).toThrow(
+      'detector id getter failed'
+    );
+    expect(idReads).toBe(1);
+
+    let stableIdReads = 0;
+    let versionReads = 0;
+    const throwingVersion = {
+      get id() {
+        stableIdReads++;
+        return 'detector';
+      },
+      get version(): string {
+        versionReads++;
+        throw new Error('detector version getter failed');
+      },
+      detect: () => detection(),
+    };
+    expect(() => new AxDemandBoundary({ detector: throwingVersion })).toThrow(
+      'detector version getter failed'
+    );
+    expect(stableIdReads).toBe(1);
+    expect(versionReads).toBe(1);
+  });
+
   it('turns malformed or harmful detector output into explicit uncertainty', async () => {
     const { value } = boundary(
       detection({ confidence: 7, requestedDisposition: 'act' })

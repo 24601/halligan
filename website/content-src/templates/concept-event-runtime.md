@@ -75,7 +75,8 @@ wraps every local dedupe key even when a custom mapper supplies the observation.
 Callbacks have bounded timeouts, and runtime cancellation remains cancellation
 rather than successful evidence. Observation and detector fields are read once
 into plain snapshots used consistently for validation, byte limits, and
-retention.
+retention. Detector metadata and callback are also captured once at boundary
+construction and bind callback identity and retained provenance.
 
 Detector latency metrics remain finite and nonnegative. Extreme or reversing
 clocks clamp to the safe-integer range and mark the sample as capped rather than
