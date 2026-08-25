@@ -1170,7 +1170,11 @@
       "createdAt": "2026-08-25",
       "sourcePR": null,
       "sourceCommit": "working-tree",
-      "tsPaths": ["src/ax/dsp", "src/ax/agent/agentInternal/playbookEvolve"],
+      "tsPaths": [
+        "src/ax/dsp",
+        "src/ax/agent/agentInternal/playbookEvolve",
+        "src/ax/agent/agent.test-d.ts"
+      ],
       "portableSurface": "axoptimize",
       "impact": "TypeScript metrics can return an explicit scalar score with bounded per-example textual feedback and named Pareto objective scores; GEPA aligns feedback with reflective datasets and playbook evolution consumes the structured scalar. Generated language optimizers still expose only scalar or legacy score-vector evaluation.",
       "suggestedAxirWork": [
