@@ -433,6 +433,44 @@ describe('AxEventRuntime', () => {
     await runtime.close({ drain: false });
   });
 
+  it('closes every started source when runtime startup or close runs', async () => {
+    const lifecycle: string[] = [];
+    const source = (id: string, fail = false) => ({
+      id,
+      start: async ({ signal }: { signal: AbortSignal }) => {
+        lifecycle.push(`${id}:start`);
+        if (fail) throw new Error(`${id}:failed`);
+        return {
+          close: () => {
+            expect(signal.aborted).toBe(true);
+            lifecycle.push(`${id}:close`);
+          },
+        };
+      },
+    });
+    const runtime = new AxEventRuntime({
+      routes: [],
+      sources: [source('first'), source('second')],
+    });
+    await runtime.start();
+    await runtime.close({ drain: false });
+    await runtime.close({ drain: false });
+    expect(lifecycle).toEqual([
+      'first:start',
+      'second:start',
+      'second:close',
+      'first:close',
+    ]);
+
+    lifecycle.length = 0;
+    const failing = new AxEventRuntime({
+      routes: [],
+      sources: [source('first'), source('broken', true)],
+    });
+    await expect(failing.start()).rejects.toThrow('broken:failed');
+    expect(lifecycle).toEqual(['first:start', 'broken:start', 'first:close']);
+  });
+
   it('refuses durable sources on the volatile store by default', async () => {
     const source = new AxPushEventSource('queue', true);
     const runtime = new AxEventRuntime({ routes: [], sources: [source] });

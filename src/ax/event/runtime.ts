@@ -1,5 +1,6 @@
 import { AxAgentClarificationError } from '../agent/agentInternal/agentStateTypes.js';
 import type { AxGenDeltaOut, AxProgrammable } from '../dsp/types.js';
+import { AxEventComponentManager } from './components.js';
 import {
   AxEventRouteBuilder,
   AxEventTargetBuilder,
@@ -32,7 +33,6 @@ import {
   type AxEventRun,
   type AxEventRuntimeOptions,
   type AxEventSink,
-  type AxEventSourceHandle,
   type AxEventTarget,
   type AxProgramStateEnvelope,
   AxSystemEventClock,
@@ -136,8 +136,7 @@ export class AxEventRuntime {
   private readonly targetSources = new Map<string, AxEventTarget<any, any>>();
   private readonly singletonTargetInstances = new Map<string, string>();
   private readonly activeRuns = new Map<string, AbortController>();
-  private readonly sourceHandles: AxEventSourceHandle[] = [];
-  private readonly sourceController = new AbortController();
+  private readonly sourceComponents = new AxEventComponentManager();
   private readonly workerController = new AbortController();
   private workerPromises: Promise<void>[] = [];
   private started = false;
@@ -216,14 +215,27 @@ export class AxEventRuntime {
     );
     try {
       for (const source of this.options.sources ?? []) {
-        const handle = await source.start({
-          signal: this.sourceController.signal,
-          publish: (ingress, signal) => this.publish(ingress, signal),
-          reportError: (error) => {
-            void this.options.onSourceError?.(source.id, error);
-          },
+        const componentId = `event-source:${source.id}`;
+        await this.sourceComponents.define({
+          id: componentId,
+          version: '1',
+          activate: (context) =>
+            context.acquire('source-handle', async (signal) => {
+              const handle = await source.start({
+                signal,
+                publish: (ingress, publishSignal) =>
+                  this.publish(ingress, publishSignal),
+                reportError: (error) => {
+                  void this.options.onSourceError?.(source.id, error);
+                },
+              });
+              return {
+                value: handle,
+                dispose: () => handle?.close(),
+              };
+            }),
         });
-        if (handle) this.sourceHandles.push(handle);
+        await this.sourceComponents.activate(componentId);
       }
     } catch (error) {
       await this.close({ drain: false });
@@ -365,10 +377,7 @@ export class AxEventRuntime {
   async close(options: Readonly<AxEventCloseOptions> = {}): Promise<void> {
     if (this.closing) return;
     this.closing = true;
-    this.sourceController.abort('AxEventRuntime closing');
-    await Promise.allSettled(
-      this.sourceHandles.map((handle) => handle.close())
-    );
+    await this.sourceComponents.dispose().catch(() => undefined);
     if (options.drain !== false) {
       try {
         await this.waitForIdle(options.timeoutMs ?? 30_000);

@@ -1,4 +1,23 @@
 export type {
+  AxEventComponentAcquisition,
+  AxEventComponentActivationContext,
+  AxEventComponentDefinition,
+  AxEventComponentDiagnostic,
+  AxEventComponentDiagnosticCode,
+  AxEventComponentDisposer,
+  AxEventComponentEffectInspection,
+  AxEventComponentInspection,
+  AxEventComponentManagerOptions,
+  AxEventComponentState,
+  AxEventComponentTransitionOptions,
+} from './components.js';
+export {
+  AxEventComponentLeakError,
+  AxEventComponentManager,
+  AxEventComponentTransitionError,
+  axEventComponentManager,
+} from './components.js';
+export type {
   AxEventStoreConformanceFactory,
   AxEventStoreConformanceFactoryOptions,
   AxEventStoreConformanceInstance,
