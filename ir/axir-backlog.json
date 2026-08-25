@@ -1162,6 +1162,33 @@
       "completedAt": "2026-08-22",
       "completedByCommit": "040f954bce9c7dca44f7fd3436886d036f9e358b",
       "verification": "TS-derived native-image routing fixture; five-language AxIR dev verifier; npm run axir:check-packages; go test ./internal/axir; focused TypeScript router tests"
+    },
+    {
+      "id": "axir-2026-08-25-port-evidence-aware-ace-playbook-metadata-and-retrieval",
+      "status": "open",
+      "title": "Port evidence-aware ACE playbook metadata and retrieval",
+      "createdAt": "2026-08-25",
+      "sourcePR": null,
+      "sourceCommit": "ca760294f5ea4f207052c39c2218e1195103bc2a",
+      "tsPaths": [
+        "src/ax/dsp/optimizers/aceTypes.ts",
+        "src/ax/dsp/optimizers/acePlaybook.ts",
+        "src/ax/dsp/optimizers/ace.ts",
+        "src/ax/dsp/playbook.ts",
+        "src/ax/agent/agentInternal/agentPlaybook.ts",
+        "src/ax/agent/agentInternal/playbookEvolve/proposals.ts",
+        "src/ax/agent/agentInternal/playbookEvolve/playbookEvolve.ts"
+      ],
+      "portableSurface": "axoptimize",
+      "impact": "TypeScript ACE bullets now support optional provenance, confidence/evidence counts, declarative applicability, host-owned verifier receipts, lifecycle/supersession, revision lineage, auditable before/after deltas, condition-aware rendering, and verified-agent receipts. Legacy artifacts remain valid. Generated runtimes do not yet expose this schema, host evidence boundary, or inactive-entry filtering.",
+      "suggestedAxirWork": [
+        "Add or update the TS-derived conformance fixture.",
+        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
+        "Run npm run axir:conformance:check and npm run test:axir."
+      ],
+      "completedAt": null,
+      "completedByCommit": null,
+      "verification": null
     }
   ],
   "nonPortableExemptions": [

@@ -17,19 +17,23 @@ import { type AxField, f } from '../sig.js';
 import { ax } from '../template.js';
 import type { AxGenOut } from '../types.js';
 import {
+  type AxACEPlaybookRenderOptions,
   applyCuratorOperations,
   clonePlaybook,
   createEmptyPlaybook,
   dedupePlaybookByContent,
+  generateBulletId,
   renderPlaybook,
   updateBulletFeedback,
 } from './acePlaybook.js';
 import type {
+  AxACEApplicability,
   AxACEBullet,
   AxACECuratorOperation,
   AxACECuratorOutput,
   AxACEFeedbackEvent,
   AxACEGeneratorOutput,
+  AxACEHostEvidence,
   AxACEOptimizationArtifact,
   AxACEOptions,
   AxACEPlaybook,
@@ -336,9 +340,8 @@ export class AxACEOptimizedProgram<
  * ergonomics (unified optimized program artifacts, metrics, and checkpointing).
  */
 export class AxACE extends AxBaseOptimizer {
-  private readonly aceConfig: Required<typeof DEFAULT_CONFIG> & {
-    initialPlaybook?: AxACEPlaybook;
-  };
+  private readonly aceConfig: Required<typeof DEFAULT_CONFIG> &
+    Pick<AxACEOptions, 'initialPlaybook' | 'sourceRunId'>;
   private playbook: AxACEPlaybook;
   private baseInstruction?: string;
   private generatorHistory: AxACEFeedbackEvent[] = [];
@@ -421,7 +424,8 @@ export class AxACE extends AxBaseOptimizer {
   }
 
   public applyCurrentState<IN, OUT extends AxGenOut>(
-    program?: AxGen<IN, OUT>
+    program?: AxGen<IN, OUT>,
+    renderOptions?: Readonly<AxACEPlaybookRenderOptions>
   ): void {
     const target = (program ?? this.program) as AxGen<IN, OUT> | undefined;
     if (!target) {
@@ -431,7 +435,7 @@ export class AxACE extends AxBaseOptimizer {
     const baseInstruction =
       this.baseInstruction ?? target.getSignature().getDescription() ?? '';
     (target as any).setDescription?.(
-      this.composeInstruction(baseInstruction, this.playbook)
+      this.composeInstruction(baseInstruction, this.playbook, renderOptions)
     );
   }
 
@@ -535,6 +539,9 @@ export class AxACE extends AxBaseOptimizer {
             example,
             program
           );
+          const feedbackId = generateBulletId('feedback');
+          const sourceRunId =
+            aceOptions?.sourceRunId ?? this.aceConfig.sourceRunId;
 
           const reflection = await this.runReflectionRounds({
             example,
@@ -568,6 +575,7 @@ export class AxACE extends AxBaseOptimizer {
               : undefined;
 
           let appliedDeltaIds: string[] = [];
+          let changes: AxACEOptimizationArtifact['history'][number]['changes'];
           if (resolvedOperations.length > 0) {
             const protectedIds =
               this.collectProtectedBulletIds(resolvedOperations);
@@ -579,9 +587,15 @@ export class AxACE extends AxBaseOptimizer {
                 allowDynamicSections: this.aceConfig.allowDynamicSections,
                 enableAutoPrune: true,
                 protectedBulletIds: protectedIds,
+                hostEvidence: {
+                  source: 'compile',
+                  ...(sourceRunId ? { sourceRunId } : {}),
+                  feedbackIds: [feedbackId],
+                },
               }
             );
             appliedDeltaIds = applicationResult.updatedBulletIds;
+            changes = applicationResult.changes;
             if (applicationResult.autoRemoved.length > 0) {
               resolvedOperations.push(...applicationResult.autoRemoved);
               if (curatorResult) {
@@ -604,6 +618,8 @@ export class AxACE extends AxBaseOptimizer {
           }
 
           const feedbackEvent: AxACEFeedbackEvent = {
+            id: feedbackId,
+            ...(sourceRunId ? { sourceRunId } : {}),
             example: example as AxExample,
             prediction,
             score: typeof score === 'number' ? score : 0,
@@ -622,6 +638,7 @@ export class AxACE extends AxBaseOptimizer {
               exampleIndex: index,
               operations: curatorResult.operations,
               updatedBulletIds: appliedDeltaIds,
+              changes,
             });
           }
 
@@ -709,6 +726,7 @@ export class AxACE extends AxBaseOptimizer {
       example: AxExample;
       prediction: unknown;
       feedback?: string;
+      evidence?: AxACEHostEvidence;
     }>
   ): Promise<AxACECuratorOutput | undefined> {
     if (!this.program) {
@@ -722,6 +740,8 @@ export class AxACE extends AxBaseOptimizer {
       args.example,
       this.program
     );
+    const feedbackId = generateBulletId('feedback');
+    const sourceRunId = args.evidence?.sourceRunId;
 
     const reflection = await this.runReflectionRounds({
       example: args.example,
@@ -759,6 +779,7 @@ export class AxACE extends AxBaseOptimizer {
     }
 
     let appliedDeltaIds: string[] = [];
+    let changes: AxACEOptimizationArtifact['history'][number]['changes'];
     if (resolvedOperations.length > 0) {
       const protectedIds = this.collectProtectedBulletIds(resolvedOperations);
       const result = applyCuratorOperations(this.playbook, resolvedOperations, {
@@ -766,8 +787,14 @@ export class AxACE extends AxBaseOptimizer {
         allowDynamicSections: this.aceConfig.allowDynamicSections,
         enableAutoPrune: true,
         protectedBulletIds: protectedIds,
+        hostEvidence: {
+          ...args.evidence,
+          source: args.evidence?.source ?? 'online',
+          feedbackIds: [feedbackId, ...(args.evidence?.feedbackIds ?? [])],
+        },
       });
       appliedDeltaIds = result.updatedBulletIds;
+      changes = result.changes;
       if (result.autoRemoved.length > 0) {
         resolvedOperations.push(...result.autoRemoved);
         if (curatorResult) {
@@ -781,6 +808,8 @@ export class AxACE extends AxBaseOptimizer {
     }
 
     const feedbackEvent: AxACEFeedbackEvent = {
+      id: feedbackId,
+      ...(sourceRunId ? { sourceRunId } : {}),
       example: args.example,
       prediction: args.prediction,
       score: 0,
@@ -799,20 +828,52 @@ export class AxACE extends AxBaseOptimizer {
         exampleIndex: this.generatorHistory.length - 1,
         operations: curatorResult.operations,
         updatedBulletIds: appliedDeltaIds,
+        changes,
       });
     }
 
     return curatorResult;
   }
 
+  /** Attach authoritative host/evaluator evidence without another LM call. */
+  public recordEvidence(
+    bulletIds: readonly string[],
+    evidence: Readonly<AxACEHostEvidence>
+  ): string[] {
+    const operations = bulletIds.flatMap((bulletId) => {
+      const bullet = this.locateBullet(this.playbook, bulletId);
+      return bullet
+        ? [{ type: 'UPDATE' as const, section: bullet.section, bulletId }]
+        : [];
+    });
+    if (!operations.length) {
+      return [];
+    }
+    const result = applyCuratorOperations(this.playbook, operations, {
+      hostEvidence: evidence,
+    });
+    if (result.updatedBulletIds.length) {
+      this.deltaHistory.push({
+        source: evidence.source ?? 'manual',
+        epoch: -1,
+        exampleIndex: -1,
+        operations,
+        updatedBulletIds: result.updatedBulletIds,
+        changes: result.changes,
+      });
+    }
+    return result.updatedBulletIds;
+  }
+
   private composeInstruction(
     baseInstruction: string,
-    playbook: AxACEPlaybook
+    playbook: AxACEPlaybook,
+    renderOptions?: Readonly<AxACEPlaybookRenderOptions>
   ): string {
     const instructionParts = [
       baseInstruction.trim(),
       '',
-      renderPlaybook(playbook),
+      renderPlaybook(playbook, renderOptions),
     ].filter((part) => part.trim().length > 0);
 
     return instructionParts.join('\n\n');
@@ -1188,7 +1249,12 @@ export class AxACE extends AxBaseOptimizer {
         const contentRaw = (entry as { content?: string }).content ?? '';
         const content = typeof contentRaw === 'string' ? contentRaw.trim() : '';
 
-        if (type !== 'REMOVE' && content.length === 0) {
+        const hasMetadataUpdate =
+          'metadata' in entry || 'evidence' in entry || 'supersedes' in entry;
+        if (
+          (type === 'ADD' && content.length === 0) ||
+          (type === 'UPDATE' && content.length === 0 && !hasMetadataUpdate)
+        ) {
           continue;
         }
 
@@ -1219,7 +1285,7 @@ export class AxACE extends AxBaseOptimizer {
           section,
         };
 
-        if (type !== 'REMOVE') {
+        if (type !== 'REMOVE' && content.length > 0) {
           normalizedEntry.content = content;
         }
         if (bulletId) {
@@ -1230,6 +1296,37 @@ export class AxACE extends AxBaseOptimizer {
           .metadata;
         if (metadataRaw && typeof metadataRaw === 'object') {
           normalizedEntry.metadata = { ...metadataRaw };
+        }
+
+        const evidenceRaw = (entry as { evidence?: Record<string, unknown> })
+          .evidence;
+        if (evidenceRaw && typeof evidenceRaw === 'object') {
+          const confidence = evidenceRaw.confidence;
+          const applicability = evidenceRaw.applicability;
+          const lifecycle = evidenceRaw.lifecycle;
+          normalizedEntry.evidence = {
+            ...(typeof confidence === 'number' && Number.isFinite(confidence)
+              ? { confidence }
+              : {}),
+            ...(applicability && typeof applicability === 'object'
+              ? {
+                  applicability:
+                    this.normalizeCuratorApplicability(applicability),
+                }
+              : {}),
+            ...(lifecycle && typeof lifecycle === 'object'
+              ? {
+                  lifecycle: this.normalizeCuratorLifecycle(lifecycle),
+                }
+              : {}),
+          };
+        }
+
+        const supersedesRaw = (entry as { supersedes?: unknown }).supersedes;
+        if (Array.isArray(supersedesRaw)) {
+          normalizedEntry.supersedes = supersedesRaw.filter(
+            (value): value is string => typeof value === 'string'
+          );
         }
 
         normalized.push(normalizedEntry);
@@ -1264,6 +1361,45 @@ export class AxACE extends AxBaseOptimizer {
     }
 
     return [];
+  }
+
+  private normalizeCuratorApplicability(value: object): AxACEApplicability {
+    const raw = value as Record<string, unknown>;
+    const strings = (candidate: unknown): string[] | undefined =>
+      Array.isArray(candidate)
+        ? candidate.filter(
+            (entry): entry is string => typeof entry === 'string'
+          )
+        : undefined;
+    const allOf = strings(raw.allOf);
+    const anyOf = strings(raw.anyOf);
+    const noneOf = strings(raw.noneOf);
+    return {
+      ...(allOf ? { allOf } : {}),
+      ...(anyOf ? { anyOf } : {}),
+      ...(noneOf ? { noneOf } : {}),
+    };
+  }
+
+  private normalizeCuratorLifecycle(
+    value: object
+  ): NonNullable<AxACECuratorOperation['evidence']>['lifecycle'] {
+    const raw = value as Record<string, unknown>;
+    const status = ['active', 'deprecated', 'superseded'].includes(
+      String(raw.status)
+    )
+      ? (raw.status as 'active' | 'deprecated' | 'superseded')
+      : undefined;
+    return {
+      ...(status ? { status } : {}),
+      ...(typeof raw.expiresAt === 'string'
+        ? { expiresAt: raw.expiresAt }
+        : {}),
+      ...(typeof raw.supersededBy === 'string'
+        ? { supersededBy: raw.supersededBy }
+        : {}),
+      ...(typeof raw.reason === 'string' ? { reason: raw.reason } : {}),
+    };
   }
 
   private async runReflectionRounds({
@@ -1481,7 +1617,7 @@ export class AxACE extends AxBaseOptimizer {
         .output(
           'operations',
           f.json(
-            'List of operations, each {type: "ADD"|"UPDATE"|"REMOVE", section, content}. Emit an operation ONLY when the playbook should actually change. If nothing should change, return an empty array — never emit an ADD whose content just acknowledges that no change is needed (e.g. "No update required", "Keep the existing rule unchanged"). Each ADD content must be a standalone, reusable rule.'
+            'List of operations, each {type: "ADD"|"UPDATE"|"REMOVE", section, content?, bulletId?, evidence?: {confidence?: 0..1, applicability?: {allOf?: string[], anyOf?: string[], noneOf?: string[]}, lifecycle?: {status?: "active"|"deprecated"|"superseded", expiresAt?: ISO timestamp, supersededBy?: string, reason?: string}}, supersedes?: string[]}. Preconditions are inert condition tokens, never executable code. Provenance, evidenceCount, and verification receipts are host-owned and MUST NOT be emitted. Emit an operation ONLY when the playbook should actually change. If nothing should change, return an empty array — never emit an ADD whose content just acknowledges that no change is needed (e.g. "No update required", "Keep the existing rule unchanged"). Each ADD content must be a standalone, reusable rule.'
           )
         )
         .build();

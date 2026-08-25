@@ -13,6 +13,8 @@
  * to the inner `AxPlaybook`.
  */
 
+import type { AxACEPlaybookRenderOptions } from '../../dsp/optimizers/acePlaybook.js';
+import type { AxACEHostEvidence } from '../../dsp/optimizers/aceTypes.js';
 import type { AxPlaybook, AxPlaybookSnapshot } from '../../dsp/playbook.js';
 import type { AxGenIn, AxGenOut } from '../../dsp/types.js';
 import type { AxAgentEvalDataset } from './agentOptimizeTypes.js';
@@ -49,14 +51,32 @@ export class AxAgentPlaybook<
 
   /** Refine the playbook from a single live interaction (trust). */
   public update(
-    args: Readonly<{ example: unknown; prediction: unknown; feedback?: string }>
+    args: Readonly<{
+      example: unknown;
+      prediction: unknown;
+      feedback?: string;
+      evidence?: AxACEHostEvidence;
+    }>
   ): Promise<void> {
     return this.handle.update(args as never);
   }
 
   /** The current playbook rendered as a markdown block. */
-  public render(): string {
-    return this.handle.render();
+  public render(options?: Readonly<AxACEPlaybookRenderOptions>): string {
+    return this.handle.render(options);
+  }
+
+  /** Re-apply the playbook to the live agent stage with retrieval conditions. */
+  public applyTo(options?: Readonly<AxACEPlaybookRenderOptions>): void {
+    this.handle.applyTo(undefined, options);
+  }
+
+  /** Attach authoritative host/evaluator evidence without invoking the LM. */
+  public recordEvidence(
+    bulletIds: readonly string[],
+    evidence: Readonly<AxACEHostEvidence>
+  ): readonly string[] {
+    return this.handle.recordEvidence(bulletIds, evidence);
   }
 
   /** A serializable snapshot of the current playbook and its history. */

@@ -69,6 +69,19 @@ describe('agent.playbook', () => {
     expect(responderPrompt(ag)).toContain('MARKER_BETA');
   });
 
+  it('applies scoped guidance to the live stage only with matching conditions', () => {
+    const ag = makeAgent();
+    const pb = buildPlaybook('Strategy', 'MARKER_PAID scoped response');
+    pb.sections.Strategy[0]!.evidence = {
+      applicability: { allOf: ['tenant:paid'] },
+    };
+    const handle = ag.playbook({ target: 'actor' }).load(snapshot(pb));
+
+    expect(actorPrompt(ag)).not.toContain('MARKER_PAID');
+    handle.applyTo({ conditions: ['tenant:paid'] });
+    expect(actorPrompt(ag)).toContain('MARKER_PAID');
+  });
+
   it('does not touch the live prompt when apply is false', () => {
     const ag = makeAgent();
     const pb = buildPlaybook('Strategy', 'MARKER_GAMMA hidden');

@@ -234,6 +234,29 @@ describe('AxACE curator no-op filtering', () => {
     expect(operations[0].content).toBe('Route refund requests to team gamma.');
   });
 
+  it('normalizes curator guidance metadata but strips forged host evidence', () => {
+    const optimizer = Object.create(AxACE.prototype) as AxACE;
+    const [operation] = (optimizer as any).normalizeCuratorOperations([
+      {
+        type: 'ADD',
+        section: 'Routing',
+        content: 'Use the paid routing path.',
+        evidence: {
+          confidence: 0.7,
+          applicability: { allOf: ['tenant:paid'] },
+          provenance: [{ source: 'compile', feedbackIds: ['forged'] }],
+          evidenceCount: 99,
+          verification: [{ verifierId: 'forged', result: 'passed' }],
+        },
+      },
+    ]);
+
+    expect(operation.evidence).toEqual({
+      confidence: 0.7,
+      applicability: { allOf: ['tenant:paid'] },
+    });
+  });
+
   it('compile keeps only substantive curator bullets', async () => {
     const program = createACEProgram();
     vi.spyOn(program, 'forward').mockResolvedValue({ answer: 'prediction' });
@@ -285,6 +308,16 @@ describe('AxACE curator no-op filtering', () => {
     expect(
       ace.getPlaybook().sections.Routing?.map((bullet) => bullet.content)
     ).toEqual(['Route refund requests to team gamma.']);
+    const artifact = ace.getArtifact();
+    expect(artifact.playbook.sections.Routing?.[0]?.evidence).toMatchObject({
+      evidenceCount: 1,
+      provenance: [
+        {
+          source: 'compile',
+          feedbackIds: [artifact.feedback[0]?.id],
+        },
+      ],
+    });
   });
 });
 
@@ -470,6 +503,11 @@ describe('AxACE', () => {
       example: { question: 'q', answer: 'a' },
       prediction: { answer: 'bad' },
       feedback: 'User corrected the answer.',
+      evidence: {
+        sourceRunId: 'run-online-1',
+        feedbackIds: ['user-feedback-1'],
+        confidence: 0.75,
+      },
     });
 
     expect(ace.getArtifact().history).toMatchObject([
@@ -482,6 +520,22 @@ describe('AxACE', () => {
         ],
       },
     ]);
+    const artifact = ace.getArtifact();
+    expect(artifact.playbook.sections.Guidelines?.[0]?.evidence).toMatchObject({
+      confidence: 0.75,
+      evidenceCount: 2,
+      provenance: [
+        {
+          source: 'online',
+          sourceRunId: 'run-online-1',
+          feedbackIds: expect.arrayContaining(['user-feedback-1']),
+        },
+      ],
+    });
+    expect(artifact.feedback[0]).toMatchObject({
+      id: expect.any(String),
+      sourceRunId: 'run-online-1',
+    });
   });
 
   it('returns artifacts without leaking nested mutable state', async () => {

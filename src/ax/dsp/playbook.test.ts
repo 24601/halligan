@@ -80,6 +80,55 @@ describe('playbook handle', () => {
     expect(restored.render()).toBe(first.render());
   });
 
+  it('loads legacy snapshots without manufacturing evidence metadata', () => {
+    const legacy = buildPlaybook({ Guidelines: ['Legacy plain bullet'] });
+    const snapshot = { playbook: legacy, artifact: emptyArtifact(legacy) };
+
+    const restored = playbook(createProgram(), { studentAI: mockAI }).load(
+      JSON.parse(JSON.stringify(snapshot))
+    );
+
+    expect(restored.getState()).toEqual(snapshot);
+    expect(
+      restored.getState().playbook.sections.Guidelines[0]
+    ).not.toHaveProperty('evidence');
+    expect(restored.render()).toContain('Legacy plain bullet');
+  });
+
+  it('records host evidence and restores it exactly on rollback load', () => {
+    const content = buildPlaybook({ Guidelines: ['Verified rule'] });
+    const pb = playbook(createProgram(), { studentAI: mockAI }).load({
+      playbook: content,
+      artifact: emptyArtifact(content),
+    });
+    const before = pb.getState();
+    const bulletId = content.sections.Guidelines[0]!.id;
+
+    expect(
+      pb.recordEvidence([bulletId], {
+        source: 'manual',
+        feedbackIds: ['review-1'],
+        confidence: 0.9,
+        verification: [
+          { verifierId: 'unit-suite', result: 'passed', testId: 'case-1' },
+        ],
+      })
+    ).toEqual([bulletId]);
+    expect(
+      pb.getState().playbook.sections.Guidelines[0]?.evidence
+    ).toMatchObject({
+      confidence: 0.9,
+      evidenceCount: 1,
+      provenance: [{ source: 'manual', feedbackIds: ['review-1'] }],
+      verification: [
+        { verifierId: 'unit-suite', result: 'passed', testId: 'case-1' },
+      ],
+    });
+
+    pb.load(before);
+    expect(pb.getState()).toEqual(before);
+  });
+
   it('injects the playbook into the bound program on apply', () => {
     const program = createProgram();
     const pb = playbook(program, { studentAI: mockAI });
@@ -91,6 +140,28 @@ describe('playbook handle', () => {
     const description = program.getSignature().getDescription() ?? '';
     expect(description).toContain('## Context Playbook');
     expect(description).toContain('Be concise');
+  });
+
+  it('applies only guidance whose runtime conditions match', () => {
+    const program = createProgram();
+    const content = buildPlaybook({
+      Guidelines: ['Paid-only response', 'General response'],
+    });
+    content.sections.Guidelines[0]!.evidence = {
+      applicability: { allOf: ['tenant:paid'] },
+    };
+    const pb = playbook(program, { studentAI: mockAI }).load({
+      playbook: content,
+      artifact: emptyArtifact(content),
+    });
+
+    expect(program.getSignature().getDescription() ?? '').not.toContain(
+      'Paid-only response'
+    );
+    pb.applyTo(undefined, { conditions: ['tenant:paid'] });
+    expect(program.getSignature().getDescription() ?? '').toContain(
+      'Paid-only response'
+    );
   });
 
   it('redirects injection through the apply hook (agent seam)', () => {

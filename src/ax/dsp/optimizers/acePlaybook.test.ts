@@ -4,6 +4,7 @@ import {
   applyCuratorOperations,
   createEmptyPlaybook,
   generateBulletId,
+  renderPlaybook,
 } from './acePlaybook.js';
 import type { AxACECuratorOperation } from './aceTypes.js';
 
@@ -139,5 +140,197 @@ describe('applyCuratorOperations', () => {
     expect(result.autoRemoved).toHaveLength(0);
     expect(playbook.stats.bulletCount).toBe(0);
     expect(playbook.sections.Guidelines).toEqual([]);
+  });
+
+  it('records add/update/remove lineage with before and after snapshots', () => {
+    const playbook = createEmptyPlaybook();
+    const added = applyCuratorOperations(playbook, [
+      {
+        type: 'ADD',
+        section: 'Guidelines',
+        bulletId: 'guide-1',
+        content: 'Validate first',
+      },
+    ]);
+    expect(added.changes[0]).toMatchObject({
+      bulletId: 'guide-1',
+      after: { revision: 1, content: 'Validate first' },
+    });
+
+    const updated = applyCuratorOperations(playbook, [
+      {
+        type: 'UPDATE',
+        section: 'Guidelines',
+        bulletId: 'guide-1',
+        content: 'Validate before applying',
+      },
+    ]);
+    expect(updated.changes[0]).toMatchObject({
+      before: { revision: 1, content: 'Validate first' },
+      after: {
+        revision: 2,
+        lineage: { previousRevision: 1 },
+        content: 'Validate before applying',
+      },
+    });
+
+    const removed = applyCuratorOperations(playbook, [
+      {
+        type: 'REMOVE',
+        section: 'Guidelines',
+        bulletId: 'guide-1',
+      },
+    ]);
+    expect(removed.changes).toMatchObject([
+      { bulletId: 'guide-1', before: { revision: 2 } },
+    ]);
+    expect(playbook.sections.Guidelines).toEqual([]);
+  });
+
+  it('keeps provenance and verifier receipts host-owned', () => {
+    const playbook = createEmptyPlaybook();
+    applyCuratorOperations(
+      playbook,
+      [
+        {
+          type: 'ADD',
+          section: 'Guidelines',
+          bulletId: 'guide-1',
+          content: 'Use the scoped policy',
+          evidence: {
+            confidence: 3,
+            applicability: { allOf: ['tenant:paid'] },
+            // Deliberately simulate forged model JSON outside the public type.
+            provenance: [{ source: 'manual', feedbackIds: ['forged'] }],
+            evidenceCount: 999,
+            verification: [{ verifierId: 'forged', result: 'passed' }],
+          } as any,
+        },
+      ],
+      {
+        hostEvidence: {
+          source: 'online',
+          sourceRunId: 'run-7',
+          feedbackIds: ['fb-2', 'fb-1'],
+          evidenceCount: 2,
+          confidence: 0.8,
+          verification: [
+            {
+              verifierId: 'policy-eval',
+              testId: 'case-2',
+              result: 'passed',
+            },
+          ],
+        },
+      }
+    );
+
+    expect(playbook.sections.Guidelines[0]?.evidence).toEqual({
+      confidence: 0.8,
+      evidenceCount: 2,
+      applicability: { allOf: ['tenant:paid'] },
+      provenance: [
+        {
+          source: 'online',
+          sourceRunId: 'run-7',
+          feedbackIds: ['fb-1', 'fb-2'],
+        },
+      ],
+      verification: [
+        {
+          verifierId: 'policy-eval',
+          testId: 'case-2',
+          result: 'passed',
+        },
+      ],
+    });
+  });
+
+  it('filters by applicability, expiry, deprecation, and supersession', () => {
+    const playbook = createEmptyPlaybook();
+    applyCuratorOperations(playbook, [
+      {
+        type: 'ADD',
+        section: 'Guidelines',
+        bulletId: 'public',
+        content: 'Always visible',
+      },
+      {
+        type: 'ADD',
+        section: 'Guidelines',
+        bulletId: 'paid',
+        content: 'Paid tenants only',
+        evidence: { applicability: { allOf: ['tenant:paid'] } },
+      },
+      {
+        type: 'ADD',
+        section: 'Guidelines',
+        bulletId: 'expired',
+        content: 'Old temporary rule',
+        evidence: { lifecycle: { expiresAt: '2026-01-01T00:00:00.000Z' } },
+      },
+      {
+        type: 'ADD',
+        section: 'Guidelines',
+        bulletId: 'deprecated',
+        content: 'Deprecated rule',
+        evidence: { lifecycle: { status: 'deprecated' } },
+      },
+      {
+        type: 'ADD',
+        section: 'Guidelines',
+        bulletId: 'replacement',
+        content: 'Replacement rule',
+        supersedes: ['public'],
+      },
+    ]);
+
+    const active = renderPlaybook(playbook, {
+      conditions: ['tenant:paid'],
+      now: '2026-08-01T00:00:00.000Z',
+    });
+    expect(active).toContain('Paid tenants only');
+    expect(active).toContain('Replacement rule');
+    expect(active).not.toContain('Always visible');
+    expect(active).not.toContain('Old temporary rule');
+    expect(active).not.toContain('Deprecated rule');
+
+    const inspection = renderPlaybook(playbook, { includeInactive: true });
+    expect(inspection).toContain('Always visible');
+    expect(inspection).toContain('Old temporary rule');
+    expect(inspection).toContain('Deprecated rule');
+    expect(
+      playbook.sections.Guidelines.find((bullet) => bullet.id === 'public')
+        ?.evidence?.lifecycle
+    ).toMatchObject({ status: 'superseded', supersededBy: 'replacement' });
+  });
+
+  it('serializes normalized evidence deterministically', () => {
+    const playbook = createEmptyPlaybook();
+    applyCuratorOperations(
+      playbook,
+      [
+        {
+          type: 'ADD',
+          section: 'Guidelines',
+          bulletId: 'guide-1',
+          content: 'Stable order',
+          evidence: { applicability: { allOf: ['z', 'a', 'z'] } },
+          supersedes: ['old-z', 'old-a', 'old-z'],
+        },
+      ],
+      { hostEvidence: { feedbackIds: ['z', 'a', 'z'] } }
+    );
+
+    const first = JSON.stringify(playbook);
+    const second = JSON.stringify(JSON.parse(first));
+    expect(second).toBe(first);
+    expect(playbook.sections.Guidelines[0]).toMatchObject({
+      lineage: { supersedes: ['old-a', 'old-z'] },
+      evidence: {
+        applicability: { allOf: ['a', 'z'] },
+        provenance: [{ feedbackIds: ['a', 'z'] }],
+      },
+    });
   });
 });

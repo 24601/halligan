@@ -167,7 +167,9 @@ export function collectCoveredFailureSignatures(
       return;
     }
     const deltas = history.filter(
-      (entry) => entry.source === 'online' && entry.exampleIndex === index
+      (entry) =>
+        (entry.source === 'online' || entry.source === 'agent-evolve') &&
+        entry.exampleIndex === index
     );
     const curatorRan = (event as { curator?: unknown }).curator !== undefined;
     const alive =

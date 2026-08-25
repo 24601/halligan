@@ -18,7 +18,12 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
 
 ## Open
 
-No entries.
+- `axir-2026-08-25-port-evidence-aware-ace-playbook-metadata-and-retrieval` [axoptimize] Port evidence-aware ACE playbook metadata and retrieval
+  - Status: open
+  - Source commit: `ca760294f5ea4f207052c39c2218e1195103bc2a`
+  - TS paths: `src/ax/dsp/optimizers/aceTypes.ts`, `src/ax/dsp/optimizers/acePlaybook.ts`, `src/ax/dsp/optimizers/ace.ts`, `src/ax/dsp/playbook.ts`, `src/ax/agent/agentInternal/agentPlaybook.ts`, `src/ax/agent/agentInternal/playbookEvolve/proposals.ts`, `src/ax/agent/agentInternal/playbookEvolve/playbookEvolve.ts`
+  - Impact: TypeScript ACE bullets now support optional provenance, confidence/evidence counts, declarative applicability, host-owned verifier receipts, lifecycle/supersession, revision lineage, auditable before/after deltas, condition-aware rendering, and verified-agent receipts. Legacy artifacts remain valid. Generated runtimes do not yet expose this schema, host evidence boundary, or inactive-entry filtering.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 
 ## Done
 
