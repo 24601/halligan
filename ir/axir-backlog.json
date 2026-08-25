@@ -1175,10 +1175,12 @@
         "src/ax/agent/agentInternal/playbookEvolve/evalHarness.ts",
         "src/ax/agent/agentInternal/playbookEvolve/playbookEvolve.test.ts",
         "src/ax/agent/agentInternal/playbookEvolve/playbookEvolve.ts",
-        "src/ax/agent/agentInternal/playbookEvolve/playbookEvolveTypes.ts"
+        "src/ax/agent/agentInternal/playbookEvolve/playbookEvolveTypes.ts",
+        "src/ax/agent/agentInternal/playbookEvolve/playbookEvolveUnits.test.ts",
+        "src/ax/agent/agentInternal/playbookEvolve/proposals.ts"
       ],
       "portableSurface": "axagent",
-      "impact": "TypeScript agent playbook evolution can gate candidates against named/versioned historical anchors with explicit stability/plasticity thresholds and per-slice receipts; generated Python, Java, C++, Go, and Rust agent evolution does not yet expose or enforce that optional policy.",
+      "impact": "TypeScript agent playbook evolution can gate candidates against named/versioned historical anchors with explicit stability/plasticity thresholds and per-slice receipts, including exact restoration when candidate application fails after mutation; generated Python, Java, C++, Go, and Rust agent evolution does not yet expose or enforce that optional policy.",
       "suggestedAxirWork": [
         "Add or update the TS-derived conformance fixture.",
         "Update AxIR/Core or descriptor data to match the portable TS behavior.",
