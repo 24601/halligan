@@ -1176,7 +1176,7 @@
         "src/ax/agent/preferenceEvidence.test-d.ts"
       ],
       "portableSurface": "axagent",
-      "impact": "Generated runtimes do not yet expose the optional principal-scoped preference evidence contract, authority-aware retrieval, lifecycle helpers, or memory adapter.",
+      "impact": "Generated runtimes do not yet expose the optional principal-scoped preference evidence contract, bounded receipt-verified retrieval, monotonic stream/epoch lifecycle helpers, frozen publications, or memory adapter.",
       "suggestedAxirWork": [
         "Add or update the TS-derived conformance fixture.",
         "Update AxIR/Core or descriptor data to match the portable TS behavior.",

@@ -1,6 +1,26 @@
 import type { AxAgentMemoryResult } from './agentInternal/memoriesTypes.js';
 import { rankDocuments } from './agentInternal/relevanceRanker.js';
 
+export const axPreferenceEvidenceLimits = Object.freeze({
+  records: 256,
+  revisionsPerRecord: 64,
+  totalBytes: 262_144,
+  recordBytes: 16_384,
+  valueChars: 4_000,
+  queryChars: 2_000,
+  scopeChars: 256,
+  idChars: 256,
+  receiptRefChars: 512,
+  attributes: 32,
+  applicabilityEntries: 16,
+  relationRefs: 32,
+  objectDepth: 8,
+  objectWidth: 64,
+  topK: 20,
+} as const);
+
+const AX_PREFERENCE_EVIDENCE_LIMITS = axPreferenceEvidenceLimits;
+
 export type AxPreferenceEvidenceKind =
   | 'observation'
   | 'inference'
@@ -13,62 +33,116 @@ export type AxPreferenceApplicability = Readonly<{
 
 type AxPreferenceRevisionBase = Readonly<{
   revision: number;
+  epoch: number;
+  eventId: string;
   recordedAt: string;
 }>;
 
+type AxPreferenceClaimFields = Readonly<{
+  value: string;
+  sourceReceiptRef: string;
+  confidence: number;
+  scope: string;
+  applicability?: AxPreferenceApplicability;
+  expiresAt?: string;
+  contradicts?: readonly string[];
+  supersedes?: readonly string[];
+  authorityReceiptRef?: string;
+  consentReceiptRef?: string;
+}>;
+
 export type AxPreferenceEvidenceAssertion = AxPreferenceRevisionBase &
+  AxPreferenceClaimFields &
   Readonly<{
     operation: 'assert';
     kind: AxPreferenceEvidenceKind;
-    value: string;
-    sourceRef: string;
-    confidence: number;
-    scope: string;
-    applicability?: AxPreferenceApplicability;
-    expiresAt?: string;
-    contradicts?: readonly string[];
-    supersedes?: readonly string[];
-    /** Required for confirmed preferences and accepted only through host policy. */
-    authorityRef?: string;
-    /** Required for confirmed preferences and accepted only through host policy. */
-    consentRef?: string;
+  }>;
+
+/** Explicitly reopens a terminal record in a new consent/lifecycle epoch. */
+export type AxPreferenceEvidenceRenewal = AxPreferenceRevisionBase &
+  AxPreferenceClaimFields &
+  Readonly<{
+    operation: 'renew';
+    kind: 'confirmed-preference';
+    authorityReceiptRef: string;
+    consentReceiptRef: string;
   }>;
 
 export type AxPreferenceEvidenceRetraction = AxPreferenceRevisionBase &
   Readonly<{
     operation: 'retract';
-    sourceRef: string;
-    authorityRef: string;
+    sourceReceiptRef: string;
+    authorityReceiptRef: string;
   }>;
 
 export type AxPreferenceEvidenceErasure = AxPreferenceRevisionBase &
   Readonly<{
     operation: 'erase';
-    authorityRef: string;
+    sourceReceiptRef: string;
+    destructiveAuthorityReceiptRef: string;
   }>;
 
 export type AxPreferenceEvidenceRevision =
   | AxPreferenceEvidenceAssertion
+  | AxPreferenceEvidenceRenewal
   | AxPreferenceEvidenceRetraction
   | AxPreferenceEvidenceErasure;
 
-/**
- * Host-persisted evidence for one opaque principal. Ax neither authenticates
- * principal IDs nor stores these records. The host must keep identity and
- * authority outside model-authored text.
- */
+/** Host-owned monotonic stream snapshot for one opaque principal and record. */
 export type AxPreferenceEvidenceRecord = Readonly<{
   id: string;
   principalId: string;
+  streamId: string;
+  streamVersion: number;
+  epoch: number;
   revisions: readonly AxPreferenceEvidenceRevision[];
 }>;
+
+export type AxPreferenceEvidenceOperation =
+  AxPreferenceEvidenceRevision['operation'];
+
+export type AxPreferenceEvidenceReceiptPurpose =
+  | 'source'
+  | 'authority'
+  | 'consent'
+  | 'epoch-authority'
+  | 'destructive-lifecycle';
+
+export type AxPreferenceEvidenceStreamBinding = Readonly<{
+  principalId: string;
+  recordId: string;
+  streamId: string;
+  streamVersion: number;
+  epoch: number;
+  revision: number;
+  eventId: string;
+  operation: AxPreferenceEvidenceOperation;
+}>;
+
+export type AxPreferenceEvidenceStreamRequest =
+  AxPreferenceEvidenceStreamBinding &
+    Readonly<{
+      /** Detached, frozen snapshot for comparison with host-owned state. */
+      record: AxPreferenceEvidenceRecord;
+    }>;
+
+export type AxPreferenceEvidenceReceiptRequest =
+  AxPreferenceEvidenceStreamBinding &
+    Readonly<{
+      purpose: AxPreferenceEvidenceReceiptPurpose;
+      receiptRef: string;
+      /** Detached, frozen event payload for exact receipt verification. */
+      event: AxPreferenceEvidenceRevision;
+    }>;
 
 export type AxPreferenceEvidenceExclusionReason =
   | 'malformed'
   | 'principal-mismatch'
-  | 'untrusted-source'
-  | 'untrusted-authority'
-  | 'untrusted-consent'
+  | 'stale-stream'
+  | 'unverified-source'
+  | 'unverified-authority'
+  | 'unverified-consent'
+  | 'unverified-destructive-lifecycle'
   | 'scope-mismatch'
   | 'applicability-mismatch'
   | 'future'
@@ -77,6 +151,7 @@ export type AxPreferenceEvidenceExclusionReason =
   | 'erased'
   | 'superseded'
   | 'contradicted'
+  | 'ambiguous-chronology'
   | 'policy-blocked';
 
 export type AxPreferenceEvidenceExclusion = Readonly<{
@@ -84,51 +159,130 @@ export type AxPreferenceEvidenceExclusion = Readonly<{
   reason: AxPreferenceEvidenceExclusionReason;
 }>;
 
+export type AxPreferenceEvidenceClaim =
+  | AxPreferenceEvidenceAssertion
+  | AxPreferenceEvidenceRenewal;
+
 export type AxSelectedPreferenceEvidence = Readonly<{
   recordId: string;
   principalId: string;
-  revision: AxPreferenceEvidenceAssertion;
+  revision: AxPreferenceEvidenceClaim;
   relevance: number;
 }>;
 
 export type AxPreferenceEvidenceSelection = Readonly<{
-  /** Confirmed, authorized preferences safe to adapt into existing memory. */
   applied: readonly AxSelectedPreferenceEvidence[];
-  /** Relevant observations/inferences for host inspection, never application. */
   informational: readonly AxSelectedPreferenceEvidence[];
   excluded: readonly AxPreferenceEvidenceExclusion[];
 }>;
 
 export type AxPreferenceEvidenceContext = Readonly<{
-  /** Principal established by the host, never read from evidence/model text. */
   principalId: string;
   query: string;
   scope: string;
   attributes?: Readonly<Record<string, string>>;
   now: string;
-  acceptedSourceRefs: readonly string[];
-  acceptedAuthorityRefs: readonly string[];
-  acceptedConsentRefs: readonly string[];
   topK?: number;
   minConfidence?: number;
-  /** Host safety/product policy; evidence cannot authorize its own application. */
-  allowApplication?: (evidence: AxPreferenceEvidenceAssertion) => boolean;
+  /** Must verify the exact current host-owned stream/version/epoch binding. */
+  verifyStreamState: (request: AxPreferenceEvidenceStreamRequest) => boolean;
+  /** Must verify source, ordinary authority, consent, and epoch receipts. */
+  verifyReceipt: (request: AxPreferenceEvidenceReceiptRequest) => boolean;
+  /** Separate verifier for destructive erasure authority. */
+  verifyDestructiveLifecycleReceipt: (
+    request: AxPreferenceEvidenceReceiptRequest
+  ) => boolean;
+  allowApplication?: (evidence: AxPreferenceEvidenceClaim) => boolean;
 }>;
 
 const issuedMemories = new WeakMap<object, readonly AxAgentMemoryResult[]>();
+const textEncoder = new TextEncoder();
 
 function nonEmpty(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
+}
+
+function boundedString(value: unknown, max: number): value is string {
+  return nonEmpty(value) && value.length <= max;
 }
 
 function validInstant(value: unknown): value is string {
   return nonEmpty(value) && Number.isFinite(Date.parse(value));
 }
 
-function validRefs(value: unknown): value is readonly string[] {
+function positiveInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && Number(value) > 0;
+}
+
+function assertBoundedStructure(
+  value: unknown,
+  depth = 0,
+  seen = new WeakSet<object>()
+): void {
+  if (depth > AX_PREFERENCE_EVIDENCE_LIMITS.objectDepth) {
+    throw new Error('Preference evidence exceeds the object depth limit.');
+  }
+  if (value === null || value === undefined) return;
+  if (typeof value === 'string') return;
+  if (typeof value === 'number' || typeof value === 'boolean') return;
+  if (typeof value !== 'object') {
+    throw new Error('Preference evidence must contain JSON-compatible data.');
+  }
+  if (seen.has(value)) {
+    throw new Error('Preference evidence must not contain cycles.');
+  }
+  seen.add(value);
+  if (Array.isArray(value)) {
+    if (value.length > AX_PREFERENCE_EVIDENCE_LIMITS.objectWidth) {
+      throw new Error('Preference evidence exceeds the array width limit.');
+    }
+    for (const entry of value) assertBoundedStructure(entry, depth + 1, seen);
+  } else {
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw new Error('Preference evidence must use plain objects.');
+    }
+    const entries = Object.entries(value);
+    if (entries.length > AX_PREFERENCE_EVIDENCE_LIMITS.objectWidth) {
+      throw new Error('Preference evidence exceeds the object width limit.');
+    }
+    for (const [, entry] of entries) {
+      assertBoundedStructure(entry, depth + 1, seen);
+    }
+  }
+  seen.delete(value);
+}
+
+function deepFreeze<T>(value: T): T {
+  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+    for (const entry of Object.values(value as Record<string, unknown>)) {
+      deepFreeze(entry);
+    }
+    Object.freeze(value);
+  }
+  return value;
+}
+
+function cloneRecord(
+  record: AxPreferenceEvidenceRecord
+): AxPreferenceEvidenceRecord {
+  return deepFreeze(
+    JSON.parse(JSON.stringify(record)) as AxPreferenceEvidenceRecord
+  );
+}
+
+function validRef(value: unknown): value is string {
+  return boundedString(value, AX_PREFERENCE_EVIDENCE_LIMITS.receiptRefChars);
+}
+
+function validRelationRefs(value: unknown): value is readonly string[] {
   return (
     value === undefined ||
-    (Array.isArray(value) && value.every((entry) => nonEmpty(entry)))
+    (Array.isArray(value) &&
+      value.length <= AX_PREFERENCE_EVIDENCE_LIMITS.relationRefs &&
+      value.every((entry) =>
+        boundedString(entry, AX_PREFERENCE_EVIDENCE_LIMITS.idChars)
+      ))
   );
 }
 
@@ -138,75 +292,124 @@ function validApplicability(
   if (value === undefined) return true;
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const candidate = value as AxPreferenceApplicability;
-  return [candidate.allOf, candidate.noneOf].every(
-    (group) =>
-      group === undefined ||
-      (group !== null &&
-        typeof group === 'object' &&
-        !Array.isArray(group) &&
-        Object.entries(group).every(
-          ([key, entry]) => nonEmpty(key) && nonEmpty(entry)
-        ))
+  const groups = [candidate.allOf, candidate.noneOf];
+  let entries = 0;
+  for (const group of groups) {
+    if (group === undefined) continue;
+    if (!group || typeof group !== 'object' || Array.isArray(group))
+      return false;
+    const pairs = Object.entries(group);
+    entries += pairs.length;
+    if (
+      pairs.some(
+        ([key, entry]) =>
+          !boundedString(key, AX_PREFERENCE_EVIDENCE_LIMITS.idChars) ||
+          !boundedString(entry, AX_PREFERENCE_EVIDENCE_LIMITS.idChars)
+      )
+    ) {
+      return false;
+    }
+  }
+  return entries <= AX_PREFERENCE_EVIDENCE_LIMITS.applicabilityEntries;
+}
+
+function validBase(revision: AxPreferenceEvidenceRevision): boolean {
+  return (
+    positiveInteger(revision.revision) &&
+    positiveInteger(revision.epoch) &&
+    boundedString(revision.eventId, AX_PREFERENCE_EVIDENCE_LIMITS.idChars) &&
+    validInstant(revision.recordedAt)
   );
 }
 
-function validAssertion(
-  value: unknown
-): value is AxPreferenceEvidenceAssertion {
-  if (!value || typeof value !== 'object') return false;
-  const revision = value as AxPreferenceEvidenceAssertion;
+function validClaim(revision: AxPreferenceEvidenceClaim): boolean {
   return (
-    revision.operation === 'assert' &&
-    Number.isSafeInteger(revision.revision) &&
-    revision.revision > 0 &&
-    validInstant(revision.recordedAt) &&
-    ['observation', 'inference', 'confirmed-preference'].includes(
-      revision.kind
-    ) &&
-    nonEmpty(revision.value) &&
-    nonEmpty(revision.sourceRef) &&
+    validBase(revision) &&
+    boundedString(revision.value, AX_PREFERENCE_EVIDENCE_LIMITS.valueChars) &&
+    validRef(revision.sourceReceiptRef) &&
     Number.isFinite(revision.confidence) &&
     revision.confidence >= 0 &&
     revision.confidence <= 1 &&
-    nonEmpty(revision.scope) &&
+    boundedString(revision.scope, AX_PREFERENCE_EVIDENCE_LIMITS.scopeChars) &&
     validApplicability(revision.applicability) &&
     (revision.expiresAt === undefined || validInstant(revision.expiresAt)) &&
-    validRefs(revision.contradicts) &&
-    validRefs(revision.supersedes) &&
+    validRelationRefs(revision.contradicts) &&
+    validRelationRefs(revision.supersedes) &&
     (revision.kind !== 'confirmed-preference' ||
-      (nonEmpty(revision.authorityRef) && nonEmpty(revision.consentRef)))
+      (validRef(revision.authorityReceiptRef) &&
+        validRef(revision.consentReceiptRef)))
+  );
+}
+
+function validRevision(revision: AxPreferenceEvidenceRevision): boolean {
+  if (!validBase(revision)) return false;
+  if (revision.operation === 'assert' || revision.operation === 'renew') {
+    return validClaim(revision);
+  }
+  if (revision.operation === 'retract') {
+    return (
+      validRef(revision.sourceReceiptRef) &&
+      validRef(revision.authorityReceiptRef)
+    );
+  }
+  return (
+    revision.operation === 'erase' &&
+    validRef(revision.sourceReceiptRef) &&
+    validRef(revision.destructiveAuthorityReceiptRef)
   );
 }
 
 function validRecord(record: AxPreferenceEvidenceRecord): boolean {
   if (
     !record ||
-    !nonEmpty(record.id) ||
-    !nonEmpty(record.principalId) ||
+    !boundedString(record.id, AX_PREFERENCE_EVIDENCE_LIMITS.idChars) ||
+    !boundedString(record.principalId, AX_PREFERENCE_EVIDENCE_LIMITS.idChars) ||
+    !boundedString(record.streamId, AX_PREFERENCE_EVIDENCE_LIMITS.idChars) ||
+    !positiveInteger(record.streamVersion) ||
+    !positiveInteger(record.epoch) ||
     !Array.isArray(record.revisions) ||
-    record.revisions.length === 0
+    record.revisions.length === 0 ||
+    record.revisions.length > AX_PREFERENCE_EVIDENCE_LIMITS.revisionsPerRecord
   ) {
     return false;
   }
-  let previousRecordedAt = Number.NEGATIVE_INFINITY;
-  return record.revisions.every((revision, index) => {
-    if (
-      !revision ||
-      typeof revision !== 'object' ||
-      revision.revision !== index + 1 ||
-      !validInstant(revision.recordedAt)
-    ) {
+  const first = record.revisions[0] as AxPreferenceEvidenceRevision;
+  if (
+    (first.revision === 1 &&
+      (first.operation !== 'assert' || first.epoch !== 1)) ||
+    (first.revision !== 1 && first.operation !== 'erase')
+  ) {
+    return false;
+  }
+  let previous: AxPreferenceEvidenceRevision | undefined;
+  let epoch = first.epoch;
+  let terminal = false;
+  const eventIds = new Set<string>();
+  for (const revision of record.revisions) {
+    if (!validRevision(revision) || eventIds.has(revision.eventId))
       return false;
+    eventIds.add(revision.eventId);
+    if (previous) {
+      if (
+        revision.revision !== previous.revision + 1 ||
+        Date.parse(revision.recordedAt) <= Date.parse(previous.recordedAt)
+      ) {
+        return false;
+      }
     }
-    const recordedAt = Date.parse(revision.recordedAt);
-    if (recordedAt < previousRecordedAt) return false;
-    previousRecordedAt = recordedAt;
-    if (revision.operation === 'assert') return validAssertion(revision);
-    if (revision.operation === 'retract') {
-      return nonEmpty(revision.sourceRef) && nonEmpty(revision.authorityRef);
+    if (revision.operation === 'renew') {
+      if (!terminal || revision.epoch !== epoch + 1) return false;
+      epoch = revision.epoch;
+      terminal = false;
+    } else {
+      if (revision.epoch !== epoch || terminal) return false;
+      if (revision.operation === 'retract' || revision.operation === 'erase') {
+        terminal = true;
+      }
     }
-    return revision.operation === 'erase' && nonEmpty(revision.authorityRef);
-  });
+    previous = revision;
+  }
+  return record.streamVersion === previous?.revision && record.epoch === epoch;
 }
 
 function applies(
@@ -228,8 +431,54 @@ function applies(
 
 type Candidate = Readonly<{
   record: AxPreferenceEvidenceRecord;
-  revision: AxPreferenceEvidenceAssertion;
+  revision: AxPreferenceEvidenceClaim;
 }>;
+
+function streamBinding(
+  record: AxPreferenceEvidenceRecord,
+  revision: AxPreferenceEvidenceRevision
+): AxPreferenceEvidenceStreamBinding {
+  return deepFreeze({
+    principalId: record.principalId,
+    recordId: record.id,
+    streamId: record.streamId,
+    streamVersion: record.streamVersion,
+    epoch: revision.epoch,
+    revision: revision.revision,
+    eventId: revision.eventId,
+    operation: revision.operation,
+  });
+}
+
+function verify(
+  verifier: (request: AxPreferenceEvidenceReceiptRequest) => boolean,
+  binding: AxPreferenceEvidenceStreamBinding,
+  revision: AxPreferenceEvidenceRevision,
+  purpose: AxPreferenceEvidenceReceiptPurpose,
+  receiptRef: string
+): boolean {
+  try {
+    return (
+      verifier(
+        deepFreeze({ ...binding, purpose, receiptRef, event: revision })
+      ) === true
+    );
+  } catch {
+    return false;
+  }
+}
+
+function verifyStream(
+  verifier: (request: AxPreferenceEvidenceStreamRequest) => boolean,
+  binding: AxPreferenceEvidenceStreamBinding,
+  record: AxPreferenceEvidenceRecord
+): boolean {
+  try {
+    return verifier(deepFreeze({ ...binding, record })) === true;
+  } catch {
+    return false;
+  }
+}
 
 function rank(
   query: string,
@@ -267,6 +516,8 @@ function rank(
           left.candidate.revision.confidence ||
         Date.parse(right.candidate.revision.recordedAt) -
           Date.parse(left.candidate.revision.recordedAt) ||
+        right.candidate.record.streamVersion -
+          left.candidate.record.streamVersion ||
         left.candidate.record.id.localeCompare(right.candidate.record.id)
     )
     .slice(0, topK)
@@ -278,49 +529,84 @@ function rank(
     }));
 }
 
-/**
- * Select authorized preference evidence without storage, identity inference,
- * model calls, or automatic promotion. Malformed and untrusted input fails
- * closed and remains visible through `excluded`.
- */
-export function axSelectPreferenceEvidence(
-  records: readonly AxPreferenceEvidenceRecord[],
-  context: AxPreferenceEvidenceContext
-): AxPreferenceEvidenceSelection {
+function validateContext(context: AxPreferenceEvidenceContext): void {
   if (
-    !nonEmpty(context.principalId) ||
-    !nonEmpty(context.query) ||
-    !nonEmpty(context.scope) ||
+    !boundedString(
+      context.principalId,
+      AX_PREFERENCE_EVIDENCE_LIMITS.idChars
+    ) ||
+    !boundedString(context.query, AX_PREFERENCE_EVIDENCE_LIMITS.queryChars) ||
+    !boundedString(context.scope, AX_PREFERENCE_EVIDENCE_LIMITS.scopeChars) ||
     !validInstant(context.now) ||
+    typeof context.verifyStreamState !== 'function' ||
+    typeof context.verifyReceipt !== 'function' ||
+    typeof context.verifyDestructiveLifecycleReceipt !== 'function' ||
     (context.topK !== undefined &&
-      (!Number.isSafeInteger(context.topK) || context.topK < 0)) ||
+      (!Number.isSafeInteger(context.topK) ||
+        context.topK < 0 ||
+        context.topK > AX_PREFERENCE_EVIDENCE_LIMITS.topK)) ||
     (context.minConfidence !== undefined &&
       (!Number.isFinite(context.minConfidence) ||
         context.minConfidence < 0 ||
         context.minConfidence > 1))
   ) {
     throw new Error(
-      'Preference evidence selection requires valid host context.'
+      'Preference evidence selection requires bounded host context.'
     );
   }
-  const acceptedSources = new Set(context.acceptedSourceRefs);
-  const acceptedAuthorities = new Set(context.acceptedAuthorityRefs);
-  const acceptedConsents = new Set(context.acceptedConsentRefs);
+  const attributes = Object.entries(context.attributes ?? {});
+  if (
+    attributes.length > AX_PREFERENCE_EVIDENCE_LIMITS.attributes ||
+    attributes.some(
+      ([key, value]) =>
+        !boundedString(key, AX_PREFERENCE_EVIDENCE_LIMITS.idChars) ||
+        !boundedString(value, AX_PREFERENCE_EVIDENCE_LIMITS.idChars)
+    )
+  ) {
+    throw new Error('Preference evidence context exceeds attribute limits.');
+  }
+}
+
+function boundedRecords(
+  records: readonly AxPreferenceEvidenceRecord[]
+): AxPreferenceEvidenceRecord[] {
+  if (records.length > AX_PREFERENCE_EVIDENCE_LIMITS.records) {
+    throw new Error('Preference evidence exceeds the record count limit.');
+  }
+  let totalBytes = 0;
+  return records.map((record) => {
+    assertBoundedStructure(record);
+    const bytes = textEncoder.encode(JSON.stringify(record)).byteLength;
+    if (bytes > AX_PREFERENCE_EVIDENCE_LIMITS.recordBytes) {
+      throw new Error('Preference evidence exceeds the per-record byte limit.');
+    }
+    totalBytes += bytes;
+    if (totalBytes > AX_PREFERENCE_EVIDENCE_LIMITS.totalBytes) {
+      throw new Error('Preference evidence exceeds the total byte limit.');
+    }
+    return cloneRecord(record);
+  });
+}
+
+export function axSelectPreferenceEvidence(
+  inputRecords: readonly AxPreferenceEvidenceRecord[],
+  context: AxPreferenceEvidenceContext
+): AxPreferenceEvidenceSelection {
+  validateContext(context);
+  const records = boundedRecords(inputRecords);
   const excluded: AxPreferenceEvidenceExclusion[] = [];
   const candidates: Candidate[] = [];
   const now = Date.parse(context.now);
   const minConfidence = context.minConfidence ?? 0;
   const idCounts = new Map<string, number>();
   for (const record of records) {
-    if (nonEmpty(record?.id)) {
-      idCounts.set(record.id, (idCounts.get(record.id) ?? 0) + 1);
-    }
+    idCounts.set(record.id, (idCounts.get(record.id) ?? 0) + 1);
   }
 
   for (const record of records) {
     if (!validRecord(record) || (idCounts.get(record.id) ?? 0) > 1) {
       excluded.push({
-        recordId: nonEmpty(record?.id) ? record.id : '<unknown>',
+        recordId: nonEmpty(record.id) ? record.id : '<unknown>',
         reason: 'malformed',
       });
       continue;
@@ -330,33 +616,112 @@ export function axSelectPreferenceEvidence(
       continue;
     }
     const latest = record.revisions.at(-1) as AxPreferenceEvidenceRevision;
+    const binding = streamBinding(record, latest);
+    if (!verifyStream(context.verifyStreamState, binding, record)) {
+      excluded.push({ recordId: record.id, reason: 'stale-stream' });
+      continue;
+    }
     if (Date.parse(latest.recordedAt) > now) {
       excluded.push({ recordId: record.id, reason: 'future' });
       continue;
     }
+    if (
+      !verify(
+        context.verifyReceipt,
+        binding,
+        latest,
+        'source',
+        latest.sourceReceiptRef
+      )
+    ) {
+      excluded.push({ recordId: record.id, reason: 'unverified-source' });
+      continue;
+    }
     if (latest.operation === 'erase') {
-      if (!acceptedAuthorities.has(latest.authorityRef)) {
-        excluded.push({ recordId: record.id, reason: 'untrusted-authority' });
+      if (
+        !verify(
+          context.verifyDestructiveLifecycleReceipt,
+          binding,
+          latest,
+          'destructive-lifecycle',
+          latest.destructiveAuthorityReceiptRef
+        )
+      ) {
+        excluded.push({
+          recordId: record.id,
+          reason: 'unverified-destructive-lifecycle',
+        });
         continue;
       }
       excluded.push({ recordId: record.id, reason: 'erased' });
       continue;
     }
     if (latest.operation === 'retract') {
-      if (!acceptedSources.has(latest.sourceRef)) {
-        excluded.push({ recordId: record.id, reason: 'untrusted-source' });
-        continue;
-      }
-      if (!acceptedAuthorities.has(latest.authorityRef)) {
-        excluded.push({ recordId: record.id, reason: 'untrusted-authority' });
+      if (
+        !verify(
+          context.verifyReceipt,
+          binding,
+          latest,
+          'authority',
+          latest.authorityReceiptRef
+        )
+      ) {
+        excluded.push({ recordId: record.id, reason: 'unverified-authority' });
         continue;
       }
       excluded.push({ recordId: record.id, reason: 'retracted' });
       continue;
     }
-    if (!acceptedSources.has(latest.sourceRef)) {
-      excluded.push({ recordId: record.id, reason: 'untrusted-source' });
-      continue;
+    if (latest.operation === 'renew') {
+      if (
+        !verify(
+          context.verifyReceipt,
+          binding,
+          latest,
+          'epoch-authority',
+          latest.authorityReceiptRef
+        )
+      ) {
+        excluded.push({ recordId: record.id, reason: 'unverified-authority' });
+        continue;
+      }
+      if (
+        !verify(
+          context.verifyReceipt,
+          binding,
+          latest,
+          'consent',
+          latest.consentReceiptRef
+        )
+      ) {
+        excluded.push({ recordId: record.id, reason: 'unverified-consent' });
+        continue;
+      }
+    } else if (latest.kind === 'confirmed-preference') {
+      if (
+        !verify(
+          context.verifyReceipt,
+          binding,
+          latest,
+          'authority',
+          latest.authorityReceiptRef as string
+        )
+      ) {
+        excluded.push({ recordId: record.id, reason: 'unverified-authority' });
+        continue;
+      }
+      if (
+        !verify(
+          context.verifyReceipt,
+          binding,
+          latest,
+          'consent',
+          latest.consentReceiptRef as string
+        )
+      ) {
+        excluded.push({ recordId: record.id, reason: 'unverified-consent' });
+        continue;
+      }
     }
     if (latest.scope !== context.scope) {
       excluded.push({ recordId: record.id, reason: 'scope-mismatch' });
@@ -374,13 +739,15 @@ export function axSelectPreferenceEvidence(
       excluded.push({ recordId: record.id, reason: 'policy-blocked' });
       continue;
     }
-    if (latest.kind === 'confirmed-preference') {
-      if (!acceptedAuthorities.has(latest.authorityRef as string)) {
-        excluded.push({ recordId: record.id, reason: 'untrusted-authority' });
-        continue;
+    if (latest.kind === 'confirmed-preference' && context.allowApplication) {
+      let allowed = false;
+      try {
+        allowed = context.allowApplication(deepFreeze({ ...latest })) === true;
+      } catch {
+        allowed = false;
       }
-      if (!acceptedConsents.has(latest.consentRef as string)) {
-        excluded.push({ recordId: record.id, reason: 'untrusted-consent' });
+      if (!allowed) {
+        excluded.push({ recordId: record.id, reason: 'policy-blocked' });
         continue;
       }
     }
@@ -394,15 +761,19 @@ export function axSelectPreferenceEvidence(
     candidates.map((candidate) => [candidate.record.id, candidate])
   );
   const superseded = new Set<string>();
+  const ambiguous = new Set<string>();
   for (const source of relationshipSources) {
     for (const targetId of source.revision.supersedes ?? []) {
       const target = candidateById.get(targetId);
+      if (!target) continue;
       if (
-        target &&
         Date.parse(source.revision.recordedAt) >
-          Date.parse(target.revision.recordedAt)
+        Date.parse(target.revision.recordedAt)
       ) {
         superseded.add(targetId);
+      } else {
+        ambiguous.add(source.record.id);
+        ambiguous.add(targetId);
       }
     }
   }
@@ -421,7 +792,11 @@ export function axSelectPreferenceEvidence(
     }
   }
 
-  const eligible = candidates.filter(({ record, revision }) => {
+  const eligible = candidates.filter(({ record }) => {
+    if (ambiguous.has(record.id)) {
+      excluded.push({ recordId: record.id, reason: 'ambiguous-chronology' });
+      return false;
+    }
     if (superseded.has(record.id)) {
       excluded.push({ recordId: record.id, reason: 'superseded' });
       return false;
@@ -430,19 +805,10 @@ export function axSelectPreferenceEvidence(
       excluded.push({ recordId: record.id, reason: 'contradicted' });
       return false;
     }
-    if (
-      revision.kind === 'confirmed-preference' &&
-      context.allowApplication &&
-      !context.allowApplication(revision)
-    ) {
-      excluded.push({ recordId: record.id, reason: 'policy-blocked' });
-      return false;
-    }
     return true;
   });
   const topK = context.topK ?? 3;
-
-  const selection: AxPreferenceEvidenceSelection = {
+  const selection = deepFreeze<AxPreferenceEvidenceSelection>({
     applied: rank(
       context.query,
       eligible.filter(
@@ -462,22 +828,23 @@ export function axSelectPreferenceEvidence(
         left.recordId.localeCompare(right.recordId) ||
         left.reason.localeCompare(right.reason)
     ),
-  };
+  });
   issuedMemories.set(
     selection,
-    selection.applied.map(({ recordId, revision }) => ({
-      id: `preference:${recordId}@${revision.revision}`,
-      content: [
-        'Host-confirmed preference evidence.',
-        `Scope: ${revision.scope}`,
-        `Preference: ${revision.value}`,
-      ].join('\n'),
-    }))
+    deepFreeze(
+      selection.applied.map(({ recordId, revision }) => ({
+        id: `preference:${recordId}@${revision.epoch}.${revision.revision}`,
+        content: [
+          'Host-confirmed preference evidence.',
+          `Scope: ${revision.scope}`,
+          `Preference: ${revision.value}`,
+        ].join('\n'),
+      }))
+    )
   );
   return selection;
 }
 
-/** Convert only confirmed selections to Ax's existing opaque memory input. */
 export function axPreferenceEvidenceToMemories(
   selection: AxPreferenceEvidenceSelection
 ): AxAgentMemoryResult[] {
@@ -487,71 +854,155 @@ export function axPreferenceEvidenceToMemories(
       'Preference memories require a selection issued by axSelectPreferenceEvidence().'
     );
   }
-  return memories.map((memory) => ({ ...memory }));
+  return deepFreeze(
+    memories.map((memory) => ({ ...memory }))
+  ) as AxAgentMemoryResult[];
 }
 
-/** Append a reversible retraction while retaining prior revision evidence. */
+function latestRevision(
+  record: AxPreferenceEvidenceRecord
+): AxPreferenceEvidenceRevision {
+  return record.revisions.at(-1) as AxPreferenceEvidenceRevision;
+}
+
+function publishLifecycleRecord(
+  record: AxPreferenceEvidenceRecord
+): AxPreferenceEvidenceRecord {
+  const published = boundedRecords([record])[0];
+  if (!published || !validRecord(published)) {
+    throw new Error(
+      'Lifecycle operation produced invalid preference evidence.'
+    );
+  }
+  return published;
+}
+
+function validLifecycleTime(
+  record: AxPreferenceEvidenceRecord,
+  recordedAt: string
+): boolean {
+  return (
+    validInstant(recordedAt) &&
+    Date.parse(recordedAt) > Date.parse(latestRevision(record).recordedAt)
+  );
+}
+
 export function axRetractPreferenceEvidence(
   record: AxPreferenceEvidenceRecord,
   event: Readonly<{
+    eventId: string;
     recordedAt: string;
-    sourceRef: string;
-    authorityRef: string;
+    sourceReceiptRef: string;
+    authorityReceiptRef: string;
   }>
 ): AxPreferenceEvidenceRecord {
   if (
     !validRecord(record) ||
-    !validInstant(event.recordedAt) ||
-    !nonEmpty(event.sourceRef) ||
-    !nonEmpty(event.authorityRef) ||
-    Date.parse(event.recordedAt) <
-      Date.parse(
-        (record.revisions.at(-1) as AxPreferenceEvidenceRevision).recordedAt
-      )
+    !validLifecycleTime(record, event.recordedAt) ||
+    record.revisions.length >=
+      AX_PREFERENCE_EVIDENCE_LIMITS.revisionsPerRecord ||
+    latestRevision(record).operation === 'retract' ||
+    latestRevision(record).operation === 'erase' ||
+    !boundedString(event.eventId, AX_PREFERENCE_EVIDENCE_LIMITS.idChars) ||
+    record.revisions.some((revision) => revision.eventId === event.eventId) ||
+    !validRef(event.sourceReceiptRef) ||
+    !validRef(event.authorityReceiptRef)
   ) {
-    throw new Error('Cannot retract malformed preference evidence.');
+    throw new Error(
+      'Cannot retract malformed or terminal preference evidence.'
+    );
   }
-  return {
+  return publishLifecycleRecord({
     ...record,
+    streamVersion: record.streamVersion + 1,
     revisions: [
       ...record.revisions,
       {
         operation: 'retract',
-        revision: record.revisions.length + 1,
+        revision: record.streamVersion + 1,
+        epoch: record.epoch,
         ...event,
       },
     ],
-  };
+  });
 }
 
-/**
- * Produce an erasure tombstone and intentionally destroy prior content,
- * provenance, and consent references. Hosts may delete the tombstone too.
- */
 export function axErasePreferenceEvidence(
   record: AxPreferenceEvidenceRecord,
-  event: Readonly<{ recordedAt: string; authorityRef: string }>
+  event: Readonly<{
+    eventId: string;
+    recordedAt: string;
+    sourceReceiptRef: string;
+    destructiveAuthorityReceiptRef: string;
+  }>
 ): AxPreferenceEvidenceRecord {
   if (
     !validRecord(record) ||
-    !validInstant(event.recordedAt) ||
-    !nonEmpty(event.authorityRef) ||
-    Date.parse(event.recordedAt) <
-      Date.parse(
-        (record.revisions.at(-1) as AxPreferenceEvidenceRevision).recordedAt
-      )
+    !validLifecycleTime(record, event.recordedAt) ||
+    !boundedString(event.eventId, AX_PREFERENCE_EVIDENCE_LIMITS.idChars) ||
+    record.revisions.some((revision) => revision.eventId === event.eventId) ||
+    !validRef(event.sourceReceiptRef) ||
+    !validRef(event.destructiveAuthorityReceiptRef)
   ) {
     throw new Error('Cannot erase malformed preference evidence.');
   }
-  return {
+  return publishLifecycleRecord({
     id: record.id,
     principalId: record.principalId,
+    streamId: record.streamId,
+    streamVersion: record.streamVersion + 1,
+    epoch: record.epoch,
     revisions: [
       {
         operation: 'erase',
-        revision: 1,
+        revision: record.streamVersion + 1,
+        epoch: record.epoch,
         ...event,
       },
     ],
+  });
+}
+
+export function axRenewPreferenceEvidence(
+  record: AxPreferenceEvidenceRecord,
+  event: Readonly<
+    Omit<
+      AxPreferenceEvidenceRenewal,
+      'operation' | 'revision' | 'epoch' | 'kind'
+    >
+  >
+): AxPreferenceEvidenceRecord {
+  if (!validRecord(record)) {
+    throw new Error(
+      'Preference renewal requires valid terminal evidence and strict chronology.'
+    );
+  }
+  const latest = latestRevision(record);
+  if (
+    (latest.operation !== 'retract' && latest.operation !== 'erase') ||
+    !validLifecycleTime(record, event.recordedAt) ||
+    record.revisions.length >=
+      AX_PREFERENCE_EVIDENCE_LIMITS.revisionsPerRecord ||
+    record.revisions.some((revision) => revision.eventId === event.eventId)
+  ) {
+    throw new Error(
+      'Preference renewal requires valid terminal evidence and strict chronology.'
+    );
+  }
+  const renewal: AxPreferenceEvidenceRenewal = {
+    operation: 'renew',
+    revision: record.streamVersion + 1,
+    epoch: record.epoch + 1,
+    kind: 'confirmed-preference',
+    ...event,
   };
+  if (!validClaim(renewal)) {
+    throw new Error('Cannot renew malformed preference evidence.');
+  }
+  return publishLifecycleRecord({
+    ...record,
+    streamVersion: renewal.revision,
+    epoch: renewal.epoch,
+    revisions: [...record.revisions, renewal],
+  });
 }

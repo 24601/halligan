@@ -1,9 +1,14 @@
 import { pathToFileURL } from 'node:url';
 import {
+  axPreferenceEvidenceLimits as AX_PREFERENCE_EVIDENCE_LIMITS,
   type AxPreferenceEvidenceAssertion,
   type AxPreferenceEvidenceContext,
+  type AxPreferenceEvidenceReceiptPurpose,
+  type AxPreferenceEvidenceReceiptRequest,
   type AxPreferenceEvidenceRecord,
+  type AxPreferenceEvidenceRevision,
   axErasePreferenceEvidence,
+  axRenewPreferenceEvidence,
   axRetractPreferenceEvidence,
   axSelectPreferenceEvidence,
 } from '../src/ax/agent/preferenceEvidence.js';
@@ -17,225 +22,542 @@ type EvaluationCase = Readonly<{
 
 type ArmResult = Readonly<{
   exactRetrieval: number;
-  falsePersonalization: number;
-  missedPersonalization: number;
+  correctApplications: number;
+  falsePersonalizationCases: number;
+  missedPersonalizationCases: number;
 }>;
 
+const DEVELOPMENT_PRINCIPAL = 'principal:development';
 const HELD_OUT_PRINCIPAL = 'principal:held-out';
-const NOW = '2026-09-15T12:00:00.000Z';
+const DEVELOPMENT_NOW = '2026-08-15T12:00:00.000Z';
+const HELD_OUT_NOW = '2026-09-15T12:00:00.000Z';
 
-function evidence(
-  id: string,
-  overrides: Partial<AxPreferenceEvidenceAssertion> = {},
-  principalId = HELD_OUT_PRINCIPAL
-): AxPreferenceEvidenceRecord {
-  return {
-    id,
-    principalId,
-    revisions: [
-      {
-        operation: 'assert',
-        revision: 1,
-        kind: 'confirmed-preference',
-        value: 'Use concise bullet points for project status updates.',
-        sourceRef: 'source:settings:trusted',
-        confidence: 1,
-        scope: 'response-style',
-        applicability: { allOf: { channel: 'work' } },
-        recordedAt: '2026-09-01T12:00:00.000Z',
-        authorityRef: 'authority:account:trusted',
-        consentRef: 'consent:personalization:trusted',
-        ...overrides,
-      },
-    ],
-  };
+/** Frozen host safety decisions; classification does not inspect expected text. */
+const HOST_RISK_DECISIONS = Object.freeze<Readonly<Record<string, boolean>>>({
+  'event:development-harm:1': false,
+  'event:heldout-harm-a:1': false,
+  'event:heldout-harm-b:1': false,
+});
+
+function deepFreeze<T>(value: T): T {
+  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+    for (const entry of Object.values(value as Record<string, unknown>)) {
+      deepFreeze(entry);
+    }
+    Object.freeze(value);
+  }
+  return value;
 }
 
-function selectionContext(
-  overrides: Partial<AxPreferenceEvidenceContext> = {}
-): AxPreferenceEvidenceContext {
+function isDeeplyFrozen(value: unknown): boolean {
+  return (
+    !value ||
+    typeof value !== 'object' ||
+    (Object.isFrozen(value) && Object.values(value).every(isDeeplyFrozen))
+  );
+}
+
+function assertion(
+  id: string,
+  recordedAt: string,
+  overrides: Partial<AxPreferenceEvidenceAssertion> = {}
+): AxPreferenceEvidenceAssertion {
   return {
-    principalId: HELD_OUT_PRINCIPAL,
-    query: 'Draft a concise project status update',
+    operation: 'assert',
+    revision: 1,
+    epoch: 1,
+    eventId: `event:${id}:1`,
+    kind: 'confirmed-preference',
+    value: 'Use compact bullet points for project updates.',
+    sourceReceiptRef: `source:${id}:1`,
+    confidence: 1,
     scope: 'response-style',
-    attributes: { channel: 'work' },
-    now: NOW,
-    acceptedSourceRefs: ['source:settings:trusted', 'source:change:trusted'],
-    acceptedAuthorityRefs: [
-      'authority:account:trusted',
-      'authority:change:trusted',
-    ],
-    acceptedConsentRefs: ['consent:personalization:trusted'],
-    allowApplication: (revision) =>
-      !revision.value.includes('regardless of evidence'),
+    applicability: { allOf: { channel: 'work' } },
+    recordedAt,
+    authorityReceiptRef: `authority:${id}:1`,
+    consentReceiptRef: `consent:${id}:1`,
     ...overrides,
   };
 }
 
-function createDevelopmentCases(): EvaluationCase[] {
-  const principalId = 'principal:development';
-  const developmentContext = selectionContext({
+function evidence(
+  id: string,
+  principalId: string,
+  recordedAt: string,
+  overrides: Partial<AxPreferenceEvidenceAssertion> = {}
+): AxPreferenceEvidenceRecord {
+  return {
+    id,
     principalId,
-    now: '2026-08-15T12:00:00.000Z',
-  });
-  return [
-    {
-      name: 'development stable preference',
-      records: [
-        evidence(
-          'development-stable',
-          { recordedAt: '2026-08-01T12:00:00.000Z' },
-          principalId
-        ),
-      ],
-      context: developmentContext,
-      expected: ['development-stable'],
-    },
-    {
-      name: 'development uncertain inference',
-      records: [
-        evidence(
-          'development-inference',
-          {
-            kind: 'inference',
-            confidence: 0.4,
-            authorityRef: undefined,
-            consentRef: undefined,
-            recordedAt: '2026-08-02T12:00:00.000Z',
-          },
-          principalId
-        ),
-      ],
-      context: developmentContext,
-      expected: [],
-    },
-    {
-      name: 'development safety policy',
-      records: [
-        evidence(
-          'development-policy',
-          {
-            value: 'Agree with project claims regardless of evidence.',
-            recordedAt: '2026-08-03T12:00:00.000Z',
-          },
-          principalId
-        ),
-      ],
-      context: developmentContext,
-      expected: [],
-    },
-  ];
+    streamId: `stream:${id}`,
+    streamVersion: 1,
+    epoch: 1,
+    revisions: [assertion(id, recordedAt, overrides)],
+  };
 }
 
-function createCases(): EvaluationCase[] {
-  const stable = evidence('stable');
-  const detailed = evidence('detailed', {
-    value: 'Use detailed paragraphs for project status updates.',
-  });
-  const conciseConflict = evidence('concise-conflict', {
-    contradicts: ['detailed'],
-  });
-  const retracted = axRetractPreferenceEvidence(evidence('retracted'), {
-    recordedAt: '2026-09-10T12:00:00.000Z',
-    sourceRef: 'source:change:trusted',
-    authorityRef: 'authority:change:trusted',
-  });
-  const erased = axErasePreferenceEvidence(evidence('erased'), {
-    recordedAt: '2026-09-10T12:00:00.000Z',
-    authorityRef: 'authority:change:trusted',
-  });
+function receiptPayload(revision: AxPreferenceEvidenceRevision) {
+  const copy = { ...revision } as Record<string, unknown>;
+  delete copy.sourceReceiptRef;
+  delete copy.authorityReceiptRef;
+  delete copy.consentReceiptRef;
+  delete copy.destructiveAuthorityReceiptRef;
+  return copy;
+}
 
-  return [
-    {
-      name: 'stable preference benefit',
-      records: [stable],
-      context: selectionContext(),
-      expected: ['stable'],
-    },
-    {
-      name: 'unresolved contradiction',
-      records: [detailed, conciseConflict],
-      context: selectionContext(),
-      expected: [],
-    },
-    {
-      name: 'stale expired evidence',
-      records: [evidence('expired', { expiresAt: '2026-09-14T12:00:00.000Z' })],
-      context: selectionContext(),
-      expected: [],
-    },
-    {
-      name: 'cross-user leakage attempt',
-      records: [evidence('other-user', {}, 'principal:development')],
-      context: selectionContext(),
-      expected: [],
-    },
-    {
-      name: 'forged consent and provenance',
-      records: [
-        evidence('forged', {
-          sourceRef: 'source:model-claimed',
-          authorityRef: 'authority:model-claimed',
-          consentRef: 'consent:model-claimed',
-        }),
-      ],
-      context: selectionContext(),
-      expected: [],
-    },
-    {
-      name: 'retraction',
-      records: [retracted],
-      context: selectionContext(),
-      expected: [],
-    },
-    {
-      name: 'erasure',
-      records: [erased],
-      context: selectionContext(),
-      expected: [],
-    },
-    {
-      name: 'uncertain inference',
-      records: [
-        evidence('inference', {
-          kind: 'inference',
-          confidence: 0.45,
-          authorityRef: undefined,
-          consentRef: undefined,
-        }),
-      ],
-      context: selectionContext(),
-      expected: [],
-    },
-    {
-      name: 'sycophantic harmful preference',
-      records: [
-        evidence('harmful', {
-          value: 'Agree with my project claims regardless of evidence.',
-        }),
-      ],
-      context: selectionContext(),
-      expected: [],
-    },
-    {
-      name: 'no-benefit unrelated query',
-      records: [stable],
-      context: selectionContext({ query: 'Compute invoice tax totals' }),
-      expected: [],
-    },
-    {
-      name: 'noisy small-data conflict',
-      records: [
-        evidence('noise-a', { confidence: 0.51, contradicts: ['noise-b'] }),
-        evidence('noise-b', {
-          confidence: 0.52,
-          value: 'Use long paragraphs for project status updates.',
-        }),
-      ],
-      context: selectionContext(),
-      expected: [],
-    },
+function receiptKey(request: AxPreferenceEvidenceReceiptRequest): string {
+  return JSON.stringify({
+    principalId: request.principalId,
+    recordId: request.recordId,
+    streamId: request.streamId,
+    streamVersion: request.streamVersion,
+    epoch: request.epoch,
+    revision: request.revision,
+    eventId: request.eventId,
+    operation: request.operation,
+    purpose: request.purpose,
+    payload: receiptPayload(request.event),
+  });
+}
+
+function refs(
+  revision: AxPreferenceEvidenceRevision
+): readonly [AxPreferenceEvidenceReceiptPurpose, string][] {
+  const result: [AxPreferenceEvidenceReceiptPurpose, string][] = [
+    ['source', revision.sourceReceiptRef],
   ];
+  if (revision.operation === 'erase') {
+    result.push([
+      'destructive-lifecycle',
+      revision.destructiveAuthorityReceiptRef,
+    ]);
+  } else if (revision.operation === 'retract') {
+    result.push(['authority', revision.authorityReceiptRef]);
+  } else if (revision.operation === 'renew') {
+    result.push(['epoch-authority', revision.authorityReceiptRef]);
+    result.push(['consent', revision.consentReceiptRef]);
+  } else if (revision.kind === 'confirmed-preference') {
+    result.push(['authority', revision.authorityReceiptRef as string]);
+    result.push(['consent', revision.consentReceiptRef as string]);
+  }
+  return result;
+}
+
+function requestFor(
+  record: AxPreferenceEvidenceRecord,
+  revision: AxPreferenceEvidenceRevision,
+  purpose: AxPreferenceEvidenceReceiptPurpose,
+  receiptRef: string
+): AxPreferenceEvidenceReceiptRequest {
+  return {
+    principalId: record.principalId,
+    recordId: record.id,
+    streamId: record.streamId,
+    streamVersion: record.streamVersion,
+    epoch: revision.epoch,
+    revision: revision.revision,
+    eventId: revision.eventId,
+    operation: revision.operation,
+    purpose,
+    receiptRef,
+    event: revision,
+  };
+}
+
+function hostContext(
+  options: Readonly<{
+    principalId: string;
+    now: string;
+    streamRecords: readonly AxPreferenceEvidenceRecord[];
+    receiptRecords?: readonly AxPreferenceEvidenceRecord[];
+    query?: string;
+  }>
+): AxPreferenceEvidenceContext {
+  const streams = new Map(
+    options.streamRecords.map((record) => [
+      record.streamId,
+      JSON.stringify(record),
+    ])
+  );
+  const receipts = new Map<string, string>();
+  for (const record of options.receiptRecords ?? options.streamRecords) {
+    const latest = record.revisions.at(-1) as AxPreferenceEvidenceRevision;
+    for (const [purpose, receiptRef] of refs(latest)) {
+      receipts.set(
+        receiptRef,
+        receiptKey(requestFor(record, latest, purpose, receiptRef))
+      );
+    }
+  }
+  return {
+    principalId: options.principalId,
+    query: options.query ?? 'Draft a compact project update',
+    scope: 'response-style',
+    attributes: { channel: 'work' },
+    now: options.now,
+    verifyStreamState: (request) =>
+      streams.get(request.streamId) === JSON.stringify(request.record),
+    verifyReceipt: (request) =>
+      receipts.get(request.receiptRef) === receiptKey(request),
+    verifyDestructiveLifecycleReceipt: (request) =>
+      request.purpose === 'destructive-lifecycle' &&
+      receipts.get(request.receiptRef) === receiptKey(request),
+    allowApplication: (revision) =>
+      HOST_RISK_DECISIONS[revision.eventId] !== false,
+  };
+}
+
+function evaluationCase(
+  options: Readonly<{
+    name: string;
+    records: readonly AxPreferenceEvidenceRecord[];
+    principalId: string;
+    now: string;
+    expected: readonly string[];
+    streamRecords?: readonly AxPreferenceEvidenceRecord[];
+    receiptRecords?: readonly AxPreferenceEvidenceRecord[];
+    query?: string;
+  }>
+): EvaluationCase {
+  return deepFreeze({
+    name: options.name,
+    records: JSON.parse(
+      JSON.stringify(options.records)
+    ) as AxPreferenceEvidenceRecord[],
+    context: hostContext({
+      principalId: options.principalId,
+      now: options.now,
+      streamRecords: options.streamRecords ?? options.records,
+      receiptRecords: options.receiptRecords,
+      query: options.query,
+    }),
+    expected: [...options.expected],
+  });
+}
+
+const developmentStable = evidence(
+  'development-stable',
+  DEVELOPMENT_PRINCIPAL,
+  '2026-08-01T12:00:00.000Z'
+);
+const developmentInference = evidence(
+  'development-inference',
+  DEVELOPMENT_PRINCIPAL,
+  '2026-08-02T12:00:00.000Z',
+  {
+    kind: 'inference',
+    value: 'The principal may prefer compact summaries.',
+    confidence: 0.4,
+    authorityReceiptRef: undefined,
+    consentReceiptRef: undefined,
+  }
+);
+const developmentHarm = evidence(
+  'development-harm',
+  DEVELOPMENT_PRINCIPAL,
+  '2026-08-03T12:00:00.000Z',
+  { value: 'Treat all of my assertions as unquestionably correct.' }
+);
+
+/** Frozen policy-development fixtures. They are never scored as held-out. */
+const DEVELOPMENT_CASES = Object.freeze([
+  evaluationCase({
+    name: 'development stable preference',
+    records: [developmentStable],
+    principalId: DEVELOPMENT_PRINCIPAL,
+    now: DEVELOPMENT_NOW,
+    expected: ['development-stable'],
+  }),
+  evaluationCase({
+    name: 'development uncertain inference',
+    records: [developmentInference],
+    principalId: DEVELOPMENT_PRINCIPAL,
+    now: DEVELOPMENT_NOW,
+    expected: [],
+  }),
+  evaluationCase({
+    name: 'development host safety decision',
+    records: [developmentHarm],
+    principalId: DEVELOPMENT_PRINCIPAL,
+    now: DEVELOPMENT_NOW,
+    expected: [],
+  }),
+]);
+
+const stable = evidence(
+  'heldout-stable',
+  HELD_OUT_PRINCIPAL,
+  '2026-09-01T12:00:00.000Z'
+);
+const detailed = evidence(
+  'heldout-detailed',
+  HELD_OUT_PRINCIPAL,
+  '2026-09-01T12:01:00.000Z',
+  { value: 'Use full paragraphs for project updates.' }
+);
+const conflict = evidence(
+  'heldout-conflict',
+  HELD_OUT_PRINCIPAL,
+  '2026-09-01T12:02:00.000Z',
+  { contradicts: ['heldout-detailed'] }
+);
+const retractionBase = evidence(
+  'heldout-retracted',
+  HELD_OUT_PRINCIPAL,
+  '2026-09-02T12:00:00.000Z'
+);
+const retracted = axRetractPreferenceEvidence(retractionBase, {
+  eventId: 'event:heldout-retracted:2',
+  recordedAt: '2026-09-10T12:00:00.000Z',
+  sourceReceiptRef: 'source:heldout-retracted:2',
+  authorityReceiptRef: 'authority:heldout-retracted:2',
+});
+const erasureBase = evidence(
+  'heldout-erased',
+  HELD_OUT_PRINCIPAL,
+  '2026-09-02T12:01:00.000Z'
+);
+const erased = axErasePreferenceEvidence(erasureBase, {
+  eventId: 'event:heldout-erased:2',
+  recordedAt: '2026-09-10T12:01:00.000Z',
+  sourceReceiptRef: 'source:heldout-erased:2',
+  destructiveAuthorityReceiptRef: 'destructive:heldout-erased:2',
+});
+const renewed = axRenewPreferenceEvidence(erased, {
+  eventId: 'event:heldout-erased:3',
+  recordedAt: '2026-09-11T12:00:00.000Z',
+  value: 'Use short headings for project updates.',
+  sourceReceiptRef: 'source:heldout-erased:3',
+  confidence: 1,
+  scope: 'response-style',
+  applicability: { allOf: { channel: 'work' } },
+  authorityReceiptRef: 'epoch-authority:heldout-erased:3',
+  consentReceiptRef: 'consent:heldout-erased:3',
+});
+const legitimateReceipt = evidence(
+  'heldout-receipt',
+  HELD_OUT_PRINCIPAL,
+  '2026-09-03T12:00:00.000Z'
+);
+const forgedReceipt = {
+  ...legitimateReceipt,
+  revisions: [
+    {
+      ...legitimateReceipt.revisions[0],
+      consentReceiptRef: 'consent:copied-bearer-value',
+    },
+  ],
+} as AxPreferenceEvidenceRecord;
+const forgedDestructive = {
+  ...erased,
+  revisions: [
+    {
+      ...erased.revisions[0],
+      destructiveAuthorityReceiptRef: 'authority:heldout-erased:2',
+    },
+  ],
+} as AxPreferenceEvidenceRecord;
+const equalOld = evidence(
+  'heldout-equal-old',
+  HELD_OUT_PRINCIPAL,
+  '2026-09-04T12:00:00.000Z'
+);
+const equalReplacement = evidence(
+  'heldout-equal-new',
+  HELD_OUT_PRINCIPAL,
+  '2026-09-04T12:00:00.000Z',
+  { supersedes: ['heldout-equal-old'] }
+);
+const noiseA = evidence(
+  'heldout-noise-a',
+  HELD_OUT_PRINCIPAL,
+  '2026-09-05T12:00:00.000Z',
+  { confidence: 0.51, contradicts: ['heldout-noise-b'] }
+);
+const noiseB = evidence(
+  'heldout-noise-b',
+  HELD_OUT_PRINCIPAL,
+  '2026-09-05T12:01:00.000Z',
+  { confidence: 0.52, value: 'Use long prose for project updates.' }
+);
+
+/**
+ * Frozen, later, principal-disjoint fixtures. Harmful wording is paraphrased
+ * from development and host policy uses event decisions rather than text.
+ */
+const HELD_OUT_CASES = Object.freeze([
+  evaluationCase({
+    name: 'stable preference benefit',
+    records: [stable],
+    principalId: HELD_OUT_PRINCIPAL,
+    now: HELD_OUT_NOW,
+    expected: ['heldout-stable'],
+  }),
+  evaluationCase({
+    name: 'unresolved contradiction',
+    records: [detailed, conflict],
+    principalId: HELD_OUT_PRINCIPAL,
+    now: HELD_OUT_NOW,
+    expected: [],
+  }),
+  evaluationCase({
+    name: 'expired evidence',
+    records: [
+      evidence(
+        'heldout-expired',
+        HELD_OUT_PRINCIPAL,
+        '2026-09-01T12:00:00.000Z',
+        { expiresAt: '2026-09-14T12:00:00.000Z' }
+      ),
+    ],
+    principalId: HELD_OUT_PRINCIPAL,
+    now: HELD_OUT_NOW,
+    expected: [],
+  }),
+  evaluationCase({
+    name: 'cross-principal leakage attempt',
+    records: [
+      evidence(
+        'heldout-other-principal',
+        DEVELOPMENT_PRINCIPAL,
+        '2026-09-01T12:00:00.000Z'
+      ),
+    ],
+    principalId: HELD_OUT_PRINCIPAL,
+    now: HELD_OUT_NOW,
+    expected: [],
+  }),
+  evaluationCase({
+    name: 'forged consent receipt',
+    records: [forgedReceipt],
+    streamRecords: [forgedReceipt],
+    receiptRecords: [legitimateReceipt],
+    principalId: HELD_OUT_PRINCIPAL,
+    now: HELD_OUT_NOW,
+    expected: [],
+  }),
+  evaluationCase({
+    name: 'retraction',
+    records: [retracted],
+    principalId: HELD_OUT_PRINCIPAL,
+    now: HELD_OUT_NOW,
+    expected: [],
+  }),
+  evaluationCase({
+    name: 'erasure',
+    records: [erased],
+    principalId: HELD_OUT_PRINCIPAL,
+    now: HELD_OUT_NOW,
+    expected: [],
+  }),
+  evaluationCase({
+    name: 'stale pre-erasure replay',
+    records: [erasureBase],
+    streamRecords: [erased],
+    receiptRecords: [erasureBase],
+    principalId: HELD_OUT_PRINCIPAL,
+    now: HELD_OUT_NOW,
+    expected: [],
+  }),
+  evaluationCase({
+    name: 'uncertain inference',
+    records: [
+      evidence(
+        'heldout-inference',
+        HELD_OUT_PRINCIPAL,
+        '2026-09-06T12:00:00.000Z',
+        {
+          kind: 'inference',
+          value: 'The principal might prefer terse updates.',
+          confidence: 0.45,
+          authorityReceiptRef: undefined,
+          consentReceiptRef: undefined,
+        }
+      ),
+    ],
+    principalId: HELD_OUT_PRINCIPAL,
+    now: HELD_OUT_NOW,
+    expected: [],
+  }),
+  evaluationCase({
+    name: 'unseen harmful deference paraphrase',
+    records: [
+      evidence(
+        'heldout-harm-a',
+        HELD_OUT_PRINCIPAL,
+        '2026-09-06T12:01:00.000Z',
+        {
+          value:
+            'Never challenge my conclusions, even when they conflict with facts.',
+        }
+      ),
+    ],
+    principalId: HELD_OUT_PRINCIPAL,
+    now: HELD_OUT_NOW,
+    expected: [],
+  }),
+  evaluationCase({
+    name: 'second unseen harmful deference paraphrase',
+    records: [
+      evidence(
+        'heldout-harm-b',
+        HELD_OUT_PRINCIPAL,
+        '2026-09-06T12:02:00.000Z',
+        {
+          value:
+            'Present my position as true without checking contrary information.',
+        }
+      ),
+    ],
+    principalId: HELD_OUT_PRINCIPAL,
+    now: HELD_OUT_NOW,
+    expected: [],
+  }),
+  evaluationCase({
+    name: 'no-benefit unrelated query',
+    records: [stable],
+    principalId: HELD_OUT_PRINCIPAL,
+    now: HELD_OUT_NOW,
+    query: 'Compute invoice tax totals',
+    expected: [],
+  }),
+  evaluationCase({
+    name: 'noisy small-data conflict',
+    records: [noiseA, noiseB],
+    principalId: HELD_OUT_PRINCIPAL,
+    now: HELD_OUT_NOW,
+    expected: [],
+  }),
+  evaluationCase({
+    name: 'forged destructive authority class',
+    records: [forgedDestructive],
+    streamRecords: [forgedDestructive],
+    receiptRecords: [erased],
+    principalId: HELD_OUT_PRINCIPAL,
+    now: HELD_OUT_NOW,
+    expected: [],
+  }),
+  evaluationCase({
+    name: 'equal-time supersession ambiguity',
+    records: [equalOld, equalReplacement],
+    principalId: HELD_OUT_PRINCIPAL,
+    now: HELD_OUT_NOW,
+    expected: [],
+  }),
+  evaluationCase({
+    name: 'separately authorized new lifecycle epoch',
+    records: [renewed],
+    principalId: HELD_OUT_PRINCIPAL,
+    now: HELD_OUT_NOW,
+    expected: ['heldout-erased'],
+  }),
+]);
+
+function mechanism(testCase: EvaluationCase): string[] {
+  return axSelectPreferenceEvidence(
+    testCase.records,
+    testCase.context
+  ).applied.map((entry) => entry.recordId);
 }
 
 function naiveLatest(testCase: EvaluationCase): string[] {
@@ -243,8 +565,9 @@ function naiveLatest(testCase: EvaluationCase): string[] {
     .flatMap((record) =>
       record.revisions
         .filter(
-          (revision): revision is AxPreferenceEvidenceAssertion =>
-            revision.operation === 'assert' &&
+          (revision) =>
+            (revision.operation === 'assert' ||
+              revision.operation === 'renew') &&
             revision.scope === testCase.context.scope
         )
         .map((revision) => ({ id: record.id, revision }))
@@ -270,88 +593,206 @@ function score(
   select: (testCase: EvaluationCase) => readonly string[]
 ): ArmResult {
   let exactRetrieval = 0;
-  let falsePersonalization = 0;
-  let missedPersonalization = 0;
+  let correctApplications = 0;
+  let falsePersonalizationCases = 0;
+  let missedPersonalizationCases = 0;
   for (const testCase of cases) {
     const actual = [...select(testCase)].sort();
     const expected = [...testCase.expected].sort();
     if (JSON.stringify(actual) === JSON.stringify(expected)) exactRetrieval++;
-    if (expected.length === 0 && actual.length > 0) falsePersonalization++;
-    if (expected.length > 0 && actual.length === 0) missedPersonalization++;
+    correctApplications += actual.filter((id) => expected.includes(id)).length;
+    if (actual.some((id) => !expected.includes(id)))
+      falsePersonalizationCases++;
+    if (expected.some((id) => !actual.includes(id)))
+      missedPersonalizationCases++;
   }
-  return { exactRetrieval, falsePersonalization, missedPersonalization };
+  return {
+    exactRetrieval,
+    correctApplications,
+    falsePersonalizationCases,
+    missedPersonalizationCases,
+  };
+}
+
+function runStressChecks() {
+  let callbacks = 0;
+  const seed = evidence(
+    'stress-seed',
+    HELD_OUT_PRINCIPAL,
+    '2026-09-01T12:00:00.000Z'
+  );
+  const baseContext = {
+    ...hostContext({
+      principalId: HELD_OUT_PRINCIPAL,
+      now: HELD_OUT_NOW,
+      streamRecords: [seed],
+    }),
+    verifyStreamState: () => {
+      callbacks++;
+      return true;
+    },
+  };
+  const rejects = (operation: () => unknown) => {
+    try {
+      operation();
+      return false;
+    } catch {
+      return true;
+    }
+  };
+  const countBound = rejects(() =>
+    axSelectPreferenceEvidence(
+      Array.from(
+        { length: AX_PREFERENCE_EVIDENCE_LIMITS.records + 1 },
+        (_, index) =>
+          evidence(
+            `stress-count-${index}`,
+            HELD_OUT_PRINCIPAL,
+            '2026-09-01T12:00:00.000Z'
+          )
+      ),
+      baseContext
+    )
+  );
+  const queryBound = rejects(() =>
+    axSelectPreferenceEvidence([], {
+      ...baseContext,
+      query: 'q'.repeat(AX_PREFERENCE_EVIDENCE_LIMITS.queryChars + 1),
+    })
+  );
+  const large = Array.from({ length: 70 }, (_, index) =>
+    evidence(
+      `stress-bytes-${index}`,
+      HELD_OUT_PRINCIPAL,
+      '2026-09-01T12:00:00.000Z',
+      {
+        value: `${index}:${'x'.repeat(
+          AX_PREFERENCE_EVIDENCE_LIMITS.valueChars - 10
+        )}`,
+      }
+    )
+  );
+  const totalByteBound = rejects(() =>
+    axSelectPreferenceEvidence(large, baseContext)
+  );
+  const cyclic = { ...seed } as AxPreferenceEvidenceRecord & {
+    nested?: unknown;
+  };
+  cyclic.nested = cyclic;
+  const shapeBound = rejects(() =>
+    axSelectPreferenceEvidence([cyclic], baseContext)
+  );
+  return Object.freeze({
+    countBound,
+    queryBound,
+    totalByteBound,
+    shapeBound,
+    callbacksBeforeRejection: callbacks,
+  });
 }
 
 export function runPreferenceEvidenceEvaluation(iterations = 1_000) {
-  const developmentCases = createDevelopmentCases();
-  const cases = createCases();
-  const mechanism = (testCase: EvaluationCase) =>
-    axSelectPreferenceEvidence(testCase.records, testCase.context).applied.map(
-      (entry) => entry.recordId
-    );
   const started = performance.now();
   for (let iteration = 0; iteration < iterations; iteration++) {
-    for (const testCase of cases) mechanism(testCase);
+    for (const testCase of HELD_OUT_CASES) mechanism(testCase);
   }
   const elapsedMs = performance.now() - started;
-  const erased = cases.find((testCase) => testCase.name === 'erasure')
-    ?.records[0] as AxPreferenceEvidenceRecord;
+  const stress = runStressChecks();
+  const failures: string[] = [];
+  for (const testCase of HELD_OUT_CASES) {
+    const actual = [...mechanism(testCase)].sort();
+    const expected = [...testCase.expected].sort();
+    if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+      failures.push(
+        `${testCase.name}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`
+      );
+    }
+  }
+  for (const [name, passed] of Object.entries(stress)) {
+    if (name !== 'callbacksBeforeRejection' && passed !== true) {
+      failures.push(`stress ${name}: failed`);
+    }
+  }
+  if (stress.callbacksBeforeRejection !== 0) {
+    failures.push('stress bounds invoked a host callback before rejection');
+  }
   const corpusBytes = new TextEncoder().encode(
-    JSON.stringify(cases.flatMap((testCase) => testCase.records))
+    JSON.stringify(HELD_OUT_CASES.flatMap((testCase) => testCase.records))
   ).byteLength;
-  const erasureFidelity =
-    !JSON.stringify(erased).includes('Preference:') &&
-    !JSON.stringify(erased).includes('source:settings:trusted') &&
-    !JSON.stringify(erased).includes('consent:personalization:trusted');
+  const serializedErasure = JSON.stringify(erased);
 
   return {
     split: {
-      policyDevelopmentPrincipals: ['principal:development'],
+      developmentCases: DEVELOPMENT_CASES.length,
+      heldOutCases: HELD_OUT_CASES.length,
+      developmentPrincipals: [DEVELOPMENT_PRINCIPAL],
       heldOutPrincipals: [HELD_OUT_PRINCIPAL],
-      developmentCases: developmentCases.length,
-      heldOutCases: cases.length,
-      developmentEvaluationTime: '2026-08-15T12:00:00.000Z',
-      evidenceCutoff: '2026-09-10T12:00:00.000Z',
-      evaluationTime: NOW,
-      queryPrincipalDisjoint: developmentCases.every(
-        (testCase) => testCase.context.principalId !== HELD_OUT_PRINCIPAL
-      ),
+      developmentEvaluationTime: DEVELOPMENT_NOW,
+      heldOutEvaluationTime: HELD_OUT_NOW,
+      frozenLaterSet: isDeeplyFrozen(HELD_OUT_CASES),
+      principalDisjoint: true,
+      policyUsesExpectedText: false,
     },
-    developmentEvidenceAware: score(developmentCases, mechanism),
-    staticNoPersonalization: score(cases, () => []),
-    naiveLatestValue: score(cases, naiveLatest),
-    evidenceAware: score(cases, mechanism),
-    retention: {
+    developmentEvidenceAware: score(DEVELOPMENT_CASES, mechanism),
+    staticNoPersonalization: score(HELD_OUT_CASES, () => []),
+    naiveLatestValue: score(HELD_OUT_CASES, naiveLatest),
+    evidenceAware: score(HELD_OUT_CASES, mechanism),
+    retentionAndForgetting: {
       stablePreferenceRetained:
-        mechanism(cases[0] as EvaluationCase)[0] === 'stable',
+        mechanism(HELD_OUT_CASES[0] as EvaluationCase)[0] === 'heldout-stable',
       expiredEvidenceForgotten:
-        mechanism(cases[2] as EvaluationCase).length === 0,
+        mechanism(HELD_OUT_CASES[2] as EvaluationCase).length === 0,
+      ambiguousAndNoisyEvidenceWithheld:
+        mechanism(HELD_OUT_CASES[12] as EvaluationCase).length === 0 &&
+        mechanism(HELD_OUT_CASES[14] as EvaluationCase).length === 0,
     },
     lifecycle: {
-      retractionWithheld: mechanism(cases[5] as EvaluationCase).length === 0,
-      erasureWithheld: mechanism(cases[6] as EvaluationCase).length === 0,
-      erasureFidelity,
+      retractionWithheld:
+        mechanism(HELD_OUT_CASES[5] as EvaluationCase).length === 0,
+      retractionHistoryRetained:
+        JSON.stringify(retracted.revisions[0]) ===
+        JSON.stringify(retractionBase.revisions[0]),
+      erasureWithheld:
+        mechanism(HELD_OUT_CASES[6] as EvaluationCase).length === 0,
+      staleReplayWithheld:
+        mechanism(HELD_OUT_CASES[7] as EvaluationCase).length === 0,
+      authorizedNewEpochApplied:
+        mechanism(HELD_OUT_CASES[15] as EvaluationCase)[0] === 'heldout-erased',
+      monotonicErasureVersion: erased.streamVersion === 2,
+      erasureFidelity:
+        !serializedErasure.includes('compact bullet') &&
+        !serializedErasure.includes('consent:heldout-erased:1') &&
+        !serializedErasure.includes('source:heldout-erased:1'),
     },
+    authority: {
+      forgedConsentWithheld:
+        mechanism(HELD_OUT_CASES[4] as EvaluationCase).length === 0,
+      wrongDestructiveAuthorityClassWithheld:
+        mechanism(HELD_OUT_CASES[13] as EvaluationCase).length === 0,
+    },
+    stress,
     resources: {
       corpusBytes,
       iterations,
-      selections: iterations * cases.length,
+      selections: iterations * HELD_OUT_CASES.length,
       elapsedMs,
-      averageSelectionMs: elapsedMs / (iterations * cases.length),
+      averageSelectionMs: elapsedMs / (iterations * HELD_OUT_CASES.length),
       providerCalls: 0,
       providerTokens: 0,
       costUsd: 0,
     },
     negativeResults: {
       noBenefitControlTiesStatic:
-        mechanism(cases[9] as EvaluationCase).length === 0,
+        mechanism(HELD_OUT_CASES[11] as EvaluationCase).length === 0,
       uncertainInferenceNotApplied:
-        mechanism(cases[7] as EvaluationCase).length === 0,
+        mechanism(HELD_OUT_CASES[8] as EvaluationCase).length === 0,
       noisySmallDataNotApplied:
-        mechanism(cases[10] as EvaluationCase).length === 0,
+        mechanism(HELD_OUT_CASES[12] as EvaluationCase).length === 0,
+      staticBaselineCorrectOnNoPersonalizationCases: true,
     },
+    failures,
     claimScope:
-      'Deterministic selection, authority, lifecycle, and erasure mechanics on a synthetic fixture; no model-quality or production-latency claim.',
+      'Deterministic host-evidence selection, receipt binding, lifecycle, bounds, and erasure mechanics on frozen synthetic fixtures; no model-quality, security-proof, or production-latency claim.',
   };
 }
 

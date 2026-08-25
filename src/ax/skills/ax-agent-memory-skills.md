@@ -211,14 +211,16 @@ The contract deliberately separates:
 - `inference`: an uncertain interpretation, returned under `informational` and
   never applied;
 - `confirmed-preference`: eligible for `applied` only when the host admits its
-  source, authority, and consent references.
+  exact source, authority, and consent receipts.
 
-The `principalId` in selection context is authoritative. Ax compares evidence
-against it but does not authenticate it. A principal ID, consent statement,
-source reference, or authority reference copied from model output has no effect
-unless trusted host code separately places that exact reference in the
-corresponding `accepted*Refs` list. Do not derive those lists from the same
-model text being evaluated.
+The context `principalId` and stream checkpoint are host-owned. Ax does not
+authenticate either. Receipt references are opaque lookup keys, not bearer
+authority: the host callbacks must compare the detached, frozen request against
+durable state and verify the complete principal, record, stream/version, epoch,
+revision, event, operation, purpose, and event payload binding. A principal ID,
+consent statement, or receipt reference copied from model output cannot certify
+identity, provenance, authority, or consent. Never derive callback approval
+from the same model text being evaluated.
 
 ```typescript
 import {
@@ -231,20 +233,25 @@ const evidence: AxPreferenceEvidenceRecord[] = [
   {
     id: 'response-style',
     principalId: trustedSession.principalId,
+    streamId: 'preference-stream-42',
+    streamVersion: 1,
+    epoch: 1,
     revisions: [
       {
         operation: 'assert',
         revision: 1,
+        epoch: 1,
+        eventId: 'preference-event-1',
         kind: 'confirmed-preference',
         value: 'Use concise bullet points for status updates.',
-        sourceRef: 'source:settings:42',
+        sourceReceiptRef: 'source-receipt-1',
         confidence: 1,
         scope: 'response-style',
         applicability: { allOf: { channel: 'work' } },
         recordedAt: '2026-08-20T12:00:00.000Z',
         expiresAt: '2027-08-20T12:00:00.000Z',
-        authorityRef: 'authority:account:7',
-        consentRef: 'consent:personalization:9',
+        authorityReceiptRef: 'authority-receipt-1',
+        consentReceiptRef: 'consent-receipt-1',
       },
     ],
   },
@@ -256,9 +263,11 @@ const selection = axSelectPreferenceEvidence(evidence, {
   scope: 'response-style',
   attributes: { channel: 'work' },
   now: new Date().toISOString(),
-  acceptedSourceRefs: trustedSources,
-  acceptedAuthorityRefs: trustedAuthorities,
-  acceptedConsentRefs: trustedConsents,
+  verifyStreamState: (request) =>
+    preferenceLedger.matchesCurrentSnapshot(request),
+  verifyReceipt: (request) => preferenceLedger.verifyReceipt(request),
+  verifyDestructiveLifecycleReceipt: (request) =>
+    privacyControls.verifyDestructiveReceipt(request),
   allowApplication: (revision) => safetyPolicy.allows(revision),
 });
 
@@ -268,21 +277,38 @@ await myAgent.forward(ai, {
 });
 ```
 
-Selection validates ordered revision history, principal scope, provenance,
-authority and consent, exact scope/applicability, expiry, retraction, erasure,
-contradiction, supersession, confidence, and host policy before using Ax's
-existing deterministic lexical ranker. Unresolved contradictions fail closed.
+Selection validates strictly increasing timestamps and versions, principal
+scope, exact host stream state, receipt bindings, scope/applicability, expiry,
+terminal lifecycle state, contradiction, supersession, confidence, and host
+policy before using Ax's existing deterministic lexical ranker. Equal-time or
+older supersession and unresolved contradictions fail closed.
 Only `applied` confirmed preferences convert to memory; observations and
 inferences remain available for host inspection under `informational`.
 Convert the returned selection directly; the memory adapter rejects copied or
-deserialized selection objects so callers cannot alter an admitted result.
-Persist the evidence records, not the transient selection.
+deserialized selection objects. Callback inputs and returned selections are
+detached and deeply frozen. Persist records and host checkpoints, not the
+transient selection.
 
 Use `axRetractPreferenceEvidence(...)` to append a reversible retraction while
-retaining revision history. Use `axErasePreferenceEvidence(...)` for erasure:
-it returns a tombstone after destroying prior values, source references,
-consent references, and revision content. The host remains responsible for
+retaining revision history. Use `axErasePreferenceEvidence(...)` to advance the
+same stream monotonically and replace prior revisions with a content-free
+tombstone; revision numbers do not reset. Retraction and erasure are terminal
+within an epoch, and replayed older snapshots fail when
+`verifyStreamState(...)` checks the host's current checkpoint. The only reopen
+path is `axRenewPreferenceEvidence(...)`, which advances to a new epoch and
+requires a separately verified epoch-authority receipt plus fresh consent.
+Persist the new stream checkpoint before making it selectable. Erasure uses a
+separate `verifyDestructiveLifecycleReceipt(...)`; ordinary application
+authority cannot authorize deletion. The host remains responsible for
 replacing/deleting durable copies, indexes, backups, caches, and derived data.
+
+Selection has fixed fail-closed limits: 256 records, 64 revisions per record,
+262,144 total bytes, 16,384 bytes per record, 4,000 value characters, 2,000
+query characters, 256 scope/ID characters, 512 receipt-reference characters,
+32 context attributes, 16 applicability entries, 32 relation references,
+object depth 8, object/array width 64, and `topK` 20. Corpus and structural
+limits are checked before host callbacks or ranking. The values are exported as
+`axPreferenceEvidenceLimits`.
 
 This mechanism is useful for small, auditable preference catalogs where the
 host already owns identity, authority, privacy, retention, and safety policy.
@@ -290,8 +316,11 @@ Do not use it as a universal memory store, an authorization decision, or a
 basis for medical, psychological, protected-trait, or other sensitive
 inference. It does not verify that a reference is authentic, discover consent,
 resolve semantic contradictions, sanitize preference text, or prove that
-personalization helps model output. `allowApplication` must enforce product and
-safety rules; user preference never overrides truthfulness or safety.
+personalization helps model output. Callback correctness, atomic checkpoint
+updates, receipt storage, privacy enforcement, identity binding, and input
+contamination controls remain host responsibilities. `allowApplication` must
+enforce product and safety rules independently of expected output text; user
+preference never overrides truthfulness or safety.
 
 ### Deterministic mechanism evaluation
 
@@ -301,22 +330,28 @@ Run:
 npm run evaluate:preference-evidence
 ```
 
-The zero-provider-call fixture fixes policy on three development cases, then
-uses 11 cases from a disjoint held-out principal and later time slice to compare
-static/no personalization, naive latest-value, and evidence-aware selection. It
-covers stable benefit, contradiction, expiry,
-cross-principal leakage, forged references, retraction, erasure, uncertain
-inference, harmful/sycophantic preference, no-benefit, and noisy small-data
-cases. Output reports exact retrieval/application, false and missed
+The zero-provider-call fixture freezes policy on three development cases, then
+uses 16 separately declared cases from a disjoint held-out principal and later
+time slice to compare static/no personalization, naive latest-value, and
+evidence-aware selection. Host safety decisions are event-bound and do not
+inspect expected output text; held-out harmful examples use unseen paraphrases.
+Cases cover stable benefit, contradiction, expiry, cross-principal leakage,
+forged consent and destructive authority, retraction, erasure and stale replay,
+explicit epoch renewal, uncertain inference, harmful/sycophantic preferences,
+equal-time ambiguity, no-benefit, and noisy small-data. Separate stress probes
+exercise count, query, total-byte, and cyclic-shape rejection before callbacks.
+Output reports every failure plus exact retrieval/application, false and missed
 personalization, retention/forgetting, lifecycle/erasure fidelity, serialized
 bytes, measured latency, and negative controls.
 
-The bound is 11 cases × 1,000 iterations = 11,000 local selections, zero
+The default bound is 16 cases × 1,000 iterations = 16,000 local selections,
+four one-shot stress probes, zero
 provider calls/tokens, and $0 provider cost. Latency is descriptive and
 machine-dependent. The fixture demonstrates selector mechanics only; it makes
-no model-quality, semantic-retrieval, authority-authenticity, privacy-system,
-or production-latency claim. Split independence and contamination control
-remain host responsibilities.
+no model-quality, security-proof, semantic-retrieval, authority-authenticity,
+privacy-system, or production-latency claim. This small synthetic set is useful
+for deterministic regression detection, not statistical generalization. Split
+independence and contamination control remain host responsibilities.
 
 ## Skills Search
 
