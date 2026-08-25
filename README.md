@@ -230,17 +230,29 @@ Runnable: [`src/examples/standard-schema.ts`](src/examples/standard-schema.ts).
 ### Tools (ReAct)
 
 ```typescript
-const assistant = ax("question:string -> answer:string", {
-  functions: [
-    { name: "getCurrentWeather", func: weatherAPI },
-    { name: "searchNews", func: newsAPI },
-  ],
+const getWeather = fn("getWeather")
+  .description("Get current weather for a city")
+  .arg("city", f.string())
+  .returns(f.string())
+  .handler(weatherAPI)
+  .build();
+
+const assistant = react("question:string -> answer:string", {
+  functions: [getWeather],
 });
 
-const { answer } = await assistant.forward(llm, {
-  question: "What's the weather in Tokyo and any news about it?",
+const result = await assistant.forward(llm, {
+  question: "What's the weather in Tokyo?",
 });
+
+if (result.success) console.log(result.output.answer);
 ```
+
+`react(...)` prefers provider-native calls and falls back to a strict prompt
+protocol for text-only models. It returns resumable canonical history and a
+structured failure with every output key preserved. See
+[`docs/REACT.md`](docs/REACT.md) for protocol, concurrency, compaction, provider
+coverage, and the reproducible native-vs-prompt evaluation.
 
 ### Multi-modal
 

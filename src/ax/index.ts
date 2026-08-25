@@ -803,6 +803,23 @@ import {
   type AxRenderedPrompt,
 } from './dsp/prompt.js';
 import {
+  AxReact,
+  type AxReactAssistantEvent,
+  type AxReactCall,
+  type AxReactEvent,
+  type AxReactFailure,
+  type AxReactForwardOptions,
+  type AxReactHistory,
+  type AxReactOptions,
+  type AxReactResult,
+  type AxReactSuccess,
+  type AxReactTerminationReason,
+  type AxReactToolEvent,
+  axReactCanonicalJSON,
+  axReactSerializeHistory,
+  react,
+} from './dsp/react.js';
+import {
   type AxAttempt,
   AxBestOfN,
   type AxBestOfNOptions,
@@ -1420,6 +1437,7 @@ export { AxPromptTemplate };
 export { AxProviderRouter };
 export { AxPushEventSource };
 export { AxRateLimiterTokenUsage };
+export { AxReact };
 export { AxRefine };
 export { AxRefineError };
 export { AxSignature };
@@ -1560,6 +1578,8 @@ export { axOpenAIChatAudioDefaults };
 export { axOptimizableValidators };
 export { axPlaybookFailureSection };
 export { axProcessContentForProvider };
+export { axReactCanonicalJSON };
+export { axReactSerializeHistory };
 export { axResolveAIProfileFeatures };
 export { axResolveAIProfileId };
 export { axResolveGeminiLiveAudioConfig };
@@ -1597,6 +1617,7 @@ export { flow };
 export { fn };
 export { optimize };
 export { playbook };
+export { react };
 export { refine };
 export { runAxEventStoreConformance };
 export { s };
@@ -2310,6 +2331,17 @@ export type { AxRankedDocument };
 export type { AxRankedModule };
 export type { AxRateLimiterFunction };
 export type { AxRateLimiterTokenUsageOptions };
+export type { AxReactAssistantEvent };
+export type { AxReactCall };
+export type { AxReactEvent };
+export type { AxReactFailure };
+export type { AxReactForwardOptions };
+export type { AxReactHistory };
+export type { AxReactOptions };
+export type { AxReactResult };
+export type { AxReactSuccess };
+export type { AxReactTerminationReason };
+export type { AxReactToolEvent };
 export type { AxRefineOptions };
 export type { AxRefineStrategy };
 export type { AxRelevanceHints };

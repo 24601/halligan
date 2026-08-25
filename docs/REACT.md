@@ -1,0 +1,191 @@
+# Structured ReAct
+
+`react(...)` is a focused typed tool loop for tasks that need a few model/tool
+rounds and a signature-validated final value. It complements `ax(...)`; it does
+not change the existing `ax(...)` function loop and does not replace `AxAgent`,
+RLM, discovery, delegation, or durable agent sessions.
+
+```typescript
+import { ai, f, fn, react } from '@ax-llm/ax';
+
+const lookup = fn('lookup')
+  .description('Look up a value by key')
+  .arg('key', f.string())
+  .returns(f.string())
+  .handler(async ({ key }) => database.get(key) ?? 'not found')
+  .build();
+
+const answer = react('question:string -> answer:string, confidence:number', {
+  functions: [lookup],
+  maxIterations: 6,
+});
+
+const result = await answer.forward(llm, { question: '...' });
+if (result.success) {
+  console.log(result.output.answer);
+} else {
+  console.error(result.terminationReason, result.error, result.output);
+}
+```
+
+## Terminal Contract
+
+Ax derives a reserved `submit` tool from the signature's public output fields.
+The model can finish only by calling `submit` with exactly those fields. Ax
+coerces JSON-compatible primitive values where safe, parses structured JSON
+fields, runs signature and Standard Schema validation, rejects unknown fields,
+and returns the validated value under `result.output`.
+
+The nested result avoids collisions when a signature contains names such as
+`success`, `history`, or `terminationReason`:
+
+```typescript
+type AxReactResult<Output> =
+  | {
+      success: true;
+      output: Output;
+      terminationReason: 'submit' | 'forced_submit';
+      history: AxReactHistory;
+    }
+  | {
+      success: false;
+      output: { [K in keyof Output]: Output[K] | null };
+      terminationReason:
+        | 'forced_submit_failed'
+        | 'model_error'
+        | 'protocol_error'
+        | 'aborted';
+      history: AxReactHistory;
+      error: { code: string; message: string };
+    };
+```
+
+Every runtime failure includes every declared public output key set to `null`,
+a termination reason, and the last complete canonical history. Invalid caller
+inputs, incompatible/tampered histories, invalid constructor configuration, and
+reserved or ambiguous tool names are rejected before a run starts and therefore
+throw. Per-run provider/configuration failures retain the structured result
+contract.
+
+## Native And Prompt Protocols
+
+`functionCallMode` controls the model boundary:
+
+- `auto` (default) uses native calls when `ai.getFeatures(model).functions` is
+  true, otherwise it uses the prompt protocol.
+- `native` requires provider-native function calling and fails closed when the
+  selected provider/model does not advertise it; this is returned as a
+  structured `protocol_error` failure.
+- `prompt` uses a strict provider-neutral JSON envelope and sends no provider
+  function definitions.
+
+Native mode sends ordinary Ax `functions` and normalized assistant/function
+messages. Prompt mode requires exactly:
+
+```json
+{"thought":"optional short rationale","calls":[{"name":"toolName","arguments":{}}]}
+```
+
+Prompt responses with Markdown, extra fields, or invalid JSON are protocol
+failures. Prompt tool results are clearly delimited JSON observations. Neither
+protocol accepts model- or provider-supplied call IDs into canonical history.
+
+Coverage is capability-based rather than provider-name-based. Native mode works
+through Ax adapters and models that advertise function calling, including
+current tool-capable OpenAI, Anthropic, and Gemini profiles. Text-only and
+OpenAI-compatible models without verified function support use prompt mode.
+Individual models can differ in parallel-call quality, forced-tool support,
+schema fidelity, and context limits; use `native` when weakening to prompt mode
+would be unacceptable.
+
+## Execution And History
+
+- Tool handlers are awaited. Attached MCP/UCP bindings execute through the
+  run-scoped native execution context and receive the abort signal.
+- Calls in one assistant turn execute concurrently up to
+  `maxParallelTools` (default 4). Results are committed in call order. Batches
+  above `maxToolCallsPerIteration` (default 16) execute nothing.
+- `submit` must be the only call in its turn. Mixed terminal/tool batches
+  execute nothing and become recoverable error observations.
+- Tool arguments and declared results are schema-checked. Runtime exceptions
+  become generic model-visible errors so handler details are not copied into
+  prompts; invalid arguments and result shapes retain bounded corrective text.
+- At normal iteration exhaustion, Ax makes exactly one additional submit-only
+  attempt. A valid terminal call reports `forced_submit`; any other outcome
+  reports `forced_submit_failed` with the full null output shape.
+
+`result.history` is a serializable provider-neutral transcript. It stores
+assistant calls and matching tool results as atomic ordered groups. Call IDs use
+a fresh UUID for every call (independent of provider IDs), while the transcript
+keeps its own namespace and allocation counter. Forked or sequential resumed
+runs therefore do not collide even when provider IDs repeat. Arguments, results,
+inputs, and `axReactSerializeHistory(...)` use recursive key-sorted canonical
+JSON.
+
+Pass a prior history to resume:
+
+```typescript
+const resumed = await answer.forward(llm, input, {
+  history: previous.history,
+});
+```
+
+The signature hash and canonical input must match. Ax clones caller-owned
+history before appending. It retains the full canonical transcript for
+persistence while replaying only bounded recent context. Compaction drops only
+complete assistant/result groups, never an orphan call or result. Tune
+`maxPromptHistoryGroups`, `maxPromptHistoryCharacters`, and
+`maxPromptValueCharacters` for the selected model.
+
+The system and canonical input are stable cache checkpoints. When history is
+replayed, Ax also marks the end of the newest complete retained group as the
+moving cache checkpoint, allowing providers with explicit prefix caching to
+reuse prior assistant/tool turns.
+
+Use `abortSignal` for one run or `program.stop()` for all active runs. An abort
+during tool execution does not commit a partial call/result group.
+
+## Security Notes
+
+- Tool results are untrusted model input. Authorize tools in handlers; a schema
+  is validation, not an authorization boundary.
+- `submit` and all provider-normalized tool names are reserved/collision
+  checked. Terminal arguments reject call markers, thoughts, IDs, and other
+  undeclared metadata.
+- The stored transcript is complete and may contain application data even when
+  replay values are truncated. Protect it according to the sensitivity of tool
+  inputs and results.
+- Keep effects idempotent when a caller may retry a failed or aborted run. Ax
+  guarantees transcript atomicity, not rollback of external side effects.
+
+## Evaluation
+
+Run the free deterministic protocol/task suite:
+
+```bash
+npm run eval:react
+```
+
+It compares native and prompt lanes on completion, exact tool calls, model
+turns, forced submit, resume determinism, bounded async latency, recoverable
+errors, final failures, and serialized prompt size. Cases include a text-only
+provider, misleading tools, handler failure/recovery, parallel async calls, and
+a direct-submit case where tools provide no benefit.
+
+The scripted provider results are reproducible mechanism evidence, **not**
+evidence that one protocol improves real-model quality. To run the optional
+bounded live comparison (four read-only tasks, four normal iterations each),
+explicitly select one provider and supply its credential:
+
+```bash
+OPENAI_APIKEY=... npm run eval:react -- --live=openai
+GOOGLE_APIKEY=... npm run eval:react -- --live=gemini
+ANTHROPIC_APIKEY=... npm run eval:react -- --live=anthropic
+```
+
+The repository does not run paid lanes automatically. Native mode is most
+useful when the selected model reliably emits typed calls, especially when the
+prompt fallback's repeated tool catalog materially increases context. It may
+provide no completion or turn benefit for direct-submit tasks, and a weak
+native implementation can underperform a strong text-only model. Treat live
+results as model/profile-specific measurements.
