@@ -483,8 +483,10 @@ objects. Supported metadata is limited to finite JSON-like primitives, arrays,
 and plain or null-prototype records. Callables, symbols, bigints, custom-prototype
 objects such as `Date`, and cyclic values fail closed. The trusted context
 resolver is the ingress exception. Function resolution reads designated `func`
-exactly once, validates that exact value, and snapshots other function metadata
-without touching `func` again; callable aliases and throwing getters fail closed.
+exactly once from an own property only after validating that the resolved root is
+a plain or null-prototype record. It validates that exact value and snapshots
+other function metadata without touching `func` again; inherited handlers, class
+instances, callable aliases, and throwing getters fail closed.
 Select immediately before registration/invocation and select again whenever host
 principal, authority, capability, receipt, or compatibility facts change.
 `provenance` is informational and must never be populated from model output as

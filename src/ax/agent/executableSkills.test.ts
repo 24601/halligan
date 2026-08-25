@@ -326,6 +326,31 @@ describe('axSelectExecutableSkills', () => {
     expect(toJSONCalls).toBe(0);
   });
 
+  it('rejects non-plain resolved roots and inherited func handlers', () => {
+    const target = artifact();
+    class ClassFunction {
+      name = 'class_function';
+      description = 'Class function fixture';
+      func = () => 'CLASS';
+    }
+    const inherited = Object.create({
+      func: () => 'INHERITED',
+    }) as AxAgentFunction;
+    inherited.name = 'inherited_function';
+    inherited.description = 'Inherited function fixture';
+
+    for (const resolved of [new ClassFunction(), inherited]) {
+      const result = axSelectExecutableSkills(
+        [target],
+        context(target, {
+          resolveFunction: () => resolved as AxAgentFunction,
+        })
+      );
+      expect(result.artifacts).toEqual([]);
+      expect(result.inspection[0]?.reasons).toEqual(['unresolved_function']);
+    }
+  });
+
   it('materializes catalog, context, and options in one shared ingress session', () => {
     let catalogLengthReads = 0;
     const target = artifact();
@@ -536,6 +561,15 @@ describe('axSelectExecutableSkills', () => {
       context(target)
     );
     expect(oversized.inspection[0]?.reasons).toEqual(['limit_exceeded']);
+
+    const { proxy, revoke } = Proxy.revocable([target], {});
+    revoke();
+    expect(() =>
+      axSelectExecutableSkills(proxy, context(target))
+    ).not.toThrow();
+    const revoked = axSelectExecutableSkills(proxy, context(target));
+    expect(revoked.artifacts).toEqual([]);
+    expect(revoked.inspection[0]?.reasons).toEqual(['malformed']);
 
     const unresolved = axSelectExecutableSkills(
       [target],

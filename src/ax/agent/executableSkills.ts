@@ -579,11 +579,11 @@ function tryMaterializeIngress(
       phase: 'catalog' | 'context' | 'options';
       limit?: boolean;
     } {
-  if (!Array.isArray(catalog)) return { ok: false, phase: 'catalog' };
   const copies = new WeakMap<object, unknown>();
   const visiting = new WeakSet<object>();
   let catalogSnapshot: unknown;
   try {
+    if (!Array.isArray(catalog)) return { ok: false, phase: 'catalog' };
     catalogSnapshot = materializeDetached(
       catalog,
       copies,
@@ -637,8 +637,15 @@ function snapshotFunction(
 ): Readonly<AxAgentFunction> | undefined {
   if (!value || typeof value !== 'object') return undefined;
   try {
-    // This is the only read of `func`. Metadata copying below explicitly omits it.
-    const handler = (value as AxAgentFunction).func;
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return undefined;
+    const funcDescriptor = Object.getOwnPropertyDescriptor(value, 'func');
+    if (!funcDescriptor) return undefined;
+    // This is the only handler read. Metadata copying below explicitly omits `func`.
+    const handler =
+      'value' in funcDescriptor
+        ? funcDescriptor.value
+        : funcDescriptor.get?.call(value);
     if (typeof handler !== 'function') return undefined;
 
     const metadata: Record<string, unknown> = {};
