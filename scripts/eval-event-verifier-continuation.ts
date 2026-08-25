@@ -1,10 +1,10 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { AxSignature } from '../src/ax/dsp/sig.js';
 import type { AxProgrammable } from '../src/ax/dsp/types.js';
-import {
-  AxInMemoryEventStore,
-  AxInMemoryProgramStateStore,
-} from '../src/ax/event/memoryStore.js';
+import { AxInMemoryEventStore } from '../src/ax/event/memoryStore.js';
 import {
   AxEventRuntime,
   eventRoute,
@@ -12,9 +12,14 @@ import {
 } from '../src/ax/event/runtime.js';
 import type {
   AxEventRun,
+  AxEventStore,
   AxEventVerificationStatus,
   AxEventVerifierResult,
 } from '../src/ax/event/types.js';
+import {
+  AX_SQLITE_EVENT_STANDARD_RETENTION,
+  AxSQLiteEventStore,
+} from '../src/tools/event/sqlite.js';
 
 type EvaluationTask = Readonly<{
   id: string;
@@ -122,8 +127,17 @@ async function evaluateTask(
   maxRuns: number,
   allowRestart: boolean
 ): Promise<TaskMetrics> {
-  const store = new AxInMemoryEventStore();
-  const stateStore = new AxInMemoryProgramStateStore();
+  const durableRestart = allowRestart && Boolean(task.restart);
+  const directory = durableRestart
+    ? mkdtempSync(join(tmpdir(), 'ax-verifier-eval-'))
+    : undefined;
+  const filename = directory ? join(directory, 'event.sqlite') : undefined;
+  let store: AxEventStore = filename
+    ? new AxSQLiteEventStore({
+        filename,
+        retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+      })
+    : new AxInMemoryEventStore();
   let attempts = 0;
   let verifierCalls = 0;
   let latestOutput = '';
@@ -175,7 +189,6 @@ async function evaluateTask(
     });
     return new AxEventRuntime({
       store,
-      programStateStore: stateStore,
       workerConcurrency: 1,
       routes: [
         eventRoute({
@@ -204,6 +217,10 @@ async function evaluateTask(
       await new Promise((resolve) => setTimeout(resolve, 1));
     await new Promise((resolve) => setTimeout(resolve, 5));
     await runtime.close({ drain: false });
+    store = new AxSQLiteEventStore({
+      filename: filename!,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
     await new Promise((resolve) => setTimeout(resolve, 30));
     runtime = createRuntime();
     await runtime.start();
@@ -216,6 +233,7 @@ async function evaluateTask(
   const finalStatus = finalRun?.verification?.status ?? 'error';
   const truthPassed = promoted && task.truth(latestOutput);
   await runtime.close();
+  if (directory) rmSync(directory, { recursive: true, force: true });
   return {
     id: task.id,
     attempts,

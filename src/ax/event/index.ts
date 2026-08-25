@@ -85,6 +85,7 @@ export type {
   AxEventVerifierContext,
   AxEventVerifierPolicy,
   AxEventVerifierResult,
+  AxEventVerifierTransitionRequest,
   AxProgramStateEnvelope,
   AxProgramStateStore,
 } from './types.js';

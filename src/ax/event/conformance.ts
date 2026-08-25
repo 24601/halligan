@@ -5,6 +5,7 @@ import {
   type AxEventEnqueueRequest,
   type AxEventRun,
   type AxEventStore,
+  type AxEventVerifierTransitionRequest,
   type AxProgramStateStore,
 } from './types.js';
 
@@ -48,6 +49,11 @@ export async function runAxEventStoreConformance(
     assert(store.capabilities.transactions, 'transactions');
     assert(store.capabilities.compareAndSet, 'compare-and-set');
     assert(store.capabilities.outputPersistence, 'output persistence');
+    assert(
+      store.capabilities.verifierTransitions ===
+        'axevent-verifier-transition-v2' && Boolean(store.transitionVerifier),
+      'verifier transition v2'
+    );
 
     const first = enqueueRequest('same-event', 'tenant-a', options.clock.now());
     const accepted = await store.enqueue(first);
@@ -161,15 +167,70 @@ export async function runAxEventStoreConformance(
       id: `${key}-continuation-enqueued`,
       correlation: [{ kind: 'task', value: '43' }],
     };
-    const resumed = await store.enqueueContinuation({
-      continuation: resumedContinuation,
-      enqueue: enqueueRequest(
-        `${key}-continuation-event`,
-        'tenant-a',
-        options.clock.now()
-      ),
+    const transitionRun: AxEventRun = {
+      id: `${key}-transition-run`,
+      deliveryId: takeover!.id,
+      routeId: takeover!.routeId,
+      targetId: takeover!.targetId,
+      instanceKey: takeover!.instanceKey,
+      status: 'running',
+      attempt: 1,
+      startedAt: options.clock.now(),
+      output: { persisted: true },
+      fencingToken: takeover!.fencingToken,
+    };
+    await peer.store.saveRun(transitionRun);
+    await peer.store.saveDelivery({
+      ...takeover!,
+      status: 'running',
+      attempt: 1,
+      runId: transitionRun.id,
     });
-    assert(resumed.accepted, 'continuation resume enqueue');
+    const child = enqueueRequest(
+      `${key}-continuation-event`,
+      'tenant-a',
+      options.clock.now()
+    );
+    const transition: AxEventVerifierTransitionRequest = {
+      operationId: `${key}-transition`,
+      parent: {
+        delivery: {
+          ...takeover!,
+          status: 'waiting_event',
+          attempt: 1,
+          runId: transitionRun.id,
+        },
+        run: {
+          ...transitionRun,
+          status: 'waiting_event',
+          finishedAt: options.clock.now(),
+          verification: {
+            policyId: 'conformance',
+            chainId: key,
+            status: 'fail',
+            run: 1,
+            checkedAt: options.clock.now(),
+            cumulativeUsage: { tokens: 0, costUSD: 0 },
+          },
+        },
+        expectedFencingToken: takeover!.fencingToken!,
+      },
+      continuation: resumedContinuation,
+      child,
+    };
+    await expectReject(
+      store.transitionVerifier!({
+        ...transition,
+        parent: {
+          ...transition.parent,
+          expectedFencingToken: staleCandidate.fencingToken!,
+        },
+      }),
+      'stale verifier transition fence'
+    );
+    assertions++;
+    const resumed = await store.transitionVerifier!(transition);
+    assert(resumed.accepted, 'fenced verifier transition');
     assert(
       (
         await peer.store.findContinuation(
@@ -179,6 +240,19 @@ export async function runAxEventStoreConformance(
         )
       )?.id === resumedContinuation.id,
       'continuation and resume delivery commit together'
+    );
+    assert(
+      (await peer.store.getDelivery(takeover!.id))?.status ===
+        'waiting_event' &&
+        (await peer.store.getRun(transitionRun.id))?.status === 'waiting_event',
+      'parent and run transition are atomically peer-visible'
+    );
+    const replayed = await peer.store.transitionVerifier!(transition);
+    assert(
+      replayed.duplicate &&
+        JSON.stringify(replayed.deliveryIds) ===
+          JSON.stringify(resumed.deliveryIds),
+      'verifier transition acknowledgement replay is idempotent'
     );
 
     const run: AxEventRun = {
@@ -230,6 +304,66 @@ export async function runAxEventStoreConformance(
     } catch (error) {
       assert(error instanceof AxEventBackpressureError, 'backpressure error');
     }
+    const capacityParent = await bounded.store.claim(
+      'capacity-worker',
+      options.clock.now(),
+      100
+    );
+    assert(Boolean(capacityParent), 'capacity parent claim');
+    const capacityRun: AxEventRun = {
+      id: `${key}-capacity-run`,
+      deliveryId: capacityParent!.id,
+      routeId: capacityParent!.routeId,
+      instanceKey: capacityParent!.instanceKey,
+      status: 'running',
+      attempt: 1,
+      startedAt: options.clock.now(),
+      output: { persisted: true },
+      fencingToken: capacityParent!.fencingToken,
+    };
+    await bounded.store.saveRun(capacityRun);
+    await bounded.store.saveDelivery({
+      ...capacityParent!,
+      status: 'running',
+      attempt: 1,
+      runId: capacityRun.id,
+    });
+    const capacityContinuation: AxEventContinuation = {
+      id: `${key}-capacity-continuation`,
+      targetId: 'target',
+      routeId: 'route',
+      instanceKey: 'instance',
+      identityScope: capacityParent!.identityScope,
+      correlation: [{ kind: 'capacity', value: key }],
+      createdAt: options.clock.now(),
+    };
+    const replacement = await bounded.store.transitionVerifier!({
+      operationId: `${key}-capacity-transition`,
+      parent: {
+        delivery: {
+          ...capacityParent!,
+          status: 'waiting_event',
+          attempt: 1,
+          runId: capacityRun.id,
+        },
+        run: {
+          ...capacityRun,
+          status: 'waiting_event',
+          finishedAt: options.clock.now(),
+        },
+        expectedFencingToken: capacityParent!.fencingToken!,
+      },
+      continuation: capacityContinuation,
+      child: enqueueRequest(
+        `${key}-capacity-child`,
+        'tenant-a',
+        options.clock.now()
+      ),
+    });
+    assert(
+      replacement.accepted,
+      'verifier transition replaces its parent within one capacity slot'
+    );
   } finally {
     await bounded.store.close?.();
   }

@@ -973,6 +973,7 @@ import {
   type AxEventVerifierContext,
   type AxEventVerifierPolicy,
   type AxEventVerifierResult,
+  type AxEventVerifierTransitionRequest,
   AxManualEventClock,
   type AxProgramStateEnvelope,
   type AxProgramStateStore,
@@ -2045,6 +2046,7 @@ export type { AxEventVerificationUsage };
 export type { AxEventVerifierContext };
 export type { AxEventVerifierPolicy };
 export type { AxEventVerifierResult };
+export type { AxEventVerifierTransitionRequest };
 export type { AxEvidenceDescriptor };
 export type { AxExample };
 export type { AxExamples };

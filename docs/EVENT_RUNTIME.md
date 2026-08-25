@@ -218,9 +218,11 @@ const target = eventTarget('repair')
 
 After each target attempt, the runtime persists output before calling
 `verify`. A pass records `verification.status: 'pass'`, releases final sinks,
-and deletes policy state. A failure bounds its typed JSON evidence, persists it
-on the run, atomically establishes an identity-scoped continuation plus resume
-delivery, and exposes the evidence at
+and completes. A failure bounds every persisted verifier field and its typed
+JSON evidence, persists it on the run, then uses the store's fenced V2 verifier
+transition to atomically terminalize the parent, establish an identity-scoped
+continuation, consume the prior continuation when present, and enqueue the
+resume delivery. The evidence is exposed at
 `continuation.metadata.verification.failure` to the target's resume mapping.
 The existing store, worker, retry, cancellation, and ordering machinery owns
 the next attempt; no scheduler daemon is created.
@@ -234,13 +236,19 @@ fingerprint equals the fingerprint of the previous failure, the target's new
 output is persisted but the repeated verifier call and further loop are
 suppressed. Final sinks run only after a pass.
 
-Use deterministic fingerprints over all state relevant to the verifier.
-Verifier callbacks execute in the host, receive an abort signal, and must not
-run shell commands through core. Autonomous targets should be idempotent;
-otherwise existing lease recovery correctly stops at `outcome_unknown` rather
-than guessing whether to repeat side effects. Persistent stores implement
-`enqueueContinuation` atomically so a resume delivery cannot race ahead of or
-exist without its continuation ownership record.
+Use deterministic fingerprints over all state relevant to the verifier. The
+`usage`, `fingerprint`, and `verify` callbacks execute in the host under the
+same timeout and abort semantics; core never runs shell commands. Verifier
+targets use non-streaming execution so no chunk or final sink is observable
+before a pass. Outputless clarification waits are not verified. Autonomous
+targets should be idempotent; otherwise lease recovery stops at
+`outcome_unknown` rather than guessing whether arbitrary external side effects
+occurred. Stores must advertise `axevent-verifier-transition-v2`; the runtime
+startup-gates verifier routes rather than silently using process-local policy
+state. The transition is fence-checked, idempotent, capacity-aware, and atomic
+for the parent run/delivery, continuation ownership, child delivery, and old
+continuation consumption. These guarantees do not make arbitrary target or sink
+I/O exactly once.
 
 ### Deterministic Evaluation
 
@@ -253,7 +261,8 @@ npx vitest run scripts/event-verifier-eval.test.ts
 
 The seven fixed tasks cover recoverable work, an already-correct/no-benefit
 case, an impossible task, unchanged state, a misleading verifier, a failing
-verifier, and restart recovery. The deterministic outcome counts are:
+verifier, and SQLite close/reopen restart recovery. The deterministic outcome
+counts are:
 
 | Metric | One shot | Bounded continuation |
 | --- | ---: | ---: |

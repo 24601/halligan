@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { AxAgentClarificationError } from '../agent/agentInternal/agentStateTypes.js';
 import { AxSignature } from '../dsp/sig.js';
 import type { AxProgrammable } from '../dsp/types.js';
 import {
@@ -84,6 +85,37 @@ function setup(
 }
 
 describe('AxEventRuntime verifier continuation policy', () => {
+  it('startup-gates verifier targets on the v2 transition capability', async () => {
+    const store = new AxInMemoryEventStore();
+    (store as any).capabilities = {
+      ...store.capabilities,
+      verifierTransitions: undefined,
+    };
+    const runtime = setup(
+      { id: 'gate', verify: () => ({ status: 'pass' }) },
+      { store }
+    ).runtime;
+    await expect(runtime.start()).rejects.toThrow(
+      'axevent-verifier-transition-v2'
+    );
+  });
+
+  it('rejects verifier-gated streaming before any chunk sink can run', () => {
+    const writeChunk = vi.fn();
+    expect(() =>
+      eventTarget({
+        id: 'streaming-verifier',
+        ai,
+        program: programmable(() => ({ answer: 'unused' })),
+        mapInput: () => ({ goal: 'unused' }),
+        execution: 'streaming',
+        verifier: { id: 'gate', verify: () => ({ status: 'pass' }) },
+        sinks: [{ id: 'chunks', write: vi.fn(), writeChunk }],
+      })
+    ).toThrow('cannot combine verifier with streaming');
+    expect(writeChunk).not.toHaveBeenCalled();
+  });
+
   it('persists output, passes the gate, and only then dispatches sinks', async () => {
     const store = new AxInMemoryEventStore();
     const order: string[] = [];
@@ -149,6 +181,127 @@ describe('AxEventRuntime verifier continuation policy', () => {
     await runtime.close();
   });
 
+  it('hands a failed parent to its child with one pending-delivery slot', async () => {
+    const verify = vi
+      .fn()
+      .mockReturnValueOnce({
+        status: 'fail',
+        failure: { code: 'retry_once' },
+      })
+      .mockReturnValue({ status: 'pass' });
+    const store = new AxInMemoryEventStore({ maxPendingDeliveries: 1 });
+    const { runtime } = setup({ id: 'single-slot', verify }, { store });
+    await runtime.start();
+    await runtime.publish(ingress('single-slot'));
+    await runtime.waitForIdle();
+    expect(verify).toHaveBeenCalledTimes(2);
+    await runtime.close();
+  });
+
+  it('does not verify outputless clarification invocations', async () => {
+    const verify = vi.fn(() => ({ status: 'pass' as const }));
+    const { runtime } = setup(
+      { id: 'clarification', verify },
+      {
+        forward: () => {
+          throw new AxAgentClarificationError('Which goal?');
+        },
+      }
+    );
+    await runtime.start();
+    await runtime.publish(ingress('clarification'));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(verify).not.toHaveBeenCalled();
+    await runtime.close({ drain: false });
+  });
+
+  it('keeps interleaved A, B, and A-resume verifier chains independent', async () => {
+    let release!: () => void;
+    let entered!: () => void;
+    const verifierEntered = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const verifierReleased = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const attempts = new Map<string, number>();
+    const feedback: Array<{ goal: string; code?: string }> = [];
+    const runIds: string[] = [];
+    const target = eventTarget({
+      id: 'interleaved',
+      ai,
+      program: programmable(({ goal, feedback: failure }) => {
+        const count = (attempts.get(goal) ?? 0) + 1;
+        attempts.set(goal, count);
+        feedback.push({ goal, code: failure?.failure?.code });
+        return {
+          answer: goal === 'A' && count === 1 ? 'A-bad' : `${goal}-good`,
+        };
+      }),
+      mapInput: (value, context) => ({
+        goal: context.continuation ? 'A' : value.event.id,
+        feedback: context.continuation?.metadata?.verification,
+      }),
+      retrySafety: 'idempotent',
+      verifier: {
+        id: 'interleaved-gate',
+        verify: async (output, context) => {
+          runIds.push(context.run.id);
+          if (output.answer === 'A-bad') {
+            entered();
+            await verifierReleased;
+            return {
+              status: 'fail',
+              failure: { code: 'A_failure', evidence: 'only A' },
+            };
+          }
+          return { status: 'pass' };
+        },
+      },
+    });
+    const runtime = new AxEventRuntime({
+      workerConcurrency: 1,
+      routes: [
+        eventRoute({
+          id: 'interleaved-route',
+          match: { types: ['goal.run'] },
+          action: 'wake',
+          target,
+          instanceKey: () => 'shared-instance',
+        }),
+      ],
+    });
+    await runtime.start();
+    await runtime.publish(ingress('A'));
+    await Promise.race([
+      verifierEntered,
+      new Promise<never>((_resolve, reject) =>
+        setTimeout(() => reject(new Error('A verifier did not start')), 500)
+      ),
+    ]);
+    await runtime.publish(ingress('B'));
+    release();
+    await runtime.waitForIdle();
+    expect(feedback).toEqual([
+      { goal: 'A', code: undefined },
+      { goal: 'B', code: undefined },
+      { goal: 'A', code: 'A_failure' },
+    ]);
+    expect(attempts).toEqual(
+      new Map([
+        ['A', 2],
+        ['B', 1],
+      ])
+    );
+    const verifications = await Promise.all(
+      runIds.map(async (runId) => (await runtime.getRun(runId))!.verification!)
+    );
+    expect(verifications.map((value) => value.run)).toEqual([1, 1, 2]);
+    expect(verifications[0]!.chainId).toBe(verifications[2]!.chainId);
+    expect(verifications[1]!.chainId).not.toBe(verifications[0]!.chainId);
+    await runtime.close();
+  });
+
   it.each([
     ['max_tokens', { maxTokens: 1, usage: () => ({ tokens: 1 }) }],
     ['max_cost', { maxCostUSD: 0.01, usage: () => ({ costUSD: 0.01 }) }],
@@ -179,14 +332,18 @@ describe('AxEventRuntime verifier continuation policy', () => {
 
   it('fails closed when max runs are exhausted', async () => {
     const runIds: string[] = [];
-    const { runtime } = setup({
-      id: 'max-runs',
-      maxRuns: 2,
-      verify: (_output, context) => {
-        runIds.push(context.run.id);
-        return { status: 'fail', failure: { code: 'still_bad' } };
+    const sink = vi.fn();
+    const { runtime } = setup(
+      {
+        id: 'max-runs',
+        maxRuns: 2,
+        verify: (_output, context) => {
+          runIds.push(context.run.id);
+          return { status: 'fail', failure: { code: 'still_bad' } };
+        },
       },
-    });
+      { sink }
+    );
     await runtime.start();
     await runtime.publish(ingress());
     await runtime.waitForIdle();
@@ -195,6 +352,7 @@ describe('AxEventRuntime verifier continuation policy', () => {
       status: 'exhausted',
       reason: 'max_runs',
     });
+    expect(sink).not.toHaveBeenCalled();
     await runtime.close();
   });
 
@@ -275,20 +433,152 @@ describe('AxEventRuntime verifier continuation policy', () => {
     ['timeout', () => new Promise(() => undefined)],
   ] as const)('fails closed on verifier %s', async (status, verify) => {
     let runId = '';
-    const { runtime } = setup({
-      id: `verifier-${status}`,
-      timeoutMs: 5,
-      verify: (output, context) => {
-        runId = context.run.id;
-        return verify(output, context) as any;
+    const sink = vi.fn();
+    const { runtime } = setup(
+      {
+        id: `verifier-${status}`,
+        timeoutMs: 5,
+        verify: (output, context) => {
+          runId = context.run.id;
+          return verify(output, context) as any;
+        },
       },
-    });
+      { sink }
+    );
     await runtime.start();
     await runtime.publish(ingress(status));
     await runtime.waitForIdle();
     expect((await runtime.getRun(runId))?.verification?.status).toBe(status);
     expect((await runtime.getRun(runId))?.status).toBe('verification_failed');
+    expect(sink).not.toHaveBeenCalled();
     await runtime.close();
+  });
+
+  it.each(['usage', 'fingerprint'] as const)(
+    'times out a hanging %s callback before verify or sinks',
+    async (callback) => {
+      let runId = '';
+      const verify = vi.fn(() => ({ status: 'pass' as const }));
+      const sink = vi.fn();
+      const hanging = (_output: unknown, context: { run: AxEventRun }) => {
+        runId = context.run.id;
+        return new Promise<never>(() => undefined);
+      };
+      const { runtime } = setup(
+        {
+          id: `hanging-${callback}`,
+          timeoutMs: 5,
+          verify,
+          ...(callback === 'usage'
+            ? { usage: hanging }
+            : { fingerprint: hanging }),
+        },
+        { sink }
+      );
+      await runtime.start();
+      await runtime.publish(ingress(callback));
+      await runtime.waitForIdle();
+      expect((await runtime.getRun(runId))?.verification?.status).toBe(
+        'timeout'
+      );
+      expect(verify).not.toHaveBeenCalled();
+      expect(sink).not.toHaveBeenCalled();
+      await runtime.close();
+    }
+  );
+
+  it('times out a hanging backoff callback without enqueueing a child', async () => {
+    let runId = '';
+    const { runtime } = setup({
+      id: 'hanging-backoff',
+      timeoutMs: 5,
+      backoffMs: (() => new Promise<never>(() => undefined)) as never,
+      verify: (_output, context) => {
+        runId = context.run.id;
+        return { status: 'fail', failure: { code: 'retry' } };
+      },
+    });
+    await runtime.start();
+    await runtime.publish(ingress('backoff'));
+    await runtime.waitForIdle();
+    expect((await runtime.getRun(runId))?.verification?.status).toBe('timeout');
+    await runtime.close();
+  });
+
+  it('fails closed when cumulative usage overflows', async () => {
+    let runId = '';
+    const { runtime } = setup({
+      id: 'overflow',
+      maxRuns: 3,
+      usage: (_output, context) => {
+        runId = context.run.id;
+        return { tokens: Number.MAX_VALUE };
+      },
+      verify: () => ({
+        status: 'fail',
+        failure: { code: 'again' },
+      }),
+    });
+    await runtime.start();
+    await runtime.publish(ingress('overflow'));
+    await runtime.waitForIdle();
+    const run = await runtime.getRun(runId);
+    expect(run?.verification?.status).toBe('error');
+    expect(Number.isFinite(run?.verification?.cumulativeUsage.tokens)).toBe(
+      true
+    );
+    await runtime.close();
+  });
+
+  it('bounds huge Unicode verifier fields in persisted state', async () => {
+    const huge = '🔥'.repeat(10_000);
+    const runIds: string[] = [];
+    const { runtime } = setup({
+      id: 'unicode',
+      maxRuns: 2,
+      fingerprint: () => huge,
+      verify: (_output, context) => {
+        runIds.push(context.run.id);
+        return {
+          status: 'fail',
+          failure: { code: huge, evidence: huge },
+        };
+      },
+    });
+    await runtime.start();
+    await runtime.publish(ingress('unicode'));
+    await runtime.waitForIdle();
+    const first = (await runtime.getRun(runIds[0]!))!.verification!;
+    expect(
+      new TextEncoder().encode(first.fingerprint).byteLength
+    ).toBeLessThanOrEqual(1_024);
+    expect(
+      new TextEncoder().encode(first.failure!.code).byteLength
+    ).toBeLessThanOrEqual(256);
+    expect(
+      new TextEncoder().encode(JSON.stringify(first.failure!.evidence))
+        .byteLength
+    ).toBeLessThanOrEqual(4_096);
+    await runtime.close();
+  });
+
+  it.each([
+    ['maxRuns', 1.5],
+    ['maxEvidenceBytes', 16.5],
+  ] as const)('rejects fractional verifier %s', (option, value) => {
+    expect(() =>
+      eventTarget({
+        id: `fractional-${option}`,
+        ai,
+        program: programmable(() => ({ answer: 'unused' })),
+        mapInput: () => ({ goal: 'unused' }),
+        verifier: {
+          id: 'fractional',
+          verify: () => ({ status: 'pass' }),
+          [option]: value,
+        },
+      })
+    ).toThrow(option);
   });
 
   it('cancels an active verifier through the run abort signal', async () => {
@@ -369,4 +659,70 @@ describe('AxEventRuntime verifier continuation policy', () => {
     expect(verify).toHaveBeenCalledTimes(2);
     await runtime.close();
   });
+
+  it.each(['before-commit', 'after-commit-ack-loss'] as const)(
+    'converges one verifier chain when transition fails %s',
+    async (fault) => {
+      const store = new AxInMemoryEventStore();
+      const transition = store.transitionVerifier.bind(store);
+      let injected = false;
+      vi.spyOn(store, 'transitionVerifier').mockImplementation(
+        async (request) => {
+          if (!injected) {
+            injected = true;
+            if (fault === 'after-commit-ack-loss') await transition(request);
+            throw new Error(fault);
+          }
+          return transition(request);
+        }
+      );
+      const chainIds: string[] = [];
+      const verify = vi.fn((_output, context) => {
+        chainIds.push(context.eventContext.deliveryId);
+        return verify.mock.calls.length === 1
+          ? {
+              status: 'fail' as const,
+              failure: { code: 'retry_once' },
+            }
+          : { status: 'pass' as const };
+      });
+      const { runtime } = setup({ id: `fault-${fault}`, verify }, { store });
+      await runtime.start();
+      await runtime.publish(ingress(`fault-${fault}`));
+      await runtime.waitForIdle();
+      expect(verify).toHaveBeenCalledTimes(2);
+      expect(new Set(chainIds).size).toBe(2);
+      expect(store.transitionVerifier).toHaveBeenCalledTimes(2);
+      await runtime.close();
+    }
+  );
+
+  it.each(['before-save', 'after-save-ack-loss'] as const)(
+    'persists verifier input exactly once across a run-save fault %s',
+    async (fault) => {
+      const store = new AxInMemoryEventStore();
+      const saveRun = store.saveRun.bind(store);
+      let injected = false;
+      vi.spyOn(store, 'saveRun').mockImplementation(async (run) => {
+        if (!injected && run.output !== undefined && !run.verification) {
+          injected = true;
+          if (fault === 'after-save-ack-loss') await saveRun(run);
+          throw new Error(fault);
+        }
+        return saveRun(run);
+      });
+      const forward = vi.fn(() => ({ answer: 'durable' }));
+      const verify = vi.fn(() => ({ status: 'pass' as const }));
+      const { runtime } = setup(
+        { id: `save-fault-${fault}`, verify },
+        { store, forward }
+      );
+      await runtime.start();
+      await runtime.publish(ingress(`save-fault-${fault}`));
+      await runtime.waitForIdle();
+      expect(forward).toHaveBeenCalledOnce();
+      expect(verify).toHaveBeenCalledOnce();
+      await runtime.close();
+    }
+  );
 });

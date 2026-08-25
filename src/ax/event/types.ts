@@ -312,6 +312,7 @@ export type AxEventVerificationStatus =
 
 export interface AxEventVerificationResult {
   policyId: string;
+  chainId: string;
   status: AxEventVerificationStatus;
   run: number;
   checkedAt: number;
@@ -556,6 +557,7 @@ export interface AxEventStoreCapabilities {
   compareAndSet: boolean;
   outputPersistence: boolean;
   conformance?: Readonly<{ multiWorker?: string; schemaVersion?: number }>;
+  verifierTransitions?: 'axevent-verifier-transition-v2';
 }
 
 export interface AxEventEnqueueRequest {
@@ -580,16 +582,30 @@ export interface AxEventContinuationEnqueueRequest {
   enqueue: Readonly<AxEventEnqueueRequest>;
 }
 
+export interface AxEventVerifierTransitionRequest {
+  operationId: string;
+  parent: Readonly<{
+    delivery: AxEventDelivery;
+    run: AxEventRun;
+    expectedFencingToken: number;
+  }>;
+  continuation: Readonly<AxEventContinuation>;
+  child: Readonly<AxEventEnqueueRequest>;
+  consumeContinuationId?: string;
+}
+
 export interface AxEventStore {
   readonly capabilities: Readonly<AxEventStoreCapabilities>;
   enqueue(
     request: Readonly<AxEventEnqueueRequest>,
     signal?: AbortSignal
   ): Promise<AxEventPublishReceipt>;
-  /** Atomically establishes continuation ownership and its resume delivery. */
-  enqueueContinuation(
-    request: Readonly<AxEventContinuationEnqueueRequest>,
-    signal?: AbortSignal
+  /**
+   * V2 fenced parent-to-child handoff. Required only when
+   * capabilities.verifierTransitions advertises the matching marker.
+   */
+  transitionVerifier?(
+    request: Readonly<AxEventVerifierTransitionRequest>
   ): Promise<AxEventPublishReceipt>;
   claim(
     workerId: string,

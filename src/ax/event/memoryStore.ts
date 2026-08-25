@@ -10,12 +10,14 @@ import {
   type AxEventPublishReceipt,
   type AxEventRun,
   type AxEventStore,
+  type AxEventVerifierTransitionRequest,
   type AxProgramStateEnvelope,
   type AxProgramStateStore,
   AxSystemEventClock,
 } from './types.js';
 import {
   axEventId,
+  axEventIdentityScope,
   axEventScopedCorrelationKey,
   axEventScopedDedupeKey,
 } from './util.js';
@@ -37,6 +39,7 @@ export class AxInMemoryEventStore implements AxEventStore {
     transactions: false,
     compareAndSet: false,
     outputPersistence: true,
+    verifierTransitions: 'axevent-verifier-transition-v2',
   } as const;
 
   private readonly clock: AxEventClock;
@@ -173,6 +176,11 @@ export class AxInMemoryEventStore implements AxEventStore {
     request: Readonly<AxEventContinuationEnqueueRequest>,
     signal?: AbortSignal
   ): Promise<AxEventPublishReceipt> {
+    const existing = this.continuations.get(request.continuation.id);
+    if (existing) {
+      this.assertContinuationMatch(existing, request.continuation);
+      return this.enqueue(request.enqueue, signal);
+    }
     await this.registerContinuation(request.continuation);
     try {
       return await this.enqueue(request.enqueue, signal);
@@ -180,6 +188,146 @@ export class AxInMemoryEventStore implements AxEventStore {
       await this.completeContinuation(request.continuation.id);
       throw error;
     }
+  }
+
+  async transitionVerifier(
+    request: Readonly<AxEventVerifierTransitionRequest>
+  ): Promise<AxEventPublishReceipt> {
+    const dedupeKey = axEventScopedDedupeKey(request.child.ingress);
+    const parent = this.deliveries.get(request.parent.delivery.id);
+    if (
+      parent?.status === 'waiting_event' &&
+      parent.fencingToken === request.parent.expectedFencingToken
+    ) {
+      const duplicate = this.dedupe.get(dedupeKey);
+      const existing = this.continuations.get(request.continuation.id);
+      const persistedRun = this.runs.get(request.parent.run.id);
+      if (!duplicate || !existing || !persistedRun) {
+        throw new Error(
+          `Verifier transition ${request.operationId} is incomplete`
+        );
+      }
+      this.assertContinuationMatch(existing, request.continuation);
+      if (
+        JSON.stringify(persistedRun) !== JSON.stringify(request.parent.run) ||
+        (request.consumeContinuationId !== undefined &&
+          this.continuations.has(request.consumeContinuationId))
+      ) {
+        throw new Error(
+          `Verifier transition ${request.operationId} does not match committed state`
+        );
+      }
+      return {
+        eventId: duplicate.eventId,
+        accepted: true,
+        duplicate: true,
+        durability: 'volatile',
+        deliveryIds: [...duplicate.deliveryIds],
+      };
+    }
+    if (
+      !parent ||
+      parent.fencingToken !== request.parent.expectedFencingToken ||
+      (parent.status !== 'claimed' && parent.status !== 'running')
+    ) {
+      throw new Error(
+        `Stale verifier transition for ${request.parent.delivery.id}`
+      );
+    }
+    if (
+      request.parent.delivery.status !== 'waiting_event' ||
+      request.parent.run.status !== 'waiting_event' ||
+      request.child.deliveries.length !== 1
+    ) {
+      throw new Error('Verifier transition requires one waiting child');
+    }
+    const descriptor = request.child.deliveries[0]!;
+    const eventBytes = descriptor.sizeBytes;
+    if (eventBytes > this.maxEventBytes) {
+      throw new AxEventBackpressureError(
+        `Event is ${eventBytes} bytes; maximum is ${this.maxEventBytes}`
+      );
+    }
+    if (
+      this.pendingDeliveries > this.maxPendingDeliveries ||
+      this.pendingBytes - parent.sizeBytes + eventBytes > this.maxPendingBytes
+    ) {
+      throw new AxEventBackpressureError();
+    }
+    for (const correlation of request.continuation.correlation) {
+      const key = axEventScopedCorrelationKey(
+        request.continuation.identityScope,
+        correlation.kind,
+        correlation.value
+      );
+      const owner = this.continuationKeys.get(key);
+      if (owner && owner !== request.continuation.id) {
+        throw new Error(
+          `Event continuation correlation is already owned: ${correlation.kind}:${correlation.value}`
+        );
+      }
+    }
+
+    this.runs.set(request.parent.run.id, structuredClone(request.parent.run));
+    this.deliveries.set(
+      request.parent.delivery.id,
+      structuredClone(request.parent.delivery)
+    );
+    this.pendingDeliveries--;
+    this.pendingBytes -= parent.sizeBytes;
+    if (request.consumeContinuationId) {
+      this.completeContinuationNow(request.consumeContinuationId);
+    }
+    this.continuations.set(
+      request.continuation.id,
+      structuredClone(request.continuation)
+    );
+    for (const correlation of request.continuation.correlation) {
+      this.continuationKeys.set(
+        axEventScopedCorrelationKey(
+          request.continuation.identityScope,
+          correlation.kind,
+          correlation.value
+        ),
+        request.continuation.id
+      );
+    }
+    const deliveryId = `verifier-delivery:${request.operationId}`;
+    const delivery: AxEventDelivery = {
+      id: deliveryId,
+      sequence: ++this.sequence,
+      ingress: structuredClone(request.child.ingress),
+      identityScope: axEventIdentityScope(request.child.ingress.identity),
+      routeId: descriptor.routeId,
+      action: descriptor.action,
+      ...(descriptor.targetId ? { targetId: descriptor.targetId } : {}),
+      instanceKey: descriptor.instanceKey,
+      status: 'queued',
+      attempt: 0,
+      availableAt: descriptor.availableAt ?? request.child.acceptedAt,
+      acceptedAt: request.child.acceptedAt,
+      sizeBytes: descriptor.sizeBytes,
+      retrySafety: descriptor.retrySafety ?? 'unknown',
+      ordering: descriptor.ordering ?? 'strict',
+    };
+    this.deliveries.set(deliveryId, delivery);
+    this.deliveryOrdering.set(deliveryId, delivery.ordering);
+    this.deliveryOrder.push(deliveryId);
+    this.pendingDeliveries++;
+    this.pendingBytes += delivery.sizeBytes;
+    this.dedupe.set(dedupeKey, {
+      eventId: request.child.ingress.event.id,
+      deliveryIds: [deliveryId],
+    });
+    this.notify(this.workWaiters);
+    this.notify(this.capacityWaiters);
+    return {
+      eventId: request.child.ingress.event.id,
+      accepted: true,
+      duplicate: false,
+      durability: 'volatile',
+      deliveryIds: [deliveryId],
+    };
   }
 
   async claim(
@@ -304,6 +452,10 @@ export class AxInMemoryEventStore implements AxEventStore {
   }
 
   async completeContinuation(id: string): Promise<void> {
+    this.completeContinuationNow(id);
+  }
+
+  private completeContinuationNow(id: string): void {
     const continuation = this.continuations.get(id);
     if (!continuation) return;
     for (const correlation of continuation.correlation) {
@@ -493,6 +645,17 @@ export class AxInMemoryEventStore implements AxEventStore {
       status === 'outcome_unknown' ||
       status === 'waiting_event'
     );
+  }
+
+  private assertContinuationMatch(
+    existing: Readonly<AxEventContinuation>,
+    requested: Readonly<AxEventContinuation>
+  ): void {
+    if (JSON.stringify(existing) !== JSON.stringify(requested)) {
+      throw new Error(
+        `Event continuation id is already owned: ${requested.id}`
+      );
+    }
   }
 
   private notify(waiters: Set<Waiter>): void {

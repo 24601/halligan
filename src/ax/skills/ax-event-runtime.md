@@ -69,8 +69,14 @@ await source.publish({ event, identity, trust: 'authenticated' });
 - For bounded autonomous attempts, attach a host-owned `.verifier(...)`. Its
   callback runs only after output persistence; failed evidence is bounded and
   resumed through an owned continuation, while pass alone releases final sinks.
+- Verifier targets are non-streaming and require a store advertising the fenced,
+  atomic `axevent-verifier-transition-v2` handoff. The transition replaces the
+  parent with its child for capacity accounting and carries chain state through
+  the owned continuation; it does not make arbitrary external I/O exactly once.
 - Set explicit verifier run/token/wall-time/cost limits. Exhaustion, verifier
   error/timeout, and unchanged fingerprints fail closed; abort stays cancelled.
+- Host `usage`, `fingerprint`, and `verify` callbacks share timeout and abort
+  handling. Outputless clarification waits bypass verification.
 - Compute verifier fingerprints from all relevant deterministic host state.
   An unchanged post-failure fingerprint suppresses the repeated verifier call
   and loop. The target never receives the verifier callback itself.

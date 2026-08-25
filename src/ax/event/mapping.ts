@@ -402,13 +402,25 @@ export function validateEventTarget<IN, OUT>(
     }
   }
   if (target.verifier) {
+    if (
+      !target.verifier.id.trim() ||
+      new TextEncoder().encode(target.verifier.id).byteLength > 256
+    ) {
+      throw new Error(
+        `AxEventTarget ${target.id} verifier id must be 1 to 256 UTF-8 bytes`
+      );
+    }
+    if (target.execution === 'streaming') {
+      throw new Error(
+        `AxEventTarget ${target.id} cannot combine verifier with streaming execution because chunk sinks run before a complete output can be verified`
+      );
+    }
     if (!target.verifier.id.trim()) {
       throw new Error(
         `AxEventTarget ${target.id} verifier id must be non-empty`
       );
     }
     for (const [name, value] of Object.entries({
-      maxRuns: target.verifier.maxRuns ?? 3,
       maxTokens: target.verifier.maxTokens,
       maxWallTimeMs: target.verifier.maxWallTimeMs,
       maxCostUSD: target.verifier.maxCostUSD,
@@ -421,8 +433,17 @@ export function validateEventTarget<IN, OUT>(
       }
     }
     if (
+      target.verifier.maxRuns !== undefined &&
+      (!Number.isInteger(target.verifier.maxRuns) ||
+        target.verifier.maxRuns < 1)
+    ) {
+      throw new Error(
+        `AxEventTarget ${target.id} verifier maxRuns must be a positive integer`
+      );
+    }
+    if (
       target.verifier.maxEvidenceBytes !== undefined &&
-      (!Number.isFinite(target.verifier.maxEvidenceBytes) ||
+      (!Number.isInteger(target.verifier.maxEvidenceBytes) ||
         target.verifier.maxEvidenceBytes < 16)
     ) {
       throw new Error(

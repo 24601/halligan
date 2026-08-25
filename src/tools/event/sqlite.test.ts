@@ -124,6 +124,87 @@ describe('AxSQLiteEventStore', () => {
     await runtime.close({ drain: false });
   });
 
+  it('persists bounded huge Unicode verifier failures and errors', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const store = new AxSQLiteEventStore({
+      filename: join(directory, 'bounded-verifier.sqlite'),
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+      maxInlinePayloadBytes: 8_192,
+    });
+    const huge = '🔥'.repeat(20_000);
+    const runIds: string[] = [];
+    const signature = s('trigger?:string -> resultText:string');
+    const program = {
+      getId: () => 'bounded-verifier-output',
+      getSignature: () => signature,
+      forward: async () => ({ resultText: 'small' }),
+      streamingForward: async function* () {},
+    } as unknown as AxProgrammable<any, any>;
+    const runtime = new AxEventRuntime({
+      store,
+      workerConcurrency: 1,
+      routes: [
+        eventRoute({
+          id: 'bounded-verifier-route',
+          match: { types: ['bounded.verifier'] },
+          action: 'wake',
+          target: eventTarget({
+            id: 'bounded-verifier-target',
+            ai: {} as never,
+            program,
+            mapInput: () => ({}),
+            retrySafety: 'idempotent',
+            verifier: {
+              id: 'bounded-verifier',
+              maxRuns: 1,
+              fingerprint: () => huge,
+              verify: (_output, context) => {
+                runIds.push(context.run.id);
+                if (context.eventContext.ingress.event.id === 'huge-error') {
+                  throw new Error(huge);
+                }
+                return {
+                  status: 'fail',
+                  failure: { code: huge, evidence: huge },
+                };
+              },
+            },
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    for (const id of ['huge-failure', 'huge-error']) {
+      await runtime.publish({
+        event: {
+          specversion: '1.0',
+          id,
+          source: 'test://sqlite',
+          type: 'bounded.verifier',
+        },
+      });
+    }
+    await runtime.waitForIdle();
+    const [failure, error] = await Promise.all(
+      runIds.map((id) => runtime.getRun(id))
+    );
+    expect(failure?.status).toBe('verification_failed');
+    expect(
+      Buffer.byteLength(failure!.verification!.failure!.code)
+    ).toBeLessThanOrEqual(256);
+    expect(
+      Buffer.byteLength(
+        JSON.stringify(failure!.verification!.failure!.evidence)
+      )
+    ).toBeLessThanOrEqual(4_096);
+    expect(error?.status).toBe('verification_failed');
+    expect(Buffer.byteLength(error!.verification!.error!)).toBeLessThanOrEqual(
+      1_024
+    );
+    await runtime.close({ drain: false });
+  });
+
   it('persists output before isolated sink retries', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
     directories.push(directory);

@@ -7,12 +7,10 @@ describe('event verifier continuation evaluation', () => {
     expect(report.taskCount).toBe(7);
     expect(report.oneShot.passRate).toBe(1 / 7);
     expect(report.continuation.passRate).toBe(3 / 7);
-    expect(report.continuation.attempts).toBeGreaterThan(
-      report.oneShot.attempts
-    );
-    expect(report.continuation.verifierCalls).toBeGreaterThan(
-      report.oneShot.verifierCalls
-    );
+    expect(report.oneShot.attempts).toBe(7);
+    expect(report.continuation.attempts).toBe(12);
+    expect(report.oneShot.verifierCalls).toBe(7);
+    expect(report.continuation.verifierCalls).toBe(11);
     expect(report.continuation.suppressedVerifierCalls).toBe(1);
     expect(report.continuation.exhaustedCorrectly).toBe(3);
     expect(report.continuation.restartPassed).toBe(true);
