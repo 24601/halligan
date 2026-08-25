@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { AxMockAIService } from '../../../ai/mock/api.js';
 import { agent } from '../../index.js';
 
@@ -197,6 +197,31 @@ describe('agent.playbook().evolve()', () => {
     expect(ag.getPlaybook().getState().playbook.stats.bulletCount).toBe(0);
     expect(actorPromptOf(ag)).not.toContain(BULLET_MARKER);
     expect(result.final.heldIn).toBeCloseTo(result.baseline.heldIn);
+  });
+
+  it('restores the exact snapshot when playbook update mutates then throws', async () => {
+    const { ag } = makeAgent();
+    const before = structuredClone(ag.getPlaybook().toJSON());
+    const beforePrompt = actorPromptOf(ag);
+    const handle = ag.getPlaybook().inner;
+    const update = handle.update.bind(handle);
+    vi.spyOn(handle, 'update').mockImplementation(async (args: any) => {
+      await update(args);
+      throw new Error('post-mutation failure');
+    });
+
+    const result = await ag.playbook().evolve(TASKS, {
+      metric: scoreByAnswer,
+      maxProposals: 1,
+    });
+
+    expect(result.outcomes[0]).toMatchObject({
+      accepted: false,
+      reason: 'apply failed: post-mutation failure',
+    });
+    expect(ag.getPlaybook().toJSON()).toEqual(before);
+    expect(actorPromptOf(ag)).toBe(beforePrompt);
+    expect(actorPromptOf(ag)).not.toContain(BULLET_MARKER);
   });
 
   it('rejects when the held-out set regresses even though held-in improves', async () => {

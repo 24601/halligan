@@ -7,7 +7,7 @@ import {
   isFailureRecord,
 } from './failureClusters.js';
 import type { AxAgentPlaybookEvolveRunRecord } from './playbookEvolveTypes.js';
-import { buildProposal } from './proposals.js';
+import { applyProposal, buildProposal } from './proposals.js';
 import {
   buildFailureExcerpt,
   coerceToArray,
@@ -264,6 +264,35 @@ describe('proposals', () => {
     expect(proposal.feedback).toContain(`[${BOOM}]`);
     expect(proposal.feedback).toContain('Compute inline');
     expect(proposal.feedback).toContain(BOOM);
+  });
+
+  it('surfaces both update and restoration failures', async () => {
+    const proposal = buildProposal(weakness);
+    const updateError = new Error('post-mutation failure');
+    const rollbackError = new Error('snapshot restoration failure');
+    const handle = {
+      getState: () => ({ value: 'before' }),
+      update: async () => {
+        throw updateError;
+      },
+      load: () => {
+        throw rollbackError;
+      },
+    };
+
+    try {
+      await applyProposal({ proposal, playbookHandle: handle });
+      throw new Error('expected applyProposal to reject');
+    } catch (error) {
+      expect(error).toBeInstanceOf(AggregateError);
+      expect((error as AggregateError).errors).toEqual([
+        updateError,
+        rollbackError,
+      ]);
+      expect((error as Error).message).toContain(
+        'update failed and exact rollback also failed'
+      );
+    }
   });
 });
 

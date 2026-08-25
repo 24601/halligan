@@ -66,14 +66,26 @@ export async function applyProposal(args: {
     );
   }
   const snapshot = handle.getState();
-  await handle.update({
-    example: {
-      task: 'playbook.evolve(): repair a diagnosed agent weakness',
-      failureSignatures: [proposal.clusterSignature],
-    },
-    prediction: {},
-    feedback: proposal.feedback,
-  });
+  try {
+    await handle.update({
+      example: {
+        task: 'playbook.evolve(): repair a diagnosed agent weakness',
+        failureSignatures: [proposal.clusterSignature],
+      },
+      prediction: {},
+      feedback: proposal.feedback,
+    });
+  } catch (updateError) {
+    try {
+      handle.load(snapshot);
+    } catch (rollbackError) {
+      throw new AggregateError(
+        [updateError, rollbackError],
+        'AxAgent.playbook().evolve(): proposal update failed and exact rollback also failed.'
+      );
+    }
+    throw updateError;
+  }
   return {
     proposal,
     rollback: () => {
