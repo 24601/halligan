@@ -321,6 +321,9 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       );
     }
     const componentSelector = new AxGEPAComponentSelector(targets);
+    const alignsConfigErrors = targets.some(
+      (target) => target.kind === 'program-source'
+    );
 
     const applyConfig = (cfg: Readonly<Record<string, string>>): void => {
       applyGEPAComponentConfig(program, cfg);
@@ -369,6 +372,7 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
         verboseLog,
         throwIfInsufficient,
         captureTraces,
+        alignConfigErrors: alignsConfigErrors,
       });
       this.stats.totalCalls = bootstrapMetricCalls + evaluationState.totalCalls;
       return result;

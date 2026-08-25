@@ -82,6 +82,23 @@ Normalize scores to `0..1` when possible. Keep objective names stable across cal
 
 Bootstrap demos are useful for small starter sets because they seed the model with concrete successful examples before GEPA mutates instructions/components. TypeScript `optimize(...)` composes the practical bootstrap-plus-GEPA path. Generated languages expose the optimizer primitives supported by their AxIR contract.
 
+## Experimental Whole-Program Source
+
+TypeScript also exposes `programSource(...)` for experiments where GEPA should
+replace the complete implementation and control flow, not only an instruction.
+Candidate source is a strict `ax-program-source/v1` JSON AST with explicit
+predictor/tool capabilities. It is never evaluated as host JavaScript: a fixed
+Ax interpreter runs it in the default locked-down worker runtime with call,
+iteration, and wall-clock budgets. Parse/bind failures reject the candidate,
+runtime failures are scored against their aligned examples, and the immutable
+signature strictly validates final output fields. This experimental API is not
+yet part of the generated-language AxIR surface.
+
+See the
+[program-source design and bounded evaluation](https://github.com/ax-llm/ax/blob/main/docs/PROGRAM_SOURCE.md)
+and the
+[provider-backed TypeScript example](https://github.com/ax-llm/ax/blob/main/src/examples/typescript/optimization/program-source.ts).
+
 ## Artifacts
 
 Optimization output is model-adjacent configuration. Save it, version it, record the examples and metrics used, and apply it through the program or agent API rather than manually patching instructions.

@@ -35,6 +35,82 @@ Use this skill to generate GEPA optimization code. Prefer the top-level `optimiz
 - `result.optimizedProgram` is the easy-to-apply best candidate. `result.paretoFront` is the full trade-off set for multi-objective runs.
 - Direct `AxGEPA` still has its own `bootstrap` option, but top-level `optimize(...)` composes the existing `AxBootstrapFewShot` optimizer before GEPA instead.
 
+## Experimental Program-Source Optimization
+
+Use `programSource(signature, options)` when the complete implementation and
+control flow should be one GEPA component instead of only tuning instruction
+strings. It exposes `<program-id>::program-source` while preserving ordinary
+instruction, description, tool, primitive, and descendant components.
+
+```typescript
+import { optimize, programSource } from '@ax-llm/ax';
+
+const program = programSource(
+  'ticketText:string -> priority:class "urgent, normal", rationale:string',
+  {
+    tools: [classifyUrgency],
+    maxPredictorCalls: 4,
+    maxToolCalls: 2,
+    maxIterations: 48,
+  }
+);
+
+const result = await optimize(program, train, metric, {
+  studentAI,
+  teacherAI,
+  validationExamples: heldOut,
+  numTrials: 8,
+  maxMetricCalls: 80,
+  bootstrap: false,
+});
+program.applyOptimization(result.optimizedProgram!);
+```
+
+Critical rules:
+
+- The source format is the strict `ax-program-source/v1` JSON AST, not
+  JavaScript, TypeScript, or Python.
+- The seed is one `$program` predictor plus a typed return.
+- Allowed statements are `predict`, `tool`, `if`, `forEach`, and final
+  top-level `return`. Allowed expressions are `literal`, `ref`, `object`,
+  `array`, `eq`, `select`, `not`, `and`, `or`, and `concat`.
+- Every used predictor/tool capability must be declared in source and allowed
+  by the host constructor. Source cannot select models or acquire new tools.
+- Candidate constraints include the task, immutable signature, tool schemas,
+  complete grammar, and predictor/tool/iteration/continuation budgets.
+- Parse/bind errors reject the candidate. Runtime and strict typed-output
+  errors become aligned per-example zero scores during direct GEPA evaluation.
+- Save source state with `dumpState()` / `loadState()`, or preserve it inside a
+  normal serialized optimized artifact's `componentMap`.
+- Do not add host `eval`, `Function`, imports, filesystem, process, network, or
+  ambient globals to make a proposal work. Narrow the AST or use an explicit
+  host tool instead.
+
+Good fits are typed LM decomposition, bounded predictor/tool routing,
+deterministic branches, field assembly, and bounded list mapping. Unsupported
+cases include arbitrary computation/modules, recursion/unbounded loops,
+dynamic capabilities/models, persistent mutable source state, nested returns,
+and intermediate token streaming.
+
+The checked-in hill climb is deterministic zero-cost mechanism evidence: a
+train memorizer is rejected on held-out data, a general tool source is promoted,
+and a redundant source is rejected against a perfect seed. Run:
+
+```bash
+node --import=tsx src/examples/program-source-evaluation.ts
+npx vitest run src/ax/dsp/programSource.test.ts src/ax/dsp/programSourceEvaluation.test.ts src/ax/dsp/optimizers/gepaEvaluation.test.ts
+```
+
+The optional paid smoke is bounded to one trial/eight metric calls and requires
+explicit acknowledgement:
+
+```bash
+OPENAI_APIKEY=... node --import=tsx src/examples/program-source-evaluation.ts --paid --ack-paid-calls
+```
+
+See `docs/PROGRAM_SOURCE.md` for the complete grammar, security boundary,
+supported task classes, exact evidence report, and limitations.
+
 ## Metric Selection
 
 Choose the evaluation path deliberately:

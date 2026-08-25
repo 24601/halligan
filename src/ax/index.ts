@@ -797,6 +797,19 @@ import {
 } from './dsp/playbook.js';
 import { AxProgram } from './dsp/program.js';
 import {
+  AxProgramSource,
+  AxProgramSourceBudgetError,
+  type AxProgramSourceCapability,
+  type AxProgramSourceDocument,
+  AxProgramSourceError,
+  type AxProgramSourceExpression,
+  type AxProgramSourceOptions,
+  type AxProgramSourceState,
+  type AxProgramSourceStatement,
+  axProgramSourceVersion,
+  programSource,
+} from './dsp/programSource.js';
+import {
   type AxFieldTemplateFn,
   AxPromptTemplate,
   type AxPromptTemplateOptions,
@@ -1416,6 +1429,9 @@ export { AxMultiServiceRouter };
 export { AxOptimizedProgramImpl };
 export { AxPlaybook };
 export { AxProgram };
+export { AxProgramSource };
+export { AxProgramSourceBudgetError };
+export { AxProgramSourceError };
 export { AxPromptTemplate };
 export { AxProviderRouter };
 export { AxPushEventSource };
@@ -1560,6 +1576,7 @@ export { axOpenAIChatAudioDefaults };
 export { axOptimizableValidators };
 export { axPlaybookFailureSection };
 export { axProcessContentForProvider };
+export { axProgramSourceVersion };
 export { axResolveAIProfileFeatures };
 export { axResolveAIProfileId };
 export { axResolveGeminiLiveAudioConfig };
@@ -1597,6 +1614,7 @@ export { flow };
 export { fn };
 export { optimize };
 export { playbook };
+export { programSource };
 export { refine };
 export { runAxEventStoreConformance };
 export { s };
@@ -2291,6 +2309,12 @@ export type { AxProgramExamples };
 export type { AxProgramForwardOptions };
 export type { AxProgramForwardOptionsWithModels };
 export type { AxProgramOptions };
+export type { AxProgramSourceCapability };
+export type { AxProgramSourceDocument };
+export type { AxProgramSourceExpression };
+export type { AxProgramSourceOptions };
+export type { AxProgramSourceState };
+export type { AxProgramSourceStatement };
 export type { AxProgramStateEnvelope };
 export type { AxProgramStateStore };
 export type { AxProgramStreamingForwardOptions };

@@ -16,11 +16,13 @@ import {
   type AxFunctionHandler,
   type AxParetoResult,
   type AxProgrammable,
+  type AxProgramSource,
   ax,
   f,
   flow,
   fn,
   optimize,
+  programSource,
 } from './index.js';
 import type { Equal, Expect, Flatten } from './util/typetest.js';
 
@@ -577,3 +579,19 @@ const responsesConfigMaxEffort: AxAIOpenAIResponsesConfig<
   string
 >['reasoningEffort'] = 'max';
 void responsesConfigMaxEffort;
+
+// === Experimental program-source factory ===
+const sourceProgram: AxProgramSource<
+  { userQuestion: string; contextItems?: string[] },
+  { finalAnswer: string; confidence: number }
+> = programSource(
+  'userQuestion:string, contextItems?:string[] -> finalAnswer:string, confidence:number'
+);
+sourceProgram.forward(optimizeAI, { userQuestion: 'hello' }).then((output) => {
+  const answer: string = output.finalAnswer;
+  const confidence: number = output.confidence;
+  void answer;
+  void confidence;
+});
+// @ts-expect-error missing required input
+void sourceProgram.forward(optimizeAI, {});

@@ -111,6 +111,8 @@ export async function evaluateGEPABatch<IN, OUT extends AxGenOut>(args: {
   verboseLog?: (message: string) => void;
   throwIfInsufficient?: boolean;
   captureTraces?: boolean;
+  /** Opt-in for components whose binding is part of candidate execution. */
+  alignConfigErrors?: boolean;
 }): Promise<AxGEPABatchEvaluation | undefined> {
   const requiredCalls = args.set.length;
   if (args.state.totalCalls + requiredCalls > args.maxMetricCalls) {
@@ -178,12 +180,17 @@ export async function evaluateGEPABatch<IN, OUT extends AxGenOut>(args: {
     error?: string;
   }> = [];
   for (const [index, ex] of args.set.entries()) {
-    args.applyConfig(args.cfg);
+    if (!args.alignConfigErrors) args.applyConfig(args.cfg);
     let prediction: unknown;
     let scores: Record<string, number>;
     const calls: AxFunctionCallTrace[] = [];
 
     try {
+      if (args.alignConfigErrors) {
+        // Program-source binding belongs to the rollout. Malformed source must
+        // fail this aligned row, not score the previously bound implementation.
+        args.applyConfig(args.cfg);
+      }
       prediction = await args.program.forward(
         args.ai,
         ex as IN,
