@@ -11,7 +11,8 @@ export type AxTypedExample<IN = any> = IN & {
 
 /**
  * A metric result with an explicit scalar used for acceptance decisions and
- * optional qualitative feedback/objectives used by reflective optimizers.
+ * optional qualitative feedback/objectives for consumers that support them.
+ * GEPA uses all fields; other metric consumers may use only the scalar score.
  */
 export interface AxMetricResult<Objective extends string = string> {
   score: number;
