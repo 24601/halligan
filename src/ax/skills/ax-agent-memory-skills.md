@@ -366,7 +366,9 @@ preference, while the mechanism applies nothing. Retention/expiry,
 retraction/erasure, stale replay, renewal, authority, and stress checks pass
 their exact expectations. The artifact is 27,045 UTF-8 bytes. The evaluator
 reports measured latency, every exclusion/callback check, and failures without
-suppressing them.
+suppressing them. Named negative-result aggregates derive from each case's full
+exact check; the output exposes all four preserved failure identities with
+expected and actual applied IDs, exclusions, callback counts, and purposes.
 
 The default bound is 17 cases × 1,000 iterations = 17,000 local selections,
 four one-shot stress probes, zero provider calls/tokens, and $0 provider cost.

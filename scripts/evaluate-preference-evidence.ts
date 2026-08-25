@@ -631,6 +631,27 @@ export function runPreferenceEvidenceEvaluation(iterations = 1_000) {
     caseResults.find(
       (entry) => entry.name === name
     ) as (typeof caseResults)[number];
+  const preservedFailures = caseResults
+    .filter(({ passed }) => !passed)
+    .map(
+      ({
+        name,
+        expectedApplied,
+        actualApplied,
+        expectedExclusions,
+        actualExclusions,
+        expectedCallbacks,
+        actualCallbacks,
+      }) => ({
+        name,
+        expectedApplied,
+        actualApplied,
+        expectedExclusions,
+        actualExclusions,
+        expectedCallbacks,
+        actualCallbacks,
+      })
+    );
 
   return {
     artifact: {
@@ -703,11 +724,11 @@ export function runPreferenceEvidenceEvaluation(iterations = 1_000) {
       costUsd: 0,
     },
     negativeResults: {
-      noBenefitControlTiesStatic: mechanism(unrelated).length === 0,
-      uncertainInferenceNotApplied: mechanism(uncertain).length === 0,
-      noisySmallDataFailurePreserved: !caseResults.find(
-        (entry) => entry.name === noisy.name
-      )?.passed,
+      noBenefitControlExact: resultFor(unrelated.name).passed,
+      uncertainInferenceExactRejection: resultFor(uncertain.name).passed,
+      uncertainInferenceFailurePreserved: !resultFor(uncertain.name).passed,
+      noisySmallDataFailurePreserved: !resultFor(noisy.name).passed,
+      preservedFailures,
     },
     failures,
     claimScope:

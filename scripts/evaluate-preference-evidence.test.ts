@@ -60,12 +60,99 @@ describe('preference evidence evaluation', () => {
       shapeBound: true,
       callbacksBeforeRejection: 0,
     });
-    expect(result.negativeResults).toEqual({
-      noBenefitControlTiesStatic: true,
-      uncertainInferenceNotApplied: true,
+    expect(result.negativeResults).toMatchObject({
+      noBenefitControlExact: true,
+      uncertainInferenceExactRejection: false,
+      uncertainInferenceFailurePreserved: true,
       noisySmallDataFailurePreserved: true,
     });
-    expect(result.caseResults.filter(({ passed }) => !passed)).toHaveLength(4);
+    expect(result.negativeResults.preservedFailures).toEqual([
+      {
+        name: 'unresolved direct contradiction fails closed',
+        expectedApplied: [],
+        actualApplied: [],
+        expectedExclusions: [
+          { recordId: 'rec-contradiction', reason: 'contradicted' },
+        ],
+        actualExclusions: [],
+        expectedCallbacks: {
+          stream: 1,
+          receipt: 1,
+          destructive: 0,
+          policy: 0,
+          receiptPurposes: ['source'],
+        },
+        actualCallbacks: {
+          stream: 1,
+          receipt: 1,
+          destructive: 0,
+          policy: 0,
+          receiptPurposes: ['source'],
+        },
+      },
+      {
+        name: 'uncertain inference remains below application threshold',
+        expectedApplied: [],
+        actualApplied: [],
+        expectedExclusions: [
+          { recordId: 'rec-uncertain', reason: 'policy-blocked' },
+        ],
+        actualExclusions: [],
+        expectedCallbacks: {
+          stream: 1,
+          receipt: 1,
+          destructive: 0,
+          policy: 0,
+          receiptPurposes: ['source'],
+        },
+        actualCallbacks: {
+          stream: 1,
+          receipt: 1,
+          destructive: 0,
+          policy: 0,
+          receiptPurposes: ['source'],
+        },
+      },
+      {
+        name: 'noisy weak contradiction does not displace stronger evidence',
+        expectedApplied: ['rec-noisy'],
+        actualApplied: [],
+        expectedExclusions: [],
+        actualExclusions: [],
+        expectedCallbacks: null,
+        actualCallbacks: {
+          stream: 1,
+          receipt: 1,
+          destructive: 0,
+          policy: 0,
+          receiptPurposes: ['source'],
+        },
+      },
+      {
+        name: 'equal time supersession is ambiguous',
+        expectedApplied: [],
+        actualApplied: [],
+        expectedExclusions: [
+          { recordId: 'rec-equal-a', reason: 'ambiguous-chronology' },
+          { recordId: 'rec-equal-b', reason: 'ambiguous-chronology' },
+        ],
+        actualExclusions: [],
+        expectedCallbacks: {
+          stream: 2,
+          receipt: 2,
+          destructive: 0,
+          policy: 0,
+          receiptPurposes: ['source', 'source'],
+        },
+        actualCallbacks: {
+          stream: 2,
+          receipt: 2,
+          destructive: 0,
+          policy: 0,
+          receiptPurposes: ['source', 'source'],
+        },
+      },
+    ]);
     expect(result.reasonCoverage).toEqual({
       exactCases: 13,
       wrongReasonCases: 3,
