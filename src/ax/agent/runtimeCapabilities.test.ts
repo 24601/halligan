@@ -382,14 +382,29 @@ describe('axSelectCodeRuntime', () => {
     expect(authorityReads).toBe(0);
   });
 
-  it('rejects proxied resource requirements before admission gating', () => {
+  it('rejects proxied resources after reflection without value reads', () => {
     let resourceReads = 0;
+    let prototypeReads = 0;
+    let ownKeyReads = 0;
+    let descriptorReads = 0;
     const requirements = new Proxy(
       {
         schemaVersion: axRuntimeCapabilityRequirementsVersion,
         resources: { maxTimeoutMs: 100 },
       },
       {
+        getPrototypeOf(target) {
+          prototypeReads++;
+          return Reflect.getPrototypeOf(target);
+        },
+        ownKeys(target) {
+          ownKeyReads++;
+          return Reflect.ownKeys(target);
+        },
+        getOwnPropertyDescriptor(target, key) {
+          descriptorReads++;
+          return Reflect.getOwnPropertyDescriptor(target, key);
+        },
         get(target, key, receiver) {
           if (key === 'resources') {
             resourceReads++;
@@ -404,6 +419,38 @@ describe('axSelectCodeRuntime', () => {
       axSelectCodeRuntime([runtime(capabilities())], requirements)
     ).toThrow(/unable to create an immutable data snapshot/);
     expect(resourceReads).toBe(0);
+    expect(prototypeReads).toBeGreaterThan(0);
+    expect(ownKeyReads).toBeGreaterThan(0);
+    expect(descriptorReads).toBeGreaterThan(0);
+  });
+
+  it('ignores inherited requirement fields on canonical records', () => {
+    const candidate = runtime(capabilities());
+    let inspectReads = 0;
+    let selected: ReturnType<typeof axSelectCodeRuntime> | undefined;
+    const previousInspect = Object.getOwnPropertyDescriptor(
+      Object.prototype,
+      'inspect'
+    );
+    Object.defineProperty(Object.prototype, 'inspect', {
+      configurable: true,
+      get() {
+        inspectReads++;
+        return true;
+      },
+    });
+    try {
+      selected = axSelectCodeRuntime([candidate], {});
+    } finally {
+      if (previousInspect) {
+        Object.defineProperty(Object.prototype, 'inspect', previousInspect);
+      } else {
+        Reflect.deleteProperty(Object.prototype, 'inspect');
+      }
+    }
+
+    expect(inspectReads).toBe(0);
+    expect(selected).toMatchObject({ runtime: candidate, index: 0 });
   });
 
   it('rejects non-enumerable security requirements before cloning', () => {

@@ -496,7 +496,7 @@ function assertRequirementDataTree(
   if (isArray) {
     const length = descriptors.length?.value;
     for (let index = 0; index < length; index++) {
-      if (!descriptors[index]) {
+      if (!Object.hasOwn(descriptors, index)) {
         throw new Error(`${path} must not contain sparse entries`);
       }
     }
@@ -506,19 +506,52 @@ function assertRequirementDataTree(
 
 function freezeRequirementTree(value: unknown): unknown {
   if (Array.isArray(value)) {
-    return Object.freeze(value.map(freezeRequirementTree));
+    const array: unknown[] = [];
+    for (let index = 0; index < value.length; index++) {
+      Object.defineProperty(array, index, {
+        value: freezeRequirementTree(value[index]),
+        enumerable: true,
+        configurable: false,
+        writable: false,
+      });
+    }
+    return Object.freeze(array);
   }
   if (value && typeof value === 'object') {
-    return Object.freeze(
-      Object.fromEntries(
-        Object.entries(value).map(([key, child]) => [
-          key,
-          freezeRequirementTree(child),
-        ])
-      )
-    );
+    const record = Object.create(null) as Record<string, unknown>;
+    for (const [key, child] of Object.entries(value)) {
+      Object.defineProperty(record, key, {
+        value: freezeRequirementTree(child),
+        enumerable: true,
+        configurable: false,
+        writable: false,
+      });
+    }
+    return Object.freeze(record);
   }
   return value;
+}
+
+function requirementValues<T>(value: T | readonly T[]): readonly T[] {
+  return Array.isArray(value) ? (value as readonly T[]) : [value as T];
+}
+
+function requirementValuesContain<T>(
+  values: readonly T[],
+  expected: T
+): boolean {
+  for (let index = 0; index < values.length; index++) {
+    if (values[index] === expected) return true;
+  }
+  return false;
+}
+
+function renderRequirementValues(values: readonly string[]): string {
+  let rendered = '';
+  for (let index = 0; index < values.length; index++) {
+    rendered += `${index === 0 ? '' : ' or '}${values[index]}`;
+  }
+  return rendered;
 }
 
 function snapshotRequirements(
@@ -623,13 +656,16 @@ function validateRequirements(
     );
   }
   const validateStrings = (value: string | readonly string[], name: string) => {
-    const values = Array.isArray(value) ? value : [value];
-    if (
-      values.length === 0 ||
-      values.some(
-        (item) => typeof item !== 'string' || item.trim().length === 0
-      )
-    ) {
+    const values = requirementValues(value);
+    let invalid = values.length === 0;
+    for (let index = 0; index < values.length; index++) {
+      const item = values[index];
+      if (typeof item !== 'string' || item.trim().length === 0) {
+        invalid = true;
+        break;
+      }
+    }
+    if (invalid) {
       errors.push(`${name} must contain non-empty values`);
     }
   };
@@ -649,13 +685,15 @@ function validateRequirements(
   if (requirements.language !== undefined)
     validateStrings(requirements.language, 'language');
   if (requirements.platform !== undefined) {
-    const requested = Array.isArray(requirements.platform)
-      ? requirements.platform
-      : [requirements.platform];
-    if (
-      requested.length === 0 ||
-      requested.some((item) => !platforms.has(item))
-    ) {
+    const requested = requirementValues(requirements.platform);
+    let invalid = requested.length === 0;
+    for (let index = 0; index < requested.length; index++) {
+      if (!platforms.has(requested[index]!)) {
+        invalid = true;
+        break;
+      }
+    }
+    if (invalid) {
       errors.push('platform must contain supported values');
     }
   }
@@ -812,10 +850,22 @@ function supportsProtocol(
   capabilities: AxRuntimeCapabilities,
   required: AxRuntimeProtocol
 ): boolean {
-  return [capabilities.protocol, ...capabilities.protocol.features].some(
-    (protocol) =>
-      protocol.name === required.name && protocol.version === required.version
-  );
+  if (
+    capabilities.protocol.name === required.name &&
+    capabilities.protocol.version === required.version
+  ) {
+    return true;
+  }
+  for (let index = 0; index < capabilities.protocol.features.length; index++) {
+    const protocol = capabilities.protocol.features[index];
+    if (
+      protocol?.name === required.name &&
+      protocol.version === required.version
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function capabilityRejectionReasons(
@@ -834,19 +884,15 @@ function capabilityRejectionReasons(
       reasons.push(`requires ${key}`);
   }
   if (requirements.language) {
-    const accepted = Array.isArray(requirements.language)
-      ? requirements.language
-      : [requirements.language];
-    if (!accepted.includes(capabilities.language)) {
-      reasons.push(`requires language ${accepted.join(' or ')}`);
+    const accepted = requirementValues(requirements.language);
+    if (!requirementValuesContain(accepted, capabilities.language)) {
+      reasons.push(`requires language ${renderRequirementValues(accepted)}`);
     }
   }
   if (requirements.platform) {
-    const accepted = Array.isArray(requirements.platform)
-      ? requirements.platform
-      : [requirements.platform];
-    if (!accepted.includes(capabilities.platform)) {
-      reasons.push(`requires platform ${accepted.join(' or ')}`);
+    const accepted = requirementValues(requirements.platform);
+    if (!requirementValuesContain(accepted, capabilities.platform)) {
+      reasons.push(`requires platform ${renderRequirementValues(accepted)}`);
     }
   }
   if (
