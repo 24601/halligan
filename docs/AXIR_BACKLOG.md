@@ -20,6 +20,7 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
 
 - `axir-2026-08-25-port-event-verifier-gated-continuation-policy` [axprogram] Port event verifier-gated continuation policy
   - Status: open
+  - Source PR: #7
   - Source commit: `ca760294f5ea4f207052c39c2218e1195103bc2a`
   - TS paths: `src/ax/event/types.ts`, `src/ax/event/mapping.ts`, `src/ax/event/runtime.ts`, `src/ax/event/memoryStore.ts`
   - Impact: Generated event runtimes need host-owned verifier callbacks, bounded failure continuations, limits, fingerprint suppression, and verification statuses matching TypeScript AxEventRuntime.
