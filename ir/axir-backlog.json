@@ -1168,7 +1168,7 @@
       "status": "open",
       "title": "Port GEPA proposal-policy guidance and references",
       "createdAt": "2026-08-25",
-      "sourcePR": null,
+      "sourcePR": 2,
       "sourceCommit": "ca760294f5ea4f207052c39c2218e1195103bc2a",
       "tsPaths": [
         "src/ax/agent/agent.test.ts",
