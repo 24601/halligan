@@ -44,6 +44,7 @@ export async function* finalizeStreamingResponse<OUT extends AxGenOut>({
   mcpExecutionContext,
   eventContext,
   authority,
+  authorityInheritance,
 }: FinalizeStreamingResponseArgs) {
   const funcs = !signatureToolCallingManager
     ? parseFunctionCalls(ai, state.functionCalls, state.values, model)
@@ -75,6 +76,7 @@ export async function* finalizeStreamingResponse<OUT extends AxGenOut>({
       mcpExecutionContext,
       eventContext,
       authority,
+      authorityInheritance,
     });
     state.functionsExecuted = new Set([...state.functionsExecuted, ...fx]);
     state.functionCalls = [];
@@ -168,6 +170,7 @@ export async function* finalizeStreamingResponse<OUT extends AxGenOut>({
           mcpExecutionContext,
           eventContext,
           authority,
+          authorityInheritance,
         });
         state.functionsExecuted = new Set([...state.functionsExecuted, ...fx]);
 

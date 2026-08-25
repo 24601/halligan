@@ -16,7 +16,9 @@ child-agent functions, live runtime tools, and attached MCP/UCP operations. The
 boundary is off when omitted. Nested calls inherit by default; use
 `authorityInheritance: 'none'` for a zero-grant child or provide explicitly
 attenuated child claims/grants. Model text and function arguments never become
-authority. See `docs/HOST_AUTHORITY.md` for the contract and limits.
+authority. Authority data is deep-snapshotted, and host callbacks fail closed
+on cancellation or `authorizeTimeoutMs` (30 seconds by default). See
+`docs/HOST_AUTHORITY.md` for the contract and limits.
 
 Your job is to choose the smallest correct `AxAgent` shape for the user's needs:
 

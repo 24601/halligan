@@ -116,7 +116,7 @@ The model sees typed capabilities. Your host code owns credentials, authz, input
 
 Ax can optionally carry host-verified identity and exact capability scope through agent, tool, MCP/UCP, child-session, and event-runtime execution. The host supplies an `authority` context with opaque principal and actor claims, versioned grants, and an `authorize(operation, context)` callback. Ax requires an exactly bound allow receipt before invoking the scoped operation and passes that receipt to function handlers.
 
-This mechanism is off by default and does not authenticate claims, hold credentials, define roles or policy, or provide a cryptographic security proof. Build authority only from host-verified state, never model output or free text. Child authority must attenuate its parent's exact operation, resource, tenant, actor, time, revocation, and lease scope; durable hosts reconstruct the callback rather than persisting it.
+This mechanism is off by default and does not authenticate claims, hold credentials, define roles or policy, or provide a cryptographic security proof. Build authority only from host-verified state, never model output or free text. Ax deep-snapshots authority data, bounds host callbacks with `authorizeTimeoutMs`, and authorizes model-callable MCP/UCP catalog and lifecycle methods as well as tools. Child authority must attenuate its parent's exact operation, resource, tenant, actor, time, revocation, and lease scope; durable hosts reconstruct the callback rather than persisting it. Sink dead-letter redrive always resolves current authority again.
 
 See the host-owned identity and authority guide in the repository documentation for API details, migration, assumptions, limitations, and deterministic adversarial evaluation commands.
 

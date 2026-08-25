@@ -656,6 +656,7 @@ import {
   axAuthorityClaim,
   axAuthorize,
   axFunctionAuthorityTarget,
+  axSnapshotAuthority,
   axValidateCapabilityGrant,
 } from './authority/authority.js';
 import type {
@@ -1604,6 +1605,7 @@ export { axShouldUseGeminiLiveAudio };
 export { axShouldUseGrokRealtime };
 export { axShouldUseOpenAIRealtime };
 export { axSignUCPRequest };
+export { axSnapshotAuthority };
 export { axSpanAttributes };
 export { axSpanEvents };
 export { axUpdateBalancerRouteStats };

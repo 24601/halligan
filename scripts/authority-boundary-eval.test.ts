@@ -15,6 +15,14 @@ describe('host authority boundary evaluation', () => {
       cancellation: 'passed',
       malformedClaims: 'passed',
       forgedModelClaims: 'passed',
+      immutableSnapshots: 'passed',
+      authorizerTimeout: 'passed',
+      modelCallablePaths: {
+        functionGlobal: 'passed',
+        mcpGlobal: 'passed',
+        nestedFunction: 'passed',
+        sinkRedrive: 'passed',
+      },
       auditRedaction: 'passed',
     });
   });

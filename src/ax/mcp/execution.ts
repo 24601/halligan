@@ -1,5 +1,8 @@
 import type { AxChatRequest, AxFunction } from '../ai/types.js';
-import { axAttenuateAuthority } from '../authority/authority.js';
+import {
+  axAttenuateAuthority,
+  axSnapshotAuthority,
+} from '../authority/authority.js';
 import type {
   AxAuthorityContext,
   AxAuthorityInheritance,
@@ -540,10 +543,10 @@ export function axMCPChildExecutionOptions<
   const childAuthority = !options.authority
     ? undefined
     : options.authorityInheritance === 'none'
-      ? { ...options.authority, grants: [] }
+      ? axSnapshotAuthority({ ...options.authority, grants: [] })
       : typeof options.authorityInheritance === 'object'
         ? axAttenuateAuthority(options.authority, options.authorityInheritance)
-        : options.authority;
+        : axSnapshotAuthority(options.authority);
   return {
     ...rest,
     ...(child ? { _mcpExecutionContext: child } : {}),

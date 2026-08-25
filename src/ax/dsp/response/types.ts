@@ -35,6 +35,7 @@ export interface AxResponseHandlerArgs<T> {
   mcpExecutionContext?: import('../../mcp/execution.js').AxMCPExecutionContext;
   eventContext?: import('../../event/types.js').AxEventContext;
   authority?: import('../../authority/types.js').AxAuthorityContext;
+  authorityInheritance?: import('../../authority/types.js').AxAuthorityInheritance;
 }
 
 export type InternalAxGenState = {

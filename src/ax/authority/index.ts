@@ -4,6 +4,7 @@ export {
   axAuthorityClaim,
   axAuthorize,
   axFunctionAuthorityTarget,
+  axSnapshotAuthority,
   axValidateCapabilityGrant,
 } from './authority.js';
 export type {

@@ -7,11 +7,14 @@ import type {
   AxAuthorityValue,
   AxAuthorizationAuditEvent,
   AxAuthorizationReceipt,
+  AxAuthorizationRequestContext,
   AxCapabilityGrant,
   AxResourceScope,
 } from './types.js';
 
 let fallbackRequestId = 0;
+const authoritySnapshots = new WeakSet<object>();
+const DEFAULT_AUTHORIZE_TIMEOUT_MS = 30_000;
 
 export class AxAuthorizationDeniedError extends Error {
   constructor(
@@ -19,7 +22,8 @@ export class AxAuthorizationDeniedError extends Error {
       | 'host_denied'
       | 'no_matching_grant'
       | 'invalid_receipt'
-      | 'cancelled',
+      | 'cancelled'
+      | 'timeout',
     message: string
   ) {
     super(message);
@@ -82,6 +86,67 @@ function validateClaims(
   }
 }
 
+function cloneValue(value: AxAuthorityValue): AxAuthorityValue {
+  if (Array.isArray(value)) {
+    return Object.freeze(value.map((entry) => cloneValue(entry)));
+  }
+  if (value !== null && typeof value === 'object') {
+    const record = value as { readonly [key: string]: AxAuthorityValue };
+    return Object.freeze(
+      Object.fromEntries(
+        Object.keys(record)
+          .sort()
+          .map((key) => [key, cloneValue(record[key]!)])
+      )
+    );
+  }
+  return value;
+}
+
+function cloneClaims(
+  claims: readonly Readonly<AxAuthorityClaim>[] | undefined
+): readonly Readonly<AxAuthorityClaim>[] | undefined {
+  if (!claims) return;
+  return Object.freeze(
+    claims.map((claim) =>
+      Object.freeze({ type: claim.type, value: cloneValue(claim.value) })
+    )
+  );
+}
+
+function cloneResource(
+  resource: Readonly<AxResourceScope>
+): Readonly<AxResourceScope> {
+  return Object.freeze({
+    type: resource.type,
+    id: resource.id,
+    ...(resource.tenantId !== undefined ? { tenantId: resource.tenantId } : {}),
+  });
+}
+
+function cloneGrant(
+  grant: Readonly<AxCapabilityGrant>
+): Readonly<AxCapabilityGrant> {
+  return Object.freeze({
+    version: grant.version,
+    id: grant.id,
+    principalId: grant.principalId,
+    ...(grant.actor
+      ? { actor: Object.freeze({ id: grant.actor.id, kind: grant.actor.kind }) }
+      : {}),
+    operations: Object.freeze([...grant.operations]),
+    resources: Object.freeze(grant.resources.map(cloneResource)),
+    ...(grant.issuedAt !== undefined ? { issuedAt: grant.issuedAt } : {}),
+    ...(grant.expiresAt !== undefined ? { expiresAt: grant.expiresAt } : {}),
+    ...(grant.revokedAt !== undefined ? { revokedAt: grant.revokedAt } : {}),
+    leaseEpoch: grant.leaseEpoch,
+    ...(grant.parentGrantId !== undefined
+      ? { parentGrantId: grant.parentGrantId }
+      : {}),
+    ...(grant.claims ? { claims: cloneClaims(grant.claims) } : {}),
+  });
+}
+
 function validateResource(resource: Readonly<AxResourceScope>, path: string) {
   nonEmpty(resource?.type, `${path}.type`);
   nonEmpty(resource?.id, `${path}.id`);
@@ -129,6 +194,91 @@ export function axValidateCapabilityGrant(
     nonEmpty(grant.parentGrantId, 'AxCapabilityGrant.parentGrantId');
   if (grant.actor) validateActor(grant.actor, 'AxCapabilityGrant.actor');
   validateClaims(grant.claims, 'AxCapabilityGrant.claims');
+}
+
+/** Clone and deeply freeze host-owned authority data at an execution boundary. */
+export function axSnapshotAuthority(
+  authority: Readonly<AxAuthorityContext>
+): Readonly<AxAuthorityContext> {
+  if (authoritySnapshots.has(authority as object)) return authority;
+  nonEmpty(authority.principal?.id, 'AxPrincipal.id');
+  if (authority.principal.tenantId !== undefined)
+    nonEmpty(authority.principal.tenantId, 'AxPrincipal.tenantId');
+  validateClaims(authority.principal.claims, 'AxPrincipal.claims');
+  validateActor(authority.actor, 'AxActor');
+  finite(authority.leaseEpoch, 'AxAuthorityContext.leaseEpoch');
+  if (!Number.isInteger(authority.leaseEpoch) || authority.leaseEpoch < 0) {
+    throw new Error(
+      'AxAuthorityContext.leaseEpoch must be a non-negative integer'
+    );
+  }
+  if (typeof authority.authorize !== 'function') {
+    throw new Error('AxAuthorityContext.authorize must be a function');
+  }
+  const authorizeTimeoutMs =
+    authority.authorizeTimeoutMs ?? DEFAULT_AUTHORIZE_TIMEOUT_MS;
+  if (!Number.isFinite(authorizeTimeoutMs) || authorizeTimeoutMs <= 0) {
+    throw new Error(
+      'AxAuthorityContext.authorizeTimeoutMs must be a positive finite number'
+    );
+  }
+  if (authority.delegation) {
+    nonEmpty(
+      authority.delegation.parentPrincipalId,
+      'AxDelegationClaims.parentPrincipalId'
+    );
+    if (
+      !Number.isInteger(authority.delegation.depth) ||
+      authority.delegation.depth < 1
+    ) {
+      throw new Error('AxDelegationClaims.depth must be a positive integer');
+    }
+    validateClaims(authority.delegation.claims, 'AxDelegationClaims.claims');
+  }
+  const grants = authority.grants.map((grant) => {
+    axValidateCapabilityGrant(grant);
+    return cloneGrant(grant);
+  });
+  if (new Set(grants.map((grant) => grant.id)).size !== grants.length) {
+    throw new Error('AxAuthorityContext grant IDs must be unique');
+  }
+  const snapshot = Object.freeze({
+    principal: Object.freeze({
+      id: authority.principal.id,
+      ...(authority.principal.tenantId !== undefined
+        ? { tenantId: authority.principal.tenantId }
+        : {}),
+      ...(authority.principal.claims
+        ? { claims: cloneClaims(authority.principal.claims) }
+        : {}),
+    }),
+    actor: Object.freeze({
+      id: authority.actor.id,
+      kind: authority.actor.kind,
+      ...(authority.actor.claims
+        ? { claims: cloneClaims(authority.actor.claims) }
+        : {}),
+    }),
+    ...(authority.delegation
+      ? {
+          delegation: Object.freeze({
+            parentPrincipalId: authority.delegation.parentPrincipalId,
+            depth: authority.delegation.depth,
+            ...(authority.delegation.claims
+              ? { claims: cloneClaims(authority.delegation.claims) }
+              : {}),
+          }),
+        }
+      : {}),
+    grants: Object.freeze(grants),
+    leaseEpoch: authority.leaseEpoch,
+    authorize: authority.authorize,
+    authorizeTimeoutMs,
+    ...(authority.now ? { now: authority.now } : {}),
+    ...(authority.onAudit ? { onAudit: authority.onAudit } : {}),
+  });
+  authoritySnapshots.add(snapshot);
+  return snapshot;
 }
 
 function sameResource(
@@ -188,21 +338,32 @@ function receiptMatches(
   const eligible = new Set(grants.map((grant) => grant.id));
   return (
     receipt.version === 1 &&
-    Boolean(receipt.receiptId?.trim()) &&
+    typeof receipt.receiptId === 'string' &&
+    Boolean(receipt.receiptId.trim()) &&
     receipt.requestId === request &&
     receipt.operation === operation &&
-    receipt.resource !== undefined &&
+    receipt.resource !== null &&
+    typeof receipt.resource === 'object' &&
+    !Array.isArray(receipt.resource) &&
+    typeof receipt.resource.type === 'string' &&
+    typeof receipt.resource.id === 'string' &&
+    (receipt.resource.tenantId === undefined ||
+      typeof receipt.resource.tenantId === 'string') &&
     sameResource(receipt.resource, resource) &&
     receipt.principalId === context.principal.id &&
+    receipt.actor !== null &&
+    typeof receipt.actor === 'object' &&
     receipt.actor?.id === context.actor.id &&
     receipt.actor?.kind === context.actor.kind &&
     receipt.leaseEpoch === context.leaseEpoch &&
     Number.isFinite(receipt.authorizedAt) &&
     receipt.authorizedAt !== undefined &&
     receipt.authorizedAt <= now &&
-    (receipt.expiresAt === undefined || receipt.expiresAt > now) &&
+    (receipt.expiresAt === undefined ||
+      (Number.isFinite(receipt.expiresAt) && receipt.expiresAt > now)) &&
     (receipt.decision === 'allow' || receipt.decision === 'deny') &&
     Array.isArray(receipt.grantIds) &&
+    receipt.grantIds.every((grantId) => typeof grantId === 'string') &&
     (receipt.decision === 'deny' ||
       (receipt.grantIds.length === eligible.size &&
         new Set(receipt.grantIds).size === eligible.size &&
@@ -214,11 +375,95 @@ async function audit(
   authority: Readonly<AxAuthorityContext>,
   event: Readonly<AxAuthorizationAuditEvent>
 ): Promise<void> {
-  await authority.onAudit?.(event);
+  await authority.onAudit?.(Object.freeze({ ...event }));
 }
 
 function cancelled(signal: AbortSignal | undefined): boolean {
   return signal?.aborted === true;
+}
+
+async function callAuthorizer(
+  authority: Readonly<AxAuthorityContext>,
+  operation: string,
+  context: Readonly<AxAuthorizationRequestContext>,
+  signal?: AbortSignal
+): Promise<Readonly<AxAuthorizationReceipt>> {
+  const controller = new AbortController();
+  const timeoutMs =
+    authority.authorizeTimeoutMs ?? DEFAULT_AUTHORIZE_TIMEOUT_MS;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  let rejectAbort!: (reason: unknown) => void;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    rejectAbort = reject;
+  });
+  const abort = () => {
+    controller.abort(signal?.reason);
+    rejectAbort(
+      new AxAuthorizationDeniedError('cancelled', 'Authorization cancelled')
+    );
+  };
+  signal?.addEventListener('abort', abort, { once: true });
+  const timedOut = new Promise<never>((_resolve, reject) => {
+    timeout = setTimeout(() => {
+      const error = new AxAuthorizationDeniedError(
+        'timeout',
+        `Host authorization timed out after ${timeoutMs}ms`
+      );
+      controller.abort(error);
+      reject(error);
+    }, timeoutMs);
+  });
+  const callback = Promise.resolve().then(() =>
+    authority.authorize(
+      operation,
+      Object.freeze({ ...context, signal: controller.signal })
+    )
+  );
+  try {
+    return await Promise.race([callback, aborted, timedOut]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+    signal?.removeEventListener('abort', abort);
+  }
+}
+
+function snapshotReceipt(
+  value: unknown
+): Readonly<AxAuthorizationReceipt> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+  try {
+    const receipt = value as Partial<AxAuthorizationReceipt>;
+    if (
+      !receipt.resource ||
+      typeof receipt.resource !== 'object' ||
+      Array.isArray(receipt.resource) ||
+      !receipt.actor ||
+      typeof receipt.actor !== 'object' ||
+      Array.isArray(receipt.actor) ||
+      !Array.isArray(receipt.grantIds)
+    ) {
+      return;
+    }
+    return Object.freeze({
+      version: receipt.version,
+      receiptId: receipt.receiptId,
+      requestId: receipt.requestId,
+      decision: receipt.decision,
+      operation: receipt.operation,
+      resource: cloneResource(receipt.resource),
+      principalId: receipt.principalId,
+      actor: Object.freeze({ id: receipt.actor.id, kind: receipt.actor.kind }),
+      grantIds: Object.freeze([...receipt.grantIds]),
+      leaseEpoch: receipt.leaseEpoch,
+      authorizedAt: receipt.authorizedAt,
+      ...(receipt.expiresAt !== undefined
+        ? { expiresAt: receipt.expiresAt }
+        : {}),
+      ...(receipt.reason !== undefined ? { reason: receipt.reason } : {}),
+    } as AxAuthorizationReceipt);
+  } catch {
+    return;
+  }
 }
 
 /**
@@ -232,38 +477,15 @@ export async function axAuthorize(
   signal?: AbortSignal
 ): Promise<Readonly<AxAuthorizationReceipt> | undefined> {
   if (!authority) return;
+  const snapshot = axSnapshotAuthority(authority);
   nonEmpty(operation, 'authorization operation');
   validateResource(resource, 'authorization resource');
-  nonEmpty(authority.principal?.id, 'AxPrincipal.id');
-  if (authority.principal.tenantId !== undefined)
-    nonEmpty(authority.principal.tenantId, 'AxPrincipal.tenantId');
-  validateClaims(authority.principal.claims, 'AxPrincipal.claims');
-  validateActor(authority.actor, 'AxActor');
-  finite(authority.leaseEpoch, 'AxAuthorityContext.leaseEpoch');
-  if (!Number.isInteger(authority.leaseEpoch) || authority.leaseEpoch < 0) {
-    throw new Error(
-      'AxAuthorityContext.leaseEpoch must be a non-negative integer'
-    );
-  }
-  if (authority.delegation) {
-    nonEmpty(
-      authority.delegation.parentPrincipalId,
-      'AxDelegationClaims.parentPrincipalId'
-    );
-    if (
-      !Number.isInteger(authority.delegation.depth) ||
-      authority.delegation.depth < 1
-    ) {
-      throw new Error('AxDelegationClaims.depth must be a positive integer');
-    }
-    validateClaims(authority.delegation.claims, 'AxDelegationClaims.claims');
-  }
-  const now = authority.now?.() ?? Date.now();
+  const now = snapshot.now?.() ?? Date.now();
   if (cancelled(signal)) {
-    await audit(authority, {
+    await audit(snapshot, {
       operation,
       resourceType: resource.type,
-      actorKind: authority.actor.kind,
+      actorKind: snapshot.actor.kind,
       decision: 'deny',
       grantCount: 0,
       at: now,
@@ -274,12 +496,12 @@ export async function axAuthorize(
       'Authorization cancelled'
     );
   }
-  const grants = matchingGrants(authority, operation, resource, now);
+  const grants = matchingGrants(snapshot, operation, resource, now);
   if (!grants.length) {
-    await audit(authority, {
+    await audit(snapshot, {
       operation,
       resourceType: resource.type,
-      actorKind: authority.actor.kind,
+      actorKind: snapshot.actor.kind,
       decision: 'deny',
       grantCount: 0,
       at: now,
@@ -291,30 +513,56 @@ export async function axAuthorize(
     );
   }
   const id = requestId();
-  const receipt = await authority.authorize(operation, {
-    requestId: id,
-    principal: authority.principal,
-    actor: authority.actor,
-    delegation: authority.delegation,
-    resource,
-    grants,
-    leaseEpoch: authority.leaseEpoch,
-    now,
-    signal,
-  });
-  const finishedAt = authority.now?.() ?? Date.now();
+  let receipt: Readonly<AxAuthorizationReceipt> | undefined;
+  try {
+    receipt = snapshotReceipt(
+      await callAuthorizer(
+        snapshot,
+        operation,
+        {
+          requestId: id,
+          principal: snapshot.principal,
+          actor: snapshot.actor,
+          delegation: snapshot.delegation,
+          resource: cloneResource(resource),
+          grants,
+          leaseEpoch: snapshot.leaseEpoch,
+          now,
+        },
+        signal
+      )
+    );
+  } catch (error) {
+    if (
+      error instanceof AxAuthorizationDeniedError &&
+      (error.code === 'cancelled' || error.code === 'timeout')
+    ) {
+      await audit(snapshot, {
+        operation,
+        resourceType: resource.type,
+        actorKind: snapshot.actor.kind,
+        decision: 'deny',
+        grantCount: grants.length,
+        at: snapshot.now?.() ?? Date.now(),
+        code: error.code,
+      });
+    }
+    throw error;
+  }
+  const finishedAt = snapshot.now?.() ?? Date.now();
   const currentGrants = matchingGrants(
-    authority,
+    snapshot,
     operation,
     resource,
     finishedAt
   );
   if (
     cancelled(signal) ||
+    !receipt ||
     !receiptMatches(
       receipt,
       operation,
-      authority,
+      snapshot,
       resource,
       id,
       currentGrants,
@@ -322,10 +570,10 @@ export async function axAuthorize(
     )
   ) {
     const code = cancelled(signal) ? 'cancelled' : 'invalid_receipt';
-    await audit(authority, {
+    await audit(snapshot, {
       operation,
       resourceType: resource.type,
-      actorKind: authority.actor.kind,
+      actorKind: snapshot.actor.kind,
       decision: 'deny',
       grantCount: grants.length,
       at: finishedAt,
@@ -339,10 +587,10 @@ export async function axAuthorize(
     );
   }
   const decision = receipt.decision;
-  await audit(authority, {
+  await audit(snapshot, {
     operation,
     resourceType: resource.type,
-    actorKind: authority.actor.kind,
+    actorKind: snapshot.actor.kind,
     decision,
     grantCount: receipt.grantIds.length,
     at: finishedAt,
@@ -409,20 +657,45 @@ export function axAttenuateAuthority(
   parent: Readonly<AxAuthorityContext>,
   child: Readonly<AxAuthorityDelegationOptions>
 ): Readonly<AxAuthorityContext> {
-  if (child.delegation.parentPrincipalId !== parent.principal.id) {
+  const parentSnapshot = axSnapshotAuthority(parent);
+  const childPrincipal = Object.freeze({
+    id: child.principal.id,
+    ...(child.principal.tenantId !== undefined
+      ? { tenantId: child.principal.tenantId }
+      : {}),
+    ...(child.principal.claims
+      ? { claims: cloneClaims(child.principal.claims) }
+      : {}),
+  });
+  const childActor = Object.freeze({
+    id: child.actor.id,
+    kind: child.actor.kind,
+    ...(child.actor.claims ? { claims: cloneClaims(child.actor.claims) } : {}),
+  });
+  const childDelegation = Object.freeze({
+    parentPrincipalId: child.delegation.parentPrincipalId,
+    depth: child.delegation.depth,
+    ...(child.delegation.claims
+      ? { claims: cloneClaims(child.delegation.claims) }
+      : {}),
+  });
+  const childGrants = Object.freeze(child.grants.map(cloneGrant));
+  if (childDelegation.parentPrincipalId !== parentSnapshot.principal.id) {
     throw new Error(
       'Child delegation parent does not match the parent principal'
     );
   }
-  if (child.principal.tenantId !== parent.principal.tenantId) {
+  if (childPrincipal.tenantId !== parentSnapshot.principal.tenantId) {
     throw new Error('Child delegation cannot change tenant scope');
   }
-  const expectedDepth = (parent.delegation?.depth ?? 0) + 1;
-  if (child.delegation.depth !== expectedDepth) {
+  const expectedDepth = (parentSnapshot.delegation?.depth ?? 0) + 1;
+  if (childDelegation.depth !== expectedDepth) {
     throw new Error(`Child delegation depth must be ${expectedDepth}`);
   }
-  const parents = new Map(parent.grants.map((grant) => [grant.id, grant]));
-  for (const grant of child.grants) {
+  const parents = new Map(
+    parentSnapshot.grants.map((grant) => [grant.id, grant])
+  );
+  for (const grant of childGrants) {
     axValidateCapabilityGrant(grant);
     const source = grant.parentGrantId
       ? parents.get(grant.parentGrantId)
@@ -430,16 +703,16 @@ export function axAttenuateAuthority(
     if (!source) throw new Error('Child grant must reference a parent grant');
     axValidateCapabilityGrant(source);
     if (
-      source.principalId !== parent.principal.id ||
+      source.principalId !== parentSnapshot.principal.id ||
       (source.actor !== undefined &&
-        (source.actor.id !== parent.actor.id ||
-          source.actor.kind !== parent.actor.kind)) ||
-      grant.principalId !== child.principal.id ||
+        (source.actor.id !== parentSnapshot.actor.id ||
+          source.actor.kind !== parentSnapshot.actor.kind)) ||
+      grant.principalId !== childPrincipal.id ||
       grant.actor === undefined ||
-      grant.actor.id !== child.actor.id ||
-      grant.actor.kind !== child.actor.kind ||
+      grant.actor.id !== childActor.id ||
+      grant.actor.kind !== childActor.kind ||
       grant.leaseEpoch !== source.leaseEpoch ||
-      grant.leaseEpoch !== parent.leaseEpoch ||
+      grant.leaseEpoch !== parentSnapshot.leaseEpoch ||
       grant.operations.some(
         (operation) => !source.operations.includes(operation)
       ) ||
@@ -455,15 +728,16 @@ export function axAttenuateAuthority(
       throw new Error('Child capability grant expands parent authority');
     }
   }
-  return Object.freeze({
-    principal: child.principal,
-    actor: child.actor,
-    delegation: child.delegation,
-    grants: Object.freeze([...child.grants]),
-    leaseEpoch: parent.leaseEpoch,
-    authorize: parent.authorize,
-    now: parent.now,
-    onAudit: parent.onAudit,
+  return axSnapshotAuthority({
+    principal: childPrincipal,
+    actor: childActor,
+    delegation: childDelegation,
+    grants: childGrants,
+    leaseEpoch: parentSnapshot.leaseEpoch,
+    authorize: parentSnapshot.authorize,
+    authorizeTimeoutMs: parentSnapshot.authorizeTimeoutMs,
+    now: parentSnapshot.now,
+    onAudit: parentSnapshot.onAudit,
   });
 }
 
@@ -474,5 +748,5 @@ export function axAuthorityClaim(
 ): Readonly<AxAuthorityClaim> {
   const claim = { type, value };
   validateClaims([claim], 'claim');
-  return Object.freeze(claim);
+  return Object.freeze({ type, value: cloneValue(value) });
 }

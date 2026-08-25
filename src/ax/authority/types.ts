@@ -108,7 +108,8 @@ export interface AxAuthorizationAuditEvent {
     | 'host_denied'
     | 'no_matching_grant'
     | 'invalid_receipt'
-    | 'cancelled';
+    | 'cancelled'
+    | 'timeout';
 }
 
 export interface AxAuthorityContext {
@@ -118,6 +119,8 @@ export interface AxAuthorityContext {
   grants: readonly Readonly<AxCapabilityGrant>[];
   leaseEpoch: number;
   authorize: AxAuthorizer;
+  /** Maximum host-authorizer duration. Defaults to 30 seconds. */
+  authorizeTimeoutMs?: number;
   now?: () => number;
   onAudit?: (
     event: Readonly<AxAuthorizationAuditEvent>

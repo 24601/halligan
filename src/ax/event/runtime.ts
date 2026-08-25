@@ -1,5 +1,5 @@
 import { AxAgentClarificationError } from '../agent/agentInternal/agentStateTypes.js';
-import { axAuthorize } from '../authority/authority.js';
+import { axAuthorize, axSnapshotAuthority } from '../authority/authority.js';
 import type { AxAuthorityContext } from '../authority/types.js';
 import type { AxGenDeltaOut, AxProgrammable } from '../dsp/types.js';
 import {
@@ -323,6 +323,7 @@ export class AxEventRuntime {
       throw new Error(`Sink ${deadLetter.sinkId} is no longer configured`);
     }
     const controller = new AbortController();
+    const authority = await this.resolveAuthority(delivery.ingress);
     const context = new AxRuntimeEventContext(
       this.id,
       run.id,
@@ -335,7 +336,14 @@ export class AxEventRuntime {
       delivery.ingress.trust ?? 'untrusted',
       delivery.attempt,
       delivery.id,
-      controller.signal
+      controller.signal,
+      authority
+    );
+    await this.authorizeEventOperation(
+      context,
+      'event.sink.write',
+      'event.sink',
+      sink.id
     );
     await sink.write(run.output, {
       run,
@@ -502,10 +510,7 @@ export class AxEventRuntime {
       const heartbeatController = new AbortController();
       this.activeRuns.set(runId, controller);
       const attempt = claimed.attempt + 1;
-      const authority =
-        typeof this.options.authority === 'function'
-          ? await this.options.authority(claimed.ingress)
-          : this.options.authority;
+      const authority = await this.resolveAuthority(claimed.ingress);
       const eventContext = new AxRuntimeEventContext(
         this.id,
         runId,
@@ -1119,6 +1124,16 @@ export class AxEventRuntime {
       },
       context.abortSignal
     );
+  }
+
+  private async resolveAuthority(
+    ingress: Readonly<AxEventIngress>
+  ): Promise<Readonly<AxAuthorityContext> | undefined> {
+    const authority =
+      typeof this.options.authority === 'function'
+        ? await this.options.authority(ingress)
+        : this.options.authority;
+    return authority ? axSnapshotAuthority(authority) : undefined;
   }
 
   private async heartbeatClaim(

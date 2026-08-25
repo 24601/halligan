@@ -7,6 +7,7 @@ import type {
 import {
   axAuthorize,
   axFunctionAuthorityTarget,
+  axSnapshotAuthority,
 } from '../../authority/authority.js';
 import type {
   AxAuthorityContext,
@@ -148,6 +149,9 @@ export function wrapFunction(
   authorityInheritance?: AxAuthorityInheritance
 ): (...args: unknown[]) => Promise<unknown> {
   return async (...args: unknown[]) => {
+    const invocationAuthority = authority
+      ? axSnapshotAuthority(authority)
+      : undefined;
     let callArgs: Record<string, unknown>;
 
     if (
@@ -171,15 +175,15 @@ export function wrapFunction(
 
     const normalizedQualifiedName = qualifiedName ?? fn.name;
     const protocol = protocolForTrigger?.(normalizedQualifiedName);
-    const authorityReceipt = authority
+    const authorityReceipt = invocationAuthority
       ? await (() => {
           const target = axFunctionAuthorityTarget(
             fn as AxFunction,
-            authority,
+            invocationAuthority,
             normalizedQualifiedName
           );
           return axAuthorize(
-            authority,
+            invocationAuthority,
             target.operation,
             target.resource,
             abortSignal
@@ -202,7 +206,7 @@ export function wrapFunction(
         ai,
         protocol,
         eventContext,
-        authority,
+        authority: invocationAuthority,
         authorityInheritance,
         authorityReceipt,
       });
@@ -312,7 +316,9 @@ export function buildRuntimeGlobals(
   const eventContext = s._activeEventContext as
     | import('../../event/types.js').AxEventContext
     | undefined;
-  const authority = s._activeAuthority as AxAuthorityContext | undefined;
+  const authority = s._activeAuthority
+    ? axSnapshotAuthority(s._activeAuthority as AxAuthorityContext)
+    : undefined;
   const authorityInheritance = s._activeAuthorityInheritance as
     | AxAuthorityInheritance
     | undefined;
@@ -401,53 +407,159 @@ export function buildRuntimeGlobals(
         fn: T
       ): T | ReturnType<typeof buildStageToolStub> =>
         executesTools ? fn : buildStageToolStub(qualifiedName);
+      const call = <T>(
+        qualifiedName: string,
+        operation: string,
+        type: string,
+        id: string,
+        fn: () => T
+      ): T | Promise<T> => {
+        if (!authority) return fn();
+        if (!executesTools) return buildStageToolStub(qualifiedName)() as never;
+        return axAuthorize(
+          authority,
+          operation,
+          {
+            type,
+            id,
+            ...(authority.principal.tenantId
+              ? { tenantId: authority.principal.tenantId }
+              : {}),
+          },
+          abortSignal
+        ).then(fn);
+      };
       mcpRoot[namespace] = {
         tools,
         prompts: {
-          list: () => client.getPrompts(),
+          list: () =>
+            call(
+              `mcp.${namespace}.prompts.list`,
+              'mcp.prompt.list',
+              'mcp.prompt.catalog',
+              namespace,
+              () => client.getPrompts()
+            ),
           get: executeOrStub(
             `mcp.${namespace}.prompts.get`,
             (name: string, args?: Record<string, string>) =>
-              client.getPrompt(name, args)
+              call(
+                `mcp.${namespace}.prompts.get`,
+                'mcp.prompt.get',
+                'mcp.prompt',
+                `${namespace}:${name}`,
+                () => client.getPrompt(name, args)
+              )
           ),
         },
         resources: {
-          list: () => client.getResources(),
-          templates: () => client.getResourceTemplates(),
+          list: () =>
+            call(
+              `mcp.${namespace}.resources.list`,
+              'mcp.resource.list',
+              'mcp.resource.catalog',
+              namespace,
+              () => client.getResources()
+            ),
+          templates: () =>
+            call(
+              `mcp.${namespace}.resources.templates`,
+              'mcp.resource.templates',
+              'mcp.resource.catalog',
+              namespace,
+              () => client.getResourceTemplates()
+            ),
           read: executeOrStub(
             `mcp.${namespace}.resources.read`,
-            (uri: string) => client.readResource(uri)
+            (uri: string) =>
+              call(
+                `mcp.${namespace}.resources.read`,
+                'mcp.resource.read',
+                'mcp.resource',
+                uri,
+                () => client.readResource(uri)
+              )
           ),
           subscribe: executeOrStub(
             `mcp.${namespace}.resources.subscribe`,
-            (uri: string) => client.subscribeResource(uri)
+            (uri: string) =>
+              call(
+                `mcp.${namespace}.resources.subscribe`,
+                'mcp.resource.subscribe',
+                'mcp.resource',
+                uri,
+                () => client.subscribeResource(uri)
+              )
           ),
           unsubscribe: executeOrStub(
             `mcp.${namespace}.resources.unsubscribe`,
-            (uri: string) => client.unsubscribeResource(uri)
+            (uri: string) =>
+              call(
+                `mcp.${namespace}.resources.unsubscribe`,
+                'mcp.resource.unsubscribe',
+                'mcp.resource',
+                uri,
+                () => client.unsubscribeResource(uri)
+              )
           ),
         },
         tasks: {
           list: executeOrStub(
             `mcp.${namespace}.tasks.list`,
-            (cursor?: string) => client.listTasks(cursor)
+            (cursor?: string) =>
+              call(
+                `mcp.${namespace}.tasks.list`,
+                'mcp.task.list',
+                'mcp.task.catalog',
+                namespace,
+                () => client.listTasks(cursor)
+              )
           ),
           get: executeOrStub(`mcp.${namespace}.tasks.get`, (taskId: string) =>
-            client.getTask(taskId)
+            call(
+              `mcp.${namespace}.tasks.get`,
+              'mcp.task.get',
+              'mcp.task',
+              taskId,
+              () => client.getTask(taskId)
+            )
           ),
           result: executeOrStub(
             `mcp.${namespace}.tasks.result`,
-            (taskId: string) => client.getTaskResult(taskId)
+            (taskId: string) =>
+              call(
+                `mcp.${namespace}.tasks.result`,
+                'mcp.task.result',
+                'mcp.task',
+                taskId,
+                () => client.getTaskResult(taskId)
+              )
           ),
           cancel: executeOrStub(
             `mcp.${namespace}.tasks.cancel`,
-            (taskId: string) => client.cancelTask(taskId)
+            (taskId: string) =>
+              call(
+                `mcp.${namespace}.tasks.cancel`,
+                'mcp.task.cancel',
+                'mcp.task',
+                taskId,
+                () => client.cancelTask(taskId)
+              )
           ),
         },
         complete: executeOrStub(
           `mcp.${namespace}.complete`,
-          (...args: Parameters<typeof client.complete>) =>
-            client.complete(...args)
+          (...args: Parameters<typeof client.complete>) => {
+            const ref = args[0];
+            const id = `${namespace}:${ref.type}:${ref.type === 'ref/prompt' ? ref.name : ref.uri}`;
+            return call(
+              `mcp.${namespace}.complete`,
+              'mcp.completion.complete',
+              'mcp.completion',
+              id,
+              () => client.complete(...args)
+            );
+          }
         ),
       };
     }
@@ -487,8 +599,42 @@ export function buildRuntimeGlobals(
       }
       ucpRoot[namespace] = {
         ...operations,
-        profile: () => client.getProfile(),
-        operations: () => client.getOperationNames(),
+        profile: () => {
+          if (!authority) return client.getProfile();
+          if (!executesTools) {
+            return buildStageToolStub(`ucp.${namespace}.profile`)();
+          }
+          return axAuthorize(
+            authority,
+            'ucp.profile.read',
+            {
+              type: 'ucp.catalog',
+              id: namespace,
+              ...(authority.principal.tenantId
+                ? { tenantId: authority.principal.tenantId }
+                : {}),
+            },
+            abortSignal
+          ).then(() => client.getProfile());
+        },
+        operations: () => {
+          if (!authority) return client.getOperationNames();
+          if (!executesTools) {
+            return buildStageToolStub(`ucp.${namespace}.operations`)();
+          }
+          return axAuthorize(
+            authority,
+            'ucp.operation.list',
+            {
+              type: 'ucp.catalog',
+              id: namespace,
+              ...(authority.principal.tenantId
+                ? { tenantId: authority.principal.tenantId }
+                : {}),
+            },
+            abortSignal
+          ).then(() => client.getOperationNames());
+        },
       };
     }
   }

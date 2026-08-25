@@ -6,6 +6,7 @@ import {
   axAuthorityClaim,
   axAuthorize,
   axFunctionAuthorityTarget,
+  axSnapshotAuthority,
 } from './authority.js';
 import type {
   AxAuthorityContext,
@@ -209,6 +210,7 @@ describe('Ax host authority boundary', () => {
       { grantIds: [] },
       { leaseEpoch: 4 },
       { expiresAt: NOW },
+      { expiresAt: String(NOW + 100) },
     ]) {
       const context = authority({
         authorize: (operation, request) => allow(operation, request, override),
@@ -217,6 +219,32 @@ describe('Ax host authority boundary', () => {
         axAuthorize(context, 'document.read', resource)
       ).rejects.toMatchObject({ code: 'invalid_receipt' });
     }
+  });
+
+  it('reports malformed host receipts as invalid without exposing runtime errors', async () => {
+    const audits: unknown[] = [];
+    for (const malformed of [
+      null,
+      {},
+      { resource: null, actor: null, grantIds: null },
+      { resource: resource, actor: {}, grantIds: [], receiptId: 1 },
+    ]) {
+      const context = authority({
+        authorize: () => malformed as never,
+        onAudit: (event) => {
+          audits.push(event);
+        },
+      });
+      await expect(
+        axAuthorize(context, 'document.read', resource)
+      ).rejects.toMatchObject({ code: 'invalid_receipt' });
+    }
+    expect(audits).toHaveLength(4);
+    expect(audits).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: 'invalid_receipt', decision: 'deny' }),
+      ])
+    );
   });
 
   it('lets the authoritative host deny an otherwise matching grant', async () => {
@@ -327,5 +355,79 @@ describe('Ax host authority boundary', () => {
     expect(audits).toEqual([
       expect.objectContaining({ code: 'cancelled', resourceType: 'document' }),
     ]);
+  });
+
+  it('deeply snapshots authority data before publication', async () => {
+    const source = authority({
+      principal: {
+        id: 'principal-a',
+        tenantId: 'tenant-a',
+        claims: [
+          { type: 'profile', value: { groups: ['readers'], nested: { n: 1 } } },
+        ],
+      },
+      grants: [grant({ resources: [{ ...resource }] })],
+    });
+    const snapshot = axSnapshotAuthority(source);
+    const sourceGrant = source.grants[0] as AxCapabilityGrant;
+    (sourceGrant.operations as string[])[0] = 'document.write';
+    (sourceGrant.resources[0] as AxResourceScope).id = 'doc-forged';
+    const claim = source.principal.claims?.[0]?.value as {
+      groups: string[];
+      nested: { n: number };
+    };
+    claim.groups[0] = 'administrators';
+    claim.nested.n = 2;
+
+    expect(snapshot.grants[0]).toMatchObject({
+      operations: ['document.read'],
+      resources: [{ id: 'doc-1' }],
+    });
+    expect(snapshot.principal.claims?.[0]?.value).toEqual({
+      groups: ['readers'],
+      nested: { n: 1 },
+    });
+    expect(Object.isFrozen(snapshot.grants[0]?.operations)).toBe(true);
+    expect(Object.isFrozen(snapshot.grants[0]?.resources[0])).toBe(true);
+    expect(
+      Object.isFrozen(
+        (snapshot.principal.claims?.[0]?.value as { nested: object }).nested
+      )
+    ).toBe(true);
+    await expect(
+      axAuthorize(snapshot, 'document.read', resource)
+    ).resolves.toMatchObject({ decision: 'allow' });
+  });
+
+  it('times out or cancels an authorizer that ignores abort', async () => {
+    let timeoutSignal: AbortSignal | undefined;
+    const never = new Promise<never>(() => {});
+    await expect(
+      axAuthorize(
+        authority({
+          authorizeTimeoutMs: 5,
+          authorize: (_operation, request) => {
+            timeoutSignal = request.signal;
+            return never;
+          },
+        }),
+        'document.read',
+        resource
+      )
+    ).rejects.toMatchObject({ code: 'timeout' });
+    expect(timeoutSignal?.aborted).toBe(true);
+
+    const controller = new AbortController();
+    const pending = axAuthorize(
+      authority({
+        authorizeTimeoutMs: 1_000,
+        authorize: () => never,
+      }),
+      'document.read',
+      resource,
+      controller.signal
+    );
+    controller.abort('stop');
+    await expect(pending).rejects.toMatchObject({ code: 'cancelled' });
   });
 });
