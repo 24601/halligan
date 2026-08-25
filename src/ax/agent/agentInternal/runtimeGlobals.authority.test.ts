@@ -239,7 +239,7 @@ describe('live runtime function authority', () => {
     });
     expect(fixture.authorizationCalls()).toBe(1);
     expect(executions).toBe(0);
-    expect(observations).toBe(1);
+    expect(observations).toBe(0);
   });
 
   it('discards an authorized future after grant revocation and falls back normally', async () => {

@@ -9,6 +9,8 @@
 export type JSRuntimeHostFunctionSpeculationLaunch = Readonly<{
   /** The authorized physical operation. Rejections are observed by the turn. */
   result: Promise<unknown>;
+  /** Exact authorization denied before physical or logical call effects. */
+  authorizationDenied?: boolean;
   /** Revalidate host authority or other launch-time preconditions at claim. */
   canClaim?: () => boolean;
   /** Internal diagnostic when canClaim() fails. */

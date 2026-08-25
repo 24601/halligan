@@ -280,8 +280,10 @@ export function wrapFunction(
     invocationSignal: AbortSignal | undefined,
     observe = true
   ): Promise<unknown> => {
-    const authorization = await authorizeCall(invocationSignal);
-    if (observe) await observeCall(callArgs);
+    const authorization = authority
+      ? await authorizeCall(invocationSignal)
+      : undefined;
+    if (observe && onFunctionCall) await observeCall(callArgs);
     return observeResult(
       callArgs,
       launchFunction(callArgs, invocationSignal, true, authorization)
@@ -313,6 +315,7 @@ export function wrapFunction(
     void result.catch(() => {});
     return {
       result,
+      authorizationDenied: true,
       canClaim,
       invalidReason: 'authority-invalidated' as const,
       signal,
@@ -326,7 +329,8 @@ export function wrapFunction(
     if (speculative.canClaim && !speculative.canClaim()) {
       return runLogicalCall(callArgs, speculative.signal ?? abortSignal);
     }
-    await observeCall(callArgs);
+    if (speculative.authorizationDenied) return speculative.result;
+    if (onFunctionCall) await observeCall(callArgs);
     if (speculative.canClaim && !speculative.canClaim()) {
       return runLogicalCall(callArgs, speculative.signal ?? abortSignal, false);
     }
