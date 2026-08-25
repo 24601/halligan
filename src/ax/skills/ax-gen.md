@@ -100,10 +100,13 @@ Rules:
   the executable catalog, replay provider/model/config protocol, and a host
   authority digest. Set a stable non-secret `historyAuthority` to recreate the
   module across processes, and set `replayProfile` for durable native resume
-  across provider objects. Rotate the latter for provider defaults, adapter/API,
-  endpoint/deployment, routing, or native-ID changes. Without it, native resume
-  is fail-closed to the current provider object; prompt resume remains
-  provider-neutral. Both values support per-run overrides.
+  across provider objects. The profile is the complete provider/protocol
+  identity (provider names are not also hashed), so aliases may deliberately
+  share it; rotate it for provider defaults, adapter/API, endpoint/deployment,
+  routing, or native-ID changes. Without it, native resume is fail-closed to the
+  current provider object. Native request model/config values must be a bounded
+  plain JSON tree and never use mutable provider-global `getLastUsed*` state.
+  Prompt resume remains provider-neutral. Both values support per-run overrides.
 - `abortSignal` cancels one run; `program.stop()` cancels all its active runs.
 - Canonical JSON stabilizes prompt-cache input, tool arguments/results, and
   persisted history. Structural validation does not authenticate semantic

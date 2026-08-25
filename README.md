@@ -253,8 +253,9 @@ protocol for text-only models. It returns resumable canonical history and a
 structured failure with every output key preserved. Resume is fail-closed
 against tool-catalog, host-authority, and native replay-protocol changes; use
 versioned `historyAuthority` and `replayProfile` values for durable native
-cross-process history. Without a replay profile, native resume is scoped to the
-current provider object. See
+cross-process history. The replay profile is the complete host-owned provider
+protocol identity; without one, native resume is scoped to the current provider
+object. See
 [`docs/REACT.md`](docs/REACT.md) for protocol, concurrency, compaction, provider
 coverage, and the reproducible native-vs-prompt evaluation.
 

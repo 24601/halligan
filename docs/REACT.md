@@ -126,11 +126,9 @@ Arguments, results, inputs, and `axReactSerializeHistory(...)` use recursive
 key-sorted canonical JSON. The history header binds replay to hashes of the
 signature, canonical executable tool catalog (names, schemas, protocol
 metadata, and the reserved `submit`), host authority/version, and replay mode.
-Native replay additionally binds the provider name, selected model, effective
+Native replay additionally binds the exact requested model, effective
 non-streaming request `modelConfig`, and a versioned Ax tool-call/ID protocol.
-Without an explicit host profile, it also binds the `AxAIService` object and
-its post-call last-used model/config so provider-specific call IDs are not
-replayed through a reconstructed or substituted native adapter.
+It never derives a digest from provider-global `getLastUsed*` state.
 
 Pass a prior history to resume:
 
@@ -161,25 +159,35 @@ integrity signature. A per-run `historyAuthority` forward option overrides the
 module default; use it on both the initial and resumed calls when one module
 serves multiple authorization scopes.
 
-`replayProfile` is a host assertion about the complete native replay boundary,
-not a value Ax can infer from a provider name. It must identify the adapter and
-protocol/API version, endpoint or deployment, provider default model when
-`model` is omitted, provider-level model/tool-call defaults not present in the
-forward `modelConfig`, routing pin, and native call-ID semantics. Rotate it when
-any of those change, including relevant Ax/provider adapter upgrades. Do not put
-credentials or other secrets in it. Ax still hashes an explicitly requested
-model and the effective ReAct request config (`stream: false`, `n: 1`, plus the
-caller config), so those changes fail closed independently. A per-run
-`replayProfile` override supports a shared module only when the host supplies it
-on both the initial and resumed calls.
+`replayProfile` is the complete host assertion about the native provider replay
+boundary, not a hint combined with `ai.getName()`. When present, it wholly
+replaces provider name, service ID, and object identity in the digest. This
+intentionally permits differently named aliases to resume when the host gives
+them the same profile; using one profile for incompatible adapters is therefore
+a host compatibility error, not something Ax silently infers. The value must
+identify the adapter and protocol/API version, endpoint or deployment, provider
+default model when `model` is omitted, provider-level model/tool-call defaults
+not present in the forward `modelConfig`, routing pin, and native call-ID
+semantics. Rotate it when any of those change, including relevant Ax/provider
+adapter upgrades. Do not put credentials or other secrets in it.
 
-When `replayProfile` is omitted, native continuation on the same provider object
-uses the last model/config Ax can introspect after a call. Ax cannot reliably
-inspect a fresh provider's default model, endpoint, deployment, or adapter
-version before that call, so cross-instance native resume fails closed instead
-of guessing. Prompt-mode history remains provider-neutral and does not require a
-replay profile. Do not durably replay native IDs through an unpinned balancer or
-router; use a profile only when the host can guarantee a protocol-stable route.
+Ax independently hashes an explicitly requested model and the exact ReAct
+request config (`stream: false`, `n: 1`, plus the caller config), so those
+changes fail closed even with a matching profile. Native replay accepts only a
+bounded plain JSON tree for these values: finite numbers and enumerable data
+properties, with no cycles, shared references, sparse arrays, accessors,
+symbols, `toJSON`, or non-plain objects. Unsupported values are rejected before
+history creation or `ai.chat()` instead of being lossy-normalized.
+
+When `replayProfile` is omitted, the digest uses an in-memory identity for the
+exact `AxAIService` object; its private defaults belong to that instance, and a
+different object fails closed even if names and service IDs match. Ax does not
+read mutable provider-global last-used model/config state. Prompt-mode history
+remains provider-neutral and does not require a replay profile. Do not durably
+replay native IDs through an unpinned balancer or router; use a profile only when
+the host can guarantee a protocol-stable route. A per-run `replayProfile`
+override supports a shared module only when the host supplies it on both the
+initial and resumed calls.
 
 Ax clones caller-owned history before appending. It retains the full canonical
 transcript for persistence while replaying only bounded recent context.
@@ -214,7 +222,8 @@ during tool execution does not commit a partial call/result group.
   scope.
 - A matching `replayProfile` authorizes protocol compatibility; it does not
   prove it. The host must rotate it for default-model, config, adapter/API,
-  endpoint/deployment, routing, or native-ID semantic changes.
+  endpoint/deployment, routing, or native-ID semantic changes. Provider names
+  are deliberately not an additional identity when a profile is present.
 - Keep effects idempotent when a caller may retry a failed or aborted run. Ax
   guarantees transcript atomicity, not rollback of external side effects.
 

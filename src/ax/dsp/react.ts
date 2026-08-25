@@ -45,6 +45,9 @@ const DEFAULT_MAX_TOOL_CALLS = 16;
 const DEFAULT_MAX_PROMPT_GROUPS = 24;
 const DEFAULT_MAX_PROMPT_CHARACTERS = 64_000;
 const DEFAULT_MAX_PROMPT_VALUE_CHARACTERS = 12_000;
+const MAX_REPLAY_JSON_DEPTH = 32;
+const MAX_REPLAY_JSON_NODES = 10_000;
+const MAX_REPLAY_JSON_CHARACTERS = 64_000;
 const NATIVE_REPLAY_PROTOCOL = {
   version: 1,
   request: 'ax-chat-functions',
@@ -146,8 +149,8 @@ export type AxReactOptions = {
    */
   historyAuthority?: string;
   /**
-   * Non-secret native provider protocol/deployment version for durable resume.
-   * Omission binds native history to the current AxAIService object.
+   * Complete non-secret native provider/protocol identity for durable resume.
+   * Omission scopes native history to the current AxAIService object.
    */
   replayProfile?: string;
   /** Normal model turns before Ax forces one final submit-only turn. */
@@ -200,6 +203,11 @@ type ToolExecution = {
   isError: boolean;
 };
 
+type NativeReplayRequest = {
+  model: unknown;
+  modelConfig: NonNullable<AxReactForwardOptions<unknown>['modelConfig']>;
+};
+
 function positiveInteger(value: number | undefined, fallback: number): number {
   const resolved = value ?? fallback;
   if (!Number.isSafeInteger(resolved) || resolved < 1) {
@@ -224,6 +232,123 @@ function validatedReplayProfile(value: string): string {
     );
   }
   return value;
+}
+
+function strictReplayJSONValue(
+  value: unknown,
+  label: string,
+  state: { readonly seen: WeakSet<object>; nodes: number },
+  depth = 0
+): unknown {
+  if (depth > MAX_REPLAY_JSON_DEPTH) {
+    throw new Error(
+      `${label} exceeds the native replay JSON depth limit of ${MAX_REPLAY_JSON_DEPTH}`
+    );
+  }
+  state.nodes++;
+  if (state.nodes > MAX_REPLAY_JSON_NODES) {
+    throw new Error(
+      `${label} exceeds the native replay JSON node limit of ${MAX_REPLAY_JSON_NODES}`
+    );
+  }
+  if (
+    value === null ||
+    typeof value === 'string' ||
+    typeof value === 'boolean'
+  ) {
+    return value;
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value) || Object.is(value, -0)) {
+      throw new Error(`${label} must contain only finite JSON numbers`);
+    }
+    return value;
+  }
+  if (typeof value !== 'object') {
+    throw new Error(`${label} must contain only JSON values`);
+  }
+  if (state.seen.has(value)) {
+    throw new Error(
+      `${label} must be a JSON tree without cycles or shared references`
+    );
+  }
+  state.seen.add(value);
+
+  if (Array.isArray(value)) {
+    if (Object.getPrototypeOf(value) !== Array.prototype) {
+      throw new Error(`${label} must contain only plain arrays and objects`);
+    }
+    const keys = Reflect.ownKeys(value);
+    for (const key of keys) {
+      if (key === 'length') continue;
+      if (
+        typeof key !== 'string' ||
+        !/^(0|[1-9]\d*)$/.test(key) ||
+        Number(key) >= value.length
+      ) {
+        throw new Error(
+          `${label} arrays must contain only indexed JSON values`
+        );
+      }
+    }
+    const result: unknown[] = [];
+    for (let index = 0; index < value.length; index++) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!descriptor || !descriptor.enumerable || !('value' in descriptor)) {
+        throw new Error(
+          `${label} must not contain sparse arrays or accessor properties`
+        );
+      }
+      result.push(
+        strictReplayJSONValue(descriptor.value, label, state, depth + 1)
+      );
+    }
+    return result;
+  }
+
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new Error(`${label} must contain only plain arrays and objects`);
+  }
+  const keys = Reflect.ownKeys(value);
+  if (keys.some((key) => typeof key === 'symbol')) {
+    throw new Error(`${label} must not contain symbol properties`);
+  }
+  const result: Record<string, unknown> = Object.create(null);
+  for (const key of (keys as string[]).sort()) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor || !descriptor.enumerable || !('value' in descriptor)) {
+      throw new Error(
+        `${label} must contain only enumerable data properties, not accessors`
+      );
+    }
+    result[key] = strictReplayJSONValue(
+      descriptor.value,
+      label,
+      state,
+      depth + 1
+    );
+  }
+  return result;
+}
+
+function strictReplayJSONClone(value: unknown, label: string): unknown {
+  return strictReplayJSONValue(
+    value,
+    label,
+    { seen: new WeakSet(), nodes: 0 },
+    0
+  );
+}
+
+function canonicalReplayJSON(value: unknown, label: string): string {
+  const serialized = JSON.stringify(strictReplayJSONClone(value, label));
+  if (serialized.length > MAX_REPLAY_JSON_CHARACTERS) {
+    throw new Error(
+      `${label} exceeds the native replay JSON character limit of ${MAX_REPLAY_JSON_CHARACTERS}`
+    );
+  }
+  return serialized;
 }
 
 function canonicalValue(
@@ -485,60 +610,68 @@ function nativeProviderInstance(ai: Readonly<AxAIService>): string {
   return created;
 }
 
+function nativeReplayRequest(
+  options: Readonly<
+    Pick<AxReactForwardOptions<unknown>, 'model' | 'modelConfig'>
+  >
+): NativeReplayRequest {
+  const config = strictReplayJSONClone(
+    options.modelConfig ?? {},
+    'Native ReAct modelConfig'
+  );
+  if (!config || typeof config !== 'object' || Array.isArray(config)) {
+    throw new Error('Native ReAct modelConfig must be a plain JSON object');
+  }
+  return {
+    model:
+      options.model === undefined
+        ? undefined
+        : strictReplayJSONClone(options.model, 'Native ReAct model'),
+    modelConfig: {
+      ...(config as Record<string, unknown>),
+      stream: false,
+      n: 1,
+    },
+  } as NativeReplayRequest;
+}
+
 function replayProtocolHash(
   ai: Readonly<AxAIService>,
   native: boolean,
-  options: Readonly<
-    Pick<AxReactForwardOptions<unknown>, 'model' | 'modelConfig'>
-  >,
+  request: NativeReplayRequest | undefined,
   replayProfile?: string
 ): Promise<string> {
   if (!native) {
     return sha256(axReactCanonicalJSON({ mode: 'prompt', version: 1 }));
   }
-
-  const requestedModelConfig = {
-    ...options.modelConfig,
-    stream: false,
-    n: 1,
-  };
+  if (!request) throw new Error('Native ReAct replay request is missing');
   const providerBinding = replayProfile
     ? { type: 'host-profile', value: replayProfile }
     : {
         type: 'service-instance',
-        serviceId: ai.getId(),
         objectInstance: nativeProviderInstance(ai),
       };
   const modelBinding =
-    options.model !== undefined
-      ? { source: 'request', value: options.model }
+    request.model !== undefined
+      ? { source: 'request', value: request.model }
       : replayProfile
         ? { source: 'host-profile-default' }
-        : {
-            source: 'provider-last-used',
-            value: ai.getLastUsedChatModel() ?? null,
-          };
-  const modelConfigBinding = replayProfile
-    ? {
-        request: requestedModelConfig,
-        providerDefaults: 'host-profile',
-      }
-    : {
-        request: requestedModelConfig,
-        providerEffectiveLastUsed: ai.getLastUsedModelConfig() ?? null,
-      };
+        : { source: 'service-instance-default' };
 
   return sha256(
-    axReactCanonicalJSON({
-      mode: 'native',
-      provider: {
-        name: ai.getName(),
-        binding: providerBinding,
+    canonicalReplayJSON(
+      {
+        mode: 'native',
+        provider: providerBinding,
+        model: modelBinding,
+        modelConfig: {
+          request: request.modelConfig,
+          providerDefaults: replayProfile ? 'host-profile' : 'service-instance',
+        },
+        toolCalls: NATIVE_REPLAY_PROTOCOL,
       },
-      model: modelBinding,
-      modelConfig: modelConfigBinding,
-      toolCalls: NATIVE_REPLAY_PROTOCOL,
-    })
+      'Native ReAct replay profile'
+    )
   );
 }
 
@@ -1078,9 +1211,10 @@ export class AxReact<IN extends AxGenIn, OUT extends AxGenOut> {
     this.assertToolNames(configured);
     const submit = this.createSubmitTool();
     const native = this.resolveNativeMode(ai, options);
+    const nativeRequest = native ? nativeReplayRequest(options) : undefined;
     const [initialCatalogHash, protocolHash] = await Promise.all([
       toolCatalogHash([...configured, submit]),
-      replayProtocolHash(ai, native, options, replayProfile),
+      replayProtocolHash(ai, native, nativeRequest, replayProfile),
     ]);
     const history = options.history
       ? cloneHistory(options.history)
@@ -1146,7 +1280,7 @@ export class AxReact<IN extends AxGenIn, OUT extends AxGenOut> {
           history,
           allTools,
           native,
-          replayProfile,
+          nativeRequest,
           false,
           contextPrompt,
           signal,
@@ -1191,7 +1325,7 @@ export class AxReact<IN extends AxGenIn, OUT extends AxGenOut> {
         history,
         [submit],
         native,
-        replayProfile,
+        nativeRequest,
         true,
         contextPrompt,
         signal,
@@ -1369,7 +1503,7 @@ export class AxReact<IN extends AxGenIn, OUT extends AxGenOut> {
     history: AxReactHistory,
     tools: readonly AxFunction[],
     native: boolean,
-    replayProfile: string | undefined,
+    nativeRequest: NativeReplayRequest | undefined,
     forcedSubmit: boolean,
     contextPrompt: AxChatRequest['chatPrompt'],
     signal: AbortSignal,
@@ -1428,14 +1562,18 @@ export class AxReact<IN extends AxGenIn, OUT extends AxGenOut> {
             : native
               ? 'auto'
               : undefined,
-        model: options.model,
-        modelConfig: { ...options.modelConfig, stream: false, n: 1 },
+        model: native ? nativeRequest?.model : options.model,
+        modelConfig: native
+          ? nativeRequest?.modelConfig
+          : { ...options.modelConfig, stream: false, n: 1 },
       };
       const {
         history: _history,
         historyAuthority: _historyAuthority,
         replayProfile: _replayProfile,
         maxIterations: _maxIterations,
+        model: _model,
+        modelConfig: _modelConfig,
         ...forwardOptions
       } = options;
       const response = await ai.chat(request, {
@@ -1447,14 +1585,6 @@ export class AxReact<IN extends AxGenIn, OUT extends AxGenOut> {
       });
       if (response instanceof ReadableStream) {
         throw new Error('react() does not accept streaming model responses');
-      }
-      if (native) {
-        history.replayProtocolHash = await replayProtocolHash(
-          ai,
-          true,
-          options,
-          replayProfile
-        );
       }
       if (response.modelUsage) this.usage.push(response.modelUsage);
       if (signal.aborted)

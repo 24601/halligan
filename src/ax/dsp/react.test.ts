@@ -704,7 +704,7 @@ describe('react', () => {
     const first = await react('question:string -> answer:string', {
       functions: [privilegedLookup],
       historyAuthority: 'tenant-a:privileged:v1',
-      replayProfile: 'native-provider:deployment-a:v1',
+      replayProfile: 'native-provider:deployment-a:default-model-a:v1',
       maxIterations: 1,
     }).forward(firstAI, { question: 'Authorized resume' });
     expect(first.success).toBe(false);
@@ -722,7 +722,7 @@ describe('react', () => {
         })),
       ],
       historyAuthority: 'tenant-a:privileged:v1',
-      replayProfile: 'native-provider:deployment-a:v1',
+      replayProfile: 'native-provider:deployment-a:default-model-a:v1',
     });
     await expect(
       recreated.forward(
@@ -734,7 +734,7 @@ describe('react', () => {
 
     const noTools = react('question:string -> answer:string', {
       historyAuthority: 'tenant-a:privileged:v1',
-      replayProfile: 'native-provider:deployment-a:v1',
+      replayProfile: 'native-provider:deployment-a:default-model-a:v1',
     });
     await expect(
       noTools.forward(
@@ -758,7 +758,7 @@ describe('react', () => {
         }),
       ],
       historyAuthority: 'tenant-a:privileged:v1',
-      replayProfile: 'native-provider:deployment-a:v1',
+      replayProfile: 'native-provider:deployment-a:default-model-a:v1',
     });
     await expect(
       changedSchema.forward(
@@ -783,7 +783,7 @@ describe('react', () => {
       name: 'other-native-provider',
       features: { functions: true },
       chatResponse: async () =>
-        nativeTurn([{ name: 'submit', args: { answer: 'wrong protocol' } }]),
+        nativeTurn([{ name: 'submit', args: { answer: 'alias resumed' } }]),
     });
     await expect(
       recreated.forward(
@@ -791,12 +791,15 @@ describe('react', () => {
         { question: 'Authorized resume' },
         { history: first.history }
       )
-    ).rejects.toThrow('current native replay profile/protocol');
+    ).resolves.toMatchObject({
+      success: true,
+      output: { answer: 'alias resumed' },
+    });
 
     const changedProtocol = react('question:string -> answer:string', {
       functions: [privilegedLookup],
       historyAuthority: 'tenant-a:privileged:v1',
-      replayProfile: 'native-provider:deployment-a:v2',
+      replayProfile: 'native-provider:deployment-a:default-model-b:v2',
     });
     await expect(
       changedProtocol.forward(
@@ -807,8 +810,7 @@ describe('react', () => {
     ).rejects.toThrow('current native replay profile/protocol');
   });
 
-  it('binds native replay to provider defaults, model config, and adapter identity', async () => {
-    let defaultModel = 'default-model-a';
+  it('binds native replay to request config and service-object identity', async () => {
     let turns = 0;
     const ai = new AxMockAIService({
       id: 'shared-provider-id',
@@ -821,7 +823,6 @@ describe('react', () => {
           : nativeTurn([]);
       },
     });
-    vi.spyOn(ai, 'getLastUsedChatModel').mockImplementation(() => defaultModel);
     const program = react('question:string -> answer:string', {
       functions: [
         tool('lookup', async ({ value }: { value: number }) => value),
@@ -835,16 +836,6 @@ describe('react', () => {
     );
     expect(first.success).toBe(false);
 
-    defaultModel = 'default-model-b';
-    await expect(
-      program.forward(
-        ai,
-        { question: 'Replay profile binding' },
-        { history: first.history, modelConfig: { temperature: 0 } }
-      )
-    ).rejects.toThrow('current native replay profile/protocol');
-
-    defaultModel = 'default-model-a';
     await expect(
       program.forward(
         ai,
@@ -860,9 +851,6 @@ describe('react', () => {
       chatResponse: async () =>
         nativeTurn([{ name: 'submit', args: { answer: 'not replayed' } }]),
     });
-    vi.spyOn(differentAdapter, 'getLastUsedChatModel').mockReturnValue(
-      'default-model-a'
-    );
     await expect(
       program.forward(
         differentAdapter,
@@ -870,6 +858,159 @@ describe('react', () => {
         { history: first.history, modelConfig: { temperature: 0 } }
       )
     ).rejects.toThrow('current native replay profile/protocol');
+  });
+
+  it('rejects lossy or effectful native replay config before chat', async () => {
+    const chat = vi.fn(async () =>
+      nativeTurn([{ name: 'submit', args: { answer: 'accepted' } }])
+    );
+    const ai = new AxMockAIService({
+      features: { functions: true },
+      chatResponse: chat,
+    });
+    const program = react('question:string -> answer:string');
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    const shared = { value: 1 };
+    let getterCalls = 0;
+    const accessor: Record<string, unknown> = {};
+    Object.defineProperty(accessor, 'temperature', {
+      enumerable: true,
+      get: () => {
+        getterCalls++;
+        return 0;
+      },
+    });
+    const sparse = new Array(1);
+    const deep: Record<string, unknown> = {};
+    let cursor = deep;
+    for (let depth = 0; depth < 34; depth++) {
+      const next: Record<string, unknown> = {};
+      cursor.next = next;
+      cursor = next;
+    }
+    const invalidConfigs: unknown[] = [
+      circular,
+      { value: new Map([['x', 1]]) },
+      { value: new Set([1]) },
+      { value: /x/ },
+      { value: Number.NaN },
+      { value: Number.POSITIVE_INFINITY },
+      { value: -0 },
+      { left: shared, right: shared },
+      { value: undefined },
+      { value: { toJSON: () => 'hidden' } },
+      { value: sparse },
+      accessor,
+      deep,
+      { value: 'x'.repeat(64_001) },
+    ];
+
+    for (const modelConfig of invalidConfigs) {
+      await expect(
+        program.forward(
+          ai,
+          { question: 'Reject lossy config' },
+          { modelConfig: modelConfig as never }
+        )
+      ).rejects.toThrow(/Native ReAct (modelConfig|replay profile)/);
+    }
+    expect(getterCalls).toBe(0);
+    expect(chat).not.toHaveBeenCalled();
+
+    await expect(
+      program.forward(
+        ai,
+        { question: 'Accept literal collision marker' },
+        { modelConfig: { stopSequences: ['[Circular]'] } }
+      )
+    ).resolves.toMatchObject({
+      success: true,
+      output: { answer: 'accepted' },
+    });
+    expect(chat).toHaveBeenCalledOnce();
+    expect(chat.mock.calls[0]?.[0].modelConfig).toEqual({
+      stopSequences: ['[Circular]'],
+      stream: false,
+      n: 1,
+    });
+  });
+
+  it('keeps concurrent native replay binding call-scoped', async () => {
+    const ai = new AxMockAIService<string>({
+      features: { functions: true },
+      chatResponse: async (request) => {
+        const input = request.chatPrompt.find(
+          (message) =>
+            message.role === 'user' &&
+            typeof message.content === 'string' &&
+            message.content.startsWith('Inputs')
+        );
+        const question =
+          input?.role === 'user' && typeof input.content === 'string'
+            ? input.content
+            : '';
+        await new Promise((resolve) =>
+          setTimeout(resolve, question.includes('run-a') ? 15 : 1)
+        );
+        return nativeTurn([
+          {
+            name: 'submit',
+            args: { answer: question.includes('run-a') ? 'a' : 'b' },
+          },
+        ]);
+      },
+    });
+    const lastModel = vi
+      .spyOn(ai, 'getLastUsedChatModel')
+      .mockImplementation(() => {
+        throw new Error('shared last-used model must not be read');
+      });
+    const lastConfig = vi
+      .spyOn(ai, 'getLastUsedModelConfig')
+      .mockImplementation(() => {
+        throw new Error('shared last-used config must not be read');
+      });
+    const program = react('question:string -> answer:string');
+    const [firstA, firstB] = await Promise.all([
+      program.forward(
+        ai,
+        { question: 'run-a' },
+        { model: 'model-a', modelConfig: { temperature: 0 } }
+      ),
+      program.forward(
+        ai,
+        { question: 'run-b' },
+        { model: 'model-b', modelConfig: { temperature: 1 } }
+      ),
+    ]);
+    expect(firstA).toMatchObject({ success: true, output: { answer: 'a' } });
+    expect(firstB).toMatchObject({ success: true, output: { answer: 'b' } });
+
+    const [resumedA, resumedB] = await Promise.all([
+      program.forward(
+        ai,
+        { question: 'run-a' },
+        {
+          history: firstA.history,
+          model: 'model-a',
+          modelConfig: { temperature: 0 },
+        }
+      ),
+      program.forward(
+        ai,
+        { question: 'run-b' },
+        {
+          history: firstB.history,
+          model: 'model-b',
+          modelConfig: { temperature: 1 },
+        }
+      ),
+    ]);
+    expect(resumedA).toMatchObject({ success: true, output: { answer: 'a' } });
+    expect(resumedB).toMatchObject({ success: true, output: { answer: 'b' } });
+    expect(lastModel).not.toHaveBeenCalled();
+    expect(lastConfig).not.toHaveBeenCalled();
   });
 
   it('accepts canonical semantic history edits as caller-owned input', async () => {
