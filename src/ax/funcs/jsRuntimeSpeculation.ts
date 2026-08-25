@@ -826,11 +826,12 @@ function canonicalize(
   }
 }
 
-function cloneWorkerVisibleDependency(value: unknown): unknown {
-  // A later worker call observes host results only after the worker transport's
-  // structured-clone boundary. Validate and clone here so planning cannot read
-  // accessors, symbols, prototypes, or reference graphs the worker would see
-  // differently. Environments without structuredClone fail closed.
+function cloneCanonicalGraph(value: unknown): unknown {
+  // Worker callbacks observe a fresh structured clone for every invocation.
+  // Validate and clone here so separate speculative launches cannot share
+  // mutable host references, and planning cannot observe graph details the
+  // worker transport would expose differently. Environments without
+  // structuredClone fail closed.
   canonicalize(value);
   if (typeof structuredClone !== 'function') {
     throw new UnsafeDependencyError();
@@ -1024,7 +1025,7 @@ export class JSRuntimeSpeculationTurn {
         parsed.args.map((expression) =>
           evaluateExpression(expression, environment)
         )
-      );
+      ).then((args) => cloneCanonicalGraph(args) as unknown[]);
       let blockedReported = false;
       const keyReady = argsReady
         .then((args) => {
@@ -1104,7 +1105,7 @@ export class JSRuntimeSpeculationTurn {
       void result.catch(() => {});
 
       if (parsed.binding && parsed.awaited) {
-        const dependency = result.then(cloneWorkerVisibleDependency);
+        const dependency = result.then(cloneCanonicalGraph);
         // A declaration does not guarantee that a later planned call consumes
         // its binding. Observe clone/rejection failures without changing what
         // an actual dependent plan would await.

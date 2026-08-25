@@ -95,6 +95,34 @@ describe('AxJSRuntime speculative programmatic tool calling', () => {
     expect(events.filter((event) => event.kind === 'miss')).toHaveLength(0);
   });
 
+  it('gives each speculative launch an independent worker-equivalent clone', async () => {
+    const events: AxJSRuntimeSpeculationEvent[] = [];
+    const mutate = createTestCallable(async ([input]) => {
+      const value = input as { count: number };
+      value.count++;
+      return value.count;
+    });
+    const code =
+      'const a = await tools.mutate(inputs.shared); const b = await tools.mutate(inputs.shared); return [a, b];';
+
+    const baseline = await run(code, {
+      inputs: { shared: { count: 0 } },
+      tools: { mutate },
+    });
+    const speculative = await run(
+      code,
+      {
+        inputs: { shared: { count: 0 } },
+        tools: { mutate },
+      },
+      speculation(events, { 'tools.mutate': pure(false) })
+    );
+
+    expect(baseline).toEqual([1, 1]);
+    expect(speculative).toEqual(baseline);
+    expect(events.filter((event) => event.kind === 'hit')).toHaveLength(2);
+  });
+
   it('enforces the configured concurrency bound', async () => {
     const events: AxJSRuntimeSpeculationEvent[] = [];
     let active = 0;
