@@ -85,6 +85,7 @@ export async function optimize<IN, OUT extends AxGenOut>(
       stats: optimizedProgram.stats,
       componentMap: optimizedProgram.componentMap,
       selectorState: optimizedProgram.selectorState,
+      causalCandidateEvidence: optimizedProgram.causalCandidateEvidence,
       demos,
       examples: (optimizedProgram as any).examples,
       modelConfig: optimizedProgram.modelConfig,

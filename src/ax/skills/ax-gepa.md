@@ -35,6 +35,115 @@ Use this skill to generate GEPA optimization code. Prefer the top-level `optimiz
 - `result.optimizedProgram` is the easy-to-apply best candidate. `result.paretoFront` is the full trade-off set for multi-objective runs.
 - Direct `AxGEPA` still has its own `bootstrap` option, but top-level `optimize(...)` composes the existing `AxBootstrapFewShot` optimizer before GEPA instead.
 
+## Causal Candidate Evidence
+
+Use `axAttachCausalCandidateEvidence(...)` after an independently evaluated
+candidate when an optimized artifact must retain why a change was proposed,
+what it was expected to change, and what actually happened. This is an
+optional artifact/audit boundary; it does not alter GEPA proposal, scoring,
+selection, or promotion.
+
+```typescript
+import {
+  axAttachCausalCandidateEvidence,
+  axFingerprintCausalEvidence,
+} from '@ax-llm/ax';
+
+const audited = axAttachCausalCandidateEvidence(result.optimizedProgram!, [
+  {
+    id: 'grounding-claim-1',
+    candidateId: 'c1', // optional optimizer/lineage ID
+    evidence: [
+      {
+        id: 'failed-eval-17',
+        kind: 'failure',
+        fingerprint: axFingerprintCausalEvidence(redactedFailure),
+      },
+    ],
+    hypothesis: 'The responder instruction omits the grounding requirement.',
+    affectedComponents: [
+      {
+        componentId: 'responder::instruction',
+        surface: 'instruction',
+        beforeFingerprint: axFingerprintCausalEvidence(beforeInstruction),
+        afterFingerprint: axFingerprintCausalEvidence(afterInstruction),
+      },
+    ],
+    predictedBenefit: [
+      {
+        metric: 'accuracy',
+        split: 'held_out',
+        expectedDirection: 'increase',
+        minimumExpectedDelta: 0.05,
+        confidence: 0.7,
+      },
+    ],
+    predictedRegressions: [],
+    outcome: {
+      heldIn: {
+        metrics: [{ metric: 'accuracy', before: 0.6, after: 0.8, sampleCount: 50 }],
+      },
+      heldOut: {
+        metrics: [{ metric: 'accuracy', before: 0.62, after: 0.7, sampleCount: 50 }],
+      },
+    },
+    decision: { status: 'promoted', reason: 'Held-out gain met the gate.' },
+  },
+]);
+```
+
+The returned artifact is new; the original is unchanged. Repeated attachment
+appends records and rejects duplicate IDs or retention overflow instead of
+rewriting or silently dropping prior receipts. Use
+`axReplaceOptimizedProgramSnapshot(current, replacement)` for rollback or
+replacement: it takes the rewindable component/demo/model snapshot from
+`replacement` while carrying the current evidence history byte-for-byte. It
+rejects a replacement with divergent history. Append a final rejection or
+rollback settlement receipt afterward. This is one artifact history, not a
+runtime event journal.
+
+The manifest is recursively frozen and survives
+`axSerializeOptimizedProgram(...)` / `axDeserializeOptimizedProgram(...)`.
+Deserialization revalidates schema, privacy metadata, fingerprints, links, and
+UTF-8 bounds. Prediction metrics must have a matching observed metric on the
+same split. Both held-in and held-out receipts are required. Optional
+ablation/counterfactual receipts must name affected components and report both
+splits.
+
+Raw examples and traces have no field in the schema. Evidence is linked by a
+caller-owned ID and fingerprint. Evidence and ablation summaries are omitted by
+default; `includeEvidenceSummaries: true` retains them with a configurable
+character bound. Records, per-field items, strings, and total UTF-8 artifact
+bytes are bounded. `axFingerprintCausalEvidence(...)` is a stable browser-safe
+identifier, not a cryptographic digest or a redaction function; redact before
+fingerprinting if the input itself will be logged elsewhere. Caller-supplied
+fingerprints must use a validated `fnv1a32`, `sha256`, `sha512`, or `blake3`
+digest form, so raw text cannot masquerade as a fingerprint field.
+
+The host/evaluator is authoritative for evidence identity, split independence,
+metric correctness, contamination controls, decision policy, and attribution.
+Ax validates structural links but does not prove the hypothesis, infer an
+ablation result, authenticate receipts, or prevent a caller from supplying
+misleading evidence. Keep rejected, no-benefit, regression, and contradictory
+records rather than retaining only promoted candidates.
+
+Deterministic zero-cost mechanism evaluation:
+
+```bash
+npm run evaluate:causal-candidate-evidence
+```
+
+The fixed three-case fixture includes helpful, no-benefit, and misleading
+hypotheses. It measures causal audit completeness (legacy artifact `0`, attached
+manifest `1`), prediction direction accuracy (`1/3`) and Brier score
+(`0.4467`), derived ablation-attribution consistency (`3/3`), exact
+serialization/replay, exact rollback-history preservation, settlement append,
+default redaction, and artifact bytes (`201` baseline, `4,946` attached;
+`4,745` bytes overhead in the fixture). It makes zero provider calls, uses zero
+provider tokens, costs `$0`, and has a 1,000 ms wall-time gate. These are
+deterministic mechanism/self-consistency measurements, not independent causal
+proof or evidence that the candidate or model quality improves in production.
+
 ## Metric Selection
 
 Choose the evaluation path deliberately:

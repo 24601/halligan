@@ -22,6 +22,13 @@ import type {
 import { AxGen } from './generate.js';
 import { axGlobals } from './globals.js';
 import { axDefaultOptimizerLogger } from './optimizerLogging.js';
+import {
+  type AxCausalCandidateEvidenceManifest,
+  type AxCausalCandidateEvidenceOptions,
+  type AxCausalCandidateEvidenceRecord,
+  axCloneCausalCandidateEvidenceManifest,
+  axCreateCausalCandidateEvidenceManifest,
+} from './optimizers/causalCandidateEvidence.js';
 import type { AxGEPAComponentBanditState } from './optimizers/gepaSelection.js';
 import type { AxOptimizerLoggerFunction } from './optimizerTypes.js';
 import type { AxGenOut, AxProgramDemos } from './types.js';
@@ -820,6 +827,8 @@ export interface AxOptimizedProgram<OUT = any> {
    */
   componentMap?: Record<string, string>;
   selectorState?: Record<string, AxGEPAComponentBanditState>;
+  /** Optional host-authored causal claim and evaluation receipts for candidates. */
+  causalCandidateEvidence?: AxCausalCandidateEvidenceManifest;
   demos?: AxProgramDemos<any, OUT>[];
 
   // Model configuration
@@ -863,6 +872,7 @@ export class AxOptimizedProgramImpl<OUT = any>
   public readonly stats: AxOptimizationStats;
   public readonly componentMap?: Record<string, string>;
   public readonly selectorState?: Record<string, AxGEPAComponentBanditState>;
+  public readonly causalCandidateEvidence?: AxCausalCandidateEvidenceManifest;
   public readonly demos?: AxProgramDemos<any, OUT>[];
   public readonly examples?: AxExample[];
   public readonly modelConfig?: {
@@ -889,6 +899,7 @@ export class AxOptimizedProgramImpl<OUT = any>
     stats: AxOptimizationStats;
     componentMap?: Record<string, string>;
     selectorState?: Record<string, AxGEPAComponentBanditState>;
+    causalCandidateEvidence?: AxCausalCandidateEvidenceManifest;
     demos?: AxProgramDemos<any, OUT>[];
     examples?: AxExample[];
     modelConfig?: AxOptimizedProgram<OUT>['modelConfig'];
@@ -905,6 +916,9 @@ export class AxOptimizedProgramImpl<OUT = any>
     this.stats = config.stats;
     this.componentMap = config.componentMap;
     this.selectorState = config.selectorState;
+    this.causalCandidateEvidence = config.causalCandidateEvidence
+      ? axCloneCausalCandidateEvidenceManifest(config.causalCandidateEvidence)
+      : undefined;
     this.demos = config.demos;
     this.examples = config.examples;
     this.modelConfig = config.modelConfig;
@@ -937,6 +951,69 @@ export function axDeserializeOptimizedProgram<OUT = any>(
   return new AxOptimizedProgramImpl<OUT>(
     axSerializeOptimizedProgram(serialized as AxOptimizedProgram<OUT>)
   );
+}
+
+/** Return a new optimized artifact with bounded host-authored causal evidence attached. */
+export function axAttachCausalCandidateEvidence<OUT = any>(
+  optimizedProgram: Readonly<AxOptimizedProgram<OUT>>,
+  records: readonly Readonly<AxCausalCandidateEvidenceRecord>[],
+  options?: Readonly<AxCausalCandidateEvidenceOptions>
+): AxOptimizedProgramImpl<OUT> {
+  const serialized = axSerializeOptimizedProgram(optimizedProgram);
+  const existing = optimizedProgram.causalCandidateEvidence;
+  if (existing?.omittedRecordCount) {
+    throw new Error('cannot append to truncated causal candidate evidence');
+  }
+  const inheritedOptions: AxCausalCandidateEvidenceOptions | undefined =
+    existing
+      ? {
+          maxRecords: existing.maxRecords,
+          maxArtifactBytes: existing.maxArtifactBytes,
+          includeEvidenceSummaries:
+            existing.privacy.evidenceSummaries === 'bounded',
+          maxSummaryChars: existing.privacy.maxSummaryChars,
+        }
+      : undefined;
+  if (
+    existing &&
+    options &&
+    JSON.stringify({ ...inheritedOptions, ...options }) !==
+      JSON.stringify(inheritedOptions)
+  ) {
+    throw new Error('cannot change causal evidence retention while appending');
+  }
+  const manifest = axCreateCausalCandidateEvidenceManifest(
+    [...(existing?.records ?? []), ...records],
+    inheritedOptions ?? options
+  );
+  if (manifest.omittedRecordCount > 0) {
+    throw new Error('causal evidence append exceeds configured retention');
+  }
+  return new AxOptimizedProgramImpl<OUT>({
+    ...serialized,
+    causalCandidateEvidence: manifest,
+  });
+}
+
+/** Replace the rewindable candidate snapshot while preserving append-only evidence. */
+export function axReplaceOptimizedProgramSnapshot<OUT = any>(
+  current: Readonly<AxOptimizedProgram<OUT>>,
+  replacement: Readonly<AxOptimizedProgram<OUT>>
+): AxOptimizedProgramImpl<OUT> {
+  const history = current.causalCandidateEvidence;
+  const replacementHistory = replacement.causalCandidateEvidence;
+  if (
+    replacementHistory &&
+    JSON.stringify(replacementHistory) !== JSON.stringify(history)
+  ) {
+    throw new Error(
+      'replacement snapshot has divergent causal evidence history'
+    );
+  }
+  return new AxOptimizedProgramImpl<OUT>({
+    ...axSerializeOptimizedProgram(replacement),
+    causalCandidateEvidence: history,
+  });
 }
 
 // Pareto optimization result for multi-objective optimization

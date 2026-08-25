@@ -43,6 +43,7 @@
     "axir:gate:agent-semantic-parity": "node scripts/axir-agent-parity-check.mjs --self-test",
     "axir:semantic-parity": "run-s axir:conformance:check axir:gate:agent-semantic-parity",
     "axir:gate:prompt-sync": "node scripts/axir-prompt-sync-check.mjs",
+    "evaluate:causal-candidate-evidence": "node --import=tsx scripts/evaluate-causal-candidate-evidence.ts",
     "skills:check": "node scripts/check-skills.mjs",
     "axir:verify:dev": "node scripts/run-axir.mjs verify --mode dev --jobs 0 --progress",
     "axir:verify:release": "node scripts/run-axir.mjs verify --mode release --jobs 0 --progress",

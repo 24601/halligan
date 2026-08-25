@@ -730,9 +730,11 @@ import {
   type AxOptimizerResult,
   type AxParetoResult,
   type AxSerializedOptimizedProgram,
+  axAttachCausalCandidateEvidence,
   axDefaultOptimizerMetricsConfig,
   axDeserializeOptimizedProgram,
   axGetOptimizerMetricsConfig,
+  axReplaceOptimizedProgramSnapshot,
   axSerializeOptimizedProgram,
   axUpdateOptimizerMetricsConfig,
 } from './dsp/optimizer.js';
@@ -760,6 +762,21 @@ import type {
 } from './dsp/optimizers/aceTypes.js';
 import type { AxRolloutTrace } from './dsp/optimizers/axGenAdapter.js';
 import { AxBootstrapFewShot } from './dsp/optimizers/bootstrapFewshot.js';
+import {
+  type AxCausalAffectedComponent,
+  type AxCausalCandidateAblation,
+  type AxCausalCandidateEvidenceManifest,
+  type AxCausalCandidateEvidenceOptions,
+  type AxCausalCandidateEvidenceRecord,
+  type AxCausalCandidateSplitOutcome,
+  type AxCausalEvidenceKind,
+  type AxCausalEvidenceReference,
+  type AxCausalMetricOutcome,
+  type AxCausalMetricPrediction,
+  axCloneCausalCandidateEvidenceManifest,
+  axCreateCausalCandidateEvidenceManifest,
+  axFingerprintCausalEvidence,
+} from './dsp/optimizers/causalCandidateEvidence.js';
 import {
   AxGEPA,
   type AxGEPAOptimizationReport,
@@ -1469,6 +1486,7 @@ export { axAnalyzeChatPromptRequirements };
 export { axAnalyzeRequestRequirements };
 export { axApplyMCPAuthentication };
 export { axApplyOpenAIChatAudioRequest };
+export { axAttachCausalCandidateEvidence };
 export { axAudioFormatFromMimeType };
 export { axAudioInputFilename };
 export { axAudioInputToBlob };
@@ -1479,7 +1497,9 @@ export { axBuildDistillerDefinition };
 export { axBuildExecutorDefinition };
 export { axBuildResponderDefinition };
 export { axCheckMetricsHealth };
+export { axCloneCausalCandidateEvidenceManifest };
 export { axConcatBase64 };
+export { axCreateCausalCandidateEvidenceManifest };
 export { axCreateDefaultColorLogger };
 export { axCreateDefaultOptimizerColorLogger };
 export { axCreateDefaultOptimizerTextLogger };
@@ -1505,6 +1525,7 @@ export { axEventScopedDedupeKey };
 export { axEventSizeBytes };
 export { axFetchJsonSpeech };
 export { axFetchMultipartTranscription };
+export { axFingerprintCausalEvidence };
 export { axGetAIProfile };
 export { axGetCompatibilityReport };
 export { axGetFormatCompatibility };
@@ -1560,6 +1581,7 @@ export { axOpenAIChatAudioDefaults };
 export { axOptimizableValidators };
 export { axPlaybookFailureSection };
 export { axProcessContentForProvider };
+export { axReplaceOptimizedProgramSnapshot };
 export { axResolveAIProfileFeatures };
 export { axResolveAIProfileId };
 export { axResolveGeminiLiveAudioConfig };
@@ -1940,6 +1962,16 @@ export type { AxBalancerStatsStore };
 export type { AxBaseAIArgs };
 export type { AxBestOfNOptions };
 export type { AxBootstrapOptimizerOptions };
+export type { AxCausalAffectedComponent };
+export type { AxCausalCandidateAblation };
+export type { AxCausalCandidateEvidenceManifest };
+export type { AxCausalCandidateEvidenceOptions };
+export type { AxCausalCandidateEvidenceRecord };
+export type { AxCausalCandidateSplitOutcome };
+export type { AxCausalEvidenceKind };
+export type { AxCausalEvidenceReference };
+export type { AxCausalMetricOutcome };
+export type { AxCausalMetricPrediction };
 export type { AxChatAudioConfig };
 export type { AxChatAudioOutput };
 export type { AxChatLogEntry };
