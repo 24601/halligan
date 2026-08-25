@@ -18,7 +18,13 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
 
 ## Open
 
-No entries.
+- `axir-2026-08-25-port-structured-native-tool-aware-react-module` [axgen] Port structured native-tool-aware ReAct module
+  - Status: open
+  - Source PR: #10
+  - Source commit: `0c03834d19ec0bce695bc4d5a1310370ee4984f4`
+  - TS paths: `src/ax/dsp/react.test.ts`, `src/ax/dsp/react.ts`
+  - Impact: TypeScript now exposes react() with native/prompt tool protocols, typed terminal submit, canonical resumable history, bounded parallel execution and compaction; generated Python/Java/C++/Go/Rust packages do not yet expose equivalent semantics.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 
 ## Done
 
