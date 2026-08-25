@@ -116,6 +116,7 @@ export interface AxDemandRecord {
   metrics: Readonly<{
     detectorCalls: number;
     detectorLatencyMs: number;
+    detectorLatencyCapped: boolean;
     observationBytes: number;
     detectionBytes: number;
   }>;
@@ -227,6 +228,56 @@ function finiteTimestamp(value: number, label: string): number {
     throw new Error(`${label} must be a non-negative safe integer timestamp`);
   }
   return value;
+}
+
+function safeIntegerDifference(
+  left: number,
+  right: number,
+  label: string
+): number {
+  const difference = left - right;
+  if (!Number.isSafeInteger(difference)) {
+    throw new Error(`${label} must be a safe integer duration`);
+  }
+  return difference;
+}
+
+function recordedElapsedMs(
+  startedAt: number,
+  finishedAt: number
+): Readonly<{ value: number; capped: boolean }> {
+  const elapsed = finishedAt - startedAt;
+  if (!Number.isFinite(elapsed)) {
+    return {
+      value: elapsed > 0 ? Number.MAX_SAFE_INTEGER : 0,
+      capped: true,
+    };
+  }
+  if (elapsed < 0) return { value: 0, capped: true };
+  if (elapsed > Number.MAX_SAFE_INTEGER) {
+    return { value: Number.MAX_SAFE_INTEGER, capped: true };
+  }
+  return { value: elapsed, capped: false };
+}
+
+function validateRecordMetrics(
+  record: Readonly<Omit<AxDemandRecord, 'cursor'> | AxDemandRecord>
+): void {
+  const { metrics } = record;
+  if (
+    !Number.isSafeInteger(metrics.detectorCalls) ||
+    metrics.detectorCalls < 0 ||
+    !Number.isFinite(metrics.detectorLatencyMs) ||
+    metrics.detectorLatencyMs < 0 ||
+    metrics.detectorLatencyMs > Number.MAX_SAFE_INTEGER ||
+    typeof metrics.detectorLatencyCapped !== 'boolean' ||
+    !Number.isSafeInteger(metrics.observationBytes) ||
+    metrics.observationBytes < 0 ||
+    !Number.isSafeInteger(metrics.detectionBytes) ||
+    metrics.detectionBytes < 0
+  ) {
+    throw new Error('AxDemandRecord metrics are invalid');
+  }
 }
 
 function validateProvenance(
@@ -421,6 +472,8 @@ export class AxInMemoryDemandStore implements AxDemandStore {
     }
     for (const record of normalized.seed ?? []) {
       const copied = clone(record);
+      finiteTimestamp(copied.createdAt, 'AxDemandRecord.createdAt');
+      validateRecordMetrics(copied);
       const size = bytes(copied);
       this.records.push({ record: copied, size });
       this.totalBytes += size;
@@ -448,6 +501,8 @@ export class AxInMemoryDemandStore implements AxDemandStore {
     value: Readonly<Omit<AxDemandRecord, 'cursor'>>
   ): Promise<Readonly<AxDemandAppendResult>> {
     this.pruneExpired();
+    finiteTimestamp(value.createdAt, 'AxDemandRecord.createdAt');
+    validateRecordMetrics(value);
     const duplicate = this.byDedupeKey.get(value.proposal.dedupeKey);
     if (duplicate) {
       return Promise.resolve({ record: clone(duplicate), duplicate: true });
@@ -523,7 +578,11 @@ export class AxInMemoryDemandStore implements AxDemandStore {
   }
 
   private pruneExpired(): void {
-    const cutoff = this.now() - this.limits.retentionMs;
+    const cutoff = safeIntegerDifference(
+      finiteTimestamp(this.now(), 'AxInMemoryDemandStore.now()'),
+      this.limits.retentionMs,
+      'AxInMemoryDemandStore retention cutoff'
+    );
     for (let index = this.records.length - 1; index >= 0; index--) {
       if (this.records[index]!.record.createdAt < cutoff) this.removeAt(index);
     }
@@ -808,6 +867,7 @@ export class AxDemandBoundary {
     if (!Number.isFinite(finishedAt)) {
       throw new Error('AxDemandBoundary.measureNow() must be finite');
     }
+    const detectorLatency = recordedElapsedMs(startedAt, finishedAt);
     const proposal = await this.propose(
       observation,
       detection,
@@ -824,7 +884,8 @@ export class AxDemandBoundary {
       createdAt: finiteTimestamp(this.now(), 'AxDemandBoundary.now()'),
       metrics: {
         detectorCalls: 1,
-        detectorLatencyMs: Math.max(0, finishedAt - startedAt),
+        detectorLatencyMs: detectorLatency.value,
+        detectorLatencyCapped: detectorLatency.capped,
         observationBytes,
         detectionBytes: bytes(detection),
       },
@@ -864,14 +925,24 @@ export class AxDemandBoundary {
       disposition = safeDisposition('annotate');
       reasonCodes.push('explicit_uncertain');
     }
+    const observationAge = safeIntegerDifference(
+      now,
+      observation.observedAt,
+      'AxDemandObservation age'
+    );
+    const futureSkew = safeIntegerDifference(
+      observation.observedAt,
+      now,
+      'AxDemandObservation future skew'
+    );
     const stale =
-      now - observation.observedAt > this.policy.maxObservationAgeMs ||
+      observationAge > this.policy.maxObservationAgeMs ||
       (observation.expiresAt !== undefined && observation.expiresAt <= now);
     if (stale) {
       disposition = safeDisposition('ignore');
       reasonCodes.push('stale_observation');
     }
-    if (observation.observedAt - now > this.policy.maxFutureSkewMs) {
+    if (futureSkew > this.policy.maxFutureSkewMs) {
       disposition = safeDisposition('ignore');
       reasonCodes.push('future_observation');
     }

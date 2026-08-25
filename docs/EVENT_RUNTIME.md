@@ -145,6 +145,12 @@ to 30 seconds by default. A timeout is retained as fail-closed uncertainty;
 caller or runtime cancellation rejects the observation and is never converted
 into successful evidence.
 
+Recorded detector latency is always finite and nonnegative. Clock reversal,
+overflow, or a duration above `Number.MAX_SAFE_INTEGER` milliseconds is clamped
+to zero or that maximum, with `metrics.detectorLatencyCapped: true`; hosts must
+not interpret a capped sample as an exact duration. Timestamp window arithmetic
+uses safe-integer differences and rejects invalid host/store clocks.
+
 `AxInMemoryDemandStore` retains cursor-addressable records, supports snapshots
 for tests and process-managed restoration, and atomically deduplicates appended
 proposals in one process. A boundary also single-flights concurrent callbacks
@@ -197,11 +203,12 @@ False fire and false suppression are FP and FN respectively. Detector
 calibration over the 39 structurally valid detector scores is Brier 0.132826
 and 5-bucket ECE 0.230; the deliberately malformed score is excluded. The
 boundary retained all 40 records, measured 40 detector and two grant-validator
-callbacks, 10,146 observation bytes, and 13,523 detection bytes. The command
-also reports monotonic detector and end-to-end evaluation latency for that run;
-latency is not asserted as a fixed-clock zero. No provider or effect callback is
-configured by this fixture. These values characterize the mechanism fixture,
-not model quality or performance limits.
+callbacks with zero capped latency samples, 10,146 observation bytes, and
+13,523 detection bytes. The command also reports monotonic detector and
+end-to-end evaluation latency for that run; latency is not asserted as a
+fixed-clock zero. No provider or effect callback is configured by this fixture.
+These values characterize the mechanism fixture, not model quality or
+performance limits.
 
 ## Signature-Aware Input Mapping
 

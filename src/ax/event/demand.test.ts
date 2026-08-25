@@ -280,6 +280,33 @@ describe('AxDemandBoundary', () => {
     expect(record.proposal.disposition).toBe('annotate');
   });
 
+  it('caps extreme finite clock deltas without retaining non-finite metrics', async () => {
+    const forwardSamples = [-Number.MAX_VALUE, Number.MAX_VALUE];
+    const forward = boundary(detection(), {
+      measureNow: () => forwardSamples.shift()!,
+    });
+    const forwardRecord = (
+      await forward.value.observe(observation('forward-clock-overflow'))
+    ).record;
+    expect(forwardRecord.metrics).toMatchObject({
+      detectorLatencyMs: Number.MAX_SAFE_INTEGER,
+      detectorLatencyCapped: true,
+    });
+    expect(JSON.parse(JSON.stringify(forwardRecord)).metrics).toMatchObject({
+      detectorLatencyMs: Number.MAX_SAFE_INTEGER,
+      detectorLatencyCapped: true,
+    });
+
+    const backwardSamples = [Number.MAX_VALUE, -Number.MAX_VALUE];
+    const backward = boundary(detection(), {
+      measureNow: () => backwardSamples.shift()!,
+    });
+    expect(
+      (await backward.value.observe(observation('backward-clock-overflow')))
+        .record.metrics
+    ).toMatchObject({ detectorLatencyMs: 0, detectorLatencyCapped: true });
+  });
+
   it('bounds detector evidence before retention', async () => {
     const { value } = boundary(detection({ reason: 'x'.repeat(1_000) }), {
       policy: { maxDetectionBytes: 100 },

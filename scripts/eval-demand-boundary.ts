@@ -308,6 +308,9 @@ export async function runDemandBoundaryEvaluation() {
         (sum, record) => sum + record.metrics.detectorLatencyMs,
         0
       ),
+      detectorLatenciesCapped: records.filter(
+        (record) => record.metrics.detectorLatencyCapped
+      ).length,
       evaluationLatencyMs: performance.now() - evaluationStartedAt,
       observationBytes: records.reduce(
         (sum, record) => sum + record.metrics.observationBytes,

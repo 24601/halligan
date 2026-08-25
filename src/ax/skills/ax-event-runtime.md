@@ -79,6 +79,9 @@ await source.publish({ event, identity, trust: 'authenticated' });
   single-flights a scoped key with per-waiter cancellation and bounded pending
   keys/bytes; distributed hosts need reservations for callback-level
   exactly-once behavior.
+- Detector latency metrics are finite and nonnegative. Extreme or reversing
+  clocks clamp to the safe-integer range and set `detectorLatencyCapped`; do not
+  treat capped samples as exact durations.
 - Use a host `AxDemandStore` for durable/distributed cursor and dedupe
   guarantees. `AxInMemoryDemandStore` is volatile; its snapshots are suitable
   for deterministic restart tests, not a durable service.

@@ -75,6 +75,10 @@ wraps every local dedupe key even when a custom mapper supplies the observation.
 Callbacks have bounded timeouts, and runtime cancellation remains cancellation
 rather than successful evidence.
 
+Detector latency metrics remain finite and nonnegative. Extreme or reversing
+clocks clamp to the safe-integer range and mark the sample as capped rather than
+serializing a non-finite duration.
+
 The built-in demand store is process-local and volatile. Supply an application
 store when cursor/backlog and dedupe must survive a restart or coordinate
 workers. The event runtime remains responsible for scheduling; this API does

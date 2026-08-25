@@ -22,6 +22,7 @@ describe('advisory demand mechanism evaluation', () => {
     expect(report.overhead).toMatchObject({
       detectorCalls: 40,
       grantValidationCalls: 2,
+      detectorLatenciesCapped: 0,
       observationBytes: 10_146,
       detectionBytes: 13_523,
       retainedRecords: 40,
