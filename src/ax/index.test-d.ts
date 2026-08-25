@@ -588,11 +588,8 @@ const executableSkill: AxExecutableSkillArtifact = {
   version: '2',
   name: 'Report export',
   description: 'Export an authorized report',
-  function: {
-    name: 'export_report',
-    description: 'Export report',
-    func: () => 'report',
-  },
+  functionRef: 'functions/report-export/2',
+  verification: { mode: 'receiptless' },
   requirements: { capabilities: ['report.read'] },
 };
 const executableSkillSelection: AxExecutableSkillSelection =
@@ -600,7 +597,15 @@ const executableSkillSelection: AxExecutableSkillSelection =
     [executableSkill],
     {
       admittedArtifacts: [axExecutableSkillRef(executableSkill)],
+      principal: 'principal:reporter',
+      audience: 'agent:reporting',
       capabilities: ['report.read'],
+      now: '2026-08-25T00:00:00.000Z',
+      resolveFunction: () => ({
+        name: 'export_report',
+        description: 'Export report',
+        func: () => 'report',
+      }),
     },
     { query: 'export report', topK: 1 }
   );
@@ -608,5 +613,5 @@ const selectedExecutableFunction: AxAgentFunction | undefined =
   executableSkillSelection.artifacts[0]?.function;
 void selectedExecutableFunction;
 
-// @ts-expect-error host admission is mandatory
+// @ts-expect-error trusted principal, clock, admission, and resolver are mandatory
 axSelectExecutableSkills([executableSkill], { capabilities: ['report.read'] });

@@ -1,11 +1,28 @@
 import {
   type AxExecutableSkillArtifact,
+  type AxExecutableSkillAuthority,
   type AxExecutableSkillContext,
-  axExecutableSkillRef,
   axSelectExecutableSkills,
 } from '@ax-llm/ax';
 
 const noop = () => undefined;
+const principal = 'principal:eval';
+const audience = 'agent:eval';
+const functionRegistry = new Map<string, () => undefined>();
+const tokenAuthority: AxExecutableSkillAuthority = {
+  issuer: 'auth.eval',
+  audience,
+  principal,
+  resource: 'token:production',
+  action: 'rotate',
+};
+const emailAuthority: AxExecutableSkillAuthority = {
+  issuer: 'auth.eval',
+  audience,
+  principal,
+  resource: 'mailbox:eval',
+  action: 'send',
+};
 
 const skill = (
   id: string,
@@ -17,7 +34,8 @@ const skill = (
   version,
   name: id.replaceAll('-', ' '),
   description,
-  function: { name: id.replaceAll('-', '_'), description, func: noop },
+  functionRef: `functions/${id}/${version}`,
+  verification: { mode: 'receiptless' },
   provenance: { source: 'controlled-eval-fixture' },
   ...overrides,
 });
@@ -28,9 +46,14 @@ const catalog: readonly unknown[] = [
       tools: ['smtp.send@1'],
       environments: ['mail-host@1'],
       capabilities: ['network'],
-      authorities: ['email.send'],
+      authorities: [emailAuthority],
     },
-    verifierReceiptRefs: ['eval://mail/v1'],
+    verification: {
+      mode: 'required',
+      evaluation: 'mail-compatibility-v1',
+      receiptRefs: ['receipt:mail:v1'],
+      issuers: ['eval.example'],
+    },
     knownFailureModes: ['Uses the retired SMTP v1 envelope'],
   }),
   skill('send-email', '2', 'Send an email message with SMTP', {
@@ -39,31 +62,60 @@ const catalog: readonly unknown[] = [
       environments: ['mail-host@2'],
       protocols: ['smtp-envelope@2'],
       capabilities: ['network'],
-      authorities: ['email.send'],
+      authorities: [emailAuthority],
     },
-    verifierReceiptRefs: ['eval://mail/v2'],
+    verification: {
+      mode: 'required',
+      evaluation: 'mail-compatibility-v2',
+      receiptRefs: ['receipt:mail:v2'],
+      issuers: ['eval.example'],
+    },
   }),
   skill('send-email-forged', '99', 'Send an email message with SMTP fastest', {
     provenance: { source: 'model-claimed-trusted-registry' },
-    verifierReceiptRefs: ['model://self-certified'],
+    verification: {
+      mode: 'required',
+      evaluation: 'model-self-certified',
+      receiptRefs: ['model://self-certified'],
+      issuers: ['model.example'],
+    },
   }),
   skill('export-report', '1', 'Export a report as CSV', {
     requirements: { capabilities: ['report.read'] },
   }),
   skill('rotate-token', '1', 'Rotate an API token', {
-    requirements: { authorities: ['token.rotate'] },
+    requirements: { authorities: [tokenAuthority] },
   }),
   skill('old-calendar', '1', 'Create a calendar event', {
     lifecycle: 'deprecated',
   }),
   skill('temporary-upload', '1', 'Upload a temporary file', {
-    expiresAt: '2026-08-24T00:00:00Z',
+    expiresAt: '2026-08-24T00:00:00.000Z',
   }),
   skill('superseded-search', '1', 'Search the documentation', {
-    supersededBy: 'search-docs@2',
+    supersededBy: { id: 'search-docs', version: '2' },
   }),
-  { name: 'legacy prompt guide', content: 'not an executable artifact' },
+  {
+    id: 'legacy-upload',
+    version: '1',
+    name: 'legacy upload',
+    description: 'Upload a legacy file',
+    function: noop,
+  },
 ];
+
+for (const entry of catalog) {
+  if (
+    entry &&
+    typeof entry === 'object' &&
+    typeof (entry as AxExecutableSkillArtifact).functionRef === 'string'
+  ) {
+    functionRegistry.set(
+      (entry as AxExecutableSkillArtifact).functionRef,
+      noop
+    );
+  }
+}
 
 type Case = {
   name: string;
@@ -74,20 +126,28 @@ type Case = {
 
 const base = {
   admittedArtifacts: [
-    'send-email-legacy@1',
-    'send-email@2',
-    'export-report@1',
-    'rotate-token@1',
-    'old-calendar@1',
-    'temporary-upload@1',
-    'superseded-search@1',
+    { id: 'send-email-legacy', version: '1' },
+    { id: 'send-email', version: '2' },
+    { id: 'export-report', version: '1' },
+    { id: 'rotate-token', version: '1' },
+    { id: 'old-calendar', version: '1' },
+    { id: 'temporary-upload', version: '1' },
+    { id: 'superseded-search', version: '1' },
   ],
-  now: '2026-08-25T00:00:00Z',
+  principal,
+  audience,
+  now: '2026-08-25T00:00:00.000Z',
+  resolveFunction: (ref: string) => {
+    const handler = functionRegistry.get(ref);
+    return handler
+      ? { name: ref.replaceAll('/', '_'), description: ref, func: handler }
+      : undefined;
+  },
 } as const;
 
 const cases: Case[] = [
   {
-    name: 'held-out tool/environment/protocol change',
+    name: 'tool/environment/protocol change',
     query: 'send email message smtp',
     expected: 'send-email@2',
     context: {
@@ -96,8 +156,19 @@ const cases: Case[] = [
       environment: 'mail-host@2',
       protocols: ['smtp-envelope@2'],
       capabilities: ['network'],
-      authorities: ['email.send'],
-      acceptedVerifierReceiptRefs: ['eval://mail/v2'],
+      grantedAuthorities: [emailAuthority],
+      verifiedReceipts: [
+        {
+          ref: 'receipt:mail:v2',
+          artifact: { id: 'send-email', version: '2' },
+          principal,
+          issuer: 'eval.example',
+          audience,
+          evaluation: 'mail-compatibility-v2',
+          verifiedAt: '2026-08-24T00:00:00.000Z',
+          expiresAt: '2026-08-26T00:00:00.000Z',
+        },
+      ],
     },
   },
   {
@@ -131,6 +202,40 @@ const cases: Case[] = [
     query: 'search documentation',
     context: base,
   },
+  {
+    name: 'forged model trust metadata exclusion',
+    query: 'send email fastest',
+    context: base,
+  },
+  {
+    name: 'forged verifier receipt exclusion',
+    query: 'send email message smtp',
+    context: {
+      ...base,
+      tools: ['smtp.send@2'],
+      environment: 'mail-host@2',
+      protocols: ['smtp-envelope@2'],
+      capabilities: ['network'],
+      grantedAuthorities: [emailAuthority],
+      verifiedReceipts: [
+        {
+          ref: 'receipt:mail:v2',
+          artifact: { id: 'send-email', version: '2' },
+          principal,
+          issuer: 'model.example',
+          audience,
+          evaluation: 'model-self-certified',
+          verifiedAt: '2026-08-24T00:00:00.000Z',
+          expiresAt: '2026-08-26T00:00:00.000Z',
+        },
+      ],
+    },
+  },
+  {
+    name: 'malformed legacy artifact exclusion',
+    query: 'upload legacy file',
+    context: base,
+  },
 ];
 
 const terms = (value: string) =>
@@ -154,11 +259,13 @@ function naiveRetrieve(query: string): AxExecutableSkillArtifact | undefined {
     .sort(
       (left, right) =>
         right.score - left.score ||
-        axExecutableSkillRef(left.entry).localeCompare(
-          axExecutableSkillRef(right.entry)
-        )
+        artifactLabel(left.entry).localeCompare(artifactLabel(right.entry))
     )[0]?.entry;
 }
+
+const artifactLabel = (
+  entry: Pick<AxExecutableSkillArtifact, 'id' | 'version'>
+) => `${entry.id}@${entry.version}`;
 
 const startedAt = performance.now();
 let naiveLatencyMs = 0;
@@ -177,9 +284,9 @@ const results = cases.map((testCase) => {
     topK: 1,
   });
   awareLatencyMs += performance.now() - awareStartedAt;
-  const naiveId = naive ? axExecutableSkillRef(naive) : undefined;
+  const naiveId = naive ? artifactLabel(naive) : undefined;
   const awareId = aware.artifacts[0]
-    ? axExecutableSkillRef(aware.artifacts[0])
+    ? artifactLabel(aware.artifacts[0].artifact)
     : undefined;
   const expected = testCase.expected;
   if (naiveId === expected) naiveCorrect++;

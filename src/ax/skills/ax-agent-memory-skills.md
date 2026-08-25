@@ -361,20 +361,39 @@ const artifacts: AxExecutableSkillArtifact[] = [
     version: '2',
     name: 'Browser checkout',
     description: 'Complete checkout in the current web store',
-    function: checkoutFunction,
+    functionRef: 'functions/browser-checkout/2',
     requirements: {
       preconditions: ['authenticated'],
       tools: ['browser.navigate@2'],
       environments: ['web-store@2026-08'],
       protocols: ['commerce@1'],
       capabilities: ['browser'],
-      authorities: ['purchase'],
+      authorities: [
+        {
+          issuer: 'auth.example',
+          audience: 'agent:checkout',
+          principal: 'user:123',
+          tenant: 'shop:7',
+          resource: 'order:456',
+          action: 'purchase',
+          delegationRef: 'delegation:9',
+        },
+      ],
     },
-    verifierReceiptRefs: ['eval://checkout/2'],
+    verification: {
+      mode: 'required',
+      evaluation: 'checkout-compatibility-v2',
+      receiptRefs: ['receipt:checkout:2'],
+      issuers: ['eval.example'],
+    },
     provenance: { source: 'host-registry' },
     knownFailureModes: ['Does not handle split shipment'],
   },
 ];
+
+const trustedFunctionRegistry = new Map([
+  ['functions/browser-checkout/2', checkoutFunction],
+]);
 
 const selection = axSelectExecutableSkills(
   artifacts,
@@ -382,14 +401,38 @@ const selection = axSelectExecutableSkills(
     // Admission and accepted receipts are host-owned facts. Artifact metadata
     // cannot add itself to either list.
     admittedArtifacts: artifacts.map(axExecutableSkillRef),
+    principal: 'user:123',
+    audience: 'agent:checkout',
     preconditions: ['authenticated'],
     tools: ['browser.navigate@2'],
     environment: 'web-store@2026-08',
     protocols: ['commerce@1'],
     capabilities: ['browser'],
-    authorities: ['purchase'],
-    acceptedVerifierReceiptRefs: ['eval://checkout/2'],
+    grantedAuthorities: [
+      {
+        issuer: 'auth.example',
+        audience: 'agent:checkout',
+        principal: 'user:123',
+        tenant: 'shop:7',
+        resource: 'order:456',
+        action: 'purchase',
+        delegationRef: 'delegation:9',
+      },
+    ],
+    verifiedReceipts: [
+      {
+        ref: 'receipt:checkout:2',
+        artifact: { id: 'browser-checkout', version: '2' },
+        principal: 'user:123',
+        issuer: 'eval.example',
+        audience: 'agent:checkout',
+        evaluation: 'checkout-compatibility-v2',
+        verifiedAt: '2026-08-24T00:00:00.000Z',
+        expiresAt: '2026-09-24T00:00:00.000Z',
+      },
+    ],
     now: new Date().toISOString(),
+    resolveFunction: (functionRef) => trustedFunctionRegistry.get(functionRef),
   },
   { query: 'complete checkout', topK: 1 }
 );
@@ -406,19 +449,39 @@ console.log(selection.inspection);
 
 Requirements use exact host-canonicalized IDs. Include versions in tool,
 environment, and protocol IDs when compatibility depends on a version; Ax does
-not guess semver compatibility. Every requirement is all-of except
-`environments`, where any listed environment may match. `expiresAt`,
+not guess semver compatibility. Artifact admission and supersession use
+structured `{ id, version }` references, so delimiters inside either field cannot
+alias another revision. Every requirement is all-of except `environments`, where
+any listed environment may match. Authorities are exact structured grants bound
+to issuer, audience, principal, tenant, resource, action, and optional delegation.
+`expiresAt`,
 `deprecatedAt`, `lifecycle`, and `supersededBy` exclude revisions by default.
-Malformed and duplicate references fail closed but remain in `inspection`.
+Malformed chronology, self-supersession, duplicate references, invalid clocks,
+oversized inputs, and invalid `topK` fail closed but remain inspectable.
+Limits are 1,000 catalog entries, 128 entries per list, 256 UTF-16 code units
+per identifier, 2,048 per description or failure-mode string, 4,096 per query,
+and integer `topK` from 0 through 100. Unknown record fields are rejected rather
+than retained as unbounded extension metadata.
+
+`verification` is mandatory and explicit. Use `{ mode: 'receiptless' }` only
+when host policy permits an admitted artifact without evaluation evidence. In
+`required` mode, at least one host-supplied receipt must match an allowed receipt
+reference and issuer and be bound to the artifact revision, principal, audience,
+evaluation, verification time, and unexpired lifetime.
 
 This is only a selection and audit boundary. It does not load files, install
-packages, execute artifact code, sandbox functions, verify receipt contents, or
-provide security isolation. The host must validate artifact and receipt sources,
-admit exact `id@version` references, supply current authority/capability facts,
-and retain evaluation records outside Ax. `provenance` is informational and
-must never be populated from model output as proof of trust. Legacy prompt skills
-are unchanged; rollback is removing the selector and passing ordinary functions
-directly.
+packages, execute artifact code during selection, sandbox functions, authenticate
+receipt contents, or provide security isolation. The host must validate artifact
+and receipt sources, admit structured revisions, supply current principal,
+authority, capability, and receipt facts, and retain evaluation records outside
+Ax. `resolveFunction` is the trusted registry boundary; selected metadata and
+function schemas are copied and frozen, and the selected handler is bound to the
+resolved handler value so later registry-object mutation cannot swap it.
+Select immediately before registration/invocation and select again whenever host
+principal, authority, capability, receipt, or compatibility facts change.
+`provenance` is informational and must never be populated from model output as
+proof of trust. Legacy prompt skills are unchanged; rollback is removing the
+selector and passing ordinary functions directly.
 
 The deterministic zero-cost evaluation is:
 
@@ -426,12 +489,15 @@ The deterministic zero-cost evaluation is:
 node --import=tsx src/examples/executable-skill-compatibility-eval.ts
 ```
 
-It compares naive lexical retrieval with compatibility-aware retrieval over
-held-out tool/environment/protocol changes, missing capability/authority,
+It compares naive lexical retrieval with compatibility-aware retrieval over a
+controlled mechanism fixture containing task/tool/environment/protocol changes,
+missing capability/authority,
 unaccepted and forged receipt metadata, malformed legacy input, expiry,
 deprecation, supersession, and a no-benefit control. It reports exact retrieval,
 false application, serialized artifact/context bytes, prompt bytes (zero), and
-wall-clock selector latency. This fixture measures retrieval mechanics only,
+wall-clock selector latency. The task variants are deterministic test cases, not
+a statistically independent benchmark split. This fixture measures selector
+mechanics only,
 not model answer quality, function safety, verifier correctness, or real-world
 latency.
 

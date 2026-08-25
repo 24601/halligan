@@ -178,13 +178,18 @@ import type {
 } from './agent/config.js';
 import {
   type AxExecutableSkillArtifact,
+  type AxExecutableSkillAuthority,
   type AxExecutableSkillContext,
   type AxExecutableSkillExclusionReason,
   type AxExecutableSkillInspection,
   type AxExecutableSkillLifecycle,
+  type AxExecutableSkillRef,
   type AxExecutableSkillRequirements,
   type AxExecutableSkillSelection,
+  type AxExecutableSkillVerification,
+  type AxExecutableSkillVerificationReceipt,
   type AxSelectExecutableSkillsOptions,
+  type AxSelectedExecutableSkill,
   axExecutableSkillRef,
   axSelectExecutableSkills,
 } from './agent/executableSkills.js';
@@ -2049,12 +2054,16 @@ export type { AxEvidenceDescriptor };
 export type { AxExample };
 export type { AxExamples };
 export type { AxExecutableSkillArtifact };
+export type { AxExecutableSkillAuthority };
 export type { AxExecutableSkillContext };
 export type { AxExecutableSkillExclusionReason };
 export type { AxExecutableSkillInspection };
 export type { AxExecutableSkillLifecycle };
+export type { AxExecutableSkillRef };
 export type { AxExecutableSkillRequirements };
 export type { AxExecutableSkillSelection };
+export type { AxExecutableSkillVerification };
+export type { AxExecutableSkillVerificationReceipt };
 export type { AxExecutorModelPolicy };
 export type { AxExecutorModelPolicyEntry };
 export type { AxField };
@@ -2358,6 +2367,7 @@ export type { AxRuntimePrimitiveSignature };
 export type { AxRuntimePrimitiveStage };
 export type { AxSamplePickerOptions };
 export type { AxSelectExecutableSkillsOptions };
+export type { AxSelectedExecutableSkill };
 export type { AxSelfTuningConfig };
 export type { AxSerializedOptimizedProgram };
 export type { AxSetExamplesOptions };
