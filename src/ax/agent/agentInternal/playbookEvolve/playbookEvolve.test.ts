@@ -268,6 +268,44 @@ describe('agent.playbook().evolve()', () => {
     }
   );
 
+  it.each([
+    [
+      'non-finite held-in weight',
+      [{ ...TASKS[0]!, weight: Number.POSITIVE_INFINITY }],
+      VALIDATION_TASKS,
+      /held-in baseline evaluation was incomplete or errored/,
+    ],
+    [
+      'zero held-in total weight',
+      [{ ...TASKS[0]!, weight: 0 }],
+      VALIDATION_TASKS,
+      /held-in baseline evaluation was incomplete or errored/,
+    ],
+    [
+      'non-finite held-out weight',
+      TASKS,
+      [{ ...VALIDATION_TASKS[0]!, weight: Number.POSITIVE_INFINITY }],
+      /held-out baseline evaluation was incomplete or errored/,
+    ],
+  ])(
+    'fails before proposal mutation for a %s',
+    async (_, train, validation, expected) => {
+      const { ag } = makeAgent();
+      const before = ag.getPlaybook().getState();
+      await expect(
+        ag.playbook().evolve(
+          { train, validation },
+          {
+            requireHeldOut: true,
+            metric: scoreByAnswer,
+            maxProposals: 1,
+          }
+        )
+      ).rejects.toThrow(expected);
+      expect(ag.getPlaybook().getState()).toEqual(before);
+    }
+  );
+
   it('rejects a non-improving proposal and rolls the playbook back exactly', async () => {
     const { ag } = makeAgent();
     const result = await ag.playbook().evolve(TASKS, {
@@ -417,6 +455,32 @@ describe('agent.playbook().evolve()', () => {
       expect(ag.getPlaybook().getState()).toEqual(before);
     }
   );
+
+  it('rejects candidate weighted-aggregate overflow with exact rollback', async () => {
+    const { ag } = makeAgent();
+    const before = ag.getPlaybook().getState();
+    const result = await ag.playbook().evolve(
+      {
+        train: TASKS,
+        validation: [{ ...VALIDATION_TASKS[0]!, weight: Number.MAX_VALUE }],
+      },
+      {
+        requireHeldOut: true,
+        metric: async ({ example, prediction }: any) =>
+          example.id === 'v1' && prediction?.output?.answer === 'ok-fixed'
+            ? 2
+            : scoreByAnswer({ prediction }),
+        maxProposals: 1,
+      }
+    );
+    expect(result.outcomes[0]).toMatchObject({
+      status: 'rejected',
+      accepted: false,
+      reason: 'held-out evaluation incomplete or errored',
+    });
+    expect(result.outcomes[0]?.heldOut?.after).toBe(Number.POSITIVE_INFINITY);
+    expect(ag.getPlaybook().getState()).toEqual(before);
+  });
 
   it('requires complete evidence across repeated runs', async () => {
     const { ag } = makeAgent();

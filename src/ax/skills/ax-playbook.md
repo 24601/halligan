@@ -98,9 +98,11 @@ accepted on held-in gain when `validation` is absent. For production promotion,
 set `requireHeldOut: true`. This requires verification, a non-empty held-out
 set, semantic IDs for every task, disjoint train/validation IDs, enough metric
 budget for a complete baseline plus candidate evaluation, and complete finite
-scores from both splits. Missing or indeterminate evidence fails before
-mutation or rejects the candidate with exact rollback. `verify: false` is an
-error under this policy. Identity defaults to `task.id`; use
+scores from both splits. When tasks use `weight`, strict mode requires finite,
+non-negative weights and a positive finite total weight in each split; the
+weighted mean must also be finite. Missing or indeterminate evidence fails
+before mutation or rejects the candidate with exact rollback. `verify: false`
+is an error under this policy. Identity defaults to `task.id`; use
 `taskId: (task) => task.input.caseId` when identity lives in typed input or
 metadata. Ax deliberately does not treat object references or serialized
 objects as proof of semantic independence.

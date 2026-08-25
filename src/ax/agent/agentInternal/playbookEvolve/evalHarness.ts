@@ -28,7 +28,11 @@ export type AxAgentEvalBatchResult<
   mean: number;
   /** True when the budget ran out before every task executed. */
   exhausted: boolean;
-  /** True only when every requested run completed with a finite metric. */
+  /**
+   * True only when every requested run completed with a finite metric and the
+   * weighted aggregate has finite non-negative weights, positive total weight,
+   * and a finite mean.
+   */
   complete: boolean;
 };
 
@@ -116,16 +120,27 @@ export async function runAgentEvalBatch<
 
   let weightSum = 0;
   let scoreSum = 0;
+  let weightsValid = true;
   for (const record of records) {
     const weight = record.task.weight ?? 1;
+    if (!Number.isFinite(weight) || weight < 0) {
+      weightsValid = false;
+    }
     weightSum += weight;
     scoreSum += weight * record.score;
   }
+  const aggregateMean = weightSum > 0 ? scoreSum / weightSum : 0;
   return {
     records,
-    mean: weightSum > 0 ? scoreSum / weightSum : 0,
+    mean: aggregateMean,
     exhausted,
     complete:
-      !exhausted && !hadEvaluationError && records.length === args.tasks.length,
+      !exhausted &&
+      !hadEvaluationError &&
+      records.length === args.tasks.length &&
+      weightsValid &&
+      Number.isFinite(weightSum) &&
+      weightSum > 0 &&
+      Number.isFinite(aggregateMean),
   };
 }

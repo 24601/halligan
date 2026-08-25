@@ -88,8 +88,9 @@ export type AxAgentPlaybookEvolveOptions<IN extends AxGenIn = AxGenIn> = {
    * Require a non-empty held-out set, prove it is disjoint from training, and
    * fail closed unless every baseline and candidate evaluation completes.
    * Also requires enough metric budget for one complete baseline + candidate
-   * evaluation. Default false for backward compatibility. Cannot be combined
-   * with `verify: false`.
+   * evaluation. Task weights must be finite and non-negative with a positive
+   * finite total weight per split. Default false for backward compatibility.
+   * Cannot be combined with `verify: false`.
    */
   requireHeldOut?: boolean;
   /**
