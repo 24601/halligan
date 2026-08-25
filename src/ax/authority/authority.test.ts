@@ -399,6 +399,28 @@ describe('Ax host authority boundary', () => {
     ).resolves.toMatchObject({ decision: 'allow' });
   });
 
+  it('captures getter-backed authority fields exactly once before validation', async () => {
+    let getterReads = 0;
+    const getterGrant = {
+      ...grant(),
+      get operations() {
+        getterReads++;
+        return getterReads === 1 ? ['document.read'] : ['document.write'];
+      },
+    } as AxCapabilityGrant;
+    const snapshot = axSnapshotAuthority(authority({ grants: [getterGrant] }));
+
+    expect(getterReads).toBe(1);
+    expect(snapshot.grants[0]?.operations).toEqual(['document.read']);
+    await expect(
+      axAuthorize(snapshot, 'document.read', resource)
+    ).resolves.toMatchObject({ decision: 'allow' });
+    await expect(
+      axAuthorize(snapshot, 'document.write', resource)
+    ).rejects.toMatchObject({ code: 'no_matching_grant' });
+    expect(getterReads).toBe(1);
+  });
+
   it('times out or cancels an authorizer that ignores abort', async () => {
     let timeoutSignal: AbortSignal | undefined;
     const never = new Promise<never>(() => {});

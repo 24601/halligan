@@ -18,9 +18,10 @@ describe('host authority boundary evaluation', () => {
       immutableSnapshots: 'passed',
       authorizerTimeout: 'passed',
       modelCallablePaths: {
-        functionGlobal: 'passed',
-        mcpGlobal: 'passed',
-        nestedFunction: 'passed',
+        productionFunction: 'passed',
+        productionMCP: 'passed',
+        productionUCP: 'passed',
+        nativeDSP: 'passed',
         sinkRedrive: 'passed',
       },
       auditRedaction: 'passed',

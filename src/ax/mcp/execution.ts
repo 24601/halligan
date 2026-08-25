@@ -537,6 +537,7 @@ export function axMCPChildExecutionOptions<
     mcpContext: _context,
     eventContext: _eventContext,
     authority: _authority,
+    authorityInheritance: _authorityInheritance,
     ...rest
   } = options;
   const child = options._mcpExecutionContext?.forChild();

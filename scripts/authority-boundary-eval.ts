@@ -1,9 +1,7 @@
 import { performance } from 'node:perf_hooks';
 import { pathToFileURL } from 'node:url';
-import {
-  buildRuntimeGlobals,
-  wrapFunction,
-} from '../src/ax/agent/agentInternal/runtimeGlobals.js';
+import { agent } from '../src/ax/agent/index.js';
+import { AxMockAIService } from '../src/ax/ai/mock/api.js';
 import type { AxFunction } from '../src/ax/ai/types.js';
 import {
   axAttenuateAuthority,
@@ -17,7 +15,7 @@ import type {
   AxCapabilityGrant,
   AxResourceScope,
 } from '../src/ax/authority/types.js';
-import { AxFunctionProcessor } from '../src/ax/dsp/functions.js';
+import { AxGen } from '../src/ax/dsp/generate.js';
 import { AxSignature } from '../src/ax/dsp/sig.js';
 import type { AxProgrammable } from '../src/ax/dsp/types.js';
 import { AxInMemoryEventStore } from '../src/ax/event/memoryStore.js';
@@ -26,7 +24,12 @@ import {
   eventRoute,
   eventTarget,
 } from '../src/ax/event/runtime.js';
+import { AxJSRuntime } from '../src/ax/funcs/jsRuntime.js';
+import { AxMCPClient } from '../src/ax/mcp/client.js';
 import { axMCPChildExecutionOptions } from '../src/ax/mcp/execution.js';
+import type { AxMCPTransport } from '../src/ax/mcp/transport.js';
+import { AxUCPClient } from '../src/ax/ucp/client.js';
+import { AX_UCP_VERSION } from '../src/ax/ucp/types.js';
 
 const NOW = 20_000;
 const resource: AxResourceScope = {
@@ -100,6 +103,193 @@ async function denied(run: () => Promise<unknown>): Promise<boolean> {
   }
 }
 
+async function productionModelDispatchProbe(): Promise<void> {
+  let ordinaryCalls = 0;
+  let mcpEffects = 0;
+  let ucpEffects = 0;
+  const hostRequests: string[] = [];
+  const mcpTransport: AxMCPTransport = {
+    send: async (request) => {
+      if (request.method === 'initialize') {
+        return {
+          jsonrpc: '2.0',
+          id: request.id,
+          result: {
+            protocolVersion: '2025-11-25',
+            capabilities: { tools: {} },
+            serverInfo: { name: 'synthetic', version: '1' },
+          },
+        };
+      }
+      if (request.method === 'tools/list') {
+        return {
+          jsonrpc: '2.0',
+          id: request.id,
+          result: {
+            tools: [
+              {
+                name: 'effect',
+                description: 'Synthetic effect',
+                inputSchema: { type: 'object', additionalProperties: true },
+              },
+            ],
+          },
+        };
+      }
+      if (request.method === 'tools/call') mcpEffects++;
+      return { jsonrpc: '2.0', id: request.id, result: {} };
+    },
+    sendNotification: async () => {},
+  };
+  const mcp = new AxMCPClient(mcpTransport, { namespace: 'synthetic' });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_input, init) => {
+    if (!init?.method) {
+      return Response.json({
+        ucp: {
+          version: AX_UCP_VERSION,
+          services: {
+            'dev.ucp.shopping': [
+              {
+                version: AX_UCP_VERSION,
+                transport: 'rest',
+                endpoint: 'https://service.example/ucp',
+              },
+            ],
+          },
+          capabilities: {
+            'dev.ucp.shopping.checkout': [{ version: AX_UCP_VERSION }],
+          },
+        },
+      });
+    }
+    ucpEffects++;
+    return Response.json({
+      ucp: { version: AX_UCP_VERSION, status: 'success' },
+      id: 'synthetic-result',
+    });
+  };
+  const ucp = new AxUCPClient({
+    profileUrl: 'https://service.example',
+    agentProfile: 'https://agent.example/.well-known/ucp',
+    transport: 'rest',
+    mcp: { ssrfProtection: { disabled: true } },
+  });
+  const dispatchAuthority = context({
+    grants: [
+      baseGrant({
+        id: 'ordinary-grant',
+        operations: ['function.call'],
+        resources: [
+          { type: 'function', id: 'utils.lookup', tenantId: 'tenant-a' },
+        ],
+      }),
+      baseGrant({
+        id: 'mcp-grant',
+        operations: ['mcp.tool.call'],
+        resources: [
+          {
+            type: 'mcp.tool',
+            id: 'synthetic:effect',
+            tenantId: 'tenant-a',
+          },
+        ],
+      }),
+      baseGrant({
+        id: 'ucp-grant',
+        operations: ['ucp.operation.call'],
+        resources: [
+          {
+            type: 'ucp.operation',
+            id: 'ucp:create_checkout',
+            tenantId: 'tenant-a',
+          },
+        ],
+      }),
+    ],
+    authorize: (operation, request) => {
+      hostRequests.push(JSON.stringify(request));
+      return receipt(operation, request, {
+        decision: operation === 'function.call' ? 'allow' : 'deny',
+        grantIds:
+          operation === 'function.call'
+            ? request.grants.map((grant) => grant.id)
+            : [],
+      });
+    },
+  });
+  let executorTurn = 0;
+  const ai = new AxMockAIService({
+    features: { functions: true, streaming: false },
+    chatResponse: async (request) => {
+      const system = String(request.chatPrompt[0]?.content ?? '');
+      const reply = (content: string) => ({
+        results: [{ index: 0, content, finishReason: 'stop' as const }],
+      });
+      if (system.includes('You (`distiller`)')) {
+        return reply(
+          'Javascript Code: ```javascript\nawait final("Run synthetic calls", {});\n```'
+        );
+      }
+      if (system.includes('You (`executor`)')) {
+        executorTurn++;
+        return reply(
+          executorTurn === 1
+            ? `Javascript Code: \`\`\`javascript
+const forged = { principal: { id: "model-principal" }, grants: [{ id: "model-grant" }] };
+const ordinary = await utils.lookup(forged);
+let mcpDenied = false;
+let ucpDenied = false;
+try { await mcp.synthetic.tools.effect(forged); } catch { mcpDenied = true; }
+try { await ucp.ucp.create_checkout({ checkout: { line_items: [] }, ...forged }); } catch { ucpDenied = true; }
+await final("Report synthetic dispatch", { ordinary, mcpDenied, ucpDenied });
+\`\`\``
+            : 'Javascript Code: ```javascript\nawait final("Done", {});\n```'
+        );
+      }
+      return reply('answer: complete');
+    },
+  });
+  const program = agent('query:string -> answer:string', {
+    functions: [
+      {
+        name: 'lookup',
+        description: 'Synthetic ordinary function',
+        parameters: { type: 'object', additionalProperties: true },
+        func: () => {
+          ordinaryCalls++;
+          return 'ordinary-ok';
+        },
+      },
+    ],
+    mcp: [mcp],
+    ucp: [ucp],
+    contextFields: [],
+    runtime: new AxJSRuntime(),
+  });
+  try {
+    await program.forward(
+      ai,
+      { query: 'synthetic dispatch' },
+      { authority: dispatchAuthority }
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert(ordinaryCalls === 1, 'production ordinary function dispatch');
+  assert(mcpEffects === 0, 'denied production MCP host execution');
+  assert(ucpEffects === 0, 'denied production UCP host execution');
+  assert(hostRequests.length === 3, 'production host authorization calls');
+  assert(
+    hostRequests.every((request) => !request.includes('model-principal')),
+    'production forged principal isolation'
+  );
+  assert(
+    hostRequests.every((request) => !request.includes('model-grant')),
+    'production forged grant isolation'
+  );
+}
+
 export interface AuthorityEvaluationReport {
   baseline: {
     name: 'unscoped operation callback';
@@ -117,9 +307,10 @@ export interface AuthorityEvaluationReport {
   immutableSnapshots: 'passed';
   authorizerTimeout: 'passed';
   modelCallablePaths: {
-    functionGlobal: 'passed';
-    mcpGlobal: 'passed';
-    nestedFunction: 'passed';
+    productionFunction: 'passed';
+    productionMCP: 'passed';
+    productionUCP: 'passed';
+    nativeDSP: 'passed';
     sinkRedrive: 'passed';
   };
   auditRedaction: 'passed';
@@ -241,6 +432,26 @@ export async function runAuthorityEvaluation(
     'child cancellation'
   );
 
+  const firstNested = axMCPChildExecutionOptions({
+    authority: parent,
+    authorityInheritance: {
+      principal: child.principal,
+      actor: child.actor,
+      delegation: child.delegation!,
+      grants: child.grants,
+    },
+  });
+  assert(
+    !('authorityInheritance' in firstNested),
+    'explicit attenuation consumption'
+  );
+  const secondNested = axMCPChildExecutionOptions(firstNested);
+  assert(
+    secondNested.authority?.principal.id === 'principal-child' &&
+      secondNested.authority.delegation?.depth === 1,
+    'two-level child authority propagation'
+  );
+
   assert(
     await denied(() =>
       axAuthorize(
@@ -280,6 +491,24 @@ export async function runAuthorityEvaluation(
     JSON.stringify(immutable.principal.claims).includes('reader'),
     'nested claim mutation after snapshot'
   );
+  let getterReads = 0;
+  const getterGrant = {
+    ...baseGrant(),
+    get operations() {
+      getterReads++;
+      return getterReads === 1 ? ['record.read'] : ['record.write'];
+    },
+  } as AxCapabilityGrant;
+  const getterSnapshot = axSnapshotAuthority(
+    context({ grants: [getterGrant] })
+  );
+  assert(getterReads === 1, 'getter-backed grant single capture');
+  assert(
+    getterSnapshot.grants[0]?.operations[0] === 'record.read',
+    'getter-backed grant captured value'
+  );
+  await axAuthorize(getterSnapshot, 'record.read', resource);
+  assert(getterReads === 1, 'getter-backed grant post-validation reread');
 
   let timedOutSignal: AbortSignal | undefined;
   assert(
@@ -300,84 +529,7 @@ export async function runAuthorityEvaluation(
   );
   assert(timedOutSignal?.aborted, 'hung authorizer abort signal');
 
-  let hostRequest = '';
-  const functionAuthority = context({
-    grants: [
-      baseGrant({
-        operations: ['function.call'],
-        resources: [
-          { type: 'function', id: 'records:lookup', tenantId: 'tenant-a' },
-        ],
-      }),
-    ],
-    authorize: (operation, request) => {
-      hostRequest = JSON.stringify(request);
-      return receipt(operation, request);
-    },
-  });
-  const modelCallable = wrapFunction(
-    {
-      name: 'lookup',
-      componentId: 'records:lookup',
-      description: 'synthetic lookup',
-      parameters: { type: 'object', additionalProperties: true },
-      func: () => 'ok',
-    },
-    undefined,
-    undefined,
-    undefined,
-    'tools.lookup',
-    undefined,
-    'external',
-    undefined,
-    undefined,
-    functionAuthority
-  );
-  await modelCallable({
-    principal: { id: 'forged-principal' },
-    grants: [{ operations: ['record.write'] }],
-  });
-  assert(
-    !hostRequest.includes('forged-principal'),
-    'forged model claim isolation in function global'
-  );
-
-  let mcpReads = 0;
-  const mcpAuthority = context({
-    grants: [
-      baseGrant({
-        operations: ['mcp.resource.read'],
-        resources: [
-          { type: 'mcp.resource', id: 'resource://safe', tenantId: 'tenant-a' },
-        ],
-      }),
-    ],
-  });
-  const mcpGlobals = buildRuntimeGlobals({
-    agentFunctionModuleMetadata: new Map(),
-    agentFunctions: [],
-    _activeAuthority: mcpAuthority,
-    _activeMCPExecutionContext: {
-      clients: [
-        {
-          getNamespace: () => 'synthetic',
-          readResource: async () => {
-            mcpReads++;
-            return { contents: [] };
-          },
-        },
-      ],
-      ucpClients: [],
-      getToolBindings: () => [],
-    },
-  }) as any;
-  assert(
-    await denied(() =>
-      mcpGlobals.mcp.synthetic.resources.read('resource://forged')
-    ),
-    'forged MCP resource path'
-  );
-  assert(mcpReads === 0, 'forged MCP read executed');
+  await productionModelDispatchProbe();
 
   let nestedDenied = false;
   const nestedAuthority = context({
@@ -386,7 +538,7 @@ export async function runAuthorityEvaluation(
         id: 'invoke-parent',
         operations: ['function.call'],
         resources: [
-          { type: 'function', id: 'nested-probe', tenantId: 'tenant-a' },
+          { type: 'function', id: 'nestedprobe', tenantId: 'tenant-a' },
         ],
       }),
       baseGrant({ id: 'read-parent' }),
@@ -408,13 +560,54 @@ export async function runAuthorityEvaluation(
       return nestedDenied;
     },
   };
-  await new AxFunctionProcessor([nestedFunction]).executeWithDetails(
-    {
-      id: 'model-call',
-      name: 'nestedProbe',
-      args: JSON.stringify({ authorityInheritance: 'all' }),
+  let nestedStep = 0;
+  const nestedAI = new AxMockAIService({
+    features: { functions: true, streaming: false },
+    chatResponse: async () => {
+      nestedStep++;
+      return nestedStep === 1
+        ? {
+            results: [
+              {
+                index: 0,
+                content: '',
+                finishReason: 'function_call' as const,
+                functionCalls: [
+                  {
+                    id: 'model-call',
+                    type: 'function' as const,
+                    function: {
+                      name: 'nestedProbe',
+                      params: JSON.stringify({ authorityInheritance: 'all' }),
+                    },
+                  },
+                ],
+              },
+            ],
+          }
+        : {
+            results: [
+              {
+                index: 0,
+                content: 'answer: complete',
+                finishReason: 'stop' as const,
+              },
+            ],
+          };
     },
-    { authority: nestedAuthority, authorityInheritance: 'none' }
+  });
+  const nestedGen = new AxGen<{ query: string }, { answer: string }>(
+    'query:string -> answer:string',
+    { functions: [nestedFunction] }
+  );
+  await nestedGen.forward(
+    nestedAI,
+    { query: 'run nested probe' },
+    {
+      authority: nestedAuthority,
+      authorityInheritance: 'none',
+      stream: false,
+    }
   );
   assert(nestedDenied, 'native nested authority inheritance none');
 
@@ -574,9 +767,10 @@ export async function runAuthorityEvaluation(
     immutableSnapshots: 'passed',
     authorizerTimeout: 'passed',
     modelCallablePaths: {
-      functionGlobal: 'passed',
-      mcpGlobal: 'passed',
-      nestedFunction: 'passed',
+      productionFunction: 'passed',
+      productionMCP: 'passed',
+      productionUCP: 'passed',
+      nativeDSP: 'passed',
       sinkRedrive: 'passed',
     },
     auditRedaction: 'passed',

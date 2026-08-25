@@ -189,4 +189,35 @@ describe('native model function authority inheritance', () => {
       'read-child',
     ]);
   });
+
+  it('consumes explicit attenuation before a second child nesting', () => {
+    const first = axMCPChildExecutionOptions({
+      authority: authority(),
+      authorityInheritance: {
+        principal: { id: 'principal-child', tenantId: 'tenant-a' },
+        actor: { id: 'agent-child', kind: 'agent' },
+        delegation: { parentPrincipalId: 'principal-a', depth: 1 },
+        grants: [
+          {
+            version: 1,
+            id: 'read-child',
+            principalId: 'principal-child',
+            actor: { id: 'agent-child', kind: 'agent' },
+            operations: ['document.read'],
+            resources: [resource],
+            leaseEpoch: 1,
+            parentGrantId: 'read-parent',
+          },
+        ],
+      } satisfies AxAuthorityInheritance,
+    });
+    expect(first).not.toHaveProperty('authorityInheritance');
+
+    const second = axMCPChildExecutionOptions(first);
+    expect(second.authority?.principal.id).toBe('principal-child');
+    expect(second.authority?.delegation?.depth).toBe(1);
+    expect(second.authority?.grants.map((grant) => grant.id)).toEqual([
+      'read-child',
+    ]);
+  });
 });

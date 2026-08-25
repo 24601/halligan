@@ -123,7 +123,10 @@ Nested agent calls inherit the same authority by default. Set
 provide explicit child principal, actor, delegation, and grants. Ax calls
 `axAttenuateAuthority` and rejects a child grant unless it references a parent
 grant and is a subset of its operations, resources, expiry/revocation bounds,
-and lease epoch. Cancellation is checked before and after host authorization.
+and lease epoch. Explicit delegation options are consumed at that boundary;
+deeper calls inherit the resulting child unless the host supplies a new
+child-relative attenuation. Cancellation is checked before and after host
+authorization.
 
 Long-lived or durable session hosts should persist only their own serializable
 principal/grant references and reconstruct the authoritative callback in the
@@ -156,8 +159,10 @@ It declares an **unscoped operation callback** as the baseline and compares it
 against exact scoped grants. It covers confused-deputy operation/resource
 attempts, stale/revoked/expired grants, tenant and human-vs-agent mismatch,
 delegation attenuation and no expansion, child cancellation, malformed legacy
-claims, nested mutation, ignored abort, forged model claims through real
-function/MCP/nested/redrive paths, exact receipt binding, audit redaction, and
+claims, getter-backed input capture, nested mutation, ignored abort, two-level
+attenuation, and forged model claims through production model request/response
+dispatch for ordinary functions and attached MCP/UCP operations, native DSP,
+and redrive paths. It also covers exact receipt binding, audit redaction, and
 local callback overhead. Timing is an environment-specific observation, not a gate.
 The result demonstrates these mechanism checks only; it is not a security proof
 or an evaluation of host authentication and policy correctness.
