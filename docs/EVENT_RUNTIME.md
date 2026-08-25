@@ -215,6 +215,111 @@ stops sources, drains by default, then aborts remaining workers. Caller-owned
 protocol clients remain caller-owned. Background source failures are supervised
 through `onSourceError`; they are never thrown from an unobserved callback.
 
+## Trusted Live Components
+
+`AxEventComponentManager` is an opt-in, process-local lifecycle boundary for
+trusted host-defined event integrations such as listeners, adapters, and source
+registrations. `AxEventRuntime` uses it internally to own source handles, but
+caller-created protocol clients remain caller-owned.
+
+```ts
+const components = axEventComponentManager();
+
+await components.define({
+  id: 'catalog',
+  version: '1',
+  activate: () => ({ revision: 1 }),
+});
+
+await components.define({
+  id: 'listener',
+  version: '1',
+  dependencies: ['catalog'],
+  activate: async (context) => {
+    const catalog = context.dependency<{ revision: number }>('catalog');
+    return context.acquire('listener-handle', async (signal) => {
+      const handle = await startListener({ catalog, signal });
+      return { value: handle, dispose: () => handle.close() };
+    });
+  },
+});
+
+await components.activate('listener');
+console.log(components.inspect());
+await components.deactivate('catalog'); // listener first, then catalog
+await components.dispose();
+```
+
+Definitions have stable IDs, explicit versions, and declared dependencies.
+Activation walks dependencies before dependents. Deactivation walks active
+dependents before dependencies. Within one component, disposers run once in
+reverse registration order; cleanup continues after a disposer error and
+records the error in `inspect()`. Missing dependencies and cycles fail before
+activation code runs.
+
+```text
+defined / failed -> activating -> active -> deactivating -> defined
+                         |                              |
+                         +-- rollback -> failed        +-- dispose -> disposed
+```
+
+All graph-changing calls share one serialized transition queue, so conflicting
+calls have a bounded concurrency of one. Repeated activate, deactivate, and
+dispose calls are idempotent. An activation `AbortSignal` is combined with the
+component lifetime signal; after activation commits, only deactivation or
+disposal aborts that lifetime signal. Teardown that has begun runs to completion
+rather than abandoning registered cleanup.
+
+`replace()` stages a new-version candidate and every active transitive dependent
+while the prior graph remains live. Staged dependency lookup prefers the staged
+graph, and each activation context retains that dependency snapshot through its
+cleanup. Failure anywhere in that closure rolls back the staged graph and leaves
+every prior binding untouched. Success switches the closure's manager bindings
+synchronously, then retires the prior graph dependents-first against the prior
+dependency snapshot. Prior cleanup failures become diagnostics on the
+corresponding active component rather than pretending the switch can be undone
+after retirement began.
+
+Use `context.acquire(label, setup)` for resources: setup must return both the
+value and its disposer. A missing disposer fails activation with an
+`AxEventComponentLeakError` diagnostic. `addDisposer()` supports effects that
+are already represented by a cleanup callback, but the host is responsible for
+registering it before activation completes.
+
+### Explicit non-guarantees
+
+- This API accepts already-authorized host callbacks. It does not load, persist,
+  watch, deploy, sandbox, or execute model-generated component code.
+- Disposers are compensating cleanup, not proof that arbitrary network writes,
+  messages, external transactions, or other unmanaged I/O were reversed.
+- Unregistered effects are invisible. The manager cannot diagnose or clean up
+  a resource that the host acquires without `acquire()` or `addDisposer()`.
+- Replacement is atomic only for the manager-visible binding. Candidate setup
+  effects that must remain externally invisible need host-provided staging.
+- Abort is cooperative. Activation code that ignores its signal can delay the
+  serialized transition queue.
+- Component definitions and state are process-local and intentionally not a
+  durable desired-state or auto-deployment system.
+
+### Fault and stress evaluation
+
+Run the deterministic, model-free comparison against a deliberately manual
+lifecycle baseline:
+
+```bash
+node --import=tsx scripts/evaluate-event-components.ts --iterations=200
+```
+
+The command repeats activation failure, replacement failure, dependency cycle,
+abort, concurrent transition, disposer-error, and unmanaged-effect scenarios
+200 times each. It fails if a managed invariant regresses and prints JSON with
+resource leaks, prior-state restoration, ordering, total/mean fault-transition
+latency, and manual versus managed mean/p95 lifecycle time and overhead. The
+unmanaged-effect result intentionally reports one leak for both implementations;
+the disposer-error result intentionally reports the resource whose own disposer
+failed while verifying that later cleanup still ran. Timing is descriptive for
+the current process, not a CI performance threshold or model-quality claim.
+
 ## Deterministic Tests
 
 Pass `AxManualEventClock` to the runtime and in-memory store. Retry delay,

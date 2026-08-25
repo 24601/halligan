@@ -78,6 +78,35 @@ await source.publish({ event, identity, trust: 'authenticated' });
 - Fan out to several Agents with several matching routes, not a multi-target
   route. This preserves independent authorization, ordering, retries, and runs.
 
+## Trusted Live Components
+
+Use `axEventComponentManager()` only for trusted, host-defined process-local
+event integrations that need dependency-aware live activation and deterministic
+cleanup. Definitions declare stable `id`, `version`, `dependencies`, and an
+`activate(context)` callback. Acquire resources with
+`context.acquire(label, setup)`, where setup returns `{ value, dispose }`, or
+register an existing inverse with `context.addDisposer(label, dispose)` before
+activation completes.
+
+The manager serializes all graph transitions, activates dependencies first,
+deactivates dependents first, rolls failed activation back in reverse order,
+stages and atomically switches the active transitive dependent closure during
+replacement, restores the complete prior graph on staged failure, and exposes
+state, effects, diagnostics, and errors through `inspect()`. Repeated lifecycle
+calls are idempotent. Abort is cooperative; teardown that already began
+finishes all registered cleanup.
+
+Do not describe this as reversal of arbitrary I/O. Unregistered effects and
+failed disposers can leak, candidate setup is not externally isolated, and the
+manager does not load or execute model-generated code, persist definitions,
+watch files, auto-deploy mutations, or own caller-created protocol clients.
+
+Run the fault/stress comparison with:
+
+```bash
+node --import=tsx scripts/evaluate-event-components.ts --iterations=200
+```
+
 ## Continuation Pattern
 
 ```ts
