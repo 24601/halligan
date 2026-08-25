@@ -56,6 +56,8 @@ export interface AxAgentSessionMessage {
   cancelRequested?: boolean;
   /** Tokens charged if this running attempt becomes outcome_unknown. */
   tokenReservation?: number;
+  /** Confirmed provider usage for this completed attempt. */
+  usage?: AxAgentSessionUsage;
 }
 
 export interface AxAgentSessionRecord {
@@ -71,6 +73,8 @@ export interface AxAgentSessionRecord {
   artifacts?: unknown;
   usage: AxAgentSessionUsage;
   descendantUsage: AxAgentSessionUsage;
+  /** Usage from descendants removed from the live registry. */
+  retiredDescendantUsage: AxAgentSessionUsage;
   lastError?: string;
 }
 
@@ -106,22 +110,28 @@ export interface AxAgentSessionRootRecord {
   admittedChildren: number;
   admittedSubcalls: number;
   descendantUsage: AxAgentSessionUsage;
+  /** Usage from sessions removed from the live registry. */
+  retiredDescendantUsage: AxAgentSessionUsage;
   reservedTokens: number;
   outcomeUnknownTokens: number;
+  /** outcome_unknown reservations removed with disposed sessions. */
+  retiredOutcomeUnknownTokens: number;
+  /** Admitted messages removed with disposed sessions. */
+  retiredSubcalls: number;
   budgetExceeded?: 'tokens' | 'subcalls';
 }
 
 export interface AxAgentSessionRegistrySnapshot {
   version: 1;
   revision: number;
-  /** SHA-256 of the canonical root/session authorization policy. */
+  /** SHA-256 of canonical authority, lifecycle, and accounting state. */
   policyDigest: string;
   root: AxAgentSessionRootRecord;
   sessions: Record<string, AxAgentSessionRecord>;
 }
 
 export interface AxAgentSessionRestoreOptions {
-  /** Trusted digest stored separately from the candidate snapshot. */
+  /** Trusted authority/accounting digest stored apart from the snapshot. */
   expectedPolicyDigest: string;
 }
 
@@ -245,8 +255,11 @@ export interface AxAgentSessionRootView {
   admittedChildren: number;
   admittedSubcalls: number;
   descendantUsage: AxAgentSessionUsage;
+  retiredDescendantUsage: AxAgentSessionUsage;
   reservedTokens: number;
   outcomeUnknownTokens: number;
+  retiredOutcomeUnknownTokens: number;
+  retiredSubcalls: number;
   budgetExceeded?: AxAgentSessionRootRecord['budgetExceeded'];
   childCount: number;
   durability: {
@@ -417,6 +430,23 @@ function assertUsage(usage: Readonly<AxAgentSessionUsage>, name: string): void {
       );
     }
   }
+  if (usage.totalTokens !== usage.promptTokens + usage.completionTokens) {
+    throw new AxAgentSessionSerializationError(
+      `${name}.totalTokens must equal promptTokens + completionTokens`
+    );
+  }
+}
+
+function equalUsage(
+  left: Readonly<AxAgentSessionUsage>,
+  right: Readonly<AxAgentSessionUsage>
+): boolean {
+  return (
+    left.modelCalls === right.modelCalls &&
+    left.promptTokens === right.promptTokens &&
+    left.completionTokens === right.completionTokens &&
+    left.totalTokens === right.totalTokens
+  );
 }
 
 function canonicalPolicy(snapshot: Readonly<AxAgentSessionRegistrySnapshot>) {
@@ -434,6 +464,21 @@ function canonicalPolicy(snapshot: Readonly<AxAgentSessionRegistrySnapshot>) {
         capability: record.handle.capability,
         depth: record.depth,
         authorizedChildren: canonicalKeys(record.authorizedChildren),
+        status: record.status,
+        activeMessageId: record.activeMessageId,
+        usage: record.usage,
+        descendantUsage: record.descendantUsage,
+        retiredDescendantUsage: record.retiredDescendantUsage,
+        mailbox: record.mailbox.map((message) => ({
+          id: message.id,
+          jobId: message.jobId,
+          mode: message.mode,
+          status: message.status,
+          attemptId: message.attemptId,
+          cancelRequested: message.cancelRequested,
+          tokenReservation: message.tokenReservation,
+          usage: message.usage,
+        })),
       };
     });
   return {
@@ -453,6 +498,16 @@ function canonicalPolicy(snapshot: Readonly<AxAgentSessionRegistrySnapshot>) {
         maxTokensPerMessage: snapshot.root.limits.maxTokensPerMessage,
         maxSubcalls: snapshot.root.limits.maxSubcalls,
       },
+      status: snapshot.root.status,
+      admittedChildren: snapshot.root.admittedChildren,
+      admittedSubcalls: snapshot.root.admittedSubcalls,
+      descendantUsage: snapshot.root.descendantUsage,
+      retiredDescendantUsage: snapshot.root.retiredDescendantUsage,
+      reservedTokens: snapshot.root.reservedTokens,
+      outcomeUnknownTokens: snapshot.root.outcomeUnknownTokens,
+      retiredOutcomeUnknownTokens: snapshot.root.retiredOutcomeUnknownTokens,
+      retiredSubcalls: snapshot.root.retiredSubcalls,
+      budgetExceeded: snapshot.root.budgetExceeded,
     },
     sessions,
   };
@@ -498,9 +553,11 @@ function normalizeUsage(
   const out = emptyUsage();
   for (const entry of usageEntries(usage)) {
     out.modelCalls++;
-    out.promptTokens += entry.tokens?.promptTokens ?? 0;
-    out.completionTokens += entry.tokens?.completionTokens ?? 0;
-    out.totalTokens += entry.tokens?.totalTokens ?? 0;
+    const promptTokens = entry.tokens?.promptTokens ?? 0;
+    const completionTokens = entry.tokens?.completionTokens ?? 0;
+    out.promptTokens += promptTokens;
+    out.completionTokens += completionTokens;
+    out.totalTokens += promptTokens + completionTokens;
   }
   return out;
 }
@@ -777,8 +834,11 @@ export class AxAgentSessionHost {
       admittedChildren: 0,
       admittedSubcalls: 0,
       descendantUsage: emptyUsage(),
+      retiredDescendantUsage: emptyUsage(),
       reservedTokens: 0,
       outcomeUnknownTokens: 0,
+      retiredOutcomeUnknownTokens: 0,
+      retiredSubcalls: 0,
     };
     const initial: AxAgentSessionRegistrySnapshot = {
       version: 1,
@@ -830,6 +890,8 @@ export class AxAgentSessionHost {
     const restored: AxAgentSessionRegistrySnapshot = cloneStructured(snapshot);
     restored.revision = 0;
     this.interruptRunning(restored);
+    this.rotateExecutionAuthority(restored);
+    this.reconcileBudget(restored);
     restored.policyDigest = await digestPolicy(restored);
     await this.validateSnapshot(restored);
     const saved = await this.store.save(restored, undefined);
@@ -853,15 +915,7 @@ export class AxAgentSessionHost {
       const outcome = await this.mutate(id, (snapshot) => {
         const records: AxAgentSessionRecord[] = [];
         this.interruptRunning(snapshot, records);
-        snapshot.root.epoch++;
-        for (const record of Object.values(snapshot.sessions)) {
-          record.handle.epoch = snapshot.root.epoch;
-          for (const message of record.mailbox) {
-            if (message.status === 'pending') {
-              message.jobId = `job-${message.id}-epoch-${snapshot.root.epoch}`;
-            }
-          }
-        }
+        this.rotateExecutionAuthority(snapshot);
         return {
           interrupted: records,
           sessionIds: Object.keys(snapshot.sessions),
@@ -975,6 +1029,7 @@ export class AxAgentSessionHost {
           mailbox: [message],
           usage: emptyUsage(),
           descendantUsage: emptyUsage(),
+          retiredDescendantUsage: emptyUsage(),
         };
         snapshot.sessions[id] = record;
         snapshot.root.admittedChildren++;
@@ -1164,15 +1219,34 @@ export class AxAgentSessionHost {
       this.assertParent(snapshot, parentId, parentCapability, parentEpoch);
       const target = this.assertHandle(snapshot, parentId, handle);
       const ids = this.descendants(snapshot, target.handle.id, true);
+      const retiredUsage = cloneStructured(target.usage);
+      addUsage(retiredUsage, target.descendantUsage);
+      if (target.handle.parentId === snapshot.root.id) {
+        addUsage(snapshot.root.retiredDescendantUsage, retiredUsage);
+      } else {
+        addUsage(
+          snapshot.sessions[target.handle.parentId]!.retiredDescendantUsage,
+          retiredUsage
+        );
+      }
       for (const id of ids) {
         const record = snapshot.sessions[id];
         if (!record) continue;
         records.push(cloneStructured(record));
         jobs.push(...record.mailbox.map((message) => message.jobId));
+        snapshot.root.retiredSubcalls += record.mailbox.length;
         for (const message of record.mailbox) {
           if (message.status === 'running' && message.tokenReservation) {
             snapshot.root.reservedTokens -= message.tokenReservation;
             snapshot.root.outcomeUnknownTokens += message.tokenReservation;
+            snapshot.root.retiredOutcomeUnknownTokens +=
+              message.tokenReservation;
+          } else if (
+            message.status === 'outcome_unknown' &&
+            message.tokenReservation
+          ) {
+            snapshot.root.retiredOutcomeUnknownTokens +=
+              message.tokenReservation;
           }
         }
         delete snapshot.sessions[id];
@@ -1216,8 +1290,13 @@ export class AxAgentSessionHost {
       admittedChildren: snapshot.root.admittedChildren,
       admittedSubcalls: snapshot.root.admittedSubcalls,
       descendantUsage: cloneStructured(snapshot.root.descendantUsage),
+      retiredDescendantUsage: cloneStructured(
+        snapshot.root.retiredDescendantUsage
+      ),
       reservedTokens: snapshot.root.reservedTokens,
       outcomeUnknownTokens: snapshot.root.outcomeUnknownTokens,
+      retiredOutcomeUnknownTokens: snapshot.root.retiredOutcomeUnknownTokens,
+      retiredSubcalls: snapshot.root.retiredSubcalls,
       ...(snapshot.root.budgetExceeded
         ? { budgetExceeded: snapshot.root.budgetExceeded }
         : {}),
@@ -1375,6 +1454,7 @@ export class AxAgentSessionHost {
         if (!record || !message || message.status !== 'pending') {
           return SKIP_MUTATION;
         }
+        if (message.jobId !== job.id) return SKIP_MUTATION;
         if (record.activeMessageId) return SKIP_MUTATION;
         if (this.nextPending(record)?.id !== message.id) return SKIP_MUTATION;
         const running = Object.values(snapshot.sessions).filter(
@@ -1509,6 +1589,8 @@ export class AxAgentSessionHost {
         delete message.attemptId;
         delete record.activeMessageId;
         snapshot.root.reservedTokens -= message.tokenReservation ?? 0;
+        delete message.tokenReservation;
+        message.usage = cloneStructured(usage);
         addUsage(record.usage, usage);
         addUsage(snapshot.root.descendantUsage, usage);
         let ancestorId = record.handle.parentId;
@@ -1810,6 +1892,22 @@ export class AxAgentSessionHost {
     }
   }
 
+  private rotateExecutionAuthority(
+    snapshot: AxAgentSessionRegistrySnapshot
+  ): void {
+    snapshot.root.epoch++;
+    snapshot.root.capability = randomUUID();
+    for (const record of Object.values(snapshot.sessions)) {
+      record.handle.epoch = snapshot.root.epoch;
+      record.handle.capability = randomUUID();
+      for (const message of record.mailbox) {
+        if (message.status === 'pending') {
+          message.jobId = `job-${message.id}-epoch-${snapshot.root.epoch}-${randomUUID()}`;
+        }
+      }
+    }
+  }
+
   private interruptRunning(
     snapshot: AxAgentSessionRegistrySnapshot,
     interrupted: AxAgentSessionRecord[] = []
@@ -1875,6 +1973,28 @@ export class AxAgentSessionHost {
       snapshot.root.reservedTokens +
       snapshot.root.outcomeUnknownTokens
     );
+  }
+
+  private expectedBudgetExceeded(
+    snapshot: Readonly<AxAgentSessionRegistrySnapshot>
+  ): AxAgentSessionRootRecord['budgetExceeded'] {
+    if (
+      this.committedTokens(snapshot) +
+        snapshot.root.limits.maxTokensPerMessage >
+      snapshot.root.limits.maxTokens
+    ) {
+      return 'tokens';
+    }
+    if (snapshot.root.admittedSubcalls >= snapshot.root.limits.maxSubcalls) {
+      return 'subcalls';
+    }
+    return undefined;
+  }
+
+  private reconcileBudget(snapshot: AxAgentSessionRegistrySnapshot): void {
+    const exceeded = this.expectedBudgetExceeded(snapshot);
+    if (exceeded) snapshot.root.budgetExceeded = exceeded;
+    else delete snapshot.root.budgetExceeded;
   }
 
   private descendants(
@@ -2059,7 +2179,9 @@ export class AxAgentSessionHost {
       typeof root.limits !== 'object' ||
       Array.isArray(root.limits) ||
       !root.descendantUsage ||
-      typeof root.descendantUsage !== 'object'
+      typeof root.descendantUsage !== 'object' ||
+      !root.retiredDescendantUsage ||
+      typeof root.retiredDescendantUsage !== 'object'
     ) {
       throw new AxAgentSessionSerializationError(
         'root identity, capability, and epoch are required'
@@ -2099,13 +2221,16 @@ export class AxAgentSessionHost {
       !isNonNegativeSafeInteger(root.admittedChildren) ||
       !isNonNegativeSafeInteger(root.admittedSubcalls) ||
       !isNonNegativeSafeInteger(root.reservedTokens) ||
-      !isNonNegativeSafeInteger(root.outcomeUnknownTokens)
+      !isNonNegativeSafeInteger(root.outcomeUnknownTokens) ||
+      !isNonNegativeSafeInteger(root.retiredOutcomeUnknownTokens) ||
+      !isNonNegativeSafeInteger(root.retiredSubcalls)
     ) {
       throw new AxAgentSessionSerializationError(
         'root counters must be non-negative safe integers'
       );
     }
     assertUsage(root.descendantUsage, 'root.descendantUsage');
+    assertUsage(root.retiredDescendantUsage, 'root.retiredDescendantUsage');
 
     const sessionIds = Object.keys(snapshot.sessions);
     if (
@@ -2121,6 +2246,7 @@ export class AxAgentSessionHost {
     let retainedMessages = 0;
     let reservedTokens = 0;
     let retainedOutcomeUnknownTokens = 0;
+    let runningMessageCount = 0;
     for (const id of sessionIds) {
       const record = snapshot.sessions[id]!;
       if (
@@ -2133,7 +2259,9 @@ export class AxAgentSessionHost {
         !record.usage ||
         typeof record.usage !== 'object' ||
         !record.descendantUsage ||
-        typeof record.descendantUsage !== 'object'
+        typeof record.descendantUsage !== 'object' ||
+        !record.retiredDescendantUsage ||
+        typeof record.retiredDescendantUsage !== 'object'
       ) {
         throw new AxAgentSessionSerializationError(
           `session "${id}" is not a complete registry record`
@@ -2210,9 +2338,14 @@ export class AxAgentSessionHost {
       }
       assertUsage(record.usage, `sessions.${id}.usage`);
       assertUsage(record.descendantUsage, `sessions.${id}.descendantUsage`);
+      assertUsage(
+        record.retiredDescendantUsage,
+        `sessions.${id}.retiredDescendantUsage`
+      );
       const runningMessages = record.mailbox.filter(
         (message) => message.status === 'running'
       );
+      runningMessageCount += runningMessages.length;
       if (
         runningMessages.length > 1 ||
         (record.activeMessageId ?? undefined) !==
@@ -2225,6 +2358,7 @@ export class AxAgentSessionHost {
         );
       }
       retainedMessages += record.mailbox.length;
+      const directUsage = emptyUsage();
       for (const message of record.mailbox) {
         if (
           !message ||
@@ -2251,6 +2385,26 @@ export class AxAgentSessionHost {
         }
         messageIds.add(message.id);
         jobIds.add(message.jobId);
+        const confirmedUsage =
+          message.status === 'completed' ||
+          message.status === 'failed' ||
+          (message.status === 'cancelled' && message.startedAt !== undefined);
+        if (message.usage !== undefined) {
+          assertUsage(
+            message.usage,
+            `sessions.${id}.mailbox.${message.id}.usage`
+          );
+          if (!confirmedUsage) {
+            throw new AxAgentSessionSerializationError(
+              `message "${message.id}" has usage without a confirmed attempt`
+            );
+          }
+          addUsage(directUsage, message.usage);
+        } else if (confirmedUsage) {
+          throw new AxAgentSessionSerializationError(
+            `message "${message.id}" lacks confirmed attempt usage`
+          );
+        }
         if (message.tokenReservation !== undefined) {
           if (message.tokenReservation !== root.limits.maxTokensPerMessage) {
             throw new AxAgentSessionSerializationError(
@@ -2261,22 +2415,68 @@ export class AxAgentSessionHost {
             reservedTokens += message.tokenReservation;
           } else if (message.status === 'outcome_unknown') {
             retainedOutcomeUnknownTokens += message.tokenReservation;
+          } else {
+            throw new AxAgentSessionSerializationError(
+              `message "${message.id}" has a reservation outside a running or outcome_unknown attempt`
+            );
           }
-        } else if (message.status === 'running') {
+        } else if (
+          message.status === 'running' ||
+          message.status === 'outcome_unknown'
+        ) {
           throw new AxAgentSessionSerializationError(
-            `running message "${message.id}" lacks a token reservation`
+            `message "${message.id}" lacks its token reservation`
           );
         }
       }
+      if (!equalUsage(record.usage, directUsage)) {
+        throw new AxAgentSessionSerializationError(
+          `session "${id}" direct usage does not match its mailbox attempts`
+        );
+      }
     }
     if (
-      root.admittedSubcalls < retainedMessages ||
+      root.admittedSubcalls !== retainedMessages + root.retiredSubcalls ||
       root.admittedSubcalls > root.limits.maxSubcalls ||
       root.reservedTokens !== reservedTokens ||
-      root.outcomeUnknownTokens < retainedOutcomeUnknownTokens
+      root.outcomeUnknownTokens !==
+        retainedOutcomeUnknownTokens + root.retiredOutcomeUnknownTokens ||
+      runningMessageCount > root.limits.maxConcurrency
     ) {
       throw new AxAgentSessionSerializationError(
-        'root admission or uncertain-token accounting is inconsistent'
+        'root admission, concurrency, or uncertain-token accounting is inconsistent'
+      );
+    }
+    for (const id of sessionIds) {
+      const record = snapshot.sessions[id]!;
+      const expectedDescendantUsage = cloneStructured(
+        record.retiredDescendantUsage
+      );
+      for (const child of Object.values(snapshot.sessions)) {
+        if (child.handle.parentId !== id) continue;
+        addUsage(expectedDescendantUsage, child.usage);
+        addUsage(expectedDescendantUsage, child.descendantUsage);
+      }
+      if (!equalUsage(record.descendantUsage, expectedDescendantUsage)) {
+        throw new AxAgentSessionSerializationError(
+          `session "${id}" descendant usage does not reconcile with its topology`
+        );
+      }
+    }
+    const expectedRootUsage = cloneStructured(root.retiredDescendantUsage);
+    for (const record of Object.values(snapshot.sessions)) {
+      if (record.handle.parentId !== root.id) continue;
+      addUsage(expectedRootUsage, record.usage);
+      addUsage(expectedRootUsage, record.descendantUsage);
+    }
+    if (!equalUsage(root.descendantUsage, expectedRootUsage)) {
+      throw new AxAgentSessionSerializationError(
+        'root descendant usage does not reconcile with its topology'
+      );
+    }
+    if (root.budgetExceeded !== this.expectedBudgetExceeded(snapshot)) {
+      throw new AxAgentSessionSerializationError(
+        'root budget status does not reconcile with accounting'
       );
     }
     const computedDigest = await digestPolicy(snapshot);
@@ -2295,6 +2495,7 @@ export class AxAgentSessionHost {
       const current = await this.requireRoot(rootId);
       const next = cloneStructured(current);
       const result = mutation(next);
+      this.reconcileBudget(next);
       next.root.updatedAt = this.now();
       next.policyDigest = await digestPolicy(next);
       await this.validateSnapshot(next);
@@ -2323,6 +2524,7 @@ export class AxAgentSessionHost {
       const next = cloneStructured(current);
       const result = mutation(next);
       if (result === SKIP_MUTATION) return undefined;
+      this.reconcileBudget(next);
       next.root.updatedAt = this.now();
       next.policyDigest = await digestPolicy(next);
       await this.validateSnapshot(next);

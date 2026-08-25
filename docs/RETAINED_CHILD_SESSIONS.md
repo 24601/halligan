@@ -95,7 +95,10 @@ owner becomes stale. After recovery, call `restoreRoot(rootId)` and use
 `root.list()` to obtain current-epoch direct-child handles. A stale worker can
 no longer spawn descendants or inspect, send, cancel, or dispose existing ones.
 Scheduler jobs also carry the epoch, and only the host that acquired the
-current epoch may dispatch or reschedule them.
+current epoch may dispatch or reschedule them. Recovery also rotates root and
+child bearer capabilities. Dispatch validates both the epoch and the rotated
+mailbox job ID, so an equal numeric epoch from another restore domain is not
+execution authority.
 
 A follow-up/steer input is the child's complete signature input, not an
 untyped chat string. A single-worker host reuses the same agent instance while
@@ -157,13 +160,21 @@ Application tools should still use stable idempotency keys when retry is safe.
 `snapshot(rootId)` / `restore(snapshot, { expectedPolicyDigest })` support
 explicit state transfer with the same uncertainty rule. Store the expected
 digest separately in trusted host metadata; do not read it from the candidate
-snapshot at restore time. Restore checks the SHA-256 digest of canonical root
-and child policy, exact registration authorization closure, topology/depth,
-handle identity, epoch, mailbox state, limits, and accounting invariants before
-accepting any state. Handles keep their IDs and capabilities during explicit
-state transfer. Registry snapshots and handles contain bearer capabilities;
-protect them as sensitive application state. Never accept client-supplied
-registry documents.
+snapshot at restore time. The expected SHA-256 digest authenticates canonical
+root/child authority, lifecycle, mailbox, and accounting state. Restore then
+reconciles direct usage from per-attempt usage, descendant usage through the
+tree, retired/disposed ledgers, reservations, outcome-unknown charges,
+subcalls, mailbox counts, concurrency, and budget status before accepting the
+snapshot.
+
+Restore is an ownership transfer, not a clone of live authority. It always
+advances the destination epoch, rotates root and child bearer capabilities,
+and rotates pending job IDs. Stable root/child/message IDs remain usable for
+correlation, but source handles are invalid in the destination and destination
+handles are invalid in a still-live source. Refresh destination handles with
+`restoredRoot.list()`. Registry snapshots and handles contain bearer
+capabilities; protect them as sensitive application state. Never accept
+client-supplied registry documents.
 
 ## Limits and accounting
 
@@ -187,12 +198,20 @@ recovery converts an ambiguous reservation to durable `outcomeUnknownTokens`.
 Subcalls are durably charged at admission, so neither counter resets after a
 crash. New work requires room for another full reservation.
 
+Confirmed per-message usage is retained so each session's direct usage can be
+recomputed; retained totals are normalized as prompt plus completion tokens.
+Derived root/ancestor usage, active reservations, uncertain-token charges,
+subcall totals, concurrency, and budget state must reconcile exactly.
+When sessions are disposed, host-owned retired ledgers preserve their usage,
+subcalls, and uncertain charges without retaining their runtime or mailbox.
+
 Configure `maxTokensPerMessage` at or above the worst-case child turn implied
 by model output and agent/tool-loop caps. Provider-reported usage can still
 exceed the reservation, and providers that report no tokens cannot be measured;
 the host charges the reservation on ambiguity but cannot enforce an internal
 provider cap. `inspectRoot()` exposes known descendant usage, active
-`reservedTokens`, and cumulative `outcomeUnknownTokens` separately.
+`reservedTokens`, cumulative `outcomeUnknownTokens`, and retired usage/subcall/
+uncertain-token ledgers separately.
 
 Each record exposes `usage` for its own model calls and `descendantUsage` for
 all nested children. The root's `descendantUsage` is the tree total. Stable
@@ -209,7 +228,7 @@ root, parent, child, and message IDs are also placed in AI usage context.
 - Handles are bearer capabilities and can operate only on direct children of
   the session client that owns them. Every handle field is checked against the
   canonical registry record; forged metadata, capabilities, cross-parent
-  handles, and pre-recovery epochs are rejected.
+  handles, pre-recovery epochs, and pre-restore capabilities are rejected.
 - Generated `sessions.*` functions close over the owning session client. The
   model cannot select another root or escalate by supplying a parent ID.
 - Treat stored inputs, outputs, and artifacts as untrusted data when rendering
@@ -251,7 +270,8 @@ A separate fresh-session versus same-handle follow-up timing reports retention
 amortization without assuming it is positive. The workload also exercises
 follow-up context, snapshot policy, descendant accounting, cancellation,
 limits, crash recovery, stale-authority denial, ambiguous token charging, and
-privilege denial. The unit suite separately runs an ordinary
+privilege denial. It also verifies that restore rotates destination authority
+while a source remains live. The unit suite separately runs an ordinary
 `AxAgent.getFunction()` child to guard the existing synchronous contract:
 
 ```bash

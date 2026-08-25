@@ -603,9 +603,10 @@ describe('retained child agent sessions', () => {
     const restoredRoot = await secondHost.restore(snapshot, {
       expectedPolicyDigest: snapshot.policyDigest,
     });
-    await restoredRoot.send(handle, { value: 'after' }, 'follow-up');
+    const restoredHandle = await refreshDirectHandle(restoredRoot, handle.id);
+    await restoredRoot.send(restoredHandle, { value: 'after' }, 'follow-up');
     const view = await waitFor(
-      () => restoredRoot.inspect(handle),
+      () => restoredRoot.inspect(restoredHandle),
       (value) => value.mailbox.length === 2 && value.status === 'completed'
     );
     expect(view.latestResult).toMatchObject({
@@ -629,14 +630,53 @@ describe('retained child agent sessions', () => {
     const restoredRoot = await secondHost.restore(snapshot, {
       expectedPolicyDigest: snapshot.policyDigest,
     });
-    await restoredRoot.send(handle, { value: 'second-artifact' }, 'follow-up');
+    const restoredHandle = await refreshDirectHandle(restoredRoot, handle.id);
+    await restoredRoot.send(
+      restoredHandle,
+      { value: 'second-artifact' },
+      'follow-up'
+    );
     const restored = await waitFor(
-      () => restoredRoot.inspect(handle),
+      () => restoredRoot.inspect(restoredHandle),
       (view) => view.mailbox.length === 2 && view.status === 'completed'
     );
     expect(restored.latestResult).toMatchObject({
       history: ['first-artifact', 'second-artifact'],
     });
+  });
+
+  it('rotates restore authority while leaving a live source domain isolated', async () => {
+    const sourceHost = host();
+    const sourceRoot = await sourceHost.createRoot({
+      authorizedChildren: ['worker'],
+    });
+    const sourceHandle = await sourceRoot.spawn('worker', { value: 'source' });
+    await completed(sourceRoot, sourceHandle);
+    const snapshot = await sourceHost.snapshot(sourceHandle.rootId);
+
+    const destinationHost = host();
+    const destinationRoot = await destinationHost.restore(snapshot, {
+      expectedPolicyDigest: snapshot.policyDigest,
+    });
+    const destinationHandle = await refreshDirectHandle(
+      destinationRoot,
+      sourceHandle.id
+    );
+
+    expect(destinationHandle.epoch).toBe(sourceHandle.epoch + 1);
+    expect(destinationHandle.capability).not.toBe(sourceHandle.capability);
+    await expect(destinationRoot.inspect(sourceHandle)).rejects.toBeInstanceOf(
+      AxAgentSessionStaleHandleError
+    );
+    await expect(sourceRoot.inspect(destinationHandle)).rejects.toBeInstanceOf(
+      AxAgentSessionStaleHandleError
+    );
+    await expect(sourceRoot.inspect(sourceHandle)).resolves.toMatchObject({
+      status: 'completed',
+    });
+    await expect(
+      destinationRoot.inspect(destinationHandle)
+    ).resolves.toMatchObject({ status: 'completed' });
   });
 
   it('rejects snapshots whose root or child authorization was altered', async () => {
@@ -695,6 +735,167 @@ describe('retained child agent sessions', () => {
         expectedPolicyDigest: nestedPolicyDigest,
       })
     ).rejects.toThrow(/is not authorized by parent/);
+  });
+
+  it('rejects inflated, reset, ancestral, and concurrent snapshot accounting', async () => {
+    const sourceHost = host();
+    const sourceRoot = await sourceHost.createRoot({
+      authorizedChildren: ['worker'],
+    });
+    const handle = await sourceRoot.spawn('worker', {
+      value: 'accounted',
+      tokens: 2,
+    });
+    await completed(sourceRoot, handle);
+    const snapshot = await sourceHost.snapshot(handle.rootId);
+
+    const inflated = structuredClone(snapshot);
+    const inflatedRecord = inflated.sessions[handle.id]!;
+    const inflatedMessage = inflatedRecord.mailbox[0]!;
+    for (const usage of [
+      inflatedMessage.usage!,
+      inflatedRecord.usage,
+      inflated.root.descendantUsage,
+    ]) {
+      usage.promptTokens++;
+      usage.totalTokens++;
+    }
+    await expect(
+      host().restore(inflated, {
+        expectedPolicyDigest: snapshot.policyDigest,
+      })
+    ).rejects.toThrow(/policy digest is invalid/);
+
+    const reset = structuredClone(snapshot);
+    reset.sessions[handle.id]!.usage = {
+      modelCalls: 0,
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+    };
+    await expect(
+      host().restore(reset, {
+        expectedPolicyDigest: snapshot.policyDigest,
+      })
+    ).rejects.toThrow(/direct usage does not match/);
+
+    const emptyHost = host();
+    const emptyRoot = await emptyHost.createRoot({
+      authorizedChildren: [],
+    });
+    const emptySnapshot = await emptyHost.snapshot(emptyRoot.sessionId);
+    const emptyDigest = emptySnapshot.policyDigest;
+    emptySnapshot.root.descendantUsage.promptTokens = 250_000;
+    emptySnapshot.root.descendantUsage.totalTokens = 250_000;
+    await expect(
+      host().restore(emptySnapshot, {
+        expectedPolicyDigest: emptyDigest,
+      })
+    ).rejects.toThrow(/root descendant usage does not reconcile/);
+
+    const nestedHost = host();
+    const nestedRoot = await nestedHost.createRoot({
+      authorizedChildren: ['parent'],
+    });
+    const parent = await nestedRoot.spawn('parent', {
+      value: 'parent-accounting',
+      spawnNested: true,
+    });
+    await waitFor(
+      () => nestedRoot.inspect(parent),
+      (view) => view.descendantUsage.totalTokens === 6
+    );
+    const nestedSnapshot = await nestedHost.snapshot(parent.rootId);
+    const nestedDigest = nestedSnapshot.policyDigest;
+    nestedSnapshot.sessions[parent.id]!.descendantUsage = {
+      modelCalls: 0,
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+    };
+    await expect(
+      host().restore(nestedSnapshot, {
+        expectedPolicyDigest: nestedDigest,
+      })
+    ).rejects.toThrow(/descendant usage does not reconcile/);
+
+    const concurrentHost = host({ limits: { maxConcurrency: 1 } });
+    const concurrentRoot = await concurrentHost.createRoot({
+      authorizedChildren: ['worker'],
+    });
+    const first = await concurrentRoot.spawn('worker', {
+      value: 'running',
+      delayMs: 100,
+    });
+    const second = await concurrentRoot.spawn('worker', { value: 'pending' });
+    await waitFor(
+      () => concurrentRoot.inspect(first),
+      (view) => view.status === 'running'
+    );
+    const concurrentSnapshot = await concurrentHost.snapshot(first.rootId);
+    const concurrentDigest = concurrentSnapshot.policyDigest;
+    const secondRecord = concurrentSnapshot.sessions[second.id]!;
+    const secondMessage = secondRecord.mailbox[0]!;
+    secondMessage.status = 'running';
+    secondMessage.startedAt = Date.now();
+    secondMessage.attemptId = 'forged-attempt';
+    secondMessage.tokenReservation =
+      concurrentSnapshot.root.limits.maxTokensPerMessage;
+    secondRecord.activeMessageId = secondMessage.id;
+    secondRecord.status = 'running';
+    concurrentSnapshot.root.reservedTokens +=
+      concurrentSnapshot.root.limits.maxTokensPerMessage;
+    await expect(
+      host().restore(concurrentSnapshot, {
+        expectedPolicyDigest: concurrentDigest,
+      })
+    ).rejects.toThrow(/concurrency/);
+    await concurrentRoot.cancel();
+  });
+
+  it('preserves disposed usage and subcalls in reconciled retired ledgers', async () => {
+    const contexts = new Map<string, AxAgentSessionClient>();
+    const sessions = host({ contexts });
+    const root = await sessions.createRoot({
+      authorizedChildren: ['parent'],
+    });
+    const parent = await root.spawn('parent', {
+      value: 'retire-tree',
+      spawnNested: true,
+    });
+    await waitFor(
+      () => root.inspect(parent),
+      (view) => view.descendantUsage.totalTokens === 6
+    );
+    const parentSession = contexts.get(parent.id)!;
+    const leaf = (await parentSession.list())[0]!.handle;
+    await parentSession.dispose(leaf);
+    const afterLeafDisposal = await sessions.snapshot(parent.rootId);
+    expect(afterLeafDisposal.root.retiredDescendantUsage.totalTokens).toBe(0);
+    expect(
+      afterLeafDisposal.sessions[parent.id]!.retiredDescendantUsage.totalTokens
+    ).toBe(6);
+
+    await root.dispose(parent);
+    expect(await root.inspectRoot()).toMatchObject({
+      admittedSubcalls: 2,
+      childCount: 0,
+      descendantUsage: { modelCalls: 2, totalTokens: 10 },
+      retiredDescendantUsage: { modelCalls: 2, totalTokens: 10 },
+      retiredSubcalls: 2,
+    });
+
+    const snapshot = await sessions.snapshot(parent.rootId);
+    const restored = await host().restore(snapshot, {
+      expectedPolicyDigest: snapshot.policyDigest,
+    });
+    expect(await restored.inspectRoot()).toMatchObject({
+      admittedSubcalls: 2,
+      childCount: 0,
+      descendantUsage: { modelCalls: 2, totalTokens: 10 },
+      retiredDescendantUsage: { modelCalls: 2, totalTokens: 10 },
+      retiredSubcalls: 2,
+    });
   });
 
   it('discards partial live runtime mutations after cancellation', async () => {
@@ -963,6 +1164,65 @@ describe('retained session crash recovery adapters', () => {
     expect(
       (await refreshDirectHandle(recoveredRoot, staleHandle.id)).epoch
     ).toBe(2);
+  });
+
+  it('rejects a same-epoch scheduler job replayed from another restore domain', async () => {
+    const sourceStore = new DurableMemoryStore();
+    const sourceScheduler = new ManualScheduler();
+    const sourceHost = host({ store: sourceStore, scheduler: sourceScheduler });
+    const sourceRoot = await sourceHost.createRoot({
+      authorizedChildren: ['worker'],
+    });
+    const sourceHandle = await sourceRoot.spawn('worker', {
+      value: 'domain-bound-job',
+    });
+    const sourceSnapshot = await sourceHost.snapshot(sourceHandle.rootId);
+
+    const destinationStore = new DurableMemoryStore();
+    const destinationScheduler = new ManualScheduler();
+    const destinationHost = host({
+      store: destinationStore,
+      scheduler: destinationScheduler,
+    });
+    const destinationRoot = await destinationHost.restore(sourceSnapshot, {
+      expectedPolicyDigest: sourceSnapshot.policyDigest,
+    });
+    const destinationHandle = await refreshDirectHandle(
+      destinationRoot,
+      sourceHandle.id
+    );
+    const destinationJob = destinationScheduler.queuedJobs()[0]!;
+
+    await sourceHost.recover(sourceHandle.rootId);
+    const foreignJob = sourceScheduler
+      .queuedJobs()
+      .find(
+        (job) =>
+          job.epoch === destinationJob.epoch && job.id !== destinationJob.id
+      )!;
+    expect(foreignJob).toMatchObject({
+      rootId: destinationJob.rootId,
+      sessionId: destinationJob.sessionId,
+      messageId: destinationJob.messageId,
+      epoch: destinationJob.epoch,
+    });
+
+    destinationScheduler.clearJobs();
+    const beforeReplay = await destinationHost.snapshot(sourceHandle.rootId);
+    await destinationScheduler.enqueue(foreignJob);
+    await destinationScheduler.runAll();
+    const afterReplay = await destinationHost.snapshot(sourceHandle.rootId);
+    expect(afterReplay.revision).toBe(beforeReplay.revision);
+    expect(afterReplay.root.updatedAt).toBe(beforeReplay.root.updatedAt);
+    expect(afterReplay.sessions[sourceHandle.id]?.mailbox[0]?.status).toBe(
+      'pending'
+    );
+
+    await destinationScheduler.enqueue(destinationJob);
+    await destinationScheduler.runAll();
+    await expect(
+      destinationRoot.result(destinationHandle)
+    ).resolves.toMatchObject({ value: 'domain-bound-job' });
   });
 
   it('revokes every stale root and nested-session operation on recovery', async () => {

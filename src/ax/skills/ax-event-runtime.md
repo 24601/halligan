@@ -115,6 +115,10 @@ restore the root and refresh the correlated child's handle before operating on
 it; a continuation may keep the stable child ID for correlation, but not an old
 epoch-bearing capability handle.
 
+Explicit snapshot restore likewise rotates destination epoch/capabilities and
+pending job IDs; dispatch checks both epoch and job ID. Correlation IDs remain
+stable, but source handles/jobs do not carry authority into the destination.
+
 ## MCP Adapter
 
 Use `ax-mcp` for client construction, transports, authentication, catalogs,

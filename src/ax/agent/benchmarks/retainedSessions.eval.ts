@@ -64,6 +64,8 @@ type EvaluationReport = {
     staleAuthorityDenied: boolean;
     outcomeUnknownTokensCharged: boolean;
     alteredSnapshotDenied: boolean;
+    alteredAccountingDenied: boolean;
+    restoreRotatedAuthority: boolean;
     privilegeDenied: boolean;
   };
   interpretation: string[];
@@ -460,14 +462,46 @@ async function runEvaluation(): Promise<EvaluationReport> {
   } catch (error) {
     alteredSnapshotDenied = error instanceof AxAgentSessionAuthorizationError;
   }
-  await retainedHost.close();
+  const alteredAccounting = structuredClone(saved);
+  const alteredRecord = alteredAccounting.sessions[handle.id]!;
+  for (const usage of [
+    alteredRecord.mailbox[0]!.usage!,
+    alteredRecord.usage,
+    alteredAccounting.root.descendantUsage,
+  ]) {
+    usage.promptTokens++;
+    usage.totalTokens++;
+  }
+  let alteredAccountingDenied = false;
+  try {
+    await createHost().restore(alteredAccounting, {
+      expectedPolicyDigest: saved.policyDigest,
+    });
+  } catch (error) {
+    alteredAccountingDenied = error instanceof AxAgentSessionAuthorizationError;
+  }
   const restoredHost = createHost();
   const restoredRoot = await restoredHost.restore(saved, {
     expectedPolicyDigest: saved.policyDigest,
   });
-  await restoredRoot.send(handle, { value: 'third' }, 'follow-up');
+  const restoredHandle = await refreshDirectHandle(restoredRoot, handle.id);
+  let restoreRotatedAuthority = false;
+  try {
+    await restoredRoot.inspect(handle);
+  } catch (error) {
+    restoreRotatedAuthority = error instanceof AxAgentSessionStaleHandleError;
+  }
+  await root.inspect(handle);
+  try {
+    await root.inspect(restoredHandle);
+    restoreRotatedAuthority = false;
+  } catch (error) {
+    restoreRotatedAuthority &&= error instanceof AxAgentSessionStaleHandleError;
+  }
+  await retainedHost.close();
+  await restoredRoot.send(restoredHandle, { value: 'third' }, 'follow-up');
   const restored = await waitFor(
-    () => restoredRoot.inspect(handle),
+    () => restoredRoot.inspect(restoredHandle),
     (view) => view.mailbox.length === 3 && view.status === 'completed'
   );
   const restoredOutput = restored.latestResult as Output;
@@ -604,6 +638,8 @@ async function runEvaluation(): Promise<EvaluationReport> {
           recoveredBudget.limits.maxTokensPerMessage &&
         recoveredBudget.admittedSubcalls === 2,
       alteredSnapshotDenied,
+      alteredAccountingDenied,
+      restoreRotatedAuthority,
       privilegeDenied,
     },
     interpretation: [
