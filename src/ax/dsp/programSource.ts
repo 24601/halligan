@@ -1018,11 +1018,14 @@ const __axRunSteps = async (steps, state) => {
     switch (statement.op) {
       case 'predict': {
         const input = await __axEvalExpression(statement.input, state);
-        state.env[statement.as] = await __axProgramSourcePredict({
+        const spec = {
           signature: statement.signature,
-          instruction: statement.instruction,
           tools: statement.tools || [],
-        }, input);
+        };
+        if (statement.instruction !== undefined) {
+          spec.instruction = statement.instruction;
+        }
+        state.env[statement.as] = await __axProgramSourcePredict(spec, input);
         break;
       }
       case 'tool': {
@@ -1296,7 +1299,7 @@ export class AxProgramSource<
       'The final top-level statement must return every required outer output and no undeclared outputs.',
       `Every forEach must declare maxIterations no greater than ${this.maxIterations}.`,
       `Runtime budgets per example: ${this.maxPredictorCalls} predictor calls, ${this.maxToolCalls} tool calls, ${this.maxIterations} executed statements/loop iterations, ${this.maxStepsPerPredictor} continuation steps per predictor.`,
-      `Every input, bridge argument/result, and output is limited to ${this.valueLimits.maxBytes} serialized JSON bytes, depth ${this.valueLimits.maxDepth}, and width ${this.valueLimits.maxWidth}.`,
+      `Every input, complete predictor request (metadata plus input), tool argument/result, and output is limited to ${this.valueLimits.maxBytes} serialized JSON bytes, depth ${this.valueLimits.maxDepth}, and width ${this.valueLimits.maxWidth}.`,
       'Source is a data-only control-flow AST. JavaScript, eval, Function, imports, filesystem, process, network, ambient globals, mutable cross-call state, and dynamic capability construction are unsupported.',
       'Do not hard-code train examples or expected answers. Prefer deterministic control flow only when it generalizes from the declared inputs.',
     ].join('\n');
@@ -1482,22 +1485,22 @@ export class AxProgramSource<
       const predictorName =
         spec.signature === '$program' ? '$program' : spec.signature;
       assertAuthority('predictor', predictorName, 'call');
+      validateSerializableValue(
+        { spec, input },
+        this.valueLimits,
+        `Program source predictor '${predictorName}' request`
+      );
+      if (!isRecord(input)) {
+        throw new AxProgramSourceError(
+          'Program source predictor input must evaluate to an object'
+        );
+      }
       predictorCalls += 1;
       if (predictorCalls > this.maxPredictorCalls) {
         throw new AxProgramSourceBudgetError(
           `Program source predictor-call budget exceeded: ${this.maxPredictorCalls}`
         );
       }
-      if (!isRecord(input)) {
-        throw new AxProgramSourceError(
-          'Program source predictor input must evaluate to an object'
-        );
-      }
-      validateSerializableValue(
-        input,
-        this.valueLimits,
-        `Program source predictor '${predictorName}' input`
-      );
       const predictorTools = spec.tools.map((name) => {
         const tool = this.tools.get(name);
         if (!tool)

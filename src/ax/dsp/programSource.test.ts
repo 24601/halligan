@@ -471,6 +471,93 @@ describe('AxProgramSource', () => {
     ).rejects.toThrow(/cyclic value/);
   });
 
+  it('bounds complete predictor requests before host authority', async () => {
+    let predictorCalls = 0;
+    let toolCalls = 0;
+    let schemaReads = 0;
+    const ai = mockTextAI();
+    ai.chat = async () => {
+      predictorCalls += 1;
+      return {
+        results: [
+          { index: 0, content: 'Answer: called', finishReason: 'stop' },
+        ],
+      } as AxChatResponse;
+    };
+
+    const oversizedInstruction = source(
+      [
+        {
+          op: 'predict',
+          as: 'prediction',
+          signature: '$program',
+          instruction: '😀'.repeat(64),
+          input: ref('inputs'),
+        },
+        returnAnswer(ref('prediction.answer')),
+      ],
+      ['predict']
+    );
+    await expect(
+      programSource('question:string -> answer:string', {
+        source: oversizedInstruction,
+        valueLimits: { maxBytes: 200 },
+      }).forward(ai, { question: 'q' })
+    ).rejects.toThrow(
+      /predictor '\$program' request exceeds serialized value byte limit: 200/
+    );
+
+    const guardedTool = (name: string): AxFunction => {
+      const tool: AxFunction = {
+        name,
+        description: 'Must not be resolved for an oversized request.',
+        parameters: { type: 'object', properties: {} },
+        returns: { type: 'object' },
+        func: () => {
+          toolCalls += 1;
+          return { answer: 'unexpected' };
+        },
+      };
+      Object.defineProperty(tool, 'description', {
+        configurable: true,
+        enumerable: true,
+        get: () => {
+          schemaReads += 1;
+          return 'Must not be resolved for an oversized request.';
+        },
+      });
+      return tool;
+    };
+    const tools = ['first', 'second', 'third'].map(guardedTool);
+    const oversizedTools = source(
+      [
+        {
+          op: 'predict',
+          as: 'prediction',
+          signature: '$program',
+          tools: tools.map((tool) => tool.name),
+          input: ref('inputs'),
+        },
+        returnAnswer(ref('prediction.answer')),
+      ],
+      ['predict', ...tools.map((tool) => `tool:${tool.name}` as const)]
+    );
+    await expect(
+      programSource('question:string -> answer:string', {
+        source: oversizedTools,
+        tools,
+        valueLimits: { maxWidth: 2 },
+      }).forward(ai, { question: 'q' })
+    ).rejects.toThrow(
+      /predictor '\$program' request exceeds value width limit: 2 at \$\.spec\.tools/
+    );
+    expect({ predictorCalls, toolCalls, schemaReads }).toEqual({
+      predictorCalls: 0,
+      toolCalls: 0,
+      schemaReads: 0,
+    });
+  });
+
   it('bounds tool results and final outputs before crossing onward boundaries', async () => {
     const toolSource = source(
       [

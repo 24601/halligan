@@ -80,8 +80,10 @@ Critical rules:
   complete grammar, and predictor/tool/iteration/continuation budgets.
 - Parse/bind errors reject the candidate. Runtime and strict typed-output
   errors become aligned per-example zero scores during direct GEPA evaluation.
-- Inputs and all predictor/tool/output bridge values must fit configurable JSON
-  byte/depth/width limits. The default Node worker also has heap/stack ceilings.
+- Inputs, complete predictor requests (metadata plus input), tool arguments and
+  results, and outputs must fit configurable JSON byte/depth/width limits before
+  host dispatch. Static source limits are cumulative; tighter bridge limits win.
+  The default Node worker also has heap/stack ceilings.
 - Timeout, abort, and close revoke the execution epoch. Late bridge completions
   are rejected and recorded, but an already-dispatched external tool/provider
   effect remains host-owned and cannot be undone by worker termination.
