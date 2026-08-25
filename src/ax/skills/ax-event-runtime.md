@@ -17,6 +17,12 @@ source -> inbox -> route -> target -> stored run -> sink
 Sources never call an Ax program directly. A route must explicitly choose
 `observe`, `invalidate`, `wake`, or `resume`. Only the last two invoke a model.
 
+`AxInteractionTimeline` is a separate, opt-in record for bounded temporal
+projection of crossmodal interaction observations. It does not enqueue events,
+wake programs, estimate clock offset, or establish semantic alignment. See
+`docs/INTERACTION_TIMELINE.md` when an application needs that lower-level
+timeline contract before deciding whether to publish anything to this runtime.
+
 ## Minimal Pattern
 
 ```ts

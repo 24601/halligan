@@ -917,6 +917,33 @@ import {
   type AxTimerEventSourceOptions,
 } from './event/sources.js';
 import {
+  type AxAudioFrameInteractionEvent,
+  type AxControlInteractionEvent,
+  type AxGeneratedMediaInteractionEvent,
+  type AxInteractionEvent,
+  AxInteractionTimeline,
+  type AxInteractionTimelineAppendResult,
+  AxInteractionTimelineDefaults,
+  type AxInteractionTimelineOptions,
+  type AxInteractionTimelineProjection,
+  type AxInteractionTimelineProjectionOptions,
+  type AxInteractionTimelineResolvedOptions,
+  AxInteractionTimelineSchema,
+  type AxInteractionTimelineSnapshot,
+  type AxInteractionTimelineStreamState,
+  AxInteractionTimelineVersion,
+  type AxMediaTimeRange,
+  type AxSessionTimeRange,
+  type AxTemporalClassification,
+  type AxTemporalEnvelope,
+  AxTemporalEnvelopeSchema,
+  AxTemporalValidationError,
+  type AxTextInteractionEvent,
+  type AxToolActivityInteractionEvent,
+  type AxTranscriptInteractionEvent,
+  type AxVisualObservationInteractionEvent,
+} from './event/timeline.js';
+import {
   AxEventBackpressureError,
   type AxEventClock,
   type AxEventCloseOptions,
@@ -1391,6 +1418,10 @@ export { AxGenerateError };
 export { AxInMemoryBalancerStatsStore };
 export { AxInMemoryEventStore };
 export { AxInMemoryProgramStateStore };
+export { AxInteractionTimeline };
+export { AxInteractionTimelineDefaults };
+export { AxInteractionTimelineSchema };
+export { AxInteractionTimelineVersion };
 export { AxJSRuntime };
 export { AxJSRuntimePermission };
 export { AxMCPAppBridge };
@@ -1429,6 +1460,8 @@ export { AxStreamingAssertionError };
 export { AxStringUtil };
 export { AxSynth };
 export { AxSystemEventClock };
+export { AxTemporalEnvelopeSchema };
+export { AxTemporalValidationError };
 export { AxTestPrompt };
 export { AxTimerEventSource };
 export { AxTokenLimitError };
@@ -1924,6 +1957,7 @@ export type { AxAnyAgentic };
 export type { AxAssertion };
 export type { AxAttempt };
 export type { AxAudioFormat };
+export type { AxAudioFrameInteractionEvent };
 export type { AxAudioInput };
 export type { AxBalancerAdaptiveStrategy };
 export type { AxBalancerCandidateScore };
@@ -1971,6 +2005,7 @@ export type { AxContextPolicyConfig };
 export type { AxContextPolicyPreset };
 export type { AxContextScenario };
 export type { AxContextTurnSample };
+export type { AxControlInteractionEvent };
 export type { AxCostTracker };
 export type { AxCostTrackerOptions };
 export type { AxDateRange };
@@ -2100,9 +2135,18 @@ export type { AxGenOutput };
 export type { AxGenStreamingOut };
 export type { AxGenerateErrorDetails };
 export type { AxGenerateResult };
+export type { AxGeneratedMediaInteractionEvent };
 export type { AxIField };
 export type { AxInMemoryEventStoreOptions };
 export type { AxInputFunctionType };
+export type { AxInteractionEvent };
+export type { AxInteractionTimelineAppendResult };
+export type { AxInteractionTimelineOptions };
+export type { AxInteractionTimelineProjection };
+export type { AxInteractionTimelineProjectionOptions };
+export type { AxInteractionTimelineResolvedOptions };
+export type { AxInteractionTimelineSnapshot };
+export type { AxInteractionTimelineStreamState };
 export type { AxJSRuntimeNodePermissionAllowlist };
 export type { AxJSRuntimeOutputMode };
 export type { AxJSRuntimeResourceLimits };
@@ -2252,6 +2296,7 @@ export type { AxMCPTransportRecordingEntry };
 export type { AxMCPVerifiedJWT };
 export type { AxMCPWebSocketLike };
 export type { AxMCPWebSocketTransportOptions };
+export type { AxMediaTimeRange };
 export type { AxMemoryData };
 export type { AxMemoryMessageValue };
 export type { AxMetricFn };
@@ -2338,6 +2383,7 @@ export type { AxRuntimePrimitiveStage };
 export type { AxSamplePickerOptions };
 export type { AxSelfTuningConfig };
 export type { AxSerializedOptimizedProgram };
+export type { AxSessionTimeRange };
 export type { AxSetExamplesOptions };
 export type { AxSharedSessionPhase };
 export type { AxSignatureConfig };
@@ -2361,9 +2407,14 @@ export type { AxSynthResult };
 export type { AxSynthesizerInit };
 export type { AxSynthesizerOptions };
 export type { AxSynthesizerRole };
+export type { AxTemporalClassification };
+export type { AxTemporalEnvelope };
+export type { AxTextInteractionEvent };
 export type { AxThoughtBlockItem };
 export type { AxTimerEventSourceOptions };
 export type { AxTokenUsage };
+export type { AxToolActivityInteractionEvent };
+export type { AxTranscriptInteractionEvent };
 export type { AxTranscriptionRequest };
 export type { AxTranscriptionResponse };
 export type { AxTranscriptionSegment };
@@ -2405,4 +2456,5 @@ export type { AxUsable };
 export type { AxUsageContext };
 export type { AxUsageEvent };
 export type { AxUsageObserver };
+export type { AxVisualObservationInteractionEvent };
 export type { AxWorkerRuntimeConfig };

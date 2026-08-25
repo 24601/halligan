@@ -146,6 +146,23 @@ protocol clients must still be closed by the caller. For deterministic tests,
 `AxManualEventClock` advances retries, debounce windows, and continuation
 expiry without waiting for wall-clock time.
 
+## Temporal Interaction Records (TypeScript)
+
+TypeScript also exports `AxTemporalEnvelope` and `AxInteractionTimeline` for
+applications that need a bounded, provider-neutral record of audio frames,
+transcripts, visual observations, text, tool activity, generated media, and
+control signals. The application supplies a monotonic session clock and any
+media clocks; optional wall time is diagnostic only. Sequence, epoch, revision,
+causal-parent, and non-causal link fields make duplicate, reordered, late,
+stale, and conflicting arrivals explicit.
+
+This structure is standalone. It does not capture or store media, estimate
+clock offset or drift, create rooms, invoke a model, or establish semantic
+alignment merely because timestamps or links are present. Generated language
+packages do not yet claim this API. See the
+[temporal interaction timeline guide](https://github.com/ax-llm/ax/blob/main/docs/INTERACTION_TIMELINE.md)
+for the TypeScript contract, bounds, and deterministic zero-cost evaluation.
+
 ## Generated Languages
 
 Generated Python, Java, C++, Go, and Rust packages use the same deterministic

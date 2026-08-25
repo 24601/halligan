@@ -518,6 +518,7 @@ const result = await optimizer.compile(
 | Batch STT/TTS | `ai.transcribe`, `ai.speak` | OpenAI, xAI, Gemini, Mistral where provider endpoints exist |
 | Signature audio artifacts | `speech:audio` outputs + `speech` options | model emits script text, Ax synthesizes audio after parsing |
 | Conversational audio | `.chat()` + `result.audio` | OpenAI `gpt-audio*`, `gpt-realtime-2`, `gpt-realtime-whisper`; Gemini Live native audio; Grok Voice; also in Python/Go/Rust/Java/C++ via `realtime_chat()` |
+| Temporal interaction timeline | `AxInteractionTimeline` | TypeScript-only, provider-neutral bounded ordering and projection; no capture, storage, or clock synchronization |
 | Workflows | `flow` | typed program graphs, branching, loops, parallelism, `.returns(...)` |
 | Optimization | `AxGEPA`, `AxBootstrapFewShot` | Pareto front, few-shot, portable optimizer artifacts |
 | Agent loop | `agent`, `AxAgent` | distiller → executor → responder |
@@ -570,6 +571,7 @@ npm install @ax-llm/ax-tools              # MCP stdio transport, JS runtime extr
 **Deep dives**
 - [AI providers](https://github.com/ax-llm/ax/blob/main/src/ax/skills/ax-ai.md)
 - [Audio I/O](https://github.com/ax-llm/ax/blob/main/src/ax/skills/ax-audio.md)
+- [Temporal interaction timeline](docs/INTERACTION_TIMELINE.md)
 - [AxFlow workflows](https://github.com/ax-llm/ax/blob/main/src/ax/skills/ax-flow.md)
 - [Optimization (GEPA, ACE)](https://axllm.dev/typescript/concepts/optimization/)
 - [AxAgent & RLM](https://github.com/ax-llm/ax/blob/main/src/ax/skills/ax-agent.md)
@@ -596,7 +598,7 @@ providers, and read credentials from `.env`. Internal generated-package fixtures
 remain under `packages/<language>/examples` for AxIR verification, but the public
 catalog and website are generated only from `src/examples/<language>/`.
 
-Highlights: `extract.ts`, `react.ts`, `agent.ts`, `streaming1.ts`, `multi-modal.ts`, `audio-chat.ts`, `audio-batch-and-agent.ts`, `standard-schema.ts`, `rlm-memories-and-skills.ts`, `rlm-discovery.ts`, `gepa-flow.ts`, `openai-compatible.ts`, `ax-flow-enhanced-demo.ts`, `ax-flow-mermaid.ts`. [Browse all examples →](src/examples/)
+Highlights: `extract.ts`, `react.ts`, `agent.ts`, `streaming1.ts`, `multi-modal.ts`, `audio-chat.ts`, `audio-batch-and-agent.ts`, `interaction-timeline.ts`, `standard-schema.ts`, `rlm-memories-and-skills.ts`, `rlm-discovery.ts`, `gepa-flow.ts`, `openai-compatible.ts`, `ax-flow-enhanced-demo.ts`, `ax-flow-mermaid.ts`. [Browse all examples →](src/examples/)
 
 ## Community
 

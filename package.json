@@ -30,6 +30,7 @@
     "axir:backlog:validate": "node scripts/axir-backlog.mjs validate",
     "axir:conformance:check": "node --import=tsx scripts/axir-conformance-sync.mjs check",
     "axir:conformance:write": "node --import=tsx scripts/axir-conformance-sync.mjs write",
+    "eval:interaction-timeline": "node --import=tsx scripts/evaluate-interaction-timeline.ts",
     "profiles:generate": "node scripts/generate-provider-profiles.mjs",
     "profiles:check": "node scripts/generate-provider-profiles.mjs --check",
     "profiles:smoke": "npm run tsx src/examples/provider-profile-smoke.ts",
