@@ -432,6 +432,9 @@ Use `mode: 'steer'` only when current child work should be cancelled and the
 new input should run first. `follow-up` never interrupts. Child runtime state
 is captured through the existing AxAgent state format; values Ax cannot
 serialize do not become durable merely because the session is retained.
+Recovery advances a root-wide lease epoch: restore the root and refresh handles
+before sending more mail; executor closures from the previous owner are stale.
+Ambiguous running work keeps its pre-dispatch token reservation charged.
 
 This mechanism does not expose a second interpreter, inherit parent tools, or
 change `llmQuery(...)` budgets. The host independently bounds child count,

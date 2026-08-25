@@ -1,6 +1,6 @@
 import type { AxAIService, AxFunction } from '../ai/types.js';
 import type { AxAgentUsage, AxProgramUsage } from '../dsp/types.js';
-import { randomUUID } from '../util/crypto.js';
+import { randomUUID, sha256 } from '../util/crypto.js';
 import type { AxAgentState } from './agentInternal/agentStateTypes.js';
 
 export type AxAgentSessionMessageMode = 'steer' | 'follow-up';
@@ -35,6 +35,8 @@ export interface AxAgentSessionHandle {
   parentId: string;
   rootId: string;
   registrationKey: string;
+  /** Root ownership lease. Recovery advances it and revokes older handles. */
+  epoch: number;
   /** Bearer capability. Treat serialized handles as sensitive application data. */
   capability: string;
 }
@@ -52,6 +54,8 @@ export interface AxAgentSessionMessage {
   error?: string;
   attemptId?: string;
   cancelRequested?: boolean;
+  /** Tokens charged if this running attempt becomes outcome_unknown. */
+  tokenReservation?: number;
 }
 
 export interface AxAgentSessionRecord {
@@ -83,6 +87,8 @@ export interface AxAgentSessionLimits {
   maxRetainedMessages: number;
   /** Provider-reported token budget across the root and all descendants. */
   maxTokens: number;
+  /** Conservative token charge for an outcome_unknown child message. */
+  maxTokensPerMessage: number;
   /** Exact admission budget across initial tasks and later messages. */
   maxSubcalls: number;
 }
@@ -90,6 +96,8 @@ export interface AxAgentSessionLimits {
 export interface AxAgentSessionRootRecord {
   id: string;
   capability: string;
+  /** Transactional ownership lease shared by every handle in this tree. */
+  epoch: number;
   authorizedChildren: string[];
   status: 'active' | 'cancelled' | 'interrupted';
   createdAt: number;
@@ -98,14 +106,23 @@ export interface AxAgentSessionRootRecord {
   admittedChildren: number;
   admittedSubcalls: number;
   descendantUsage: AxAgentSessionUsage;
+  reservedTokens: number;
+  outcomeUnknownTokens: number;
   budgetExceeded?: 'tokens' | 'subcalls';
 }
 
 export interface AxAgentSessionRegistrySnapshot {
   version: 1;
   revision: number;
+  /** SHA-256 of the canonical root/session authorization policy. */
+  policyDigest: string;
   root: AxAgentSessionRootRecord;
   sessions: Record<string, AxAgentSessionRecord>;
+}
+
+export interface AxAgentSessionRestoreOptions {
+  /** Trusted digest stored separately from the candidate snapshot. */
+  expectedPolicyDigest: string;
 }
 
 export interface AxAgentSessionStore {
@@ -133,6 +150,7 @@ export interface AxAgentSessionJob {
   rootId: string;
   sessionId: string;
   messageId: string;
+  epoch: number;
   enqueuedAt: number;
 }
 
@@ -227,6 +245,8 @@ export interface AxAgentSessionRootView {
   admittedChildren: number;
   admittedSubcalls: number;
   descendantUsage: AxAgentSessionUsage;
+  reservedTokens: number;
+  outcomeUnknownTokens: number;
   budgetExceeded?: AxAgentSessionRootRecord['budgetExceeded'];
   childCount: number;
   durability: {
@@ -291,6 +311,7 @@ const DEFAULT_LIMITS: AxAgentSessionLimits = {
   maxPendingMessages: 16,
   maxRetainedMessages: 128,
   maxTokens: 250_000,
+  maxTokensPerMessage: 62_500,
   maxSubcalls: 100,
 };
 
@@ -335,8 +356,21 @@ function resolveLimits(
   override?: Partial<AxAgentSessionLimits>
 ): AxAgentSessionLimits {
   const limits = { ...base, ...override };
+  if (
+    override &&
+    override.maxTokensPerMessage === undefined &&
+    override.maxTokens !== undefined
+  ) {
+    limits.maxTokensPerMessage = Math.min(
+      base.maxTokensPerMessage,
+      Math.max(1, Math.floor(limits.maxTokens / limits.maxConcurrency))
+    );
+  }
   for (const [name, value] of Object.entries(limits)) {
     validatePositiveLimit(name as keyof AxAgentSessionLimits, value);
+  }
+  if (limits.maxTokensPerMessage > limits.maxTokens) {
+    throw new Error('maxTokensPerMessage cannot exceed maxTokens');
   }
   return limits;
 }
@@ -347,6 +381,87 @@ function validateRegistrationKey(key: string): void {
       `Invalid retained agent registration key "${key}"; use 1-128 letters, numbers, dot, underscore, or dash`
     );
   }
+}
+
+function canonicalKeys(keys: readonly string[]): string[] {
+  return [...new Set(keys)].sort();
+}
+
+function equalStrings(left: readonly string[], right: readonly string[]) {
+  return (
+    left.length === right.length &&
+    left.every((value, index) => value === right[index])
+  );
+}
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && Number(value) >= 0;
+}
+
+function assertUsage(usage: Readonly<AxAgentSessionUsage>, name: string): void {
+  const fields = [
+    'completionTokens',
+    'modelCalls',
+    'promptTokens',
+    'totalTokens',
+  ];
+  if (!equalStrings(Object.keys(usage).sort(), fields)) {
+    throw new AxAgentSessionSerializationError(
+      `${name} does not match the canonical usage schema`
+    );
+  }
+  for (const [field, value] of Object.entries(usage)) {
+    if (!isNonNegativeSafeInteger(value)) {
+      throw new AxAgentSessionSerializationError(
+        `${name}.${field} must be a non-negative safe integer`
+      );
+    }
+  }
+}
+
+function canonicalPolicy(snapshot: Readonly<AxAgentSessionRegistrySnapshot>) {
+  const sessions = Object.keys(snapshot.sessions)
+    .sort()
+    .map((id) => {
+      const record = snapshot.sessions[id]!;
+      return {
+        version: record.handle.version,
+        id,
+        parentId: record.handle.parentId,
+        rootId: record.handle.rootId,
+        registrationKey: record.handle.registrationKey,
+        epoch: record.handle.epoch,
+        capability: record.handle.capability,
+        depth: record.depth,
+        authorizedChildren: canonicalKeys(record.authorizedChildren),
+      };
+    });
+  return {
+    version: snapshot.version,
+    root: {
+      id: snapshot.root.id,
+      capability: snapshot.root.capability,
+      epoch: snapshot.root.epoch,
+      authorizedChildren: canonicalKeys(snapshot.root.authorizedChildren),
+      limits: {
+        maxChildren: snapshot.root.limits.maxChildren,
+        maxDepth: snapshot.root.limits.maxDepth,
+        maxConcurrency: snapshot.root.limits.maxConcurrency,
+        maxPendingMessages: snapshot.root.limits.maxPendingMessages,
+        maxRetainedMessages: snapshot.root.limits.maxRetainedMessages,
+        maxTokens: snapshot.root.limits.maxTokens,
+        maxTokensPerMessage: snapshot.root.limits.maxTokensPerMessage,
+        maxSubcalls: snapshot.root.limits.maxSubcalls,
+      },
+    },
+    sessions,
+  };
+}
+
+async function digestPolicy(
+  snapshot: Readonly<AxAgentSessionRegistrySnapshot>
+): Promise<string> {
+  return sha256(JSON.stringify(canonicalPolicy(snapshot)));
 }
 
 function timingSafeEqual(left: string, right: string): boolean {
@@ -575,6 +690,7 @@ export class AxInMemoryAgentSessionScheduler
 }
 
 type RegistryMutation<T> = (snapshot: AxAgentSessionRegistrySnapshot) => T;
+const SKIP_MUTATION = Symbol('skip-retained-session-mutation');
 
 type LiveAgent = {
   agent: AxRetainedAgent;
@@ -594,6 +710,7 @@ export class AxAgentSessionHost {
   private readonly onEvent?: AxAgentSessionHostOptions['onEvent'];
   private readonly liveAgents = new Map<string, LiveAgent>();
   private readonly controllers = new Map<string, AbortController>();
+  private readonly ownedEpochs = new Map<string, number>();
   private detachScheduler?: () => void;
   private closed = false;
 
@@ -651,7 +768,8 @@ export class AxAgentSessionHost {
     const root: AxAgentSessionRootRecord = {
       id,
       capability: randomUUID(),
-      authorizedChildren: [...new Set(options.authorizedChildren)],
+      epoch: 1,
+      authorizedChildren: canonicalKeys(options.authorizedChildren),
       status: 'active',
       createdAt: now,
       updatedAt: now,
@@ -659,12 +777,24 @@ export class AxAgentSessionHost {
       admittedChildren: 0,
       admittedSubcalls: 0,
       descendantUsage: emptyUsage(),
+      reservedTokens: 0,
+      outcomeUnknownTokens: 0,
     };
-    const saved = await this.store.save(
-      { version: 1, revision: 0, root, sessions: {} },
-      undefined
+    const initial: AxAgentSessionRegistrySnapshot = {
+      version: 1,
+      revision: 0,
+      policyDigest: '',
+      root,
+      sessions: {},
+    };
+    initial.policyDigest = await digestPolicy(initial);
+    const saved = await this.store.save(initial, undefined);
+    this.ownedEpochs.set(saved.root.id, saved.root.epoch);
+    const client = this.clientFor(
+      saved.root.id,
+      saved.root.capability,
+      saved.root.epoch
     );
-    const client = this.clientFor(saved.root.id, saved.root.capability);
     if (options.abortSignal) {
       const cancel = () => {
         void client.cancel().catch(() => {
@@ -680,7 +810,11 @@ export class AxAgentSessionHost {
 
   async restoreRoot(rootId: string): Promise<AxAgentSessionClient> {
     const snapshot = await this.requireRoot(rootId);
-    return this.clientFor(snapshot.root.id, snapshot.root.capability);
+    return this.clientFor(
+      snapshot.root.id,
+      snapshot.root.capability,
+      snapshot.root.epoch
+    );
   }
 
   async snapshot(rootId: string): Promise<AxAgentSessionRegistrySnapshot> {
@@ -688,20 +822,24 @@ export class AxAgentSessionHost {
   }
 
   async restore(
-    snapshot: Readonly<AxAgentSessionRegistrySnapshot>
+    snapshot: Readonly<AxAgentSessionRegistrySnapshot>,
+    options: Readonly<AxAgentSessionRestoreOptions>
   ): Promise<AxAgentSessionClient> {
     this.assertOpen();
-    if (snapshot.version !== 1) {
-      throw new Error(
-        `Unsupported retained agent session snapshot version "${String(snapshot.version)}"`
-      );
-    }
+    await this.validateSnapshot(snapshot, options.expectedPolicyDigest);
     const restored: AxAgentSessionRegistrySnapshot = cloneStructured(snapshot);
     restored.revision = 0;
     this.interruptRunning(restored);
+    restored.policyDigest = await digestPolicy(restored);
+    await this.validateSnapshot(restored);
     const saved = await this.store.save(restored, undefined);
-    await this.scheduleReady(saved.root.id);
-    return this.clientFor(saved.root.id, saved.root.capability);
+    this.ownedEpochs.set(saved.root.id, saved.root.epoch);
+    await this.scheduleReady(saved.root.id, saved.root.epoch);
+    return this.clientFor(
+      saved.root.id,
+      saved.root.capability,
+      saved.root.epoch
+    );
   }
 
   /**
@@ -712,15 +850,32 @@ export class AxAgentSessionHost {
     this.assertOpen();
     const roots = rootId ? [rootId] : await this.store.listRoots();
     for (const id of roots) {
-      const interrupted = await this.mutate(id, (snapshot) => {
+      const outcome = await this.mutate(id, (snapshot) => {
         const records: AxAgentSessionRecord[] = [];
         this.interruptRunning(snapshot, records);
-        return records;
+        snapshot.root.epoch++;
+        for (const record of Object.values(snapshot.sessions)) {
+          record.handle.epoch = snapshot.root.epoch;
+          for (const message of record.mailbox) {
+            if (message.status === 'pending') {
+              message.jobId = `job-${message.id}-epoch-${snapshot.root.epoch}`;
+            }
+          }
+        }
+        return {
+          interrupted: records,
+          sessionIds: Object.keys(snapshot.sessions),
+          epoch: snapshot.root.epoch,
+        };
       });
-      for (const record of interrupted) {
+      this.ownedEpochs.set(id, outcome.epoch);
+      for (const sessionId of outcome.sessionIds) {
+        this.stopLiveAgent(sessionId);
+      }
+      for (const record of outcome.interrupted) {
         await this.emit('interrupted', record);
       }
-      await this.scheduleReady(id);
+      await this.scheduleReady(id, outcome.epoch);
     }
   }
 
@@ -739,13 +894,14 @@ export class AxAgentSessionHost {
     await this.scheduler.close?.();
   }
 
-  private clientFor(sessionId: string, capability: string) {
-    return new AxAgentSessionClient(this, sessionId, capability);
+  private clientFor(sessionId: string, capability: string, epoch: number) {
+    return new AxAgentSessionClient(this, sessionId, capability, epoch);
   }
 
   async spawn(
     parentId: string,
     parentCapability: string,
+    parentEpoch: number,
     registrationKey: string,
     input: unknown
   ): Promise<AxAgentSessionHandle> {
@@ -754,9 +910,10 @@ export class AxAgentSessionHost {
     const id = `child-${randomUUID()}`;
     const capability = randomUUID();
     const now = this.now();
-    const handle = await this.mutateBySession(
+    const admitted = await this.mutateBySession(
       parentId,
       parentCapability,
+      parentEpoch,
       (snapshot, parent) => {
         const allowed = parent.authorizedChildren;
         const parentRecord = snapshot.sessions[parentId];
@@ -802,13 +959,16 @@ export class AxAgentSessionHost {
           parentId,
           rootId: snapshot.root.id,
           registrationKey,
+          epoch: snapshot.root.epoch,
           capability,
         };
         const message = this.createMessage('follow-up', clonedInput, now);
-        snapshot.sessions[id] = {
+        const record: AxAgentSessionRecord = {
           handle: childHandle,
           depth,
-          authorizedChildren: [...(registration.authorizedChildren ?? [])],
+          authorizedChildren: canonicalKeys(
+            registration.authorizedChildren ?? []
+          ),
           status: 'queued',
           createdAt: now,
           updatedAt: now,
@@ -816,24 +976,30 @@ export class AxAgentSessionHost {
           usage: emptyUsage(),
           descendantUsage: emptyUsage(),
         };
+        snapshot.sessions[id] = record;
         snapshot.root.admittedChildren++;
-        return childHandle;
+        return {
+          handle: cloneStructured(childHandle),
+          record: cloneStructured(record),
+          message: cloneStructured(message),
+        };
       }
     );
-    const record = (await this.requireRoot(handle.rootId)).sessions[handle.id]!;
-    await this.enqueueSafely(record, record.mailbox[0]!);
-    await this.emit('queued', record, record.mailbox[0]?.id);
-    return cloneStructured(handle);
+    await this.enqueueSafely(admitted.record, admitted.message);
+    await this.emit('queued', admitted.record, admitted.message.id);
+    return cloneStructured(admitted.handle);
   }
 
   async inspect(
     parentId: string,
     parentCapability: string,
+    parentEpoch: number,
     handle: Readonly<AxAgentSessionHandle>
   ): Promise<AxAgentSessionStatusView> {
     const record = await this.authorizedRecord(
       parentId,
       parentCapability,
+      parentEpoch,
       handle
     );
     return this.view(record);
@@ -842,11 +1008,13 @@ export class AxAgentSessionHost {
   async result(
     parentId: string,
     parentCapability: string,
+    parentEpoch: number,
     handle: Readonly<AxAgentSessionHandle>
   ): Promise<unknown> {
     const record = await this.authorizedRecord(
       parentId,
       parentCapability,
+      parentEpoch,
       handle
     );
     const message = latestCompletedMessage(record);
@@ -859,6 +1027,7 @@ export class AxAgentSessionHost {
   async send(
     parentId: string,
     parentCapability: string,
+    parentEpoch: number,
     handle: Readonly<AxAgentSessionHandle>,
     input: unknown,
     mode: AxAgentSessionMessageMode
@@ -870,7 +1039,7 @@ export class AxAgentSessionHost {
     const clonedInput = cloneStructured(input);
     const now = this.now();
     const result = await this.mutate(handle.rootId, (snapshot) => {
-      this.assertParent(snapshot, parentId, parentCapability);
+      this.assertParent(snapshot, parentId, parentCapability, parentEpoch);
       if (snapshot.root.status === 'cancelled') {
         throw new AxAgentSessionAuthorizationError(
           `Retained root "${snapshot.root.id}" is cancelled and cannot accept messages`
@@ -930,7 +1099,9 @@ export class AxAgentSessionHost {
         'Retained child steered by parent'
       );
     }
-    if (!result.hasActiveMessage) await this.scheduleReady(handle.rootId);
+    if (!result.hasActiveMessage) {
+      await this.scheduleReady(handle.rootId, parentEpoch);
+    }
     await this.emit('queued', result.record, result.receipt.messageId);
     return {
       ...result.receipt,
@@ -941,6 +1112,7 @@ export class AxAgentSessionHost {
   async cancel(
     sessionId: string,
     capability: string,
+    epoch: number,
     handle?: Readonly<AxAgentSessionHandle>
   ): Promise<void> {
     this.assertOpen();
@@ -948,7 +1120,7 @@ export class AxAgentSessionHost {
     const outcome = await this.mutate(root.root.id, (snapshot) => {
       const jobs: string[] = [];
       const affected: AxAgentSessionRecord[] = [];
-      this.assertParent(snapshot, sessionId, capability);
+      this.assertParent(snapshot, sessionId, capability, epoch);
       const targetId = handle
         ? this.assertHandle(snapshot, sessionId, handle).handle.id
         : sessionId;
@@ -982,13 +1154,14 @@ export class AxAgentSessionHost {
   async dispose(
     parentId: string,
     parentCapability: string,
+    parentEpoch: number,
     handle: Readonly<AxAgentSessionHandle>
   ): Promise<void> {
     this.assertOpen();
     const outcome = await this.mutate(handle.rootId, (snapshot) => {
       const jobs: string[] = [];
       const records: AxAgentSessionRecord[] = [];
-      this.assertParent(snapshot, parentId, parentCapability);
+      this.assertParent(snapshot, parentId, parentCapability, parentEpoch);
       const target = this.assertHandle(snapshot, parentId, handle);
       const ids = this.descendants(snapshot, target.handle.id, true);
       for (const id of ids) {
@@ -996,6 +1169,12 @@ export class AxAgentSessionHost {
         if (!record) continue;
         records.push(cloneStructured(record));
         jobs.push(...record.mailbox.map((message) => message.jobId));
+        for (const message of record.mailbox) {
+          if (message.status === 'running' && message.tokenReservation) {
+            snapshot.root.reservedTokens -= message.tokenReservation;
+            snapshot.root.outcomeUnknownTokens += message.tokenReservation;
+          }
+        }
         delete snapshot.sessions[id];
         snapshot.root.admittedChildren--;
       }
@@ -1012,10 +1191,11 @@ export class AxAgentSessionHost {
 
   async list(
     parentId: string,
-    parentCapability: string
+    parentCapability: string,
+    parentEpoch: number
   ): Promise<AxAgentSessionStatusView[]> {
     const snapshot = await this.rootForSession(parentId);
-    this.assertParent(snapshot, parentId, parentCapability);
+    this.assertParent(snapshot, parentId, parentCapability, parentEpoch);
     return Object.values(snapshot.sessions)
       .filter((record) => record.handle.parentId === parentId)
       .sort((left, right) => left.createdAt - right.createdAt)
@@ -1024,10 +1204,11 @@ export class AxAgentSessionHost {
 
   async inspectRoot(
     sessionId: string,
-    capability: string
+    capability: string,
+    epoch: number
   ): Promise<AxAgentSessionRootView> {
     const snapshot = await this.rootForSession(sessionId);
-    this.assertParent(snapshot, sessionId, capability);
+    this.assertParent(snapshot, sessionId, capability, epoch);
     return {
       rootId: snapshot.root.id,
       status: snapshot.root.status,
@@ -1035,6 +1216,8 @@ export class AxAgentSessionHost {
       admittedChildren: snapshot.root.admittedChildren,
       admittedSubcalls: snapshot.root.admittedSubcalls,
       descendantUsage: cloneStructured(snapshot.root.descendantUsage),
+      reservedTokens: snapshot.root.reservedTokens,
+      outcomeUnknownTokens: snapshot.root.outcomeUnknownTokens,
       ...(snapshot.root.budgetExceeded
         ? { budgetExceeded: snapshot.root.budgetExceeded }
         : {}),
@@ -1046,9 +1229,10 @@ export class AxAgentSessionHost {
   functions(
     sessionId: string,
     capability: string,
+    epoch: number,
     options: Readonly<AxAgentSessionFunctionOptions> = {}
   ): AxFunction[] {
-    const client = this.clientFor(sessionId, capability);
+    const client = this.clientFor(sessionId, capability, epoch);
     const namespace = options.namespace ?? 'sessions';
     const objectSchema = { type: 'object' } as const;
     const handleSchema = {
@@ -1178,29 +1362,48 @@ export class AxAgentSessionHost {
 
   private async dispatch(job: Readonly<AxAgentSessionJob>): Promise<void> {
     if (this.closed) return;
+    if (this.ownedEpochs.get(job.rootId) !== job.epoch) return;
     const attemptId = randomUUID();
-    const claimed = await this.mutate(job.rootId, (snapshot) => {
-      const record = snapshot.sessions[job.sessionId];
-      const message = record?.mailbox.find((item) => item.id === job.messageId);
-      if (!record || !message || message.status !== 'pending') return undefined;
-      if (record.activeMessageId) return undefined;
-      if (this.nextPending(record)?.id !== message.id) return undefined;
-      const running = Object.values(snapshot.sessions).filter(
-        (item) => item.activeMessageId
-      ).length;
-      if (running >= snapshot.root.limits.maxConcurrency) return undefined;
-      message.status = 'running';
-      message.startedAt = this.now();
-      message.attemptId = attemptId;
-      record.activeMessageId = message.id;
-      record.status = 'running';
-      record.updatedAt = this.now();
-      delete record.lastError;
-      return {
-        record: cloneStructured(record),
-        message: cloneStructured(message),
-      };
-    });
+    const claimed = await this.mutateAtEpoch(
+      job.rootId,
+      job.epoch,
+      (snapshot) => {
+        const record = snapshot.sessions[job.sessionId];
+        const message = record?.mailbox.find(
+          (item) => item.id === job.messageId
+        );
+        if (!record || !message || message.status !== 'pending') {
+          return SKIP_MUTATION;
+        }
+        if (record.activeMessageId) return SKIP_MUTATION;
+        if (this.nextPending(record)?.id !== message.id) return SKIP_MUTATION;
+        const running = Object.values(snapshot.sessions).filter(
+          (item) => item.activeMessageId
+        ).length;
+        if (running >= snapshot.root.limits.maxConcurrency)
+          return SKIP_MUTATION;
+        const tokenReservation = snapshot.root.limits.maxTokensPerMessage;
+        if (
+          this.committedTokens(snapshot) + tokenReservation >
+          snapshot.root.limits.maxTokens
+        ) {
+          return SKIP_MUTATION;
+        }
+        message.status = 'running';
+        message.startedAt = this.now();
+        message.attemptId = attemptId;
+        message.tokenReservation = tokenReservation;
+        snapshot.root.reservedTokens += tokenReservation;
+        record.activeMessageId = message.id;
+        record.status = 'running';
+        record.updatedAt = this.now();
+        delete record.lastError;
+        return {
+          record: cloneStructured(record),
+          message: cloneStructured(message),
+        };
+      }
+    );
     if (!claimed) return;
     await this.emit('running', claimed.record, claimed.message.id);
 
@@ -1284,119 +1487,133 @@ export class AxAgentSessionHost {
       this.controllers.delete(job.id);
     }
 
-    const completion = await this.mutate(job.rootId, (snapshot) => {
-      const cancelJobs: string[] = [];
-      const record = snapshot.sessions[job.sessionId];
-      const message = record?.mailbox.find((item) => item.id === job.messageId);
-      if (
-        !record ||
-        !message ||
-        message.status !== 'running' ||
-        message.attemptId !== attemptId
-      ) {
-        return { terminal: undefined, cancelJobs, rollback: false };
-      }
-      const cancelled = message.cancelRequested || controller.signal.aborted;
-      message.completedAt = this.now();
-      delete message.attemptId;
-      delete record.activeMessageId;
-      addUsage(record.usage, usage);
-      addUsage(snapshot.root.descendantUsage, usage);
-      let ancestorId = record.handle.parentId;
-      while (ancestorId !== snapshot.root.id) {
-        const ancestor = snapshot.sessions[ancestorId];
-        if (!ancestor) break;
-        addUsage(ancestor.descendantUsage, usage);
-        ancestorId = ancestor.handle.parentId;
-      }
+    const completion = await this.mutateAtEpoch(
+      job.rootId,
+      job.epoch,
+      (snapshot) => {
+        const cancelJobs: string[] = [];
+        const record = snapshot.sessions[job.sessionId];
+        const message = record?.mailbox.find(
+          (item) => item.id === job.messageId
+        );
+        if (
+          !record ||
+          !message ||
+          message.status !== 'running' ||
+          message.attemptId !== attemptId
+        ) {
+          return SKIP_MUTATION;
+        }
+        const cancelled = message.cancelRequested || controller.signal.aborted;
+        message.completedAt = this.now();
+        delete message.attemptId;
+        delete record.activeMessageId;
+        snapshot.root.reservedTokens -= message.tokenReservation ?? 0;
+        addUsage(record.usage, usage);
+        addUsage(snapshot.root.descendantUsage, usage);
+        let ancestorId = record.handle.parentId;
+        while (ancestorId !== snapshot.root.id) {
+          const ancestor = snapshot.sessions[ancestorId];
+          if (!ancestor) break;
+          addUsage(ancestor.descendantUsage, usage);
+          ancestorId = ancestor.handle.parentId;
+        }
 
-      let terminalType: AxAgentSessionEvent['type'];
-      if (cancelled) {
-        message.status = 'cancelled';
-        record.status = record.mailbox.some((item) => item.status === 'pending')
-          ? 'queued'
-          : 'cancelled';
-        terminalType = 'cancelled';
-      } else if (failure) {
-        message.status = 'failed';
-        message.error = errorMessage(failure);
-        record.status = 'failed';
-        record.lastError = message.error;
-        if (nextState !== undefined) record.state = cloneStructured(nextState);
-        if (nextArtifacts !== undefined)
-          record.artifacts = cloneStructured(nextArtifacts);
-        terminalType = 'failed';
-      } else {
-        message.status = 'completed';
-        message.result = cloneStructured(result);
-        record.status = 'completed';
-        delete record.lastError;
-        if (nextState !== undefined) record.state = cloneStructured(nextState);
-        if (nextArtifacts !== undefined)
-          record.artifacts = cloneStructured(nextArtifacts);
-        terminalType = 'completed';
-      }
-      record.updatedAt = this.now();
-      if (
-        snapshot.root.descendantUsage.totalTokens >=
-        snapshot.root.limits.maxTokens
-      ) {
-        snapshot.root.budgetExceeded = 'tokens';
-        for (const candidate of Object.values(snapshot.sessions)) {
-          for (const queued of candidate.mailbox) {
-            if (queued.status === 'pending') {
-              queued.status = 'cancelled';
-              queued.completedAt = this.now();
-              cancelJobs.push(queued.jobId);
-            } else if (
-              queued.status === 'running' &&
-              queued.id !== message.id
+        let terminalType: AxAgentSessionEvent['type'];
+        if (cancelled) {
+          message.status = 'cancelled';
+          record.status = record.mailbox.some(
+            (item) => item.status === 'pending'
+          )
+            ? 'queued'
+            : 'cancelled';
+          terminalType = 'cancelled';
+        } else if (failure) {
+          message.status = 'failed';
+          message.error = errorMessage(failure);
+          record.status = 'failed';
+          record.lastError = message.error;
+          if (nextState !== undefined)
+            record.state = cloneStructured(nextState);
+          if (nextArtifacts !== undefined)
+            record.artifacts = cloneStructured(nextArtifacts);
+          terminalType = 'failed';
+        } else {
+          message.status = 'completed';
+          message.result = cloneStructured(result);
+          record.status = 'completed';
+          delete record.lastError;
+          if (nextState !== undefined)
+            record.state = cloneStructured(nextState);
+          if (nextArtifacts !== undefined)
+            record.artifacts = cloneStructured(nextArtifacts);
+          terminalType = 'completed';
+        }
+        record.updatedAt = this.now();
+        if (
+          this.committedTokens(snapshot) +
+            snapshot.root.limits.maxTokensPerMessage >
+          snapshot.root.limits.maxTokens
+        ) {
+          snapshot.root.budgetExceeded = 'tokens';
+          for (const candidate of Object.values(snapshot.sessions)) {
+            for (const queued of candidate.mailbox) {
+              if (queued.status === 'pending') {
+                queued.status = 'cancelled';
+                queued.completedAt = this.now();
+                cancelJobs.push(queued.jobId);
+              } else if (
+                queued.status === 'running' &&
+                queued.id !== message.id
+              ) {
+                queued.cancelRequested = true;
+                cancelJobs.push(queued.jobId);
+                candidate.status = 'cancelling';
+              }
+            }
+            if (
+              !candidate.activeMessageId &&
+              candidate.status === 'queued' &&
+              !candidate.mailbox.some((item) => item.status === 'pending')
             ) {
-              queued.cancelRequested = true;
-              cancelJobs.push(queued.jobId);
-              candidate.status = 'cancelling';
+              candidate.status = 'cancelled';
+              candidate.updatedAt = this.now();
             }
           }
-          if (
-            !candidate.activeMessageId &&
-            candidate.status === 'queued' &&
-            !candidate.mailbox.some((item) => item.status === 'pending')
-          ) {
-            candidate.status = 'cancelled';
-            candidate.updatedAt = this.now();
-          }
         }
+        return {
+          terminal: {
+            type: terminalType,
+            record: cloneStructured(record),
+          },
+          cancelJobs,
+          rollback: cancelled,
+        };
       }
-      return {
-        terminal: {
-          type: terminalType,
-          record: cloneStructured(record),
-        },
-        cancelJobs,
-        rollback: cancelled,
-      };
-    });
+    );
 
-    if (completion.rollback) {
+    if (completion?.rollback) {
       const current = this.liveAgents.get(job.sessionId);
       if (current && current === live) {
         this.stopLiveAgent(job.sessionId);
       }
     }
-    if (completion.terminal) {
+    if (completion?.terminal) {
       await this.emit(
         completion.terminal.type,
         completion.terminal.record,
         job.messageId
       );
     }
-    for (const cancelJob of completion.cancelJobs) {
+    for (const cancelJob of completion?.cancelJobs ?? []) {
       await this.cancelScheduledJob(
         cancelJob,
         'Retained agent root token budget exhausted'
       );
     }
-    if (!this.closed) await this.scheduleReady(job.rootId);
+    if (completion && !this.closed) {
+      await this.scheduleReady(job.rootId, job.epoch);
+    }
   }
 
   private async liveAgent(record: Readonly<AxAgentSessionRecord>) {
@@ -1409,7 +1626,11 @@ export class AxAgentSessionHost {
         `Retained agent registration "${record.handle.registrationKey}" is not configured on this host`
       );
     }
-    const client = this.clientFor(record.handle.id, record.handle.capability);
+    const client = this.clientFor(
+      record.handle.id,
+      record.handle.capability,
+      record.handle.epoch
+    );
     const agent = registration.create({
       session: client,
       sessionId: record.handle.id,
@@ -1441,9 +1662,14 @@ export class AxAgentSessionHost {
     );
   }
 
-  private async scheduleReady(rootId: string): Promise<void> {
+  private async scheduleReady(
+    rootId: string,
+    expectedEpoch: number
+  ): Promise<void> {
     if (this.closed) return;
+    if (this.ownedEpochs.get(rootId) !== expectedEpoch) return;
     const snapshot = await this.requireRoot(rootId);
+    if (snapshot.root.epoch !== expectedEpoch) return;
     if (snapshot.root.budgetExceeded === 'tokens') return;
     const running = Object.values(snapshot.sessions).filter(
       (record) => record.activeMessageId
@@ -1480,6 +1706,7 @@ export class AxAgentSessionHost {
       rootId: record.handle.rootId,
       sessionId: record.handle.id,
       messageId: message.id,
+      epoch: record.handle.epoch,
       enqueuedAt: this.now(),
     });
   }
@@ -1492,14 +1719,26 @@ export class AxAgentSessionHost {
       await this.enqueue(record, message);
       return true;
     } catch (error) {
-      await this.mutate(record.handle.rootId, (snapshot) => {
-        const current = snapshot.sessions[record.handle.id];
-        const queued = current?.mailbox.find((item) => item.id === message.id);
-        if (current && queued?.status === 'pending') {
-          current.lastError = `Scheduler enqueue failed: ${errorMessage(error)}`;
-          current.updatedAt = this.now();
+      await this.mutateAtEpoch(
+        record.handle.rootId,
+        record.handle.epoch,
+        (snapshot) => {
+          const current = snapshot.sessions[record.handle.id];
+          const queued = current?.mailbox.find(
+            (item) => item.id === message.id
+          );
+          if (
+            current &&
+            queued?.status === 'pending' &&
+            queued.jobId === message.jobId
+          ) {
+            current.lastError = `Scheduler enqueue failed: ${errorMessage(error)}`;
+            current.updatedAt = this.now();
+            return true;
+          }
+          return SKIP_MUTATION;
         }
-      });
+      );
       return false;
     }
   }
@@ -1580,6 +1819,9 @@ export class AxAgentSessionHost {
       let recordInterrupted = false;
       for (const message of record.mailbox) {
         if (message.status !== 'running') continue;
+        const tokenReservation = message.tokenReservation ?? 0;
+        snapshot.root.reservedTokens -= tokenReservation;
+        snapshot.root.outcomeUnknownTokens += tokenReservation;
         message.status = 'outcome_unknown';
         message.completedAt = this.now();
         message.error =
@@ -1598,7 +1840,41 @@ export class AxAgentSessionHost {
         interrupted.push(cloneStructured(record));
       }
     }
-    if (found) snapshot.root.status = 'interrupted';
+    if (found) {
+      snapshot.root.status = 'interrupted';
+      if (
+        this.committedTokens(snapshot) +
+          snapshot.root.limits.maxTokensPerMessage >
+        snapshot.root.limits.maxTokens
+      ) {
+        snapshot.root.budgetExceeded = 'tokens';
+        for (const record of Object.values(snapshot.sessions)) {
+          for (const message of record.mailbox) {
+            if (message.status === 'pending') {
+              message.status = 'cancelled';
+              message.completedAt = this.now();
+            }
+          }
+          if (
+            !record.activeMessageId &&
+            record.status === 'queued' &&
+            !record.mailbox.some((message) => message.status === 'pending')
+          ) {
+            record.status = 'cancelled';
+          }
+        }
+      }
+    }
+  }
+
+  private committedTokens(
+    snapshot: Readonly<AxAgentSessionRegistrySnapshot>
+  ): number {
+    return (
+      snapshot.root.descendantUsage.totalTokens +
+      snapshot.root.reservedTokens +
+      snapshot.root.outcomeUnknownTokens
+    );
   }
 
   private descendants(
@@ -1618,10 +1894,11 @@ export class AxAgentSessionHost {
   private async authorizedRecord(
     parentId: string,
     parentCapability: string,
+    parentEpoch: number,
     handle: Readonly<AxAgentSessionHandle>
   ) {
     const snapshot = await this.requireRoot(handle.rootId);
-    this.assertParent(snapshot, parentId, parentCapability);
+    this.assertParent(snapshot, parentId, parentCapability, parentEpoch);
     return cloneStructured(this.assertHandle(snapshot, parentId, handle));
   }
 
@@ -1634,9 +1911,14 @@ export class AxAgentSessionHost {
     if (!record) throw new AxAgentSessionNotFoundError(handle.id);
     if (
       handle.version !== 1 ||
+      record.handle.id !== handle.id ||
       record.handle.parentId !== parentId ||
       handle.parentId !== parentId ||
+      record.handle.rootId !== snapshot.root.id ||
       handle.rootId !== snapshot.root.id ||
+      record.handle.registrationKey !== handle.registrationKey ||
+      handle.epoch !== snapshot.root.epoch ||
+      record.handle.epoch !== snapshot.root.epoch ||
       !timingSafeEqual(handle.capability, record.handle.capability)
     ) {
       throw new AxAgentSessionStaleHandleError(handle.id);
@@ -1647,10 +1929,14 @@ export class AxAgentSessionHost {
   private assertParent(
     snapshot: Readonly<AxAgentSessionRegistrySnapshot>,
     sessionId: string,
-    capability: string
+    capability: string,
+    epoch: number
   ): { depth: number; authorizedChildren: readonly string[] } {
     if (sessionId === snapshot.root.id) {
-      if (!timingSafeEqual(capability, snapshot.root.capability)) {
+      if (
+        epoch !== snapshot.root.epoch ||
+        !timingSafeEqual(capability, snapshot.root.capability)
+      ) {
         throw new AxAgentSessionStaleHandleError(sessionId);
       }
       return {
@@ -1660,7 +1946,11 @@ export class AxAgentSessionHost {
     }
     const record = snapshot.sessions[sessionId];
     if (!record) throw new AxAgentSessionNotFoundError(sessionId);
-    if (!timingSafeEqual(capability, record.handle.capability)) {
+    if (
+      epoch !== snapshot.root.epoch ||
+      record.handle.epoch !== snapshot.root.epoch ||
+      !timingSafeEqual(capability, record.handle.capability)
+    ) {
       throw new AxAgentSessionStaleHandleError(sessionId);
     }
     return {
@@ -1672,6 +1962,7 @@ export class AxAgentSessionHost {
   private async mutateBySession<T>(
     sessionId: string,
     capability: string,
+    epoch: number,
     mutation: (
       snapshot: AxAgentSessionRegistrySnapshot,
       parent: { depth: number; authorizedChildren: readonly string[] }
@@ -1679,7 +1970,10 @@ export class AxAgentSessionHost {
   ): Promise<T> {
     const root = await this.rootForSession(sessionId);
     return this.mutate(root.root.id, (snapshot) =>
-      mutation(snapshot, this.assertParent(snapshot, sessionId, capability))
+      mutation(
+        snapshot,
+        this.assertParent(snapshot, sessionId, capability, epoch)
+      )
     );
   }
 
@@ -1687,10 +1981,16 @@ export class AxAgentSessionHost {
     sessionId: string
   ): Promise<AxAgentSessionRegistrySnapshot> {
     const direct = await this.store.load(sessionId);
-    if (direct) return cloneStructured(direct);
+    if (direct) {
+      await this.validateSnapshot(direct);
+      return cloneStructured(direct);
+    }
     for (const rootId of await this.store.listRoots()) {
       const snapshot = await this.store.load(rootId);
-      if (snapshot?.sessions[sessionId]) return cloneStructured(snapshot);
+      if (snapshot?.sessions[sessionId]) {
+        await this.validateSnapshot(snapshot);
+        return cloneStructured(snapshot);
+      }
     }
     throw new AxAgentSessionNotFoundError(sessionId);
   }
@@ -1700,7 +2000,291 @@ export class AxAgentSessionHost {
   ): Promise<AxAgentSessionRegistrySnapshot> {
     const snapshot = await this.store.load(rootId);
     if (!snapshot) throw new AxAgentSessionNotFoundError(rootId);
+    await this.validateSnapshot(snapshot);
     return cloneStructured(snapshot);
+  }
+
+  private async validateSnapshot(
+    snapshot: Readonly<AxAgentSessionRegistrySnapshot>,
+    expectedPolicyDigest?: string
+  ): Promise<void> {
+    if (
+      !snapshot ||
+      typeof snapshot !== 'object' ||
+      !snapshot.root ||
+      typeof snapshot.root !== 'object' ||
+      !snapshot.sessions ||
+      typeof snapshot.sessions !== 'object' ||
+      Array.isArray(snapshot.sessions)
+    ) {
+      throw new AxAgentSessionSerializationError(
+        'snapshot root and session registry are required'
+      );
+    }
+    if (snapshot.version !== 1) {
+      throw new AxAgentSessionSerializationError(
+        `unsupported snapshot version "${String(snapshot.version)}"`
+      );
+    }
+    if (!isNonNegativeSafeInteger(snapshot.revision)) {
+      throw new AxAgentSessionSerializationError(
+        'revision must be a non-negative safe integer'
+      );
+    }
+    if (!/^[a-f0-9]{64}$/.test(snapshot.policyDigest)) {
+      throw new AxAgentSessionSerializationError(
+        'policyDigest must be a SHA-256 hex digest'
+      );
+    }
+    if (
+      expectedPolicyDigest !== undefined &&
+      !timingSafeEqual(snapshot.policyDigest, expectedPolicyDigest)
+    ) {
+      throw new AxAgentSessionAuthorizationError(
+        'Retained agent snapshot does not match the trusted policy digest'
+      );
+    }
+
+    const root = snapshot.root;
+    if (
+      !root ||
+      typeof root.id !== 'string' ||
+      root.id.length === 0 ||
+      typeof root.capability !== 'string' ||
+      root.capability.length === 0 ||
+      !Number.isSafeInteger(root.epoch) ||
+      root.epoch < 1 ||
+      !Array.isArray(root.authorizedChildren) ||
+      !root.limits ||
+      typeof root.limits !== 'object' ||
+      Array.isArray(root.limits) ||
+      !root.descendantUsage ||
+      typeof root.descendantUsage !== 'object'
+    ) {
+      throw new AxAgentSessionSerializationError(
+        'root identity, capability, and epoch are required'
+      );
+    }
+    if (!['active', 'cancelled', 'interrupted'].includes(root.status)) {
+      throw new AxAgentSessionSerializationError('invalid root status');
+    }
+    if (
+      root.budgetExceeded !== undefined &&
+      root.budgetExceeded !== 'tokens' &&
+      root.budgetExceeded !== 'subcalls'
+    ) {
+      throw new AxAgentSessionSerializationError('invalid root budget status');
+    }
+    const rootKeys = canonicalKeys(root.authorizedChildren);
+    if (!equalStrings(root.authorizedChildren, rootKeys)) {
+      throw new AxAgentSessionAuthorizationError(
+        'Root child authorization must be canonical and duplicate-free'
+      );
+    }
+    for (const key of rootKeys) {
+      if (!this.registrations.has(key)) {
+        throw new AxAgentSessionAuthorizationError(
+          `Root snapshot authorizes unavailable retained agent "${key}"`
+        );
+      }
+    }
+    const limitKeys = Object.keys(DEFAULT_LIMITS).sort();
+    if (!equalStrings(Object.keys(root.limits).sort(), limitKeys)) {
+      throw new AxAgentSessionSerializationError(
+        'snapshot limits do not match the canonical limit schema'
+      );
+    }
+    resolveLimits(root.limits);
+    if (
+      !isNonNegativeSafeInteger(root.admittedChildren) ||
+      !isNonNegativeSafeInteger(root.admittedSubcalls) ||
+      !isNonNegativeSafeInteger(root.reservedTokens) ||
+      !isNonNegativeSafeInteger(root.outcomeUnknownTokens)
+    ) {
+      throw new AxAgentSessionSerializationError(
+        'root counters must be non-negative safe integers'
+      );
+    }
+    assertUsage(root.descendantUsage, 'root.descendantUsage');
+
+    const sessionIds = Object.keys(snapshot.sessions);
+    if (
+      root.admittedChildren !== sessionIds.length ||
+      sessionIds.length > root.limits.maxChildren
+    ) {
+      throw new AxAgentSessionSerializationError(
+        'admittedChildren must equal the bounded session topology'
+      );
+    }
+    const messageIds = new Set<string>();
+    const jobIds = new Set<string>();
+    let retainedMessages = 0;
+    let reservedTokens = 0;
+    let retainedOutcomeUnknownTokens = 0;
+    for (const id of sessionIds) {
+      const record = snapshot.sessions[id]!;
+      if (
+        !record ||
+        typeof record !== 'object' ||
+        !record.handle ||
+        typeof record.handle !== 'object' ||
+        !Array.isArray(record.authorizedChildren) ||
+        !Array.isArray(record.mailbox) ||
+        !record.usage ||
+        typeof record.usage !== 'object' ||
+        !record.descendantUsage ||
+        typeof record.descendantUsage !== 'object'
+      ) {
+        throw new AxAgentSessionSerializationError(
+          `session "${id}" is not a complete registry record`
+        );
+      }
+      const handle = record.handle;
+      const registration = this.registrations.get(handle.registrationKey);
+      if (
+        handle.version !== 1 ||
+        handle.id !== id ||
+        handle.rootId !== root.id ||
+        handle.epoch !== root.epoch ||
+        typeof handle.capability !== 'string' ||
+        handle.capability.length === 0 ||
+        !registration
+      ) {
+        throw new AxAgentSessionSerializationError(
+          `session "${id}" has a non-canonical handle`
+        );
+      }
+      const parentDepth =
+        handle.parentId === root.id
+          ? 0
+          : snapshot.sessions[handle.parentId]?.depth;
+      const parentAuthorization =
+        handle.parentId === root.id
+          ? root.authorizedChildren
+          : snapshot.sessions[handle.parentId]?.authorizedChildren;
+      if (
+        parentDepth === undefined ||
+        record.depth !== parentDepth + 1 ||
+        record.depth > root.limits.maxDepth
+      ) {
+        throw new AxAgentSessionSerializationError(
+          `session "${id}" has an invalid parent/depth chain`
+        );
+      }
+      if (!parentAuthorization?.includes(handle.registrationKey)) {
+        throw new AxAgentSessionAuthorizationError(
+          `Session "${id}" registration "${handle.registrationKey}" is not authorized by parent "${handle.parentId}"`
+        );
+      }
+      const expectedChildren = canonicalKeys(
+        registration.authorizedChildren ?? []
+      );
+      if (!equalStrings(record.authorizedChildren, expectedChildren)) {
+        throw new AxAgentSessionAuthorizationError(
+          `Session "${id}" child authorization does not match registration "${registration.key}"`
+        );
+      }
+      if (
+        ![
+          'queued',
+          'running',
+          'cancelling',
+          'completed',
+          'failed',
+          'cancelled',
+          'interrupted',
+        ].includes(record.status)
+      ) {
+        throw new AxAgentSessionSerializationError(
+          `session "${id}" has an invalid status`
+        );
+      }
+      if (
+        record.mailbox.length > root.limits.maxRetainedMessages ||
+        record.mailbox.filter((message) => message.status === 'pending')
+          .length > root.limits.maxPendingMessages
+      ) {
+        throw new AxAgentSessionSerializationError(
+          `session "${id}" mailbox exceeds policy limits`
+        );
+      }
+      assertUsage(record.usage, `sessions.${id}.usage`);
+      assertUsage(record.descendantUsage, `sessions.${id}.descendantUsage`);
+      const runningMessages = record.mailbox.filter(
+        (message) => message.status === 'running'
+      );
+      if (
+        runningMessages.length > 1 ||
+        (record.activeMessageId ?? undefined) !==
+          (runningMessages[0]?.id ?? undefined) ||
+        runningMessages.length > 0 !==
+          (record.status === 'running' || record.status === 'cancelling')
+      ) {
+        throw new AxAgentSessionSerializationError(
+          `session "${id}" active-message state is inconsistent`
+        );
+      }
+      retainedMessages += record.mailbox.length;
+      for (const message of record.mailbox) {
+        if (
+          !message ||
+          typeof message !== 'object' ||
+          typeof message.id !== 'string' ||
+          message.id.length === 0 ||
+          messageIds.has(message.id) ||
+          typeof message.jobId !== 'string' ||
+          message.jobId.length === 0 ||
+          jobIds.has(message.jobId) ||
+          !['steer', 'follow-up'].includes(message.mode) ||
+          ![
+            'pending',
+            'running',
+            'completed',
+            'failed',
+            'cancelled',
+            'outcome_unknown',
+          ].includes(message.status)
+        ) {
+          throw new AxAgentSessionSerializationError(
+            `session "${id}" contains a non-canonical mailbox entry`
+          );
+        }
+        messageIds.add(message.id);
+        jobIds.add(message.jobId);
+        if (message.tokenReservation !== undefined) {
+          if (message.tokenReservation !== root.limits.maxTokensPerMessage) {
+            throw new AxAgentSessionSerializationError(
+              `message "${message.id}" has an invalid token reservation`
+            );
+          }
+          if (message.status === 'running') {
+            reservedTokens += message.tokenReservation;
+          } else if (message.status === 'outcome_unknown') {
+            retainedOutcomeUnknownTokens += message.tokenReservation;
+          }
+        } else if (message.status === 'running') {
+          throw new AxAgentSessionSerializationError(
+            `running message "${message.id}" lacks a token reservation`
+          );
+        }
+      }
+    }
+    if (
+      root.admittedSubcalls < retainedMessages ||
+      root.admittedSubcalls > root.limits.maxSubcalls ||
+      root.reservedTokens !== reservedTokens ||
+      root.outcomeUnknownTokens < retainedOutcomeUnknownTokens
+    ) {
+      throw new AxAgentSessionSerializationError(
+        'root admission or uncertain-token accounting is inconsistent'
+      );
+    }
+    const computedDigest = await digestPolicy(snapshot);
+    if (!timingSafeEqual(snapshot.policyDigest, computedDigest)) {
+      throw new AxAgentSessionAuthorizationError(
+        'Retained agent snapshot policy digest is invalid'
+      );
+    }
   }
 
   private async mutate<T>(
@@ -1712,6 +2296,8 @@ export class AxAgentSessionHost {
       const next = cloneStructured(current);
       const result = mutation(next);
       next.root.updatedAt = this.now();
+      next.policyDigest = await digestPolicy(next);
+      await this.validateSnapshot(next);
       try {
         await this.store.save(next, current.revision);
         return result;
@@ -1721,6 +2307,34 @@ export class AxAgentSessionHost {
     }
     throw new AxAgentSessionConflictError(
       `Retained agent session registry "${rootId}" remained contended`
+    );
+  }
+
+  private async mutateAtEpoch<T>(
+    rootId: string,
+    expectedEpoch: number,
+    mutation: (
+      snapshot: AxAgentSessionRegistrySnapshot
+    ) => T | typeof SKIP_MUTATION
+  ): Promise<T | undefined> {
+    for (let attempt = 0; attempt < 12; attempt++) {
+      const current = await this.requireRoot(rootId);
+      if (current.root.epoch !== expectedEpoch) return undefined;
+      const next = cloneStructured(current);
+      const result = mutation(next);
+      if (result === SKIP_MUTATION) return undefined;
+      next.root.updatedAt = this.now();
+      next.policyDigest = await digestPolicy(next);
+      await this.validateSnapshot(next);
+      try {
+        await this.store.save(next, current.revision);
+        return result;
+      } catch (error) {
+        if (!(error instanceof AxAgentSessionConflictError)) throw error;
+      }
+    }
+    throw new AxAgentSessionConflictError(
+      `Retained agent session registry "${rootId}" remained contended at epoch ${expectedEpoch}`
     );
   }
 
@@ -1786,24 +2400,36 @@ export class AxAgentSessionClient {
   constructor(
     private readonly host: AxAgentSessionHost,
     readonly sessionId: string,
-    private readonly capability: string
+    private readonly capability: string,
+    readonly epoch: number
   ) {}
 
   spawn(registrationKey: string, input: unknown) {
     return this.host.spawn(
       this.sessionId,
       this.capability,
+      this.epoch,
       registrationKey,
       input
     );
   }
 
   inspect(handle: Readonly<AxAgentSessionHandle>) {
-    return this.host.inspect(this.sessionId, this.capability, handle);
+    return this.host.inspect(
+      this.sessionId,
+      this.capability,
+      this.epoch,
+      handle
+    );
   }
 
   result(handle: Readonly<AxAgentSessionHandle>) {
-    return this.host.result(this.sessionId, this.capability, handle);
+    return this.host.result(
+      this.sessionId,
+      this.capability,
+      this.epoch,
+      handle
+    );
   }
 
   send(
@@ -1811,26 +2437,48 @@ export class AxAgentSessionClient {
     input: unknown,
     mode: AxAgentSessionMessageMode
   ) {
-    return this.host.send(this.sessionId, this.capability, handle, input, mode);
+    return this.host.send(
+      this.sessionId,
+      this.capability,
+      this.epoch,
+      handle,
+      input,
+      mode
+    );
   }
 
   cancel(handle?: Readonly<AxAgentSessionHandle>) {
-    return this.host.cancel(this.sessionId, this.capability, handle);
+    return this.host.cancel(
+      this.sessionId,
+      this.capability,
+      this.epoch,
+      handle
+    );
   }
 
   dispose(handle: Readonly<AxAgentSessionHandle>) {
-    return this.host.dispose(this.sessionId, this.capability, handle);
+    return this.host.dispose(
+      this.sessionId,
+      this.capability,
+      this.epoch,
+      handle
+    );
   }
 
   list() {
-    return this.host.list(this.sessionId, this.capability);
+    return this.host.list(this.sessionId, this.capability, this.epoch);
   }
 
   inspectRoot() {
-    return this.host.inspectRoot(this.sessionId, this.capability);
+    return this.host.inspectRoot(this.sessionId, this.capability, this.epoch);
   }
 
   functions(options?: Readonly<AxAgentSessionFunctionOptions>) {
-    return this.host.functions(this.sessionId, this.capability, options);
+    return this.host.functions(
+      this.sessionId,
+      this.capability,
+      this.epoch,
+      options
+    );
   }
 }

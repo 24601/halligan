@@ -11,6 +11,7 @@ import {
   AxAgentSessionLimitError,
   type AxAgentSessionRegistration,
   type AxAgentSessionScheduler,
+  AxAgentSessionStaleHandleError,
   type AxAgentSessionStore,
   AxInMemoryAgentSessionStore,
   type AxRetainedAgent,
@@ -38,15 +39,18 @@ type EvaluationReport = {
     equal: boolean;
   };
   timingMs: {
-    delayedSynchronous: number;
-    delayedRetained: number;
-    delayedSpeedup: number;
+    equalConcurrencySynchronous: number;
+    equalConcurrencyRetained: number;
+    equalConcurrencyOverhead: number;
     tinySynchronous: number;
     tinyRetained: number;
     tinyOverhead: number;
     sequentialSynchronous: number;
     sequentialRetained: number;
     sequentialOverhead: number;
+    freshRetainedTurns: number;
+    retainedFollowUpTurns: number;
+    retentionAmortization: number;
   };
   retained: {
     admissionDidNotWaitForResult: boolean;
@@ -57,6 +61,9 @@ type EvaluationReport = {
     childLimitDenied: boolean;
     crashOutcomeUnknown: boolean;
     pendingMessageRecovered: boolean;
+    staleAuthorityDenied: boolean;
+    outcomeUnknownTokensCharged: boolean;
+    alteredSnapshotDenied: boolean;
     privilegeDenied: boolean;
   };
   interpretation: string[];
@@ -239,7 +246,18 @@ async function waitForCompleted(
   );
 }
 
-async function synchronousBatch(
+async function refreshDirectHandle(
+  root: AxAgentSessionClient,
+  id: string
+): Promise<AxAgentSessionHandle> {
+  const handle = (await root.list()).find(
+    (view) => view.handle.id === id
+  )?.handle;
+  assert(handle, `missing retained child ${id}`);
+  return handle;
+}
+
+async function serialSynchronousBatch(
   inputs: readonly Input[]
 ): Promise<{ elapsedMs: number; outputs: Output[] }> {
   const started = performance.now();
@@ -248,6 +266,18 @@ async function synchronousBatch(
     const child = synchronousChildFunction();
     outputs.push((await child.func(input, { ai: unusedAI })) as Output);
   }
+  return { elapsedMs: elapsed(started), outputs };
+}
+
+async function concurrentSynchronousBatch(
+  inputs: readonly Input[]
+): Promise<{ elapsedMs: number; outputs: Output[] }> {
+  const started = performance.now();
+  const outputs = (await Promise.all(
+    inputs.map((input) =>
+      synchronousChildFunction().func(input, { ai: unusedAI })
+    )
+  )) as Output[];
   return { elapsedMs: elapsed(started), outputs };
 }
 
@@ -269,6 +299,34 @@ async function retainedBatch(inputs: readonly Input[]): Promise<{
     handles.map((handle) => root.result(handle))
   )) as Output[];
   return { elapsedMs: elapsed(started), admissionMs, outputs };
+}
+
+async function retainedSequentialBatch(
+  inputs: readonly Input[],
+  reuse: boolean
+): Promise<number> {
+  const sessions = createHost();
+  const root = await sessions.createRoot({
+    authorizedChildren: ['worker'],
+    limits: { maxConcurrency: 1 },
+  });
+  const started = performance.now();
+  let handle: AxAgentSessionHandle | undefined;
+  for (const [index, input] of inputs.entries()) {
+    if (!reuse || !handle) {
+      handle = await root.spawn('worker', input);
+    } else {
+      await root.send(handle, input, 'follow-up');
+    }
+    const expectedMessages = reuse ? index + 1 : 1;
+    await waitFor(
+      () => root.inspect(handle!),
+      (view) =>
+        view.mailbox.length === expectedMessages &&
+        view.mailbox.at(-1)?.status === 'completed'
+    );
+  }
+  return elapsed(started);
 }
 
 class DurableEvaluationStore implements AxAgentSessionStore {
@@ -340,7 +398,7 @@ async function runEvaluation(): Promise<EvaluationReport> {
     value,
     delayMs: 60,
   }));
-  const synchronous = await synchronousBatch(delayedInputs);
+  const synchronous = await concurrentSynchronousBatch(delayedInputs);
   const retained = await retainedBatch(delayedInputs);
   const synchronousValues = synchronous.outputs.map((output) => output.value);
   const retainedValues = retained.outputs.map((output) => output.value);
@@ -354,25 +412,29 @@ async function runEvaluation(): Promise<EvaluationReport> {
   );
 
   const tinyInputs = ['a', 'b', 'c'].map((value) => ({ value }));
-  const tinySync = await synchronousBatch(tinyInputs);
+  const tinySync = await concurrentSynchronousBatch(tinyInputs);
   const tinyRetained = await retainedBatch(tinyInputs);
 
   const sequentialInputs = ['one', 'two', 'three'].map((value) => ({
     value,
     delayMs: 15,
   }));
-  const sequentialSync = await synchronousBatch(sequentialInputs);
-  const sequentialHost = createHost();
-  const sequentialRoot = await sequentialHost.createRoot({
-    authorizedChildren: ['worker'],
-    limits: { maxConcurrency: 1 },
-  });
-  const sequentialStarted = performance.now();
-  for (const input of sequentialInputs) {
-    const handle = await sequentialRoot.spawn('worker', input);
-    await waitForCompleted(sequentialRoot, handle);
-  }
-  const sequentialRetainedMs = elapsed(sequentialStarted);
+  const sequentialSync = await serialSynchronousBatch(sequentialInputs);
+  const sequentialRetainedMs = await retainedSequentialBatch(
+    sequentialInputs,
+    false
+  );
+  const retentionInputs = ['retain-one', 'retain-two', 'retain-three'].map(
+    (value) => ({ value, delayMs: 10 })
+  );
+  const freshRetainedTurnsMs = await retainedSequentialBatch(
+    retentionInputs,
+    false
+  );
+  const retainedFollowUpTurnsMs = await retainedSequentialBatch(
+    retentionInputs,
+    true
+  );
 
   const retainedHost = createHost();
   const root = await retainedHost.createRoot({
@@ -388,9 +450,21 @@ async function runEvaluation(): Promise<EvaluationReport> {
   const followUp = reused.latestResult as Output;
 
   const saved = await retainedHost.snapshot(handle.rootId);
+  const altered = structuredClone(saved);
+  altered.root.authorizedChildren.push('privileged');
+  let alteredSnapshotDenied = false;
+  try {
+    await createHost().restore(altered, {
+      expectedPolicyDigest: saved.policyDigest,
+    });
+  } catch (error) {
+    alteredSnapshotDenied = error instanceof AxAgentSessionAuthorizationError;
+  }
   await retainedHost.close();
   const restoredHost = createHost();
-  const restoredRoot = await restoredHost.restore(saved);
+  const restoredRoot = await restoredHost.restore(saved, {
+    expectedPolicyDigest: saved.policyDigest,
+  });
   await restoredRoot.send(handle, { value: 'third' }, 'follow-up');
   const restored = await waitFor(
     () => restoredRoot.inspect(handle),
@@ -461,14 +535,24 @@ async function runEvaluation(): Promise<EvaluationReport> {
     (view) => view.status === 'running'
   );
   await crashRoot.send(crashHandle, { value: 'recover-this' }, 'follow-up');
-  await crashHost.close();
   const secondScheduler = new ManualEvaluationScheduler();
   const recoveredHost = createHost({ store, scheduler: secondScheduler });
   await recoveredHost.recover(crashHandle.rootId);
   const recoveredRoot = await recoveredHost.restoreRoot(crashHandle.rootId);
-  const afterCrash = await recoveredRoot.inspect(crashHandle);
+  const recoveredHandle = await refreshDirectHandle(
+    recoveredRoot,
+    crashHandle.id
+  );
+  const afterCrash = await recoveredRoot.inspect(recoveredHandle);
+  const recoveredBudget = await recoveredRoot.inspectRoot();
+  let staleAuthorityDenied = false;
+  try {
+    await crashRoot.inspect(crashHandle);
+  } catch (error) {
+    staleAuthorityDenied = error instanceof AxAgentSessionStaleHandleError;
+  }
   await secondScheduler.runAll();
-  const afterRecovery = await waitForCompleted(recoveredRoot, crashHandle);
+  const afterRecovery = await waitForCompleted(recoveredRoot, recoveredHandle);
   await inFlight;
 
   const report: EvaluationReport = {
@@ -479,10 +563,10 @@ async function runEvaluation(): Promise<EvaluationReport> {
       equal: true,
     },
     timingMs: {
-      delayedSynchronous: synchronous.elapsedMs,
-      delayedRetained: retained.elapsedMs,
-      delayedSpeedup: Number(
-        (synchronous.elapsedMs / retained.elapsedMs).toFixed(2)
+      equalConcurrencySynchronous: synchronous.elapsedMs,
+      equalConcurrencyRetained: retained.elapsedMs,
+      equalConcurrencyOverhead: Number(
+        (retained.elapsedMs - synchronous.elapsedMs).toFixed(3)
       ),
       tinySynchronous: tinySync.elapsedMs,
       tinyRetained: tinyRetained.elapsedMs,
@@ -493,6 +577,11 @@ async function runEvaluation(): Promise<EvaluationReport> {
       sequentialRetained: sequentialRetainedMs,
       sequentialOverhead: Number(
         (sequentialRetainedMs - sequentialSync.elapsedMs).toFixed(3)
+      ),
+      freshRetainedTurns: freshRetainedTurnsMs,
+      retainedFollowUpTurns: retainedFollowUpTurnsMs,
+      retentionAmortization: Number(
+        (freshRetainedTurnsMs - retainedFollowUpTurnsMs).toFixed(3)
       ),
     },
     retained: {
@@ -509,16 +598,22 @@ async function runEvaluation(): Promise<EvaluationReport> {
       crashOutcomeUnknown: afterCrash.mailbox[0]?.status === 'outcome_unknown',
       pendingMessageRecovered:
         (afterRecovery.latestResult as Output).value === 'recover-this',
+      staleAuthorityDenied,
+      outcomeUnknownTokensCharged:
+        recoveredBudget.outcomeUnknownTokens ===
+          recoveredBudget.limits.maxTokensPerMessage &&
+        recoveredBudget.admittedSubcalls === 2,
+      alteredSnapshotDenied,
       privilegeDenied,
     },
     interpretation: [
-      'Delayed independent work should benefit because admission overlaps child wall-clock time.',
+      'Equal-concurrency timings compare concurrent synchronous functions with concurrent retained admission; their delta is retained registry/scheduler overhead, not a concurrency speedup.',
+      'Retention amortization separately compares fresh retained admission per turn with follow-ups on one retained handle; the signed result may help or hurt for this workload.',
       'Tiny work and intentionally sequential work can be slower because durable registry, scheduler, cloning, and polling overhead dominate.',
       'This deterministic workload validates mechanism semantics and accounting; it is not evidence of real-model answer quality.',
     ],
   };
 
-  assert(report.timingMs.delayedSpeedup > 1.5, 'delayed work did not overlap');
   for (const [name, value] of Object.entries(report.retained)) {
     if (name === 'descendantUsageTotalTokens') continue;
     assert(value === true, `${name} failed`);

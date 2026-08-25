@@ -354,6 +354,14 @@ async function completed(
   );
 }
 
+async function refreshDirectHandle(client: AxAgentSessionClient, id: string) {
+  const handle = (await client.list()).find(
+    (view) => view.handle.id === id
+  )?.handle;
+  if (!handle) throw new Error(`Missing retained child ${id}`);
+  return handle;
+}
+
 describe('retained child agent sessions', () => {
   it('admits concurrent children immediately without blocking on results', async () => {
     DeterministicAgent.active = 0;
@@ -424,7 +432,11 @@ describe('retained child agent sessions', () => {
     expect(steer.interruptAccepted).toBe(true);
     const view = await waitFor(
       () => root.inspect(handle),
-      (value) => value.mailbox.every((message) => message.status !== 'pending')
+      (value) =>
+        value.mailbox.every(
+          (message) =>
+            message.status !== 'pending' && message.status !== 'running'
+        )
     );
     expect(view.mailbox[0]?.status).toBe('cancelled');
     expect(view.mailbox[2]?.result).toMatchObject({
@@ -478,6 +490,12 @@ describe('retained child agent sessions', () => {
     await expect(
       root.send(second, { value: 'fourth-admission' }, 'follow-up')
     ).resolves.toMatchObject({ mode: 'follow-up' });
+    await waitFor(
+      () => root.inspect(second),
+      (view) =>
+        view.mailbox.length === 2 &&
+        view.mailbox.every((message) => message.status === 'completed')
+    );
     await expect(
       root.send(second, { value: 'subcall-exhausted' }, 'follow-up')
     ).rejects.toMatchObject({ limit: 'maxSubcalls' });
@@ -582,7 +600,9 @@ describe('retained child agent sessions', () => {
     await firstHost.close();
 
     const secondHost = host();
-    const restoredRoot = await secondHost.restore(snapshot);
+    const restoredRoot = await secondHost.restore(snapshot, {
+      expectedPolicyDigest: snapshot.policyDigest,
+    });
     await restoredRoot.send(handle, { value: 'after' }, 'follow-up');
     const view = await waitFor(
       () => restoredRoot.inspect(handle),
@@ -606,7 +626,9 @@ describe('retained child agent sessions', () => {
     await firstHost.close();
 
     const secondHost = host();
-    const restoredRoot = await secondHost.restore(snapshot);
+    const restoredRoot = await secondHost.restore(snapshot, {
+      expectedPolicyDigest: snapshot.policyDigest,
+    });
     await restoredRoot.send(handle, { value: 'second-artifact' }, 'follow-up');
     const restored = await waitFor(
       () => restoredRoot.inspect(handle),
@@ -615,6 +637,64 @@ describe('retained child agent sessions', () => {
     expect(restored.latestResult).toMatchObject({
       history: ['first-artifact', 'second-artifact'],
     });
+  });
+
+  it('rejects snapshots whose root or child authorization was altered', async () => {
+    const firstHost = host();
+    const root = await firstHost.createRoot({
+      authorizedChildren: ['worker'],
+    });
+    const handle = await root.spawn('worker', { value: 'confirmed' });
+    await completed(root, handle);
+    const snapshot = await firstHost.snapshot(handle.rootId);
+
+    const expandedRoot = structuredClone(snapshot);
+    expandedRoot.root.authorizedChildren.push('privileged');
+    await expect(
+      host().restore(expandedRoot, {
+        expectedPolicyDigest: snapshot.policyDigest,
+      })
+    ).rejects.toBeInstanceOf(AxAgentSessionAuthorizationError);
+
+    const expandedChild = structuredClone(snapshot);
+    expandedChild.sessions[handle.id]!.authorizedChildren.push('leaf');
+    await expect(
+      host().restore(expandedChild, {
+        expectedPolicyDigest: snapshot.policyDigest,
+      })
+    ).rejects.toThrow(/child authorization does not match registration/);
+
+    const swappedRegistration = structuredClone(snapshot);
+    swappedRegistration.sessions[handle.id]!.handle.registrationKey =
+      'privileged';
+    await expect(
+      host().restore(swappedRegistration, {
+        expectedPolicyDigest: snapshot.policyDigest,
+      })
+    ).rejects.toThrow(/is not authorized by parent/);
+
+    const nestedHost = host();
+    const nestedRoot = await nestedHost.createRoot({
+      authorizedChildren: ['parent'],
+    });
+    const parent = await nestedRoot.spawn('parent', {
+      value: 'parent',
+      spawnNested: true,
+    });
+    await completed(nestedRoot, parent);
+    const nestedSnapshot = await nestedHost.snapshot(parent.rootId);
+    const nestedPolicyDigest = nestedSnapshot.policyDigest;
+    const leaf = Object.values(nestedSnapshot.sessions).find(
+      (record) => record.handle.parentId === parent.id
+    );
+    expect(leaf).toBeDefined();
+    nestedSnapshot.sessions[leaf!.handle.id]!.handle.registrationKey =
+      'privileged';
+    await expect(
+      host().restore(nestedSnapshot, {
+        expectedPolicyDigest: nestedPolicyDigest,
+      })
+    ).rejects.toThrow(/is not authorized by parent/);
   });
 
   it('discards partial live runtime mutations after cancellation', async () => {
@@ -685,6 +765,9 @@ describe('retained child agent sessions', () => {
     await expect(
       root.inspect({ ...handle, capability: 'forged' })
     ).rejects.toBeInstanceOf(AxAgentSessionStaleHandleError);
+    await expect(
+      root.inspect({ ...handle, registrationKey: 'privileged' })
+    ).rejects.toBeInstanceOf(AxAgentSessionStaleHandleError);
     await root.dispose(handle);
     await expect(root.inspect(handle)).rejects.toBeInstanceOf(
       AxAgentSessionNotFoundError
@@ -738,6 +821,40 @@ class DurableMemoryStore
   } as const;
 }
 
+class PausingDurableStore extends DurableMemoryStore {
+  private pause?: {
+    committed: () => void;
+    release: Promise<void>;
+  };
+
+  pauseNextSaveAfterCommit() {
+    let committed!: () => void;
+    let release!: () => void;
+    const committedPromise = new Promise<void>((resolve) => {
+      committed = resolve;
+    });
+    const releasePromise = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.pause = { committed, release: releasePromise };
+    return { committed: committedPromise, release };
+  }
+
+  override async save(
+    snapshot: Parameters<AxAgentSessionStore['save']>[0],
+    expectedRevision: number | undefined
+  ) {
+    const saved = await super.save(snapshot, expectedRevision);
+    const pause = this.pause;
+    if (pause) {
+      this.pause = undefined;
+      pause.committed();
+      await pause.release;
+    }
+    return saved;
+  }
+}
+
 class ManualScheduler implements AxAgentSessionScheduler {
   readonly capabilities = {
     durability: 'persistent',
@@ -773,6 +890,14 @@ class ManualScheduler implements AxAgentSessionScheduler {
   async runAll(): Promise<void> {
     while (this.jobs.size > 0) await this.runOne();
   }
+
+  queuedJobs(): AxAgentSessionJob[] {
+    return [...this.jobs.values()].map((job) => structuredClone(job));
+  }
+
+  clearJobs(): void {
+    this.jobs.clear();
+  }
 }
 
 describe('retained session crash recovery adapters', () => {
@@ -802,6 +927,213 @@ describe('retained session crash recovery adapters', () => {
     });
   });
 
+  it('never grants a recovered epoch to a spawn paused after its admission CAS', async () => {
+    const store = new PausingDurableStore();
+    const firstScheduler = new ManualScheduler();
+    const firstHost = host({ store, scheduler: firstScheduler });
+    const root = await firstHost.createRoot({
+      authorizedChildren: ['worker'],
+    });
+    const pause = store.pauseNextSaveAfterCommit();
+    const spawning = root.spawn('worker', {
+      value: 'admitted-before-recovery',
+    });
+    await pause.committed;
+
+    const secondScheduler = new ManualScheduler();
+    const secondHost = host({ store, scheduler: secondScheduler });
+    await secondHost.recover(root.sessionId);
+    const recoveredRoot = await secondHost.restoreRoot(root.sessionId);
+    expect(secondScheduler.queuedJobs()).toEqual([
+      expect.objectContaining({ epoch: 2 }),
+    ]);
+
+    pause.release();
+    const staleHandle = await spawning;
+    expect(staleHandle.epoch).toBe(1);
+    expect(firstScheduler.queuedJobs()).toEqual([
+      expect.objectContaining({ epoch: 1 }),
+    ]);
+    expect(firstScheduler.queuedJobs()).not.toEqual([
+      expect.objectContaining({ epoch: 2 }),
+    ]);
+    await expect(root.inspect(staleHandle)).rejects.toBeInstanceOf(
+      AxAgentSessionStaleHandleError
+    );
+    expect(
+      (await refreshDirectHandle(recoveredRoot, staleHandle.id)).epoch
+    ).toBe(2);
+  });
+
+  it('revokes every stale root and nested-session operation on recovery', async () => {
+    const store = new DurableMemoryStore();
+    const scheduler = new ManualScheduler();
+    const contexts = new Map<string, AxAgentSessionClient>();
+    const firstHost = host({ store, scheduler, contexts });
+    const root = await firstHost.createRoot({
+      authorizedChildren: ['parent'],
+    });
+    const parent = await root.spawn('parent', {
+      value: 'uncertain-parent',
+      delayMs: 100,
+    });
+    const inFlight = scheduler.runOne();
+    await waitFor(
+      () => root.inspect(parent),
+      (view) => view.status === 'running'
+    );
+    const staleSession = contexts.get(parent.id)!;
+    const leaf = await staleSession.spawn('leaf', { value: 'queued-leaf' });
+
+    const recoveredHost = host({
+      store,
+      scheduler: new ManualScheduler(),
+    });
+    await recoveredHost.recover(parent.rootId);
+    const recoveredRoot = await recoveredHost.restoreRoot(parent.rootId);
+    const recoveredParent = await refreshDirectHandle(recoveredRoot, parent.id);
+    const beforeStaleJob = await recoveredHost.snapshot(parent.rootId);
+    await scheduler.runAll();
+    const afterStaleJob = await recoveredHost.snapshot(parent.rootId);
+    expect(afterStaleJob.revision).toBe(beforeStaleJob.revision);
+    expect(afterStaleJob.root.updatedAt).toBe(beforeStaleJob.root.updatedAt);
+    expect(afterStaleJob.sessions[leaf.id]?.mailbox[0]?.status).toBe('pending');
+
+    await expect(root.inspect(parent)).rejects.toBeInstanceOf(
+      AxAgentSessionStaleHandleError
+    );
+    const staleOperations = [
+      () => staleSession.spawn('leaf', { value: 'stale-spawn' }),
+      () => staleSession.inspect(leaf),
+      () => staleSession.send(leaf, { value: 'stale-send' }, 'follow-up'),
+      () => staleSession.cancel(leaf),
+      () => staleSession.dispose(leaf),
+      () => staleSession.cancel(),
+    ];
+    for (const operation of staleOperations) {
+      await expect(operation()).rejects.toBeInstanceOf(
+        AxAgentSessionStaleHandleError
+      );
+    }
+    await expect(recoveredRoot.inspect(recoveredParent)).resolves.toMatchObject(
+      {
+        status: 'interrupted',
+      }
+    );
+    expect((await recoveredRoot.inspectRoot()).childCount).toBe(2);
+    await inFlight;
+    expect(
+      (await recoveredHost.snapshot(parent.rootId)).sessions[leaf.id]
+        ?.mailbox[0]?.status
+    ).toBe('pending');
+  });
+
+  it('does not let a same-host stale completion enqueue recovered work', async () => {
+    const store = new DurableMemoryStore();
+    const scheduler = new ManualScheduler();
+    const sessions = host({ store, scheduler });
+    const root = await sessions.createRoot({
+      authorizedChildren: ['worker'],
+    });
+    const handle = await root.spawn('worker', {
+      value: 'uncertain',
+      delayMs: 100,
+    });
+    const staleAttempt = scheduler.runOne();
+    await waitFor(
+      () => root.inspect(handle),
+      (view) => view.status === 'running'
+    );
+    await root.send(handle, { value: 'pending-after-recovery' }, 'follow-up');
+
+    await sessions.recover(root.sessionId);
+    const recoveredRoot = await sessions.restoreRoot(root.sessionId);
+    const recoveredHandle = await refreshDirectHandle(recoveredRoot, handle.id);
+    expect(scheduler.queuedJobs()).toEqual([
+      expect.objectContaining({ epoch: 2 }),
+    ]);
+    scheduler.clearJobs();
+    const beforeStaleCompletion = await sessions.snapshot(root.sessionId);
+
+    await staleAttempt;
+    const afterStaleCompletion = await sessions.snapshot(root.sessionId);
+    expect(scheduler.queuedJobs()).toEqual([]);
+    expect(afterStaleCompletion.revision).toBe(beforeStaleCompletion.revision);
+    expect(afterStaleCompletion.root.updatedAt).toBe(
+      beforeStaleCompletion.root.updatedAt
+    );
+    expect(
+      (await recoveredRoot.inspect(recoveredHandle)).mailbox[1]?.status
+    ).toBe('pending');
+  });
+
+  it('charges outcome_unknown attempts against durable token and subcall budgets', async () => {
+    const store = new DurableMemoryStore();
+    const firstScheduler = new ManualScheduler();
+    const firstHost = host({
+      store,
+      scheduler: firstScheduler,
+      limits: {
+        maxTokens: 8,
+        maxTokensPerMessage: 4,
+        maxSubcalls: 3,
+      },
+    });
+    const root = await firstHost.createRoot({
+      authorizedChildren: ['worker'],
+    });
+    const handle = await root.spawn('worker', {
+      value: 'uncertain',
+      delayMs: 100,
+      tokens: 1,
+    });
+    const inFlight = firstScheduler.runOne();
+    await waitFor(
+      () => root.inspect(handle),
+      (view) => view.status === 'running'
+    );
+    await root.send(
+      handle,
+      { value: 'durable-follow-up', tokens: 1 },
+      'follow-up'
+    );
+
+    const secondScheduler = new ManualScheduler();
+    const secondHost = host({
+      store,
+      scheduler: secondScheduler,
+      limits: {
+        maxTokens: 8,
+        maxTokensPerMessage: 4,
+        maxSubcalls: 3,
+      },
+    });
+    await secondHost.recover(handle.rootId);
+    const recoveredRoot = await secondHost.restoreRoot(handle.rootId);
+    const recoveredHandle = await refreshDirectHandle(recoveredRoot, handle.id);
+    expect(await recoveredRoot.inspectRoot()).toMatchObject({
+      admittedSubcalls: 2,
+      reservedTokens: 0,
+      outcomeUnknownTokens: 4,
+    });
+
+    await secondScheduler.runAll();
+    await completed(recoveredRoot, recoveredHandle);
+    expect(await recoveredRoot.inspectRoot()).toMatchObject({
+      admittedSubcalls: 2,
+      outcomeUnknownTokens: 4,
+      budgetExceeded: 'tokens',
+    });
+    await expect(
+      recoveredRoot.send(
+        recoveredHandle,
+        { value: 'budget-reset-attempt' },
+        'follow-up'
+      )
+    ).rejects.toMatchObject({ limit: 'maxTokens' });
+    await inFlight;
+  });
+
   it('fences in-flight work as outcome_unknown and resumes only pending mail', async () => {
     const store = new DurableMemoryStore();
     const firstScheduler = new ManualScheduler();
@@ -825,7 +1157,8 @@ describe('retained session crash recovery adapters', () => {
     const secondHost = host({ store, scheduler: secondScheduler });
     await secondHost.recover(handle.rootId);
     const restoredRoot = await secondHost.restoreRoot(handle.rootId);
-    const interrupted = await restoredRoot.inspect(handle);
+    const recoveredHandle = await refreshDirectHandle(restoredRoot, handle.id);
+    const interrupted = await restoredRoot.inspect(recoveredHandle);
     expect(interrupted.mailbox[0]?.status).toBe('outcome_unknown');
     expect(interrupted.mailbox[1]?.status).toBe('pending');
     expect(interrupted.durability).toEqual({
@@ -834,15 +1167,15 @@ describe('retained session crash recovery adapters', () => {
     });
 
     await secondScheduler.runAll();
-    const recovered = await completed(restoredRoot, handle);
+    const recovered = await completed(restoredRoot, recoveredHandle);
     expect(recovered.latestResult).toMatchObject({
       value: 'durable-follow-up',
       count: 1,
     });
     await inFlight;
-    expect((await restoredRoot.inspect(handle)).mailbox[0]?.status).toBe(
-      'outcome_unknown'
-    );
+    expect(
+      (await restoredRoot.inspect(recoveredHandle)).mailbox[0]?.status
+    ).toBe('outcome_unknown');
   });
 
   it('does not reuse stale process-local state after multi-worker recovery', async () => {
@@ -867,22 +1200,30 @@ describe('retained session crash recovery adapters', () => {
     const secondHost = host({ store, scheduler: secondScheduler });
     await secondHost.recover(handle.rootId);
     const recoveredRoot = await secondHost.restoreRoot(handle.rootId);
+    const recoveredHandle = await refreshDirectHandle(recoveredRoot, handle.id);
     await secondScheduler.runAll();
-    expect((await completed(recoveredRoot, handle)).latestResult).toMatchObject(
-      {
-        history: ['confirmed'],
-      }
-    );
+    expect(
+      (await completed(recoveredRoot, recoveredHandle)).latestResult
+    ).toMatchObject({
+      history: ['confirmed'],
+    });
     await staleAttempt;
 
-    await root.send(handle, { value: 'after-recovery' }, 'follow-up');
-    await firstScheduler.runAll();
-    expect((await completed(recoveredRoot, handle)).latestResult).toMatchObject(
-      {
-        count: 2,
-        history: ['confirmed', 'after-recovery'],
-      }
+    await expect(
+      root.send(handle, { value: 'stale-owner' }, 'follow-up')
+    ).rejects.toBeInstanceOf(AxAgentSessionStaleHandleError);
+    await recoveredRoot.send(
+      recoveredHandle,
+      { value: 'after-recovery' },
+      'follow-up'
     );
+    await secondScheduler.runAll();
+    expect(
+      (await completed(recoveredRoot, recoveredHandle)).latestResult
+    ).toMatchObject({
+      count: 2,
+      history: ['confirmed', 'after-recovery'],
+    });
   });
 
   it('detaches captured values before stopping a multi-worker attempt', async () => {

@@ -205,6 +205,7 @@ import {
   type AxAgentSessionRecord,
   type AxAgentSessionRegistration,
   type AxAgentSessionRegistrySnapshot,
+  type AxAgentSessionRestoreOptions,
   AxAgentSessionResultNotReadyError,
   type AxAgentSessionRootOptions,
   type AxAgentSessionRootRecord,
@@ -1960,6 +1961,7 @@ export type { AxAgentSessionMessageStatus };
 export type { AxAgentSessionRecord };
 export type { AxAgentSessionRegistration };
 export type { AxAgentSessionRegistrySnapshot };
+export type { AxAgentSessionRestoreOptions };
 export type { AxAgentSessionRootOptions };
 export type { AxAgentSessionRootRecord };
 export type { AxAgentSessionRootView };

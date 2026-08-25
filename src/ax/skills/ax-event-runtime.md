@@ -110,6 +110,11 @@ scope, persistence, expiry, and target restoration; the session host owns the
 child lifecycle and mailbox. The in-memory adapters on either side remain
 volatile.
 
+Recovery advances the retained tree's ownership epoch. Event handlers must
+restore the root and refresh the correlated child's handle before operating on
+it; a continuation may keep the stable child ID for correlation, but not an old
+epoch-bearing capability handle.
+
 ## MCP Adapter
 
 Use `ax-mcp` for client construction, transports, authentication, catalogs,

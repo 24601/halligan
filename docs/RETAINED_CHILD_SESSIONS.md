@@ -88,6 +88,15 @@ remain synchronous namespaced calls and are unchanged.
 - `dispose(handle)` cancels and removes that child and all descendants. Old
   handles then fail as missing; capability mismatches fail as stale.
 
+Handles contain a stable child ID plus the root ownership epoch. `recover()`
+atomically advances that epoch for the whole tree, so every root client,
+session client, generated function closure, and handle held by the previous
+owner becomes stale. After recovery, call `restoreRoot(rootId)` and use
+`root.list()` to obtain current-epoch direct-child handles. A stale worker can
+no longer spawn descendants or inspect, send, cancel, or dispose existing ones.
+Scheduler jobs also carry the epoch, and only the host that acquired the
+current epoch may dispatch or reschedule them.
+
 A follow-up/steer input is the child's complete signature input, not an
 untyped chat string. A single-worker host reuses the same agent instance while
 resident. Multi-worker adapters deliberately use an attempt-scoped instance
@@ -138,17 +147,22 @@ can call `recover()`. With the volatile defaults, there is no restart recovery;
 the queued work is lost when the process is lost.
 
 On process restart, configure the same stable registration keys and factories,
-then call `host.recover(rootId?)`. Recovery fences messages left in `running` as
-`outcome_unknown` and never automatically replays them, because a pre-crash
-tool side effect may have happened. The last confirmed state remains intact;
-pending messages are rescheduled. Application tools should still use stable
-idempotency keys when retry is safe.
+then call `host.recover(rootId?)`. In one registry CAS, recovery advances the
+ownership epoch and fences messages left in `running` as `outcome_unknown`.
+Those messages are never automatically replayed because a pre-crash tool side
+effect may have happened. The last confirmed state remains intact; pending
+messages are rescheduled when their remaining conservative token budget allows.
+Application tools should still use stable idempotency keys when retry is safe.
 
-`snapshot(rootId)` / `restore(snapshot)` support explicit state transfer with
-the same rule: running work becomes `outcome_unknown`, pending work can resume,
-and handles keep their IDs and capabilities. Registry snapshots and handles
-contain bearer capabilities; protect them as sensitive application state.
-`restore()` accepts trusted host-owned snapshots only, never client-supplied
+`snapshot(rootId)` / `restore(snapshot, { expectedPolicyDigest })` support
+explicit state transfer with the same uncertainty rule. Store the expected
+digest separately in trusted host metadata; do not read it from the candidate
+snapshot at restore time. Restore checks the SHA-256 digest of canonical root
+and child policy, exact registration authorization closure, topology/depth,
+handle identity, epoch, mailbox state, limits, and accounting invariants before
+accepting any state. Handles keep their IDs and capabilities during explicit
+state transfer. Registry snapshots and handles contain bearer capabilities;
+protect them as sensitive application state. Never accept client-supplied
 registry documents.
 
 ## Limits and accounting
@@ -163,14 +177,22 @@ Defaults are deliberately bounded per root tree:
 | `maxPendingMessages` | 16 | Pending messages per child |
 | `maxRetainedMessages` | 128 | Total mailbox entries per child |
 | `maxTokens` | 250,000 | Provider-reported root descendant tokens |
+| `maxTokensPerMessage` | 62,500 | Conservative running-attempt reservation |
 | `maxSubcalls` | 100 | Exact initial-task + later-message admissions |
 
 Subcall, child, depth, mailbox, and concurrency limits are checked before work
-runs. Token usage is attributed after each provider response, so concurrent
-in-flight calls can overshoot the observed token boundary; once reached, the
-host cancels pending/active work and denies new admission. Providers that do
-not report tokens cannot contribute to this counter. Use provider/model output
-caps as an additional hard per-call bound.
+runs. Every message reserves `maxTokensPerMessage` in the registry before its
+agent runs. Confirmed completion replaces that reservation with reported usage;
+recovery converts an ambiguous reservation to durable `outcomeUnknownTokens`.
+Subcalls are durably charged at admission, so neither counter resets after a
+crash. New work requires room for another full reservation.
+
+Configure `maxTokensPerMessage` at or above the worst-case child turn implied
+by model output and agent/tool-loop caps. Provider-reported usage can still
+exceed the reservation, and providers that report no tokens cannot be measured;
+the host charges the reservation on ambiguity but cannot enforce an internal
+provider cap. `inspectRoot()` exposes known descendant usage, active
+`reservedTokens`, and cumulative `outcomeUnknownTokens` separately.
 
 Each record exposes `usage` for its own model calls and `descendantUsage` for
 all nested children. The root's `descendantUsage` is the tree total. Stable
@@ -185,8 +207,9 @@ root, parent, child, and message IDs are also placed in AI usage context.
   tools, MCP/UCP clients, runtime permissions, AI service, and artifact hooks
   that factory configures. Parent tools are not implicitly inherited.
 - Handles are bearer capabilities and can operate only on direct children of
-  the session client that owns them. Forged capabilities and cross-parent
-  handles are rejected.
+  the session client that owns them. Every handle field is checked against the
+  canonical registry record; forged metadata, capabilities, cross-parent
+  handles, and pre-recovery epochs are rejected.
 - Generated `sessions.*` functions close over the owning session client. The
   model cannot select another root or escalate by supplying a parent ID.
 - Treat stored inputs, outputs, and artifacts as untrusted data when rendering
@@ -222,11 +245,14 @@ a host/root and adding `root.functions()` as a separate function collection.
 
 The deterministic end-to-end workload runs the same child implementation
 through a synchronous namespaced function boundary and through retained
-admission. It compares completion and wall-clock behavior, then exercises
-follow-up reuse, snapshot restoration, descendant accounting, cancellation,
-limits, crash recovery, and privilege denial. The unit suite separately runs
-an ordinary `AxAgent.getFunction()` child to guard the existing synchronous
-contract:
+admission. Delayed and tiny comparisons use equal concurrency on both sides;
+their delta is retained registry/scheduler overhead, not a concurrency speedup.
+A separate fresh-session versus same-handle follow-up timing reports retention
+amortization without assuming it is positive. The workload also exercises
+follow-up context, snapshot policy, descendant accounting, cancellation,
+limits, crash recovery, stale-authority denial, ambiguous token charging, and
+privilege denial. The unit suite separately runs an ordinary
+`AxAgent.getFunction()` child to guard the existing synchronous contract:
 
 ```bash
 node --import=tsx src/ax/agent/benchmarks/retainedSessions.eval.ts

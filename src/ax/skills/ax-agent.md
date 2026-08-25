@@ -181,6 +181,9 @@ Rules:
 - Registration factories create state-isolated AxAgents. Single-worker hosts
   reuse the live instance; multi-worker hosts restore each attempt from the
   last confirmed state/artifacts to fence stale worker caches.
+- Recovery atomically advances a root-wide ownership epoch. Restore the root
+  and refresh direct-child handles after recovery; all older clients, generated
+  function closures, and handles are intentionally stale.
 - `follow-up` waits behind active work; `steer` requests active cancellation
   and gets priority at the next mailbox boundary.
 - Cancelling one child retains its last confirmed state for a later follow-up;
@@ -189,6 +192,9 @@ Rules:
   boundaries. Child tools and runtime permissions come only from the factory.
 - The in-memory store/scheduler are volatile. Process-restart durability needs
   persistent host adapters and `host.recover()`.
+- Running messages reserve conservative tokens before execution; an
+  `outcome_unknown` attempt keeps that reservation charged. Explicit snapshot
+  restore requires a separately trusted canonical policy digest.
 - Existing synchronous namespaced child calls remain the smallest choice when
   the parent needs the answer now.
 
