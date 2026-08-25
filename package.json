@@ -33,6 +33,7 @@
     "profiles:generate": "node scripts/generate-provider-profiles.mjs",
     "profiles:check": "node scripts/generate-provider-profiles.mjs --check",
     "profiles:smoke": "npm run tsx src/examples/provider-profile-smoke.ts",
+    "evaluate:preference-evidence": "node --import=tsx scripts/evaluate-preference-evidence.ts",
     "axir:generate-packages": "node scripts/generate-axir-packages.mjs",
     "axir:check-packages": "node scripts/check-axir-packages.mjs",
     "axir:audit:coverage": "node scripts/run-axir.mjs audit coverage ir/axcore/root.axir",

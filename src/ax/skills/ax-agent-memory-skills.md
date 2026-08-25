@@ -198,6 +198,126 @@ const myAgent = agent('task:string -> answer:string', {
 });
 ```
 
+## Host-owned preference evidence
+
+Use `axSelectPreferenceEvidence(...)` when a host already has a bounded,
+principal-scoped preference ledger and needs to decide which evidence may enter
+Ax's existing memory input. This is an optional selection contract, not a user
+profile, identity system, consent system, database, or autonomous learner.
+
+The contract deliberately separates:
+
+- `observation`: a sourced event, never applied as a preference;
+- `inference`: an uncertain interpretation, returned under `informational` and
+  never applied;
+- `confirmed-preference`: eligible for `applied` only when the host admits its
+  source, authority, and consent references.
+
+The `principalId` in selection context is authoritative. Ax compares evidence
+against it but does not authenticate it. A principal ID, consent statement,
+source reference, or authority reference copied from model output has no effect
+unless trusted host code separately places that exact reference in the
+corresponding `accepted*Refs` list. Do not derive those lists from the same
+model text being evaluated.
+
+```typescript
+import {
+  axPreferenceEvidenceToMemories,
+  axSelectPreferenceEvidence,
+} from '@ax-llm/ax';
+import type { AxPreferenceEvidenceRecord } from '@ax-llm/ax';
+
+const evidence: AxPreferenceEvidenceRecord[] = [
+  {
+    id: 'response-style',
+    principalId: trustedSession.principalId,
+    revisions: [
+      {
+        operation: 'assert',
+        revision: 1,
+        kind: 'confirmed-preference',
+        value: 'Use concise bullet points for status updates.',
+        sourceRef: 'source:settings:42',
+        confidence: 1,
+        scope: 'response-style',
+        applicability: { allOf: { channel: 'work' } },
+        recordedAt: '2026-08-20T12:00:00.000Z',
+        expiresAt: '2027-08-20T12:00:00.000Z',
+        authorityRef: 'authority:account:7',
+        consentRef: 'consent:personalization:9',
+      },
+    ],
+  },
+];
+
+const selection = axSelectPreferenceEvidence(evidence, {
+  principalId: trustedSession.principalId,
+  query: 'Draft a concise project status update',
+  scope: 'response-style',
+  attributes: { channel: 'work' },
+  now: new Date().toISOString(),
+  acceptedSourceRefs: trustedSources,
+  acceptedAuthorityRefs: trustedAuthorities,
+  acceptedConsentRefs: trustedConsents,
+  allowApplication: (revision) => safetyPolicy.allows(revision),
+});
+
+await myAgent.forward(ai, {
+  task: 'Draft the update',
+  memories: axPreferenceEvidenceToMemories(selection),
+});
+```
+
+Selection validates ordered revision history, principal scope, provenance,
+authority and consent, exact scope/applicability, expiry, retraction, erasure,
+contradiction, supersession, confidence, and host policy before using Ax's
+existing deterministic lexical ranker. Unresolved contradictions fail closed.
+Only `applied` confirmed preferences convert to memory; observations and
+inferences remain available for host inspection under `informational`.
+Convert the returned selection directly; the memory adapter rejects copied or
+deserialized selection objects so callers cannot alter an admitted result.
+Persist the evidence records, not the transient selection.
+
+Use `axRetractPreferenceEvidence(...)` to append a reversible retraction while
+retaining revision history. Use `axErasePreferenceEvidence(...)` for erasure:
+it returns a tombstone after destroying prior values, source references,
+consent references, and revision content. The host remains responsible for
+replacing/deleting durable copies, indexes, backups, caches, and derived data.
+
+This mechanism is useful for small, auditable preference catalogs where the
+host already owns identity, authority, privacy, retention, and safety policy.
+Do not use it as a universal memory store, an authorization decision, or a
+basis for medical, psychological, protected-trait, or other sensitive
+inference. It does not verify that a reference is authentic, discover consent,
+resolve semantic contradictions, sanitize preference text, or prove that
+personalization helps model output. `allowApplication` must enforce product and
+safety rules; user preference never overrides truthfulness or safety.
+
+### Deterministic mechanism evaluation
+
+Run:
+
+```bash
+npm run evaluate:preference-evidence
+```
+
+The zero-provider-call fixture fixes policy on three development cases, then
+uses 11 cases from a disjoint held-out principal and later time slice to compare
+static/no personalization, naive latest-value, and evidence-aware selection. It
+covers stable benefit, contradiction, expiry,
+cross-principal leakage, forged references, retraction, erasure, uncertain
+inference, harmful/sycophantic preference, no-benefit, and noisy small-data
+cases. Output reports exact retrieval/application, false and missed
+personalization, retention/forgetting, lifecycle/erasure fidelity, serialized
+bytes, measured latency, and negative controls.
+
+The bound is 11 cases × 1,000 iterations = 11,000 local selections, zero
+provider calls/tokens, and $0 provider cost. Latency is descriptive and
+machine-dependent. The fixture demonstrates selector mechanics only; it makes
+no model-quality, semantic-retrieval, authority-authenticity, privacy-system,
+or production-latency claim. Split independence and contamination control
+remain host responsibilities.
+
 ## Skills Search
 
 Use `onSkillsSearch` when the agent needs to load skill guides such as usage instructions, operational guides, or domain conventions into the executor's system prompt on demand. The actor decides which skills to fetch and when, so you do not pre-render every skill into every prompt.

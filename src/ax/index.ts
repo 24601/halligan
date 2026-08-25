@@ -186,6 +186,24 @@ import type {
   AxResolvedAgentPlaybookLearn,
 } from './agent/playbookConfig.js';
 import {
+  type AxPreferenceApplicability,
+  type AxPreferenceEvidenceAssertion,
+  type AxPreferenceEvidenceContext,
+  type AxPreferenceEvidenceErasure,
+  type AxPreferenceEvidenceExclusion,
+  type AxPreferenceEvidenceExclusionReason,
+  type AxPreferenceEvidenceKind,
+  type AxPreferenceEvidenceRecord,
+  type AxPreferenceEvidenceRetraction,
+  type AxPreferenceEvidenceRevision,
+  type AxPreferenceEvidenceSelection,
+  type AxSelectedPreferenceEvidence,
+  axErasePreferenceEvidence,
+  axPreferenceEvidenceToMemories,
+  axRetractPreferenceEvidence,
+  axSelectPreferenceEvidence,
+} from './agent/preferenceEvidence.js';
+import {
   type AxCodeRuntime,
   type AxCodeSession,
   type AxCodeSessionSnapshot,
@@ -1496,6 +1514,7 @@ export { axDefaultOptimizerLogger };
 export { axDefaultOptimizerMetricsConfig };
 export { axDeserializeOptimizedProgram };
 export { axEmitUsageEvent };
+export { axErasePreferenceEvidence };
 export { axEventErrorMessage };
 export { axEventId };
 export { axEventIdentityScope };
@@ -1559,6 +1578,7 @@ export { axNormalizeTranscriptionResponse };
 export { axOpenAIChatAudioDefaults };
 export { axOptimizableValidators };
 export { axPlaybookFailureSection };
+export { axPreferenceEvidenceToMemories };
 export { axProcessContentForProvider };
 export { axResolveAIProfileFeatures };
 export { axResolveAIProfileId };
@@ -1567,9 +1587,11 @@ export { axResolveGrokRealtimeAudioConfig };
 export { axResolveMCPExecutionContext };
 export { axResolveOpenAIChatAudioConfig };
 export { axResolveOpenAIRealtimeAudioConfig };
+export { axRetractPreferenceEvidence };
 export { axRuntimePrimitives };
 export { axScoreProvidersForRequest };
 export { axSelectOptimalProvider };
+export { axSelectPreferenceEvidence };
 export { axSerializeOptimizedProgram };
 export { axShouldUseGeminiLiveAudio };
 export { axShouldUseGrokRealtime };
@@ -2286,6 +2308,17 @@ export type { AxPlaybookEvolveOptions };
 export type { AxPlaybookEvolveResult };
 export type { AxPlaybookOptions };
 export type { AxPlaybookSnapshot };
+export type { AxPreferenceApplicability };
+export type { AxPreferenceEvidenceAssertion };
+export type { AxPreferenceEvidenceContext };
+export type { AxPreferenceEvidenceErasure };
+export type { AxPreferenceEvidenceExclusion };
+export type { AxPreferenceEvidenceExclusionReason };
+export type { AxPreferenceEvidenceKind };
+export type { AxPreferenceEvidenceRecord };
+export type { AxPreferenceEvidenceRetraction };
+export type { AxPreferenceEvidenceRevision };
+export type { AxPreferenceEvidenceSelection };
 export type { AxProgramDemos };
 export type { AxProgramExamples };
 export type { AxProgramForwardOptions };
@@ -2336,6 +2369,7 @@ export type { AxRuntimePrimitiveOverrideMap };
 export type { AxRuntimePrimitiveSignature };
 export type { AxRuntimePrimitiveStage };
 export type { AxSamplePickerOptions };
+export type { AxSelectedPreferenceEvidence };
 export type { AxSelfTuningConfig };
 export type { AxSerializedOptimizedProgram };
 export type { AxSetExamplesOptions };
