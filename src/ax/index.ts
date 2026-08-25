@@ -769,10 +769,13 @@ import {
   type AxCausalCandidateEvidenceOptions,
   type AxCausalCandidateEvidenceRecord,
   type AxCausalCandidateSplitOutcome,
+  type AxCausalEvidenceAuthority,
+  type AxCausalEvidenceAuthorityVerifier,
   type AxCausalEvidenceKind,
   type AxCausalEvidenceReference,
   type AxCausalMetricOutcome,
   type AxCausalMetricPrediction,
+  axCanonicalizeCausalCandidateEvidenceManifest,
   axCloneCausalCandidateEvidenceManifest,
   axCreateCausalCandidateEvidenceManifest,
   axFingerprintCausalEvidence,
@@ -1496,6 +1499,7 @@ export { axBaseAIDefaultCreativeConfig };
 export { axBuildDistillerDefinition };
 export { axBuildExecutorDefinition };
 export { axBuildResponderDefinition };
+export { axCanonicalizeCausalCandidateEvidenceManifest };
 export { axCheckMetricsHealth };
 export { axCloneCausalCandidateEvidenceManifest };
 export { axConcatBase64 };
@@ -1968,6 +1972,8 @@ export type { AxCausalCandidateEvidenceManifest };
 export type { AxCausalCandidateEvidenceOptions };
 export type { AxCausalCandidateEvidenceRecord };
 export type { AxCausalCandidateSplitOutcome };
+export type { AxCausalEvidenceAuthority };
+export type { AxCausalEvidenceAuthorityVerifier };
 export type { AxCausalEvidenceKind };
 export type { AxCausalEvidenceReference };
 export type { AxCausalMetricOutcome };

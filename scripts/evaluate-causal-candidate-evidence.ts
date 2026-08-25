@@ -1,6 +1,8 @@
 import { pathToFileURL } from 'node:url';
 import {
+  type AxCausalCandidateEvidenceOptions,
   type AxCausalCandidateEvidenceRecord,
+  type AxCausalEvidenceAuthorityVerifier,
   AxOptimizedProgramImpl,
   axAttachCausalCandidateEvidence,
   axDeserializeOptimizedProgram,
@@ -17,23 +19,61 @@ function split(before: number, after: number) {
   };
 }
 
-function scenario(args: {
+function receiptRegistry(): {
+  options: (receiptId: string) => AxCausalCandidateEvidenceOptions;
+  verify: AxCausalEvidenceAuthorityVerifier;
+} {
+  const receipts = new Map<string, string>();
+  const verify: AxCausalEvidenceAuthorityVerifier = (payload, authority) => {
+    if (
+      authority.principalId !== 'host:deterministic-fixture' ||
+      authority.evaluatorId !== 'eval:causal-fixture-v2' ||
+      authority.verifierId !== 'verifier:fixture-registry' ||
+      authority.receiptVersion !== '1'
+    ) {
+      return false;
+    }
+    const prior = receipts.get(authority.receiptId);
+    if (prior === undefined) receipts.set(authority.receiptId, payload);
+    return prior === undefined || prior === payload;
+  };
+  return {
+    options: (receiptId) => ({
+      authority: {
+        principalId: 'host:deterministic-fixture',
+        evaluatorId: 'eval:causal-fixture-v2',
+        verifierId: 'verifier:fixture-registry',
+        receiptId,
+        receiptVersion: '1',
+      },
+      verifyAuthority: verify,
+    }),
+    verify,
+  };
+}
+
+async function scenario(args: {
   id: string;
+  sequence: number;
+  parentRecordId?: string;
   confidence: number;
   heldInAfter: number;
   heldOutAfter: number;
   decision: 'promoted' | 'rejected';
   ablationAfter: number;
   attribution: 'supports' | 'contradicts' | 'inconclusive';
-}): AxCausalCandidateEvidenceRecord {
+}): Promise<AxCausalCandidateEvidenceRecord> {
   return {
     id: args.id,
+    sequence: args.sequence,
+    eventKind: 'candidate_decision',
+    parentRecordId: args.parentRecordId,
     candidateId: args.id.replace('claim', 'candidate'),
     evidence: [
       {
         id: `${args.id}-trace`,
         kind: 'trace',
-        fingerprint: axFingerprintCausalEvidence(
+        fingerprint: await axFingerprintCausalEvidence(
           `private trace content for ${args.id}`
         ),
         summary: `sensitive ${args.id} trace excerpt`,
@@ -44,8 +84,10 @@ function scenario(args: {
       {
         componentId,
         surface: 'instruction',
-        beforeFingerprint: axFingerprintCausalEvidence('old instruction'),
-        afterFingerprint: axFingerprintCausalEvidence(`${args.id} instruction`),
+        beforeFingerprint: await axFingerprintCausalEvidence('old instruction'),
+        afterFingerprint: await axFingerprintCausalEvidence(
+          `${args.id} instruction`
+        ),
       },
     ],
     predictedBenefit: [
@@ -83,15 +125,17 @@ function scenario(args: {
 export interface AxCausalEvidenceEvaluationResult {
   scenarios: number;
   auditFidelity: { baseline: number; evidenceManifest: number };
-  predictionCalibration: {
-    directionAccuracy: number;
-    brierScore: number;
-  };
+  thresholdAttainment: { rate: number; confidenceBrierScore: number };
   ablationAttributionConsistency: number;
   replayExact: boolean;
   rollbackHistoryExact: boolean;
   settlementAppended: boolean;
-  rawEvidenceRedacted: boolean;
+  evidenceSummariesOmitted: boolean;
+  adversarial: {
+    forgedManifestRejected: boolean;
+    legacyHashCollisionSeparated: boolean;
+    invalidChronologyRejected: boolean;
+  };
   bytes: { baseline: number; withEvidence: number; overhead: number };
   negativeCasesPreserved: readonly string[];
   budget: {
@@ -103,11 +147,12 @@ export interface AxCausalEvidenceEvaluationResult {
   };
 }
 
-export function evaluateCausalCandidateEvidence(): AxCausalEvidenceEvaluationResult {
+export async function evaluateCausalCandidateEvidence(): Promise<AxCausalEvidenceEvaluationResult> {
   const started = performance.now();
-  const records = [
+  const records = await Promise.all([
     scenario({
       id: 'claim-helpful',
+      sequence: 0,
       confidence: 0.8,
       heldInAfter: 0.8,
       heldOutAfter: 0.7,
@@ -117,6 +162,8 @@ export function evaluateCausalCandidateEvidence(): AxCausalEvidenceEvaluationRes
     }),
     scenario({
       id: 'claim-no-benefit',
+      sequence: 1,
+      parentRecordId: 'claim-helpful',
       confidence: 0.7,
       heldInAfter: 0.7,
       heldOutAfter: 0.5,
@@ -126,6 +173,8 @@ export function evaluateCausalCandidateEvidence(): AxCausalEvidenceEvaluationRes
     }),
     scenario({
       id: 'claim-misleading',
+      sequence: 2,
+      parentRecordId: 'claim-no-benefit',
       confidence: 0.9,
       heldInAfter: 0.8,
       heldOutAfter: 0.4,
@@ -133,7 +182,8 @@ export function evaluateCausalCandidateEvidence(): AxCausalEvidenceEvaluationRes
       ablationAfter: 0.5,
       attribution: 'contradicts',
     }),
-  ];
+  ]);
+  const receipts = receiptRegistry();
   const base = new AxOptimizedProgramImpl({
     bestScore: 0.7,
     stats: {} as any,
@@ -143,25 +193,38 @@ export function evaluateCausalCandidateEvidence(): AxCausalEvidenceEvaluationRes
     totalRounds: 1,
     converged: true,
   });
-  const attached = axAttachCausalCandidateEvidence(base, records);
+  const attached = axAttachCausalCandidateEvidence(
+    base,
+    records,
+    receipts.options('receipt-evaluation')
+  );
   const historyBeforeRollback = JSON.stringify(
     attached.causalCandidateEvidence?.records
   );
-  const rolledBack = axReplaceOptimizedProgramSnapshot(attached, base);
-  const settled = axAttachCausalCandidateEvidence(rolledBack, [
-    scenario({
-      id: 'claim-rollback-settlement',
-      confidence: 0.5,
-      heldInAfter: 0.8,
-      heldOutAfter: 0.4,
-      decision: 'rejected',
-      ablationAfter: 0.5,
-      attribution: 'contradicts',
-    }),
-  ]);
+  const rolledBack = axReplaceOptimizedProgramSnapshot(
+    attached,
+    base,
+    receipts.verify
+  );
+  const settlement: AxCausalCandidateEvidenceRecord = {
+    ...records[0]!,
+    id: 'settlement-helpful-rollback',
+    sequence: 3,
+    eventKind: 'settlement',
+    parentRecordId: 'claim-misleading',
+    settlesRecordId: 'claim-helpful',
+    decision: { status: 'rejected', reason: 'Candidate was rolled back.' },
+  };
+  const settled = axAttachCausalCandidateEvidence(
+    rolledBack,
+    [settlement],
+    receipts.options('receipt-settlement')
+  );
   const baselineJson = JSON.stringify(axSerializeOptimizedProgram(base));
   const evidenceJson = JSON.stringify(axSerializeOptimizedProgram(settled));
-  const replayed = axDeserializeOptimizedProgram(JSON.parse(evidenceJson));
+  const replayed = axDeserializeOptimizedProgram(JSON.parse(evidenceJson), {
+    causalEvidenceVerifier: receipts.verify,
+  });
   const replayJson = JSON.stringify(axSerializeOptimizedProgram(replayed));
 
   const requiredAuditFields = [
@@ -170,10 +233,10 @@ export function evaluateCausalCandidateEvidence(): AxCausalEvidenceEvaluationRes
     'affectedComponents',
     'predictedBenefit',
     'predictedRegressions',
-    'outcome.heldIn',
-    'outcome.heldOut',
+    'outcome',
     'decision',
     'ablation',
+    'authority',
   ];
   const auditFidelity = settled.causalCandidateEvidence!.records.every(
     (record) =>
@@ -194,21 +257,21 @@ export function evaluateCausalCandidateEvidence(): AxCausalEvidenceEvaluationRes
     const observed = record.outcome.heldOut.metrics[0]!;
     const delta = observed.after - observed.before;
     const threshold = prediction.minimumExpectedDelta ?? 0;
-    const benefited =
+    const attained =
       prediction.expectedDirection === 'increase'
         ? delta >= threshold
         : prediction.expectedDirection === 'decrease'
           ? delta <= -threshold
           : Math.abs(delta) <= threshold;
-    return { confidence: prediction.confidence ?? 0.5, benefited };
+    return { confidence: prediction.confidence ?? 0.5, attained };
   });
-  const directionAccuracy =
-    predictions.filter((prediction) => prediction.benefited).length /
+  const thresholdAttainmentRate =
+    predictions.filter((prediction) => prediction.attained).length /
     predictions.length;
-  const brierScore =
+  const confidenceBrierScore =
     predictions.reduce(
       (sum, prediction) =>
-        sum + (prediction.confidence - (prediction.benefited ? 1 : 0)) ** 2,
+        sum + (prediction.confidence - (prediction.attained ? 1 : 0)) ** 2,
       0
     ) / predictions.length;
   const expectedAttribution = records.map((record) => {
@@ -230,6 +293,33 @@ export function evaluateCausalCandidateEvidence(): AxCausalEvidenceEvaluationRes
       (record, index) =>
         record.ablation?.attribution === expectedAttribution[index]
     ).length / records.length;
+
+  const forged = JSON.parse(evidenceJson);
+  forged.causalCandidateEvidence.omittedRecordCount += 1;
+  forged.causalCandidateEvidence.totalRecordCount += 1;
+  let forgedManifestRejected = false;
+  try {
+    axDeserializeOptimizedProgram(forged, {
+      causalEvidenceVerifier: receipts.verify,
+    });
+  } catch {
+    forgedManifestRejected = true;
+  }
+  const [legacyCollisionLeft, legacyCollisionRight] = await Promise.all([
+    axFingerprintCausalEvidence('trace-1mf0zaf-23065'),
+    axFingerprintCausalEvidence('trace-v4wu3d-67395'),
+  ]);
+  let invalidChronologyRejected = false;
+  try {
+    axAttachCausalCandidateEvidence(
+      base,
+      [{ ...records[0]!, sequence: 1 }],
+      receipts.options('receipt-invalid-chronology')
+    );
+  } catch {
+    invalidChronologyRejected = true;
+  }
+
   const elapsedWallTimeMs = performance.now() - started;
   const result: AxCausalEvidenceEvaluationResult = {
     scenarios: records.length,
@@ -241,7 +331,10 @@ export function evaluateCausalCandidateEvidence(): AxCausalEvidenceEvaluationRes
         : 0,
       evidenceManifest: auditFidelity,
     },
-    predictionCalibration: { directionAccuracy, brierScore },
+    thresholdAttainment: {
+      rate: thresholdAttainmentRate,
+      confidenceBrierScore,
+    },
     ablationAttributionConsistency,
     replayExact: evidenceJson === replayJson,
     rollbackHistoryExact:
@@ -250,9 +343,14 @@ export function evaluateCausalCandidateEvidence(): AxCausalEvidenceEvaluationRes
     settlementAppended:
       JSON.stringify(settled.causalCandidateEvidence?.records.slice(0, 3)) ===
         historyBeforeRollback &&
-      settled.causalCandidateEvidence?.records.at(-1)?.id ===
-        'claim-rollback-settlement',
-    rawEvidenceRedacted: !evidenceJson.includes('sensitive'),
+      settled.causalCandidateEvidence?.records.at(-1)?.id === settlement.id,
+    evidenceSummariesOmitted: !evidenceJson.includes('sensitive'),
+    adversarial: {
+      forgedManifestRejected,
+      legacyHashCollisionSeparated:
+        legacyCollisionLeft !== legacyCollisionRight,
+      invalidChronologyRejected,
+    },
     bytes: {
       baseline: new TextEncoder().encode(baselineJson).byteLength,
       withEvidence: new TextEncoder().encode(evidenceJson).byteLength,
@@ -272,14 +370,16 @@ export function evaluateCausalCandidateEvidence(): AxCausalEvidenceEvaluationRes
   if (
     result.auditFidelity.baseline !== 0 ||
     result.auditFidelity.evidenceManifest !== 1 ||
-    Math.abs(result.predictionCalibration.directionAccuracy - 1 / 3) > 1e-9 ||
-    Math.abs(result.predictionCalibration.brierScore - 0.4466666666666667) >
-      1e-9 ||
+    Math.abs(result.thresholdAttainment.rate - 1 / 3) > 1e-9 ||
+    Math.abs(
+      result.thresholdAttainment.confidenceBrierScore - 0.4466666666666667
+    ) > 1e-9 ||
     !result.replayExact ||
-    !result.rawEvidenceRedacted ||
+    !result.evidenceSummariesOmitted ||
     result.ablationAttributionConsistency !== 1 ||
     !result.rollbackHistoryExact ||
     !result.settlementAppended ||
+    !Object.values(result.adversarial).every(Boolean) ||
     result.negativeCasesPreserved.length !== 2 ||
     elapsedWallTimeMs > result.budget.maxWallTimeMs
   ) {
@@ -294,5 +394,5 @@ if (
   process.argv[1] &&
   import.meta.url === pathToFileURL(process.argv[1]).href
 ) {
-  console.log(JSON.stringify(evaluateCausalCandidateEvidence(), null, 2));
+  console.log(JSON.stringify(await evaluateCausalCandidateEvidence(), null, 2));
 }

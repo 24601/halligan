@@ -26,6 +26,7 @@ import {
   type AxCausalCandidateEvidenceManifest,
   type AxCausalCandidateEvidenceOptions,
   type AxCausalCandidateEvidenceRecord,
+  type AxCausalEvidenceAuthorityVerifier,
   axCloneCausalCandidateEvidenceManifest,
   axCreateCausalCandidateEvidenceManifest,
 } from './optimizers/causalCandidateEvidence.js';
@@ -900,6 +901,7 @@ export class AxOptimizedProgramImpl<OUT = any>
     componentMap?: Record<string, string>;
     selectorState?: Record<string, AxGEPAComponentBanditState>;
     causalCandidateEvidence?: AxCausalCandidateEvidenceManifest;
+    causalEvidenceVerifier?: AxCausalEvidenceAuthorityVerifier;
     demos?: AxProgramDemos<any, OUT>[];
     examples?: AxExample[];
     modelConfig?: AxOptimizedProgram<OUT>['modelConfig'];
@@ -916,8 +918,14 @@ export class AxOptimizedProgramImpl<OUT = any>
     this.stats = config.stats;
     this.componentMap = config.componentMap;
     this.selectorState = config.selectorState;
+    if (config.causalCandidateEvidence && !config.causalEvidenceVerifier) {
+      throw new Error('causal evidence verifier is required');
+    }
     this.causalCandidateEvidence = config.causalCandidateEvidence
-      ? axCloneCausalCandidateEvidenceManifest(config.causalCandidateEvidence)
+      ? axCloneCausalCandidateEvidenceManifest(
+          config.causalCandidateEvidence,
+          config.causalEvidenceVerifier!
+        )
       : undefined;
     this.demos = config.demos;
     this.examples = config.examples;
@@ -946,45 +954,64 @@ export function axSerializeOptimizedProgram<OUT = any>(
 }
 
 export function axDeserializeOptimizedProgram<OUT = any>(
-  serialized: Readonly<AxSerializedOptimizedProgram<OUT>>
+  serialized: Readonly<AxSerializedOptimizedProgram<OUT>>,
+  options?: Readonly<{
+    causalEvidenceVerifier?: AxCausalEvidenceAuthorityVerifier;
+  }>
 ): AxOptimizedProgramImpl<OUT> {
-  return new AxOptimizedProgramImpl<OUT>(
-    axSerializeOptimizedProgram(serialized as AxOptimizedProgram<OUT>)
-  );
+  return new AxOptimizedProgramImpl<OUT>({
+    ...axSerializeOptimizedProgram(serialized as AxOptimizedProgram<OUT>),
+    causalEvidenceVerifier: options?.causalEvidenceVerifier,
+  });
 }
 
 /** Return a new optimized artifact with bounded host-authored causal evidence attached. */
 export function axAttachCausalCandidateEvidence<OUT = any>(
   optimizedProgram: Readonly<AxOptimizedProgram<OUT>>,
   records: readonly Readonly<AxCausalCandidateEvidenceRecord>[],
-  options?: Readonly<AxCausalCandidateEvidenceOptions>
+  options: Readonly<AxCausalCandidateEvidenceOptions>
 ): AxOptimizedProgramImpl<OUT> {
   const serialized = axSerializeOptimizedProgram(optimizedProgram);
   const existing = optimizedProgram.causalCandidateEvidence;
   if (existing?.omittedRecordCount) {
     throw new Error('cannot append to truncated causal candidate evidence');
   }
-  const inheritedOptions: AxCausalCandidateEvidenceOptions | undefined =
-    existing
-      ? {
-          maxRecords: existing.maxRecords,
-          maxArtifactBytes: existing.maxArtifactBytes,
-          includeEvidenceSummaries:
-            existing.privacy.evidenceSummaries === 'bounded',
-          maxSummaryChars: existing.privacy.maxSummaryChars,
-        }
-      : undefined;
+  const inheritedOptions:
+    | Pick<
+        AxCausalCandidateEvidenceOptions,
+        | 'maxRecords'
+        | 'maxArtifactBytes'
+        | 'includeEvidenceSummaries'
+        | 'maxSummaryChars'
+      >
+    | undefined = existing
+    ? {
+        maxRecords: existing.maxRecords,
+        maxArtifactBytes: existing.maxArtifactBytes,
+        includeEvidenceSummaries:
+          existing.privacy.evidenceSummaries === 'bounded',
+        maxSummaryChars: existing.privacy.maxSummaryChars,
+      }
+    : undefined;
   if (
     existing &&
-    options &&
-    JSON.stringify({ ...inheritedOptions, ...options }) !==
-      JSON.stringify(inheritedOptions)
+    JSON.stringify({
+      ...inheritedOptions,
+      maxRecords: options.maxRecords ?? inheritedOptions?.maxRecords,
+      maxArtifactBytes:
+        options.maxArtifactBytes ?? inheritedOptions?.maxArtifactBytes,
+      includeEvidenceSummaries:
+        options.includeEvidenceSummaries ??
+        inheritedOptions?.includeEvidenceSummaries,
+      maxSummaryChars:
+        options.maxSummaryChars ?? inheritedOptions?.maxSummaryChars,
+    }) !== JSON.stringify(inheritedOptions)
   ) {
     throw new Error('cannot change causal evidence retention while appending');
   }
   const manifest = axCreateCausalCandidateEvidenceManifest(
     [...(existing?.records ?? []), ...records],
-    inheritedOptions ?? options
+    { ...inheritedOptions, ...options }
   );
   if (manifest.omittedRecordCount > 0) {
     throw new Error('causal evidence append exceeds configured retention');
@@ -992,13 +1019,15 @@ export function axAttachCausalCandidateEvidence<OUT = any>(
   return new AxOptimizedProgramImpl<OUT>({
     ...serialized,
     causalCandidateEvidence: manifest,
+    causalEvidenceVerifier: options.verifyAuthority,
   });
 }
 
 /** Replace the rewindable candidate snapshot while preserving append-only evidence. */
 export function axReplaceOptimizedProgramSnapshot<OUT = any>(
   current: Readonly<AxOptimizedProgram<OUT>>,
-  replacement: Readonly<AxOptimizedProgram<OUT>>
+  replacement: Readonly<AxOptimizedProgram<OUT>>,
+  causalEvidenceVerifier: AxCausalEvidenceAuthorityVerifier
 ): AxOptimizedProgramImpl<OUT> {
   const history = current.causalCandidateEvidence;
   const replacementHistory = replacement.causalCandidateEvidence;
@@ -1013,6 +1042,7 @@ export function axReplaceOptimizedProgramSnapshot<OUT = any>(
   return new AxOptimizedProgramImpl<OUT>({
     ...axSerializeOptimizedProgram(replacement),
     causalCandidateEvidence: history,
+    causalEvidenceVerifier,
   });
 }
 

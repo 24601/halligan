@@ -6,13 +6,51 @@ import {
   axReplaceOptimizedProgramSnapshot,
   axSerializeOptimizedProgram,
 } from '../optimizer.js';
-import type { AxCausalCandidateEvidenceRecord } from './causalCandidateEvidence.js';
+import type {
+  AxCausalCandidateEvidenceOptions,
+  AxCausalCandidateEvidenceRecord,
+  AxCausalEvidenceAuthorityVerifier,
+} from './causalCandidateEvidence.js';
 import {
   axCreateCausalCandidateEvidenceManifest,
   axFingerprintCausalEvidence,
 } from './causalCandidateEvidence.js';
 
 const componentId = 'answerer::instruction';
+const digest = (character: string) => `sha256:${character.repeat(64)}`;
+
+function hostReceipt(receiptId: string): {
+  options: AxCausalCandidateEvidenceOptions;
+  verify: AxCausalEvidenceAuthorityVerifier;
+} {
+  let boundPayload: string | undefined;
+  const verify: AxCausalEvidenceAuthorityVerifier = (payload, authority) => {
+    if (
+      authority.principalId !== 'host:test' ||
+      authority.evaluatorId !== 'eval:test' ||
+      authority.verifierId !== 'verifier:test' ||
+      authority.receiptId !== receiptId ||
+      authority.receiptVersion !== '1'
+    ) {
+      return false;
+    }
+    if (boundPayload === undefined) boundPayload = payload;
+    return boundPayload === payload;
+  };
+  return {
+    options: {
+      authority: {
+        principalId: 'host:test',
+        evaluatorId: 'eval:test',
+        verifierId: 'verifier:test',
+        receiptId,
+        receiptVersion: '1',
+      },
+      verifyAuthority: verify,
+    },
+    verify,
+  };
+}
 
 function record(
   overrides: Partial<AxCausalCandidateEvidenceRecord> = {}
@@ -22,12 +60,14 @@ function record(
   });
   return {
     id: 'claim-1',
+    sequence: 0,
+    eventKind: 'candidate_decision',
     candidateId: 'c1',
     evidence: [
       {
         id: 'trace-1',
         kind: 'trace',
-        fingerprint: axFingerprintCausalEvidence('private raw trace'),
+        fingerprint: digest('a'),
         summary: 'contains raw-looking detail that is omitted by default',
       },
     ],
@@ -36,8 +76,8 @@ function record(
       {
         componentId,
         surface: 'instruction',
-        beforeFingerprint: axFingerprintCausalEvidence('old'),
-        afterFingerprint: axFingerprintCausalEvidence('new'),
+        beforeFingerprint: digest('b'),
+        afterFingerprint: digest('c'),
       },
     ],
     predictedBenefit: [
@@ -64,6 +104,24 @@ function record(
   };
 }
 
+function chain(length: number): AxCausalCandidateEvidenceRecord[] {
+  return Array.from({ length }, (_, index) =>
+    record({
+      id: `claim-${index}`,
+      sequence: index,
+      parentRecordId: index ? `claim-${index - 1}` : undefined,
+      candidateId: `c${index}`,
+      evidence: [
+        {
+          id: `trace-${index}`,
+          kind: 'trace',
+          fingerprint: digest((index % 10).toString()),
+        },
+      ],
+    })
+  );
+}
+
 function artifact(value = 'new') {
   return new AxOptimizedProgramImpl({
     bestScore: 0.7,
@@ -77,179 +135,254 @@ function artifact(value = 'new') {
 }
 
 describe('causal candidate evidence', () => {
-  it('omits raw evidence summaries by default and recursively freezes links', () => {
-    const manifest = axCreateCausalCandidateEvidenceManifest([record()]);
+  it('omits evidence summaries by default and precisely describes free text', () => {
+    const receipt = hostReceipt('receipt-redaction');
+    const manifest = axCreateCausalCandidateEvidenceManifest(
+      [record()],
+      receipt.options
+    );
 
     expect(manifest.records[0]?.evidence[0]?.summary).toBeUndefined();
     expect(manifest.records[0]?.ablation?.summary).toBeUndefined();
     expect(manifest.privacy).toMatchObject({
-      rawEvidenceRetained: false,
+      evidencePayloads: 'not_in_schema',
+      freeText: 'bounded_not_redacted',
       evidenceSummaries: 'omitted',
     });
-    expect(Object.isFrozen(manifest)).toBe(true);
     expect(Object.isFrozen(manifest.records[0]?.outcome.heldOut.metrics)).toBe(
       true
     );
   });
 
-  it('bounds explicitly retained summaries and total UTF-8 size', () => {
-    const records = Array.from({ length: 8 }, (_, index) =>
-      record({ id: `claim-${index}` })
-    );
-    const manifest = axCreateCausalCandidateEvidenceManifest(records, {
+  it('bounds retained summaries, records, and exact omitted metadata', () => {
+    const receipt = hostReceipt('receipt-bounds');
+    const manifest = axCreateCausalCandidateEvidenceManifest(chain(8), {
+      ...receipt.options,
       includeEvidenceSummaries: true,
       maxSummaryChars: 16,
-      maxArtifactBytes: 2600,
+      maxArtifactBytes: 2800,
     });
 
-    expect(manifest.records[0]?.evidence[0]?.summary).toHaveLength(16);
+    expect(manifest.totalRecordCount).toBe(8);
+    expect(manifest.omittedRecordCount).toBe(
+      manifest.totalRecordCount - manifest.records.length
+    );
     expect(manifest.omittedRecordCount).toBeGreaterThan(0);
     expect(
       new TextEncoder().encode(JSON.stringify(manifest)).byteLength
-    ).toBeLessThanOrEqual(2600);
+    ).toBeLessThanOrEqual(2800);
   });
 
-  it('rejects broken causal links and incomplete held-out receipts', () => {
-    expect(() =>
-      axCreateCausalCandidateEvidenceManifest([
-        record({
-          predictedBenefit: [
-            {
-              metric: 'latency',
-              split: 'held_out',
-              expectedDirection: 'decrease',
-            },
-          ],
-        }),
-      ])
-    ).toThrow(/has no matching outcome/);
-    expect(() =>
-      axCreateCausalCandidateEvidenceManifest([
-        record({
-          outcome: { heldIn: { metrics: [] }, heldOut: { metrics: [] } },
-        }),
-      ])
-    ).toThrow(/must not be empty/);
-    expect(() =>
-      axCreateCausalCandidateEvidenceManifest([
-        record({
-          evidence: [
-            {
-              id: 'trace-raw',
-              kind: 'trace',
-              fingerprint: 'raw trace text must not fit here',
-            },
-          ],
-        }),
-      ])
-    ).toThrow(/supported digest fingerprint/);
+  it('uses canonical UTF-8 SHA-256 rather than collision-prone FNV identity', async () => {
+    const left = 'trace-1mf0zaf-23065';
+    const right = 'trace-v4wu3d-67395';
+    const [leftDigest, rightDigest, composed, decomposed] = await Promise.all([
+      axFingerprintCausalEvidence(left),
+      axFingerprintCausalEvidence(right),
+      axFingerprintCausalEvidence('é'),
+      axFingerprintCausalEvidence('e\u0301'),
+    ]);
+
+    expect(leftDigest).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(leftDigest).not.toBe(rightDigest);
+    expect(composed).toBe(decomposed);
   });
 
-  it('retains predicted regressions when the same split has an outcome', () => {
-    const withLatency = record({
-      predictedRegressions: [
-        {
-          metric: 'latency_ms',
-          split: 'held_out',
-          expectedDirection: 'increase',
-          confidence: 0.4,
-        },
-      ],
-      outcome: {
-        heldIn: {
-          metrics: [
-            { metric: 'accuracy', before: 0.5, after: 0.8, sampleCount: 10 },
-          ],
-        },
-        heldOut: {
-          metrics: [
-            { metric: 'accuracy', before: 0.5, after: 0.7, sampleCount: 10 },
-            {
-              metric: 'latency_ms',
-              before: 100,
-              after: 104,
-              sampleCount: 10,
+  it('rejects invalid thresholds, duplicate metrics, and incomparable ablations', () => {
+    const options = hostReceipt('receipt-invalid-metrics').options;
+    expect(() =>
+      axCreateCausalCandidateEvidenceManifest(
+        [
+          record({
+            predictedBenefit: [
+              {
+                metric: 'accuracy',
+                split: 'held_out',
+                expectedDirection: 'increase',
+                minimumExpectedDelta: -0.1,
+              },
+            ],
+          }),
+        ],
+        options
+      )
+    ).toThrow(/non-negative/);
+    expect(() =>
+      axCreateCausalCandidateEvidenceManifest(
+        [
+          record({
+            outcome: {
+              heldIn: record().outcome.heldIn,
+              heldOut: {
+                metrics: [
+                  {
+                    metric: 'accuracy',
+                    before: 0.5,
+                    after: 0.7,
+                    sampleCount: 10,
+                  },
+                  {
+                    metric: 'accuracy',
+                    before: 0.5,
+                    after: 0.8,
+                    sampleCount: 10,
+                  },
+                ],
+              },
             },
-          ],
-        },
-      },
+          }),
+        ],
+        options
+      )
+    ).toThrow(/unique metric names/);
+    expect(() =>
+      axCreateCausalCandidateEvidenceManifest(
+        [
+          record({
+            ablation: {
+              ...record().ablation!,
+              heldOut: {
+                metrics: [
+                  { metric: 'other', before: 0.7, after: 0.5, sampleCount: 10 },
+                ],
+              },
+            },
+          }),
+        ],
+        options
+      )
+    ).toThrow(/ablation metrics must match/);
+  });
+
+  it('enforces chronology, settlement targets, and global evidence bindings', () => {
+    const options = hostReceipt('receipt-chronology').options;
+    expect(() =>
+      axCreateCausalCandidateEvidenceManifest(
+        [record(), record({ id: 'claim-2', sequence: 2, candidateId: 'c2' })],
+        options
+      )
+    ).toThrow(/sequence must equal 1/);
+    expect(() =>
+      axCreateCausalCandidateEvidenceManifest(
+        [
+          record(),
+          record({
+            id: 'settlement-1',
+            sequence: 1,
+            parentRecordId: 'claim-1',
+            eventKind: 'settlement',
+            candidateId: 'unrelated',
+            settlesRecordId: 'claim-1',
+            decision: { status: 'rejected', reason: 'rollback' },
+          }),
+        ],
+        options
+      )
+    ).toThrow(/same candidate/);
+    expect(() =>
+      axCreateCausalCandidateEvidenceManifest(
+        [
+          record(),
+          record({
+            id: 'claim-2',
+            sequence: 1,
+            parentRecordId: 'claim-1',
+            candidateId: 'c2',
+            evidence: [
+              { id: 'trace-1', kind: 'trace', fingerprint: digest('d') },
+            ],
+          }),
+        ],
+        options
+      )
+    ).toThrow(/conflicts with a prior fingerprint/);
+  });
+
+  it('attaches, replays with host verification, and rejects exact-field forgery', () => {
+    const receipt = hostReceipt('receipt-replay');
+    const attached = axAttachCausalCandidateEvidence(
+      artifact(),
+      [record()],
+      receipt.options
+    );
+    const serialized = axSerializeOptimizedProgram(attached);
+    const replayed = axDeserializeOptimizedProgram(serialized, {
+      causalEvidenceVerifier: receipt.verify,
     });
 
-    expect(
-      axCreateCausalCandidateEvidenceManifest([withLatency]).records[0]
-        ?.predictedRegressions
-    ).toEqual(withLatency.predictedRegressions);
-  });
-
-  it('attaches immutably and survives serialization/replay', () => {
-    const base = artifact();
-    const attached = axAttachCausalCandidateEvidence(base, [record()]);
-    const serialized = axSerializeOptimizedProgram(attached);
-    const replayed = axDeserializeOptimizedProgram(serialized);
-
-    expect(base.causalCandidateEvidence).toBeUndefined();
     expect(replayed.causalCandidateEvidence).toEqual(
       attached.causalCandidateEvidence
     );
-    expect(Object.isFrozen(replayed.causalCandidateEvidence?.records[0])).toBe(
-      true
+    const forged = JSON.parse(JSON.stringify(serialized));
+    forged.causalCandidateEvidence.omittedRecordCount = 1;
+    expect(() =>
+      axDeserializeOptimizedProgram(forged, {
+        causalEvidenceVerifier: receipt.verify,
+      })
+    ).toThrow(/metadata/);
+    forged.causalCandidateEvidence.totalRecordCount = 2;
+    expect(() =>
+      axDeserializeOptimizedProgram(forged, {
+        causalEvidenceVerifier: receipt.verify,
+      })
+    ).toThrow(/unauthorized/);
+    const extraField = JSON.parse(JSON.stringify(serialized));
+    extraField.causalCandidateEvidence.unsigned = 'forged';
+    expect(() =>
+      axDeserializeOptimizedProgram(extraField, {
+        causalEvidenceVerifier: receipt.verify,
+      })
+    ).toThrow(/metadata/);
+    expect(() => axDeserializeOptimizedProgram(serialized)).toThrow(
+      /verifier is required/
     );
-    expect(replayed.componentMap).toEqual(base.componentMap);
   });
 
-  it('separates rewindable snapshots from append-only evidence history', () => {
-    const original = artifact('old');
-    const candidate = artifact('candidate');
-    const promoted = axAttachCausalCandidateEvidence(candidate, [record()]);
-    const evaluated = axAttachCausalCandidateEvidence(promoted, [
-      record({
-        id: 'claim-rejected',
-        candidateId: 'c2',
-        decision: { status: 'rejected', reason: 'Held-out score regressed.' },
-      }),
-    ]);
+  it('preserves exact history through rollback then appends a valid settlement', () => {
+    const firstReceipt = hostReceipt('receipt-first');
+    const promoted = axAttachCausalCandidateEvidence(
+      artifact('candidate'),
+      [record()],
+      firstReceipt.options
+    );
     const historyBeforeRollback = JSON.stringify(
-      evaluated.causalCandidateEvidence?.records
+      promoted.causalCandidateEvidence?.records
+    );
+    const rolledBack = axReplaceOptimizedProgramSnapshot(
+      promoted,
+      artifact('old'),
+      firstReceipt.verify
+    );
+    const settlementReceipt = hostReceipt('receipt-settlement');
+    const settled = axAttachCausalCandidateEvidence(
+      rolledBack,
+      [
+        record({
+          id: 'settlement-1',
+          sequence: 1,
+          eventKind: 'settlement',
+          parentRecordId: 'claim-1',
+          settlesRecordId: 'claim-1',
+          decision: { status: 'rejected', reason: 'rolled back' },
+        }),
+      ],
+      settlementReceipt.options
     );
 
-    const rolledBack = axReplaceOptimizedProgramSnapshot(evaluated, original);
-    const settled = axAttachCausalCandidateEvidence(rolledBack, [
-      record({
-        id: 'claim-rollback-settlement',
-        candidateId: 'c1',
-        decision: {
-          status: 'rejected',
-          reason: 'Candidate was rolled back after regression.',
-        },
-      }),
-    ]);
-
-    expect(rolledBack.componentMap).toEqual(original.componentMap);
+    expect(rolledBack.componentMap).toEqual(artifact('old').componentMap);
     expect(JSON.stringify(rolledBack.causalCandidateEvidence?.records)).toBe(
       historyBeforeRollback
     );
-    expect(settled.causalCandidateEvidence?.records.slice(0, 2)).toEqual(
-      evaluated.causalCandidateEvidence?.records
+    expect(settled.causalCandidateEvidence?.records.slice(0, 1)).toEqual(
+      promoted.causalCandidateEvidence?.records
     );
-    expect(
-      settled.causalCandidateEvidence?.records.map((item) => item.id)
-    ).toEqual(['claim-1', 'claim-rejected', 'claim-rollback-settlement']);
+    expect(settled.causalCandidateEvidence?.records[1]).toMatchObject({
+      eventKind: 'settlement',
+      settlesRecordId: 'claim-1',
+    });
   });
 
-  it('rejects forged privacy metadata during deserialization', () => {
-    const serialized = axSerializeOptimizedProgram(
-      axAttachCausalCandidateEvidence(artifact(), [record()])
-    ) as any;
-    serialized.causalCandidateEvidence.privacy.rawEvidenceRetained = true;
-    serialized.causalCandidateEvidence.records[0].evidence[0].fingerprint =
-      'raw trace content';
-
-    expect(() => axDeserializeOptimizedProgram(serialized)).toThrow(
-      /invalid causal candidate evidence manifest metadata/
-    );
-  });
-
-  it('preserves legacy artifacts without adding evidence', () => {
+  it('preserves legacy artifacts without requiring an evidence verifier', () => {
     const replayed = axDeserializeOptimizedProgram(
       axSerializeOptimizedProgram(artifact())
     );

@@ -49,15 +49,23 @@ import {
   axFingerprintCausalEvidence,
 } from '@ax-llm/ax';
 
+const [failureFingerprint, beforeFingerprint, afterFingerprint] =
+  await Promise.all([
+    axFingerprintCausalEvidence(redactedFailure),
+    axFingerprintCausalEvidence(beforeInstruction),
+    axFingerprintCausalEvidence(afterInstruction),
+  ]);
 const audited = axAttachCausalCandidateEvidence(result.optimizedProgram!, [
   {
     id: 'grounding-claim-1',
-    candidateId: 'c1', // optional optimizer/lineage ID
+    sequence: 0,
+    eventKind: 'candidate_decision',
+    candidateId: 'c1', // may reference an optimizer/lineage ID
     evidence: [
       {
         id: 'failed-eval-17',
         kind: 'failure',
-        fingerprint: axFingerprintCausalEvidence(redactedFailure),
+        fingerprint: failureFingerprint,
       },
     ],
     hypothesis: 'The responder instruction omits the grounding requirement.',
@@ -65,8 +73,8 @@ const audited = axAttachCausalCandidateEvidence(result.optimizedProgram!, [
       {
         componentId: 'responder::instruction',
         surface: 'instruction',
-        beforeFingerprint: axFingerprintCausalEvidence(beforeInstruction),
-        afterFingerprint: axFingerprintCausalEvidence(afterInstruction),
+        beforeFingerprint,
+        afterFingerprint,
       },
     ],
     predictedBenefit: [
@@ -89,43 +97,62 @@ const audited = axAttachCausalCandidateEvidence(result.optimizedProgram!, [
     },
     decision: { status: 'promoted', reason: 'Held-out gain met the gate.' },
   },
-]);
+], {
+  authority: {
+    principalId: hostPrincipalId,
+    evaluatorId: evaluatorVersion,
+    verifierId: receiptVerifierId,
+    receiptId,
+    receiptVersion: '1',
+  },
+  // Verify that receiptId covers the canonical payload and authority above.
+  verifyAuthority: verifyReceipt,
+});
 ```
 
 The returned artifact is new; the original is unchanged. Repeated attachment
 appends records and rejects duplicate IDs or retention overflow instead of
 rewriting or silently dropping prior receipts. Use
-`axReplaceOptimizedProgramSnapshot(current, replacement)` for rollback or
-replacement: it takes the rewindable component/demo/model snapshot from
-`replacement` while carrying the current evidence history byte-for-byte. It
-rejects a replacement with divergent history. Append a final rejection or
-rollback settlement receipt afterward. This is one artifact history, not a
-runtime event journal.
+`axReplaceOptimizedProgramSnapshot(current, replacement, verifyReceipt)` for
+rollback or replacement: it takes the rewindable component/demo/model snapshot
+from `replacement` while carrying the current evidence history byte-for-byte.
+It rejects a replacement with divergent history. Append a `settlement` event
+whose `settlesRecordId` names the prior promoted decision afterward. Sequences
+are zero-based and monotonic; every later record names its immediately preceding
+`parentRecordId`. A candidate has one decision and a promoted decision can be
+settled only once. This is one artifact history, not a runtime event journal.
 
 The manifest is recursively frozen and survives
-`axSerializeOptimizedProgram(...)` / `axDeserializeOptimizedProgram(...)`.
+`axSerializeOptimizedProgram(...)` /
+`axDeserializeOptimizedProgram(serialized, { causalEvidenceVerifier })`.
 Deserialization revalidates schema, privacy metadata, fingerprints, links, and
-UTF-8 bounds. Prediction metrics must have a matching observed metric on the
-same split. Both held-in and held-out receipts are required. Optional
-ablation/counterfactual receipts must name affected components and report both
-splits.
+every manifest field against a host-owned receipt. Evidence IDs are globally
+bound to one kind and fingerprint within a manifest. Prediction metric/split
+keys and outcome metric names are unique, thresholds are non-negative, and
+predictions must have a matching observed metric on the same split. Both
+held-in and held-out receipts are required. Optional ablation/counterfactual
+receipts must name affected components, report both splits, and use exactly the
+candidate outcome metric sets.
 
 Raw examples and traces have no field in the schema. Evidence is linked by a
 caller-owned ID and fingerprint. Evidence and ablation summaries are omitted by
 default; `includeEvidenceSummaries: true` retains them with a configurable
-character bound. Records, per-field items, strings, and total UTF-8 artifact
-bytes are bounded. `axFingerprintCausalEvidence(...)` is a stable browser-safe
-identifier, not a cryptographic digest or a redaction function; redact before
-fingerprinting if the input itself will be logged elsewhere. Caller-supplied
-fingerprints must use a validated `fnv1a32`, `sha256`, `sha512`, or `blake3`
-digest form, so raw text cannot masquerade as a fingerprint field.
+character bound. Other free-text fields (including hypothesis, reason, and IDs)
+are bounded but not redacted, so callers must apply host policy before attaching
+them. Records, per-field items, strings, and total UTF-8 artifact bytes are
+bounded. `await axFingerprintCausalEvidence(...)` produces a canonical NFC
+UTF-8 SHA-256 identifier. It is not a redaction function; redact before
+fingerprinting if the input itself will be logged elsewhere. SHA-256 is the only
+accepted identity form; weak legacy hashes must stay separate metadata.
 
 The host/evaluator is authoritative for evidence identity, split independence,
 metric correctness, contamination controls, decision policy, and attribution.
-Ax validates structural links but does not prove the hypothesis, infer an
-ablation result, authenticate receipts, or prevent a caller from supplying
-misleading evidence. Keep rejected, no-benefit, regression, and contradictory
-records rather than retaining only promoted candidates.
+The required verifier must authenticate principal, evaluator, receipt, and
+receipt-version bindings outside Ax. Ax validates structural links but does not
+prove the hypothesis, infer an ablation result, establish split independence,
+or prevent an authorized host from supplying misleading evidence. Keep
+rejected, no-benefit, regression, and contradictory records rather than
+retaining only promoted candidates.
 
 Deterministic zero-cost mechanism evaluation:
 
@@ -135,14 +162,17 @@ npm run evaluate:causal-candidate-evidence
 
 The fixed three-case fixture includes helpful, no-benefit, and misleading
 hypotheses. It measures causal audit completeness (legacy artifact `0`, attached
-manifest `1`), prediction direction accuracy (`1/3`) and Brier score
-(`0.4467`), derived ablation-attribution consistency (`3/3`), exact
+manifest `1`), held-out threshold attainment (`1/3`) and confidence-vs-threshold
+Brier score (`0.4467`), derived ablation-attribution consistency (`3/3`), exact
 serialization/replay, exact rollback-history preservation, settlement append,
-default redaction, and artifact bytes (`201` baseline, `4,946` attached;
-`4,745` bytes overhead in the fixture). It makes zero provider calls, uses zero
-provider tokens, costs `$0`, and has a 1,000 ms wall-time gate. These are
-deterministic mechanism/self-consistency measurements, not independent causal
-proof or evidence that the candidate or model quality improves in production.
+default evidence-summary omission, SHA-256 separation of a known FNV collision,
+and rejection of forged manifest counts and invalid chronology. The command
+also reports artifact bytes (`201` baseline, `6,093` attached; `5,892` bytes
+overhead in the fixture). It makes zero provider calls, uses zero provider
+tokens, costs `$0`, and has a 1,000 ms wall-time gate. These are deterministic
+mechanism/self-consistency measurements, not independent causal proof,
+population calibration, or evidence that the candidate or model quality
+improves in production.
 
 ## Metric Selection
 

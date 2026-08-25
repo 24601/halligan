@@ -54,8 +54,12 @@ export interface AxCausalCandidateAblation {
  */
 export interface AxCausalCandidateEvidenceRecord {
   readonly id: string;
-  /** May reference an optimizer-specific candidate/lineage ID when one exists. */
-  readonly candidateId?: string;
+  readonly sequence: number;
+  readonly eventKind: 'candidate_decision' | 'settlement';
+  readonly parentRecordId?: string;
+  readonly settlesRecordId?: string;
+  /** May reference an optimizer-specific candidate/lineage ID. */
+  readonly candidateId: string;
   readonly evidence: readonly AxCausalEvidenceReference[];
   readonly hypothesis: string;
   readonly affectedComponents: readonly AxCausalAffectedComponent[];
@@ -73,21 +77,40 @@ export interface AxCausalCandidateEvidenceRecord {
   readonly ablation?: AxCausalCandidateAblation;
 }
 
+export interface AxCausalEvidenceAuthority {
+  readonly principalId: string;
+  readonly evaluatorId: string;
+  readonly verifierId: string;
+  readonly receiptId: string;
+  readonly receiptVersion: string;
+}
+
+export type AxCausalEvidenceAuthorityVerifier = (
+  canonicalPayload: string,
+  authority: Readonly<AxCausalEvidenceAuthority>
+) => boolean;
+
 export interface AxCausalCandidateEvidenceManifest {
-  readonly version: 1;
+  readonly version: 2;
   readonly records: readonly AxCausalCandidateEvidenceRecord[];
+  readonly totalRecordCount: number;
   readonly omittedRecordCount: number;
   readonly maxRecords: number;
   readonly maxArtifactBytes: number;
   readonly privacy: {
-    readonly rawEvidenceRetained: false;
+    readonly evidencePayloads: 'not_in_schema';
+    readonly freeText: 'bounded_not_redacted';
     readonly evidenceSummaries: 'omitted' | 'bounded';
     readonly maxSummaryChars: number;
   };
-  readonly authority: 'host_supplied';
+  readonly authority: AxCausalEvidenceAuthority;
 }
 
 export interface AxCausalCandidateEvidenceOptions {
+  /** Manifest-scoped host identity and durable receipt metadata. */
+  authority: AxCausalEvidenceAuthority;
+  /** Host-owned verification. Return false for an unknown or mismatched receipt. */
+  verifyAuthority: AxCausalEvidenceAuthorityVerifier;
   /** Maximum records retained, preserving input order. Default: 100. */
   maxRecords?: number;
   /** Maximum UTF-8 serialized manifest size. Default: 256 KiB. */
@@ -98,11 +121,29 @@ export interface AxCausalCandidateEvidenceOptions {
   maxSummaryChars?: number;
 }
 
+type AxCausalCandidateRetentionOptions = Omit<
+  AxCausalCandidateEvidenceOptions,
+  'authority' | 'verifyAuthority'
+>;
+
 const DEFAULT_MAX_RECORDS = 100;
 const DEFAULT_MAX_ARTIFACT_BYTES = 256 * 1024;
 const DEFAULT_MAX_SUMMARY_CHARS = 200;
 const MAX_TEXT_CHARS = 500;
 const MAX_ITEMS_PER_FIELD = 64;
+
+function hasExactKeys(
+  value: unknown,
+  expectedKeys: readonly string[]
+): value is Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const keys = Object.keys(value).sort();
+  const expected = [...expectedKeys].sort();
+  return (
+    keys.length === expected.length &&
+    keys.every((key, index) => key === expected[index])
+  );
+}
 
 function deepFreeze<T>(value: T): T {
   if (value && typeof value === 'object') {
@@ -133,12 +174,8 @@ function requiredText(value: string, field: string): string {
 
 function requiredFingerprint(value: string, field: string): string {
   const normalized = requiredText(value, field);
-  if (
-    !/^(fnv1a32:[0-9a-f]{8}|sha256:[0-9a-f]{64}|sha512:[0-9a-f]{128}|blake3:[0-9a-f]{64})$/.test(
-      normalized
-    )
-  ) {
-    throw new Error(`${field} must use a supported digest fingerprint`);
+  if (!/^sha256:[0-9a-f]{64}$/.test(normalized)) {
+    throw new Error(`${field} must use a canonical SHA-256 fingerprint`);
   }
   return normalized;
 }
@@ -188,12 +225,14 @@ function normalizeSplit(
   split: Readonly<AxCausalCandidateSplitOutcome>,
   field: string
 ): AxCausalCandidateSplitOutcome {
-  return {
-    metrics: boundedArray(split.metrics, `${field}.metrics`).map(
-      (metric, index) =>
-        normalizeMetricOutcome(metric, `${field}.metrics[${index}]`)
-    ),
-  };
+  const metrics = boundedArray(split.metrics, `${field}.metrics`).map(
+    (metric, index) =>
+      normalizeMetricOutcome(metric, `${field}.metrics[${index}]`)
+  );
+  if (new Set(metrics.map((metric) => metric.metric)).size !== metrics.length) {
+    throw new Error(`${field}.metrics must use unique metric names`);
+  }
+  return { metrics };
 }
 
 function normalizePrediction(
@@ -202,9 +241,12 @@ function normalizePrediction(
 ): AxCausalMetricPrediction {
   if (
     prediction.minimumExpectedDelta !== undefined &&
-    !Number.isFinite(prediction.minimumExpectedDelta)
+    (!Number.isFinite(prediction.minimumExpectedDelta) ||
+      prediction.minimumExpectedDelta < 0)
   ) {
-    throw new Error(`${field}.minimumExpectedDelta must be finite`);
+    throw new Error(
+      `${field}.minimumExpectedDelta must be finite and non-negative`
+    );
   }
   if (
     prediction.confidence !== undefined &&
@@ -229,7 +271,7 @@ function normalizePrediction(
 
 function normalizeRecord(
   record: Readonly<AxCausalCandidateEvidenceRecord>,
-  options: Readonly<Required<AxCausalCandidateEvidenceOptions>>
+  options: Readonly<Required<AxCausalCandidateRetentionOptions>>
 ): AxCausalCandidateEvidenceRecord {
   const summary = (value: string | undefined): string | undefined =>
     options.includeEvidenceSummaries && value
@@ -248,9 +290,19 @@ function normalizeRecord(
 
   return {
     id: requiredText(record.id, 'record.id'),
-    candidateId: record.candidateId
-      ? requiredText(record.candidateId, 'record.candidateId')
+    sequence: record.sequence,
+    eventKind: oneOf(
+      record.eventKind,
+      ['candidate_decision', 'settlement'],
+      'record.eventKind'
+    ),
+    parentRecordId: record.parentRecordId
+      ? requiredText(record.parentRecordId, 'record.parentRecordId')
       : undefined,
+    settlesRecordId: record.settlesRecordId
+      ? requiredText(record.settlesRecordId, 'record.settlesRecordId')
+      : undefined,
+    candidateId: requiredText(record.candidateId, 'record.candidateId'),
     evidence: boundedArray(record.evidence, 'record.evidence').map(
       (evidence, index) => ({
         id: requiredText(evidence.id, `record.evidence[${index}].id`),
@@ -357,6 +409,11 @@ function validateRecordLinks(record: AxCausalCandidateEvidenceRecord): void {
     record.affectedComponents.map((component) => component.componentId),
     `record ${record.id} affectedComponents`
   );
+  const predictionKeys = [
+    ...record.predictedBenefit,
+    ...record.predictedRegressions,
+  ].map((prediction) => `${prediction.split}:${prediction.metric}`);
+  unique(predictionKeys, `record ${record.id} predictions`);
   const outcomeKeys = new Set([
     ...record.outcome.heldIn.metrics.map(
       (metric) => `held_in:${metric.metric}`
@@ -386,25 +443,115 @@ function validateRecordLinks(record: AxCausalCandidateEvidenceRecord): void {
         );
       }
     }
+    for (const [split, observed, ablated] of [
+      ['held_in', record.outcome.heldIn, record.ablation.heldIn],
+      ['held_out', record.outcome.heldOut, record.ablation.heldOut],
+    ] as const) {
+      const observedMetrics = observed.metrics
+        .map((metric) => metric.metric)
+        .sort();
+      const ablatedMetrics = ablated.metrics
+        .map((metric) => metric.metric)
+        .sort();
+      if (JSON.stringify(observedMetrics) !== JSON.stringify(ablatedMetrics)) {
+        throw new Error(
+          `record ${record.id} ${split} ablation metrics must match candidate outcomes`
+        );
+      }
+    }
   }
 }
 
-/** Stable browser-safe identifier helper. This is not a cryptographic digest. */
-export function axFingerprintCausalEvidence(value: string): string {
-  let hash = 0x811c9dc5;
-  for (let index = 0; index < value.length; index++) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193);
+function validateManifestRecords(
+  records: readonly AxCausalCandidateEvidenceRecord[]
+): void {
+  const recordById = new Map<string, AxCausalCandidateEvidenceRecord>();
+  const candidateDecisions = new Set<string>();
+  const settledRecords = new Set<string>();
+  const evidenceBindings = new Map<string, string>();
+  for (const [index, record] of records.entries()) {
+    if (!Number.isInteger(record.sequence) || record.sequence !== index) {
+      throw new Error(`record ${record.id} sequence must equal ${index}`);
+    }
+    if (recordById.has(record.id)) {
+      throw new Error('causal candidate evidence record IDs must be unique');
+    }
+    if (index === 0) {
+      if (record.parentRecordId !== undefined) {
+        throw new Error(
+          'the first causal evidence record cannot have a parent'
+        );
+      }
+    } else if (record.parentRecordId !== records[index - 1]!.id) {
+      throw new Error(
+        `record ${record.id} must name the immediately preceding parent record`
+      );
+    }
+    if (record.eventKind === 'candidate_decision') {
+      if (record.settlesRecordId !== undefined) {
+        throw new Error('candidate decisions cannot settle another record');
+      }
+      if (candidateDecisions.has(record.candidateId)) {
+        throw new Error(
+          `candidate ${record.candidateId} already has a decision record`
+        );
+      }
+      candidateDecisions.add(record.candidateId);
+    } else {
+      const target = record.settlesRecordId
+        ? recordById.get(record.settlesRecordId)
+        : undefined;
+      if (
+        !target ||
+        target.eventKind !== 'candidate_decision' ||
+        target.decision.status !== 'promoted' ||
+        target.candidateId !== record.candidateId ||
+        record.decision.status !== 'rejected'
+      ) {
+        throw new Error(
+          `settlement ${record.id} must reject a prior promoted decision for the same candidate`
+        );
+      }
+      if (settledRecords.has(target.id)) {
+        throw new Error(`record ${target.id} is already settled`);
+      }
+      settledRecords.add(target.id);
+    }
+    for (const evidence of record.evidence) {
+      const binding = `${evidence.kind}:${evidence.fingerprint}`;
+      const previous = evidenceBindings.get(evidence.id);
+      if (previous !== undefined && previous !== binding) {
+        throw new Error(
+          `evidence ID ${evidence.id} conflicts with a prior fingerprint binding`
+        );
+      }
+      evidenceBindings.set(evidence.id, binding);
+    }
+    validateRecordLinks(record);
+    recordById.set(record.id, record);
   }
-  return `fnv1a32:${(hash >>> 0).toString(16).padStart(8, '0')}`;
+}
+
+/** Canonical NFC UTF-8 SHA-256 evidence identity. */
+export async function axFingerprintCausalEvidence(
+  value: string
+): Promise<string> {
+  const bytes = new TextEncoder().encode(value.normalize('NFC'));
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return `sha256:${Array.from(new Uint8Array(digest), (byte) =>
+    byte.toString(16).padStart(2, '0')
+  ).join('')}`;
 }
 
 /** Build a bounded, recursively immutable host-authored evidence manifest. */
 export function axCreateCausalCandidateEvidenceManifest(
   records: readonly Readonly<AxCausalCandidateEvidenceRecord>[],
-  options: Readonly<AxCausalCandidateEvidenceOptions> = {}
+  options: Readonly<AxCausalCandidateEvidenceOptions>
 ): AxCausalCandidateEvidenceManifest {
-  const resolved: Required<AxCausalCandidateEvidenceOptions> = {
+  if (typeof options?.verifyAuthority !== 'function') {
+    throw new Error('causal candidate evidence authority verifier is required');
+  }
+  const resolved: Required<AxCausalCandidateRetentionOptions> = {
     maxRecords: boundedInteger(options.maxRecords, DEFAULT_MAX_RECORDS, 10_000),
     maxArtifactBytes: boundedInteger(
       options.maxArtifactBytes,
@@ -418,29 +565,31 @@ export function axCreateCausalCandidateEvidenceManifest(
       2000
     ),
   };
-  let retained = records
-    .slice(0, resolved.maxRecords)
-    .map((record) => normalizeRecord(record, resolved));
-  const recordIds = retained.map((record) => record.id);
-  if (new Set(recordIds).size !== recordIds.length) {
-    throw new Error('causal candidate evidence record IDs must be unique');
+  if (records.length > 10_000) {
+    throw new Error('causal candidate evidence exceeds 10000 input records');
   }
-  for (const record of retained) validateRecordLinks(record);
-  let omittedRecordCount = records.length - retained.length;
+  const normalized = records.map((record) => normalizeRecord(record, resolved));
+  validateManifestRecords(normalized);
+  const totalRecordCount = normalized.length;
+  let retained = normalized.slice(0, resolved.maxRecords);
+  let omittedRecordCount = totalRecordCount - retained.length;
+  const authority = normalizeAuthority(options.authority);
   const makeManifest = (): AxCausalCandidateEvidenceManifest => ({
-    version: 1,
+    version: 2,
     records: retained,
+    totalRecordCount,
     omittedRecordCount,
     maxRecords: resolved.maxRecords,
     maxArtifactBytes: resolved.maxArtifactBytes,
     privacy: {
-      rawEvidenceRetained: false,
+      evidencePayloads: 'not_in_schema',
+      freeText: 'bounded_not_redacted',
       evidenceSummaries: resolved.includeEvidenceSummaries
         ? 'bounded'
         : 'omitted',
       maxSummaryChars: resolved.maxSummaryChars,
     },
-    authority: 'host_supplied',
+    authority,
   });
   const encoder = new TextEncoder();
   let manifest = makeManifest();
@@ -461,18 +610,89 @@ export function axCreateCausalCandidateEvidenceManifest(
       `causal candidate evidence metadata exceeds maxArtifactBytes=${resolved.maxArtifactBytes}`
     );
   }
+  if (
+    !options.verifyAuthority(
+      axCanonicalizeCausalCandidateEvidenceManifest(manifest),
+      authority
+    )
+  ) {
+    throw new Error('causal candidate evidence authority verification failed');
+  }
   return deepFreeze(manifest);
 }
 
-export function axCloneCausalCandidateEvidenceManifest(
+function normalizeAuthority(
+  authority: Readonly<AxCausalEvidenceAuthority>
+): AxCausalEvidenceAuthority {
+  if (!authority || typeof authority !== 'object') {
+    throw new Error('causal candidate evidence authority is required');
+  }
+  return {
+    principalId: requiredText(authority.principalId, 'authority.principalId'),
+    evaluatorId: requiredText(authority.evaluatorId, 'authority.evaluatorId'),
+    verifierId: requiredText(authority.verifierId, 'authority.verifierId'),
+    receiptId: requiredText(authority.receiptId, 'authority.receiptId'),
+    receiptVersion: requiredText(
+      authority.receiptVersion,
+      'authority.receiptVersion'
+    ),
+  };
+}
+
+/** Stable JSON payload covered by the host authority receipt. */
+export function axCanonicalizeCausalCandidateEvidenceManifest(
   manifest: Readonly<AxCausalCandidateEvidenceManifest>
+): string {
+  return JSON.stringify({
+    version: manifest.version,
+    records: manifest.records,
+    totalRecordCount: manifest.totalRecordCount,
+    omittedRecordCount: manifest.omittedRecordCount,
+    maxRecords: manifest.maxRecords,
+    maxArtifactBytes: manifest.maxArtifactBytes,
+    privacy: manifest.privacy,
+  });
+}
+
+export function axCloneCausalCandidateEvidenceManifest(
+  manifest: Readonly<AxCausalCandidateEvidenceManifest>,
+  verifyAuthority: AxCausalEvidenceAuthorityVerifier
 ): AxCausalCandidateEvidenceManifest {
+  if (typeof verifyAuthority !== 'function') {
+    throw new Error('causal candidate evidence authority verifier is required');
+  }
   if (
-    manifest.version !== 1 ||
-    manifest.authority !== 'host_supplied' ||
-    manifest.privacy?.rawEvidenceRetained !== false ||
+    !hasExactKeys(manifest, [
+      'version',
+      'records',
+      'totalRecordCount',
+      'omittedRecordCount',
+      'maxRecords',
+      'maxArtifactBytes',
+      'privacy',
+      'authority',
+    ]) ||
+    !hasExactKeys(manifest.privacy, [
+      'evidencePayloads',
+      'freeText',
+      'evidenceSummaries',
+      'maxSummaryChars',
+    ]) ||
+    !hasExactKeys(manifest.authority, [
+      'principalId',
+      'evaluatorId',
+      'verifierId',
+      'receiptId',
+      'receiptVersion',
+    ]) ||
+    manifest.version !== 2 ||
+    manifest.privacy?.evidencePayloads !== 'not_in_schema' ||
+    manifest.privacy?.freeText !== 'bounded_not_redacted' ||
+    !Number.isInteger(manifest.totalRecordCount) ||
     !Number.isInteger(manifest.omittedRecordCount) ||
-    manifest.omittedRecordCount < 0
+    manifest.omittedRecordCount < 0 ||
+    manifest.totalRecordCount !==
+      manifest.records.length + manifest.omittedRecordCount
   ) {
     throw new Error('invalid causal candidate evidence manifest metadata');
   }
@@ -484,22 +704,46 @@ export function axCloneCausalCandidateEvidenceManifest(
   ) {
     throw new Error('invalid causal candidate evidence privacy mode');
   }
-  const validated = axCreateCausalCandidateEvidenceManifest(manifest.records, {
-    maxRecords: manifest.maxRecords,
-    maxArtifactBytes: manifest.maxArtifactBytes,
+  const resolved: Required<AxCausalCandidateRetentionOptions> = {
+    maxRecords: boundedInteger(
+      manifest.maxRecords,
+      DEFAULT_MAX_RECORDS,
+      10_000
+    ),
+    maxArtifactBytes: boundedInteger(
+      manifest.maxArtifactBytes,
+      DEFAULT_MAX_ARTIFACT_BYTES,
+      10 * 1024 * 1024
+    ),
     includeEvidenceSummaries,
-    maxSummaryChars: manifest.privacy.maxSummaryChars,
-  });
+    maxSummaryChars: boundedInteger(
+      manifest.privacy.maxSummaryChars,
+      DEFAULT_MAX_SUMMARY_CHARS,
+      2000
+    ),
+  };
+  const validatedRecords = manifest.records.map((record) =>
+    normalizeRecord(record, resolved)
+  );
+  validateManifestRecords(validatedRecords);
+  const authority = normalizeAuthority(manifest.authority);
   if (
-    validated.maxRecords !== manifest.maxRecords ||
-    validated.maxArtifactBytes !== manifest.maxArtifactBytes ||
-    validated.privacy.maxSummaryChars !== manifest.privacy.maxSummaryChars ||
-    validated.omittedRecordCount !== 0 ||
-    JSON.stringify(validated.records) !== JSON.stringify(manifest.records) ||
+    resolved.maxRecords !== manifest.maxRecords ||
+    resolved.maxArtifactBytes !== manifest.maxArtifactBytes ||
+    resolved.maxSummaryChars !== manifest.privacy.maxSummaryChars ||
+    JSON.stringify(authority) !== JSON.stringify(manifest.authority) ||
+    manifest.records.length > manifest.maxRecords ||
+    JSON.stringify(validatedRecords) !== JSON.stringify(manifest.records) ||
     new TextEncoder().encode(JSON.stringify(manifest)).byteLength >
-      manifest.maxArtifactBytes
+      manifest.maxArtifactBytes ||
+    !verifyAuthority(
+      axCanonicalizeCausalCandidateEvidenceManifest(manifest),
+      authority
+    )
   ) {
-    throw new Error('invalid or unbounded causal candidate evidence manifest');
+    throw new Error(
+      'invalid, unauthorized, or unbounded causal candidate evidence manifest'
+    );
   }
   return deepFreeze(
     JSON.parse(JSON.stringify(manifest)) as AxCausalCandidateEvidenceManifest
