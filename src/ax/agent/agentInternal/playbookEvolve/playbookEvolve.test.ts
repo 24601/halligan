@@ -224,6 +224,55 @@ describe('agent.playbook().evolve()', () => {
     expect(actorPromptOf(ag)).not.toContain(BULLET_MARKER);
   });
 
+  it('fails closed when a mutated playbook cannot be restored after update failure', async () => {
+    const { ag } = makeAgent();
+    const handle = ag.getPlaybook().inner;
+    const update = handle.update.bind(handle);
+    const updateError = new Error('post-mutation failure');
+    const rollbackError = new Error('snapshot restoration failure');
+    vi.spyOn(handle, 'update').mockImplementation(async (args: any) => {
+      await update(args);
+      throw updateError;
+    });
+    const load = vi.spyOn(handle, 'load').mockImplementation(() => {
+      throw rollbackError;
+    });
+
+    try {
+      await ag.playbook().evolve(TASKS, {
+        metric: scoreByAnswer,
+        maxProposals: 1,
+      });
+      throw new Error('expected evolve to reject');
+    } catch (error) {
+      expect(error).toBeInstanceOf(AggregateError);
+      expect((error as AggregateError).errors).toEqual([
+        updateError,
+        rollbackError,
+      ]);
+    }
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(actorPromptOf(ag)).toContain(BULLET_MARKER);
+  });
+
+  it('attempts a rejected candidate rollback only once', async () => {
+    const { ag } = makeAgent();
+    const rollbackError = new Error('rollback failure');
+    const load = vi
+      .spyOn(ag.getPlaybook().inner, 'load')
+      .mockImplementation(() => {
+        throw rollbackError;
+      });
+
+    await expect(
+      ag.playbook().evolve(TASKS, {
+        metric: async () => 0.2,
+        maxProposals: 1,
+      })
+    ).rejects.toBe(rollbackError);
+    expect(load).toHaveBeenCalledTimes(1);
+  });
+
   it('rejects when the held-out set regresses even though held-in improves', async () => {
     const { ag } = makeAgent();
     const result = await ag.playbook().evolve(
@@ -636,6 +685,49 @@ describe('agent.playbook().evolve()', () => {
 
       expect(ag.getPlaybook().toJSON()).toEqual(before);
       expect(actorPromptOf(ag)).not.toContain(BULLET_MARKER);
+    });
+
+    it('preserves abort and rollback failures without retrying restoration', async () => {
+      const { ag } = makeAgent();
+      const controller = new AbortController();
+      const rollbackError = new Error('abort rollback failure');
+      const load = vi
+        .spyOn(ag.getPlaybook().inner, 'load')
+        .mockImplementation(() => {
+          throw rollbackError;
+        });
+
+      try {
+        await ag.playbook().evolve(TASKS, {
+          metric: async ({ example, prediction }: any) => {
+            const fixed = prediction?.output?.answer === 'ok-fixed';
+            if (
+              fixed &&
+              example.id === 'history-routing' &&
+              !controller.signal.aborted
+            ) {
+              controller.abort();
+            }
+            return fixed
+              ? 1
+              : String(example.id).startsWith('history-')
+                ? 1
+                : 0.2;
+          },
+          maxProposals: 1,
+          abortSignal: controller.signal,
+          retentionPolicy: retentionPolicy(0.5),
+        });
+        throw new Error('expected evolve to reject');
+      } catch (error) {
+        expect(error).toBeInstanceOf(AggregateError);
+        const errors = (error as AggregateError).errors;
+        expect(errors).toHaveLength(2);
+        expect(errors[0]).toBeInstanceOf(Error);
+        expect((errors[0] as Error).message).toContain('aborted');
+        expect(errors[1]).toBe(rollbackError);
+      }
+      expect(load).toHaveBeenCalledTimes(1);
     });
 
     it('uses an immutable policy and task snapshot despite caller mutation', async () => {

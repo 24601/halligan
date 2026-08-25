@@ -36,6 +36,7 @@ import type {
 } from './playbookEvolveTypes.js';
 import type { AxAppliedProposal } from './proposals.js';
 import {
+  AxAgentPlaybookRestorationError,
   applyProposal,
   buildProposal,
   currentPlaybookText,
@@ -554,6 +555,9 @@ export async function evolveAgentPlaybook<
     try {
       applied = await applyProposal({ proposal, playbookHandle });
     } catch (err) {
+      if (err instanceof AxAgentPlaybookRestorationError) {
+        throw err;
+      }
       outcomes.push({
         proposal,
         accepted: false,
@@ -576,7 +580,7 @@ export async function evolveAgentPlaybook<
       continue;
     }
 
-    let rolledBack = false;
+    let rollbackAttempted = false;
     try {
       const revalTrain = await runAgentEvalBatch<IN, OUT>({
         ...batchArgs,
@@ -770,13 +774,22 @@ export async function evolveAgentPlaybook<
         }
         progress('validation', `${weakness.id}: ACCEPTED`);
       } else {
+        rollbackAttempted = true;
         applied.rollback();
-        rolledBack = true;
         progress('validation', `${weakness.id}: rejected, rolled back`);
       }
     } catch (err) {
-      if (!rolledBack) {
+      if (rollbackAttempted) {
+        throw err;
+      }
+      rollbackAttempted = true;
+      try {
         applied.rollback();
+      } catch (rollbackError) {
+        throw new AggregateError(
+          [err, rollbackError],
+          'AxAgent.playbook().evolve(): candidate evaluation failed and exact rollback also failed.'
+        );
       }
       throw err;
     }

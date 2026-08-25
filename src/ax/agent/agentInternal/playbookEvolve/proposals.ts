@@ -18,6 +18,9 @@ export type AxAppliedProposal = {
   rollback: () => void;
 };
 
+/** An update failed after mutation and its exact snapshot could not be restored. */
+export class AxAgentPlaybookRestorationError extends AggregateError {}
+
 /** The playbook text currently applied to the agent, fed to the miner. */
 export function currentPlaybookText(agent: any): string | undefined {
   const rendered = agent.getPlaybook?.()?.render?.();
@@ -79,7 +82,7 @@ export async function applyProposal(args: {
     try {
       handle.load(snapshot);
     } catch (rollbackError) {
-      throw new AggregateError(
+      throw new AxAgentPlaybookRestorationError(
         [updateError, rollbackError],
         'AxAgent.playbook().evolve(): proposal update failed and exact rollback also failed.'
       );
