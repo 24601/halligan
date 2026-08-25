@@ -1168,7 +1168,7 @@
       "status": "open",
       "title": "Port host-owned executable skill compatibility and retirement selection",
       "createdAt": "2026-08-25",
-      "sourcePR": null,
+      "sourcePR": 13,
       "sourceCommit": "ca760294f5ea4f207052c39c2218e1195103bc2a",
       "tsPaths": [
         "src/ax/agent/executableSkills.test.ts",
