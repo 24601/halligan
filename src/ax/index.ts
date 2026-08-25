@@ -665,6 +665,7 @@ import type {
   AxGEPABootstrapOptions,
   AxMetricFn,
   AxMetricFnArgs,
+  AxMetricResult,
   AxMultiMetricFn,
   AxOptimizationCheckpoint,
   AxOptimizationProgress,
@@ -2256,6 +2257,7 @@ export type { AxMemoryData };
 export type { AxMemoryMessageValue };
 export type { AxMetricFn };
 export type { AxMetricFnArgs };
+export type { AxMetricResult };
 export type { AxMetricsConfig };
 export type { AxMockAIServiceConfig };
 export type { AxModelConfig };

@@ -596,7 +596,7 @@ providers, and read credentials from `.env`. Internal generated-package fixtures
 remain under `packages/<language>/examples` for AxIR verification, but the public
 catalog and website are generated only from `src/examples/<language>/`.
 
-Highlights: `extract.ts`, `react.ts`, `agent.ts`, `streaming1.ts`, `multi-modal.ts`, `audio-chat.ts`, `audio-batch-and-agent.ts`, `standard-schema.ts`, `rlm-memories-and-skills.ts`, `rlm-discovery.ts`, `gepa-flow.ts`, `openai-compatible.ts`, `ax-flow-enhanced-demo.ts`, `ax-flow-mermaid.ts`. [Browse all examples →](src/examples/)
+Highlights: `extract.ts`, `react.ts`, `agent.ts`, `streaming1.ts`, `multi-modal.ts`, `audio-chat.ts`, `audio-batch-and-agent.ts`, `standard-schema.ts`, `rlm-memories-and-skills.ts`, `rlm-discovery.ts`, `gepa-flow.ts`, `gepa-qualitative-feedback-live-eval.ts`, `openai-compatible.ts`, `ax-flow-enhanced-demo.ts`, `ax-flow-mermaid.ts`. [Browse all examples →](src/examples/)
 
 ## Community
 

@@ -524,10 +524,11 @@ export class AxACE extends AxBaseOptimizer {
             prediction,
             example: example as AxExample,
           });
+          const scalar = typeof score === 'number' ? score : score.score;
 
-          if (typeof score === 'number') {
-            this.stats.bestScore = Math.max(this.stats.bestScore, score);
-            bestScore = Math.max(bestScore, score);
+          if (Number.isFinite(scalar)) {
+            this.stats.bestScore = Math.max(this.stats.bestScore, scalar);
+            bestScore = Math.max(bestScore, scalar);
           }
 
           const generatorOutput = this.createGeneratorOutput(
@@ -539,7 +540,7 @@ export class AxACE extends AxBaseOptimizer {
           const reflection = await this.runReflectionRounds({
             example,
             generatorOutput,
-            feedback: this.createMetricFeedback(score),
+            feedback: this.createMetricFeedback(scalar),
           });
 
           const rawCurator = await this.runCurator({

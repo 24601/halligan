@@ -18,7 +18,12 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
 
 ## Open
 
-No entries.
+- `axir-2026-08-25-port-structured-qualitative-metric-results-through-gepa` [axoptimize] Port structured qualitative metric results through GEPA
+  - Status: open
+  - Source commit: `working-tree`
+  - TS paths: `src/ax/dsp`
+  - Impact: TypeScript metrics can return an explicit scalar score with bounded per-example textual feedback and named Pareto objective scores; generated language optimizers still expose only scalar or legacy score-vector evaluation and do not align metric feedback with reflective datasets.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 
 ## Done
 

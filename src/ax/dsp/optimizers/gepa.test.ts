@@ -139,6 +139,81 @@ describe('AxGEPA Optimizer', () => {
       });
     });
 
+    it('uses structured scalar acceptance while retaining named Pareto objectives', async () => {
+      const optimizer = new AxGEPA({
+        studentAI: {} as AxAIService,
+        teacherAI: {} as AxAIService,
+        numTrials: 0,
+      });
+      const program = createSingleRootProgram('task', async () => ({
+        answer: 'a',
+      }));
+
+      const result = await optimizer.compile(
+        program as any,
+        [{ question: 'q1' }, { question: 'q2' }],
+        async () => ({
+          score: 0.9,
+          feedback: 'This feedback is evaluation-time data only.',
+          scores: { accuracy: 1, brevity: 0 },
+        }),
+        { maxMetricCalls: 2 }
+      );
+
+      // bestScore follows the existing Pareto-vector scalarization convention;
+      // the explicit 0.9 scalar is used for rollout acceptance decisions.
+      expect(result.bestScore).toBe(0.5);
+      expect(result.paretoFront[0]?.scores).toEqual({
+        accuracy: 1,
+        brevity: 0,
+      });
+      expect(JSON.stringify(result.optimizedProgram)).not.toContain(
+        'evaluation-time data only'
+      );
+      expect(JSON.parse(JSON.stringify(result.optimizedProgram))).toMatchObject(
+        {
+          bestScore: 0.5,
+          componentMap: { 'root::instruction': 'task' },
+        }
+      );
+    });
+
+    it('carries evaluated metric feedback into component reflection tuples', async () => {
+      const optimizer = new AxGEPA({
+        studentAI: {} as AxAIService,
+        teacherAI: {} as AxAIService,
+        numTrials: 1,
+        minibatchSize: 1,
+        seed: 1,
+      });
+      const program = createSingleRootProgram('task', async () => ({
+        answer: 'a',
+      }));
+      let reflectedTuples: any[] = [];
+      (optimizer as any).reflectTargetInstruction = async (...args: any[]) => {
+        reflectedTuples = args[8];
+        return args[1];
+      };
+
+      await optimizer.compile(
+        program as any,
+        [{ question: 'q1' }, { question: 'q2' }],
+        async ({ example }) => ({
+          score: 0.4,
+          feedback: `Use evidence for ${example.question}.`,
+        }),
+        { maxMetricCalls: 10, skipPerfectScore: false }
+      );
+
+      expect(reflectedTuples).toMatchObject([
+        {
+          input: { question: expect.any(String) },
+          score: 0.4,
+          feedback: expect.stringMatching(/^Use evidence for q[12]\.$/),
+        },
+      ]);
+    });
+
     it('treats forward failures as zero-score rows instead of aborting the optimization', async () => {
       const optimizer = new AxGEPA({
         studentAI: {} as AxAIService,
@@ -530,16 +605,32 @@ describe('AxGEPA Optimizer', () => {
         'current instruction',
         program,
         [{ question: 'q1', extra: { nested: ['value'] } }],
-        async () => 0.25,
+        async () => ({
+          score: 0.25,
+          feedback: 'Metric feedback: preserve the nested evidence.',
+        }),
         {
+          feedbackNotes: ['Global note: keep the output concise.'],
           feedbackFn: ({ componentId }: { componentId?: string }) =>
-            componentId ? `component=${componentId}` : undefined,
+            componentId
+              ? `Explicit feedback: component=${componentId}`
+              : undefined,
         }
       );
 
       expect(capturedPrompt).toContain('"taskDigest": "branch-a"');
       expect(capturedPrompt).toContain('"nested": [');
-      expect(capturedPrompt).toContain('component=root');
+      expect(capturedPrompt).toContain(
+        'Metric feedback: preserve the nested evidence.'
+      );
+      expect(capturedPrompt).toContain('Explicit feedback: component=root');
+      expect(capturedPrompt).toContain('Global note: keep the output concise.');
+      expect(
+        capturedPrompt.indexOf('This trajectory got a score')
+      ).toBeLessThan(capturedPrompt.indexOf('Metric feedback:'));
+      expect(capturedPrompt.indexOf('Metric feedback:')).toBeLessThan(
+        capturedPrompt.indexOf('Explicit feedback:')
+      );
       expect(capturedPrompt).not.toContain('[object Object]');
     });
   });

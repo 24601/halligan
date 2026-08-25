@@ -9,14 +9,30 @@ export type AxTypedExample<IN = any> = IN & {
   [key: string]: AxFieldValue;
 };
 
-export type AxMetricFn = <T = any>(
+/**
+ * A metric result with an explicit scalar used for acceptance decisions and
+ * optional qualitative feedback/objectives used by reflective optimizers.
+ */
+export interface AxMetricResult<Objective extends string = string> {
+  score: number;
+  feedback?: string;
+  scores?: Partial<Record<Objective, number>>;
+}
+
+export type AxMetricFn<T = any, Objective extends string = string> = (
   arg0: Readonly<{ prediction: T; example: AxExample }>
-) => number | Promise<number>;
+) =>
+  | number
+  | AxMetricResult<Objective>
+  | Promise<number | AxMetricResult<Objective>>;
 export type AxMetricFnArgs = Parameters<AxMetricFn>[0];
 
-export type AxMultiMetricFn = <T = any>(
+export type AxMultiMetricFn<T = any, Objective extends string = string> = (
   arg0: Readonly<{ prediction: T; example: AxExample }>
-) => Record<string, number> | Promise<Record<string, number>>;
+) =>
+  | Record<string, number>
+  | AxMetricResult<Objective>
+  | Promise<Record<string, number> | AxMetricResult<Objective>>;
 
 export interface AxOptimizationProgress {
   round: number;
@@ -179,6 +195,8 @@ export interface AxCompileOptions {
       componentId?: string;
     }>
   ) => string | string[] | undefined;
+  /** Global evaluator notes added before per-example metric and feedbackFn text. */
+  feedbackNotes?: readonly string[];
   skipPerfectScore?: boolean;
   perfectScore?: number;
   maxMetricCalls?: number;

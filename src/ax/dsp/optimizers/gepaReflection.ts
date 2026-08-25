@@ -7,6 +7,7 @@ export type AxGEPAReflectiveTuple = {
   input: AxExample;
   prediction: unknown;
   score: number;
+  feedback?: string;
 };
 
 export type AxGEPATraceSummaryCall = {
@@ -20,6 +21,7 @@ export type AxGEPATraceSummaryCall = {
 
 export type AxGEPATraceSummary = {
   score: number;
+  feedback?: string;
   calls: AxGEPATraceSummaryCall[];
   output?: string;
   error?: string;
@@ -56,6 +58,10 @@ export function summarizeGEPATraces(
 
   return traceDataset.slice(0, maxRows).map((item: any) => ({
     score: Number(item?.score ?? 0),
+    feedback:
+      typeof item?.feedback === 'string'
+        ? renderReflectiveValue(item.feedback, maxValueChars)
+        : undefined,
     calls: Array.isArray(item?.calls)
       ? item.calls.map((call: any) => ({
           componentId:
@@ -90,7 +96,7 @@ export async function proposeGEPAComponentValue(args: {
   maxAttempts?: number;
 }): Promise<string | undefined> {
   const refl = ax(
-    `componentKey:string "Component key", componentKind:string "Free-form component kind hint", componentDescription?:string "What this string is used for", constraints?:string "Hard constraints on the new value", currentValue:string "Current value of the component", feedbackSummary?:string "Summarized feedback", previousValidationError?:string "Why the previous proposal was rejected; avoid repeating it", minibatch:json "Array of {input,prediction,score}", traceDataset?:json "Compact actionable execution trace summaries relevant to this component" -> newValue:string "Improved value for the component"`
+    `componentKey:string "Component key", componentKind:string "Free-form component kind hint", componentDescription?:string "What this string is used for", constraints?:string "Hard constraints on the new value", currentValue:string "Current value of the component", feedbackSummary?:string "Summarized feedback", previousValidationError?:string "Why the previous proposal was rejected; avoid repeating it", minibatch:json "Array of {input,prediction,score,feedback?}", traceDataset?:json "Compact actionable execution trace summaries relevant to this component" -> newValue:string "Improved value for the component"`
   );
 
   const attempts = Math.max(1, args.maxAttempts ?? 2);

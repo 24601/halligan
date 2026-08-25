@@ -14,6 +14,9 @@ import {
   type AxAIService,
   type AxFunction,
   type AxFunctionHandler,
+  type AxMetricFn,
+  type AxMetricResult,
+  type AxMultiMetricFn,
   type AxParetoResult,
   type AxProgrammable,
   ax,
@@ -528,6 +531,28 @@ const _optimizedProgrammable: Promise<
   maxMetricCalls: 2,
   bootstrap: { maxDemos: 1, qualityThreshold: 0.5 },
 });
+const qualitativeResult: AxMetricResult<'accuracy' | 'brevity'> = {
+  score: 0.8,
+  feedback: 'Ground the answer in the provided evidence.',
+  scores: { accuracy: 1, brevity: 0.5 },
+};
+const qualitativeMetric: AxMetricFn<any, 'accuracy' | 'brevity'> = () =>
+  qualitativeResult;
+const legacyScalarMetric: AxMetricFn = () => 1;
+const legacyMultiMetric: AxMultiMetricFn = () => ({
+  accuracy: 1,
+  brevity: 0.5,
+});
+void qualitativeMetric;
+void legacyScalarMetric;
+void legacyMultiMetric;
+
+const invalidQualitativeResult: AxMetricResult<'accuracy'> = {
+  score: 1,
+  // @ts-expect-error named objectives are constrained by AxMetricResult's generic
+  scores: { brevity: 1 },
+};
+void invalidQualitativeResult;
 
 // Test flow() with optional fields
 const optionalFlow = flow<{
