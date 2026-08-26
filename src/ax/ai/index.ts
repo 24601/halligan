@@ -35,3 +35,4 @@ export type {
   AxUsageEvent,
   AxUsageObserver,
 } from './types.js';
+export * from './visual/index.js';

@@ -100,6 +100,7 @@ grault
 groq
 Groq
 guidel
+Halligan
 Hono
 huggingface
 hypervolume
@@ -339,3 +340,5 @@ subcall
 subcalls
 togethre
 vllm
+dhash
+luma

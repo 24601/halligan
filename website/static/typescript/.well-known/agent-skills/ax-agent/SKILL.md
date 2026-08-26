@@ -1,12 +1,24 @@
 ---
 name: ax-agent
 description: This skill helps an LLM generate correct core AxAgent code using @ax-llm/ax. Use when the user asks about agent(), child agents, namespaced functions, discovery mode, clarification, bubbleErrors, host-side final/clarification protocol, or ordinary agent runtime behavior. For MCP clients, native runtime modules, subscriptions, tasks, or authentication use ax-mcp alongside this skill. For RLM/code-runtime work use ax-agent-rlm; for callbacks and telemetry use ax-agent-observability; for recall/memory/skill loading use ax-agent-memory-skills; for agent.optimize(...) use ax-agent-optimize.
-version: "24.0.3"
+version: "24.0.8"
 ---
 
 # AxAgent Codegen Rules (@ax-llm/ax)
 
 Use this skill to generate small, correct `AxAgent` code. Prefer modern factory-style APIs and copyable patterns. Do not write tutorial prose unless the user explicitly asks for explanation.
+
+## Host-owned authority
+
+Pass an optional `authority` in forward options to apply exact host-owned
+principal, actor, capability-grant, and receipt checks to ordinary functions,
+child-agent functions, live runtime tools, and attached MCP/UCP operations. The
+boundary is off when omitted. Nested calls inherit by default; use
+`authorityInheritance: 'none'` for a zero-grant child or provide explicitly
+attenuated child claims/grants. Model text and function arguments never become
+authority. Authority data is deep-snapshotted, and host callbacks fail closed
+on cancellation or `authorizeTimeoutMs` (30 seconds by default). See
+`docs/HOST_AUTHORITY.md` for the contract and limits.
 
 Your job is to choose the smallest correct `AxAgent` shape for the user's needs:
 

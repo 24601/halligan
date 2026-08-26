@@ -8,6 +8,18 @@ version: "__VERSION__"
 
 Use this skill to generate small, correct `AxAgent` code. Prefer modern factory-style APIs and copyable patterns. Do not write tutorial prose unless the user explicitly asks for explanation.
 
+## Host-owned authority
+
+Pass an optional `authority` in forward options to apply exact host-owned
+principal, actor, capability-grant, and receipt checks to ordinary functions,
+child-agent functions, live runtime tools, and attached MCP/UCP operations. The
+boundary is off when omitted. Nested calls inherit by default; use
+`authorityInheritance: 'none'` for a zero-grant child or provide explicitly
+attenuated child claims/grants. Model text and function arguments never become
+authority. Authority data is deep-snapshotted, and host callbacks fail closed
+on cancellation or `authorizeTimeoutMs` (30 seconds by default). See
+`docs/HOST_AUTHORITY.md` for the contract and limits.
+
 Your job is to choose the smallest correct `AxAgent` shape for the user's needs:
 
 - If the user wants a normal tool-using assistant, keep the config minimal.
