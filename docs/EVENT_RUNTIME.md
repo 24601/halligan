@@ -264,6 +264,9 @@ full-record journals to commitments and securely deletes the old rows. A
 durable cleanup-pending marker is committed with that migration; every later
 startup checkpoints and truncates the WAL before clearing the marker, so a
 crash between migration commit and cleanup cannot strand legacy payload frames.
+These verifier journal and cleanup-marker semantics are SQLite event schema v4;
+later event-family schema lines must migrate from verifier-v4 rather than
+reusing its version numbers or replacing its capability marker.
 These guarantees do not make arbitrary target or sink I/O exactly once.
 
 ### Deterministic Evaluation

@@ -39,6 +39,7 @@ describe('GEPA reflection helpers', () => {
 
   it('passes validation errors into retry prompts and accepts a corrected value', async () => {
     const seenPrompts: string[] = [];
+    const failures: Array<{ kind: string; message: string }> = [];
     let calls = 0;
     const ai = new AxMockAIService({
       chatResponse: async (req) => {
@@ -70,12 +71,16 @@ describe('GEPA reflection helpers', () => {
       currentValue: 'lookup',
       tuples: [],
       maxAttempts: 2,
+      onFailure: (failure) => failures.push(failure),
     });
 
     expect(proposed).toBe('good_value');
     expect(seenPrompts[1]).toContain('must be snake_case');
     expect(seenPrompts[0]).toContain('Do not memorize or copy');
     expect(seenPrompts[0]).toContain('Preserve behavior that already succeeds');
+    expect(failures).toEqual([
+      { kind: 'validator', message: 'must be snake_case' },
+    ]);
   });
 
   it('renders trusted optimization references in stable caller order', () => {
@@ -253,6 +258,54 @@ describe('GEPA reflection helpers', () => {
     expect(seenExamples).toBe(0);
   });
 
+  it('reaches the built-in teacher when maxExamples is 0', async () => {
+    let calls = 0;
+    let seenPrompt: string | undefined;
+    const ai = new AxMockAIService({
+      chatResponse: async (req) => {
+        calls++;
+        seenPrompt = JSON.stringify(req.chatPrompt);
+        return {
+          results: [
+            {
+              index: 0,
+              content: 'New Value: from zero examples',
+              finishReason: 'stop',
+            },
+          ],
+        };
+      },
+    });
+
+    const proposed = await proposeGEPAComponentValue({
+      ai,
+      target: {
+        id: 'root::instruction',
+        kind: 'instruction',
+        current: 'Keep this',
+      },
+      currentValue: 'Keep this',
+      tuples: [
+        {
+          input: { value: 'secret-training-entity' },
+          prediction: {},
+          score: 0,
+        },
+      ],
+      proposal: {
+        maxExamples: 0,
+      },
+    });
+
+    expect(proposed).toBe('from zero examples');
+    expect(calls).toBe(1);
+    expect(seenPrompt).toBeDefined();
+    expect(seenPrompt).not.toContain('secret-training-entity');
+    expect(seenPrompt).not.toContain(
+      "Value for input field 'reflectiveExamples' is required"
+    );
+  });
+
   it('records custom-policy exceptions and retries instead of declining', async () => {
     const errors: Array<string | undefined> = [];
     const proposed = await proposeGEPAComponentValue({
@@ -278,5 +331,39 @@ describe('GEPA reflection helpers', () => {
 
     expect(proposed).toBe('recovered proposal');
     expect(errors).toEqual([undefined, 'proposer unavailable']);
+  });
+
+  it('passes per-example metric feedback into component reflection', async () => {
+    let prompt = '';
+    const ai = new AxMockAIService({
+      chatResponse: async (req) => {
+        prompt = JSON.stringify(req.chatPrompt);
+        return {
+          results: [
+            {
+              index: 0,
+              content: 'New Value: improved',
+              finishReason: 'stop',
+            },
+          ],
+        };
+      },
+    });
+
+    await proposeGEPAComponentValue({
+      ai,
+      target: { id: 'root::instruction', kind: 'instruction', current: 'base' },
+      currentValue: 'base',
+      tuples: [
+        {
+          input: { question: 'q' },
+          prediction: { answer: 'a' },
+          score: 0.4,
+          feedback: 'Ground the answer in the supplied context.',
+        },
+      ],
+    });
+
+    expect(prompt).toContain('Ground the answer in the supplied context.');
   });
 });

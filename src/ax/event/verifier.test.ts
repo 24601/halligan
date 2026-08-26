@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { AxAgentClarificationError } from '../agent/agentInternal/agentStateTypes.js';
+import type { AxAuthorityContext } from '../authority/types.js';
 import { AxSignature } from '../dsp/sig.js';
 import type { AxProgrammable } from '../dsp/types.js';
 import {
@@ -53,6 +54,7 @@ function setup(
     stateStore?: AxInMemoryProgramStateStore;
     forward?: (input: any, options?: any) => unknown | Promise<unknown>;
     sink?: (output: unknown) => void | Promise<void>;
+    authority?: Readonly<AxAuthorityContext>;
   }> = {}
 ) {
   const target = eventTarget({
@@ -72,6 +74,7 @@ function setup(
   const runtime = new AxEventRuntime({
     store: options.store,
     programStateStore: options.stateStore,
+    authority: options.authority,
     workerConcurrency: 1,
     routes: [
       eventRoute({
@@ -179,6 +182,84 @@ describe('AxEventRuntime verifier continuation policy', () => {
         .byteLength
     ).toBeLessThanOrEqual(64);
     expect((await runtime.getRun(runs[1]!))?.verification?.status).toBe('pass');
+    await runtime.close();
+  });
+
+  it('preserves host authority alongside verifier continuation context', async () => {
+    const contexts: Array<{
+      principalId: string | undefined;
+      resumed: boolean;
+      failureCode: unknown;
+    }> = [];
+    const authority: AxAuthorityContext = {
+      principal: { id: 'verifier-principal', tenantId: 'tenant-1' },
+      actor: { id: 'verifier-worker', kind: 'agent' },
+      grants: [
+        {
+          version: 1,
+          id: 'verifier-target-grant',
+          principalId: 'verifier-principal',
+          actor: { id: 'verifier-worker', kind: 'agent' },
+          operations: ['event.target.invoke'],
+          resources: [
+            { type: 'event.target', id: 'goal', tenantId: 'tenant-1' },
+          ],
+          leaseEpoch: 1,
+        },
+      ],
+      leaseEpoch: 1,
+      authorize: (operation, context) => ({
+        version: 1,
+        receiptId: `receipt-${context.requestId}`,
+        requestId: context.requestId,
+        decision: 'allow',
+        operation,
+        resource: context.resource,
+        principalId: context.principal.id,
+        actor: context.actor,
+        grantIds: context.grants.map((grant) => grant.id),
+        leaseEpoch: context.leaseEpoch,
+        authorizedAt: context.now,
+      }),
+    };
+    const verify = vi
+      .fn()
+      .mockReturnValueOnce({
+        status: 'fail',
+        failure: { code: 'retry_with_authority' },
+      })
+      .mockReturnValue({ status: 'pass' });
+    const { runtime } = setup(
+      { id: 'authority-continuation', verify },
+      {
+        authority,
+        forward: (input, options) => {
+          const eventContext = options.eventContext as AxEventContext;
+          contexts.push({
+            principalId: eventContext.authority?.principal.id,
+            resumed: Boolean(eventContext.continuation),
+            failureCode: input.feedback?.failure?.code,
+          });
+          return { answer: `attempt-${contexts.length}` };
+        },
+      }
+    );
+    await runtime.start();
+    await runtime.publish(ingress('authority-continuation'));
+    await runtime.waitForIdle();
+    expect(contexts).toEqual([
+      {
+        principalId: 'verifier-principal',
+        resumed: false,
+        failureCode: undefined,
+      },
+      {
+        principalId: 'verifier-principal',
+        resumed: true,
+        failureCode: 'retry_with_authority',
+      },
+    ]);
+    expect(verify).toHaveBeenCalledTimes(2);
     await runtime.close();
   });
 

@@ -38,7 +38,7 @@
     "@pipedream/sdk": "^1.6.4",
     "@types/ws": "^8.18.1",
     "google-auth-library": "^9.15.1",
-    "ws": "^8.20.0"
+    "ws": "^8.21.3"
   },
   "bugs": {
     "url": "https://github.com/@ax-llm/ax/issues"
@@ -46,6 +46,6 @@
   "homepage": "https://github.com/ax-llm/ax#readme",
   "author": "Vikram <https://twitter.com/dosco>",
   "devDependencies": {
-    "@modelcontextprotocol/server-everything": "2026.7.4"
+    "@modelcontextprotocol/server-everything": "2026.8.18"
   }
 }

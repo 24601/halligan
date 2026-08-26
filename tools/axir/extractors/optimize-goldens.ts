@@ -13,7 +13,6 @@ import {
   applyCuratorOperations,
   createEmptyPlaybook,
   dedupePlaybookByContent,
-  renderPlaybook,
   updateBulletFeedback,
 } from '../../../src/ax/dsp/optimizers/acePlaybook.js';
 import type {
@@ -1855,6 +1854,32 @@ function acePlaybook(
   return playbook as unknown as AxACEPlaybook;
 }
 
+// Empty-section filtering is TypeScript-first and tracked by the open ACE AxIR
+// backlog item. Keep render fixtures on the generated runtimes' current
+// contract until that behavior is ported instead of claiming false parity.
+function renderPortablePlaybook(playbook: Readonly<AxACEPlaybook>): string {
+  const totalBullets = Object.values(playbook.sections).reduce(
+    (count, bullets) => count + bullets.length,
+    0
+  );
+  if (totalBullets === 0 && !playbook.description) return '';
+
+  const header = playbook.description
+    ? `## Context Playbook\n${playbook.description.trim()}\n`
+    : '## Context Playbook\n';
+  const sections = Object.entries(playbook.sections)
+    .map(([sectionName, bullets]) => {
+      const body = bullets
+        .map((bullet) => `- [${bullet.id}] ${bullet.content}`)
+        .join('\n');
+      return body
+        ? `### ${sectionName}\n${body}`
+        : `### ${sectionName}\n_(empty)_`;
+    })
+    .join('\n\n');
+  return `${header}\n${sections}`.trim();
+}
+
 // playbook-empty: createEmptyPlaybook(description?, now)
 const emptyWithDescription = withFrozenClock(ACE_NOW, () =>
   createEmptyPlaybook('Grounded answers only.')
@@ -1893,7 +1918,7 @@ writeFixture('ace-render-with-description', {
   kind: 'optimize',
   operation: 'playbook-render',
   playbook: clone(renderPlaybookInput) as unknown as Json,
-  expected_render: renderPlaybook(renderPlaybookInput),
+  expected_render: renderPortablePlaybook(renderPlaybookInput),
 });
 
 // playbook-render: no description, single empty section.
@@ -1902,7 +1927,7 @@ writeFixture('ace-render-no-description-empty-section', {
   kind: 'optimize',
   operation: 'playbook-render',
   playbook: clone(renderEmptySection) as unknown as Json,
-  expected_render: renderPlaybook(renderEmptySection),
+  expected_render: renderPortablePlaybook(renderEmptySection),
 });
 
 // Empty-string descriptions are falsy in the TS renderer and therefore behave
@@ -1915,7 +1940,7 @@ writeFixture('ace-render-empty-description-empty-section', {
   kind: 'optimize',
   operation: 'playbook-render',
   playbook: clone(renderEmptyDescription) as unknown as Json,
-  expected_render: renderPlaybook(renderEmptyDescription),
+  expected_render: renderPortablePlaybook(renderEmptyDescription),
 });
 
 // playbook-stats: recompute stats over a (duplicate-free) playbook. The TS
@@ -2066,7 +2091,7 @@ function applyOpsFixture(
     apply_options: fixtureOptions,
     now: ACE_NOW,
     expected_result: {
-      playbook: mutated as unknown as Json,
+      playbook: stripTypeScriptOnlyACEEvidence(mutated as unknown as Json),
       updatedBulletIds: result.updatedBulletIds as unknown as Json,
       autoRemoved: result.autoRemoved as unknown as Json,
     },
@@ -2223,6 +2248,34 @@ function stripGeneratorSerialization(artifact: Json): Json {
   return out as unknown as Json;
 }
 
+// Evidence metadata is intentionally TypeScript-first (tracked by the open ACE
+// AxIR backlog item). Keep the existing portable ACE fixtures projected onto
+// the schema generated runtimes currently implement; otherwise host-generated
+// feedback ids make fixture extraction nondeterministic and falsely claim
+// evidence/lineage conformance before that backlog item is implemented.
+function stripTypeScriptOnlyACEEvidence(value: Json): Json {
+  const out = clone(value) as any;
+  const stripPlaybook = (playbook: any) => {
+    for (const bullets of Object.values(playbook?.sections ?? {}) as any[][]) {
+      for (const bullet of bullets) {
+        delete bullet.evidence;
+        delete bullet.revision;
+        delete bullet.lineage;
+      }
+    }
+  };
+  stripPlaybook(out);
+  stripPlaybook(out.playbook);
+  for (const event of out.feedback ?? []) {
+    delete event.id;
+    delete event.sourceRunId;
+  }
+  for (const entry of out.history ?? []) {
+    delete entry.changes;
+  }
+  return out as Json;
+}
+
 function scriptACE(
   ace: AxACE,
   program: { forward: unknown },
@@ -2256,9 +2309,11 @@ async function driveACECompile(
   return withFrozenClockAsync(ACE_NOW, async () => {
     await ace.compile(program, examples as any, metric as any);
     return {
-      playbook: ace.getPlaybook() as unknown as Json,
-      artifact: stripGeneratorSerialization(
-        ace.getArtifact() as unknown as Json
+      playbook: stripTypeScriptOnlyACEEvidence(
+        ace.getPlaybook() as unknown as Json
+      ),
+      artifact: stripTypeScriptOnlyACEEvidence(
+        stripGeneratorSerialization(ace.getArtifact() as unknown as Json)
       ),
     };
   });
@@ -2292,9 +2347,11 @@ async function driveACEOnlineUpdate(
   return withFrozenClockAsync(ACE_NOW, async () => {
     const curator = await ace.applyOnlineUpdate(update);
     return {
-      playbook: ace.getPlaybook() as unknown as Json,
-      artifact: stripGeneratorSerialization(
-        ace.getArtifact() as unknown as Json
+      playbook: stripTypeScriptOnlyACEEvidence(
+        ace.getPlaybook() as unknown as Json
+      ),
+      artifact: stripTypeScriptOnlyACEEvidence(
+        stripGeneratorSerialization(ace.getArtifact() as unknown as Json)
       ),
       curator: (curator ?? null) as unknown as Json,
     };

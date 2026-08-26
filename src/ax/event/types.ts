@@ -1,4 +1,5 @@
 import type { AxAIService } from '../ai/types.js';
+import type { AxAuthorityContext } from '../authority/types.js';
 import type { AxSignature } from '../dsp/sig.js';
 import type {
   AxGenDeltaOut,
@@ -203,12 +204,16 @@ export interface AxEventContext {
   readonly trust: AxEventTrust;
   readonly attempt: number;
   readonly idempotencyKey: string;
-  readonly fencingToken?: number;
   readonly abortSignal: AbortSignal;
+  /** Host-resolved authority for this delivery. Never sourced from event data. */
+  readonly authority?: Readonly<AxAuthorityContext>;
   readonly continuation?: Readonly<AxEventContinuation>;
+  readonly fencingToken?: number;
   registerContinuation(
     registration: Readonly<AxEventContinuationRegistration>
   ): string;
+  /** Run work only after this invocation's continuations are durably registered. */
+  afterContinuationsRegistered(callback: () => void | Promise<void>): void;
 }
 
 export type AxEventInheritance = 'all' | 'none';
@@ -697,6 +702,15 @@ export interface AxEventRuntimeOptions {
   coordination?: 'single-worker' | 'multi-worker';
   leaseMs?: number;
   heartbeatMs?: number;
+  /** Resolve host-verified authority for each delivery. Event payload claims are ignored. */
+  authority?:
+    | Readonly<AxAuthorityContext>
+    | ((
+        ingress: Readonly<AxEventIngress>
+      ) =>
+        | Readonly<AxAuthorityContext>
+        | undefined
+        | Promise<Readonly<AxAuthorityContext> | undefined>);
 }
 
 export interface AxEventPayloadStore {

@@ -294,6 +294,7 @@ export function initializeAgentInternal(
   if (agentIdentity) {
     s.func = {
       name: toCamelCase(agentIdentity.name),
+      componentId: `agent:${agentIdentity.namespace ? `${agentIdentity.namespace}:` : ''}${toCamelCase(agentIdentity.name)}`,
       description: agentIdentity.description,
       parameters: s._buildFuncParameters(),
       func: async () => {

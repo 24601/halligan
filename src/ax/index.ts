@@ -113,6 +113,10 @@ import type {
   AxAgentPlaybookEvolveProposal,
   AxAgentPlaybookEvolveResult,
   AxAgentPlaybookEvolveRunRecord,
+  AxAgentPlaybookRetentionAnchor,
+  AxAgentPlaybookRetentionPolicy,
+  AxAgentPlaybookRetentionReceipt,
+  AxAgentPlaybookRetentionSlice,
   AxAgentPlaybookWeakness,
 } from './agent/agentInternal/playbookEvolve/playbookEvolveTypes.js';
 import type {
@@ -176,6 +180,23 @@ import type {
   AxResolvedAutoUpgrade,
   AxResolvedCitations,
 } from './agent/config.js';
+import {
+  type AxExecutableSkillArtifact,
+  type AxExecutableSkillAuthority,
+  type AxExecutableSkillContext,
+  type AxExecutableSkillExclusionReason,
+  type AxExecutableSkillInspection,
+  type AxExecutableSkillLifecycle,
+  type AxExecutableSkillRef,
+  type AxExecutableSkillRequirements,
+  type AxExecutableSkillSelection,
+  type AxExecutableSkillVerification,
+  type AxExecutableSkillVerificationReceipt,
+  type AxSelectExecutableSkillsOptions,
+  type AxSelectedExecutableSkill,
+  axExecutableSkillRef,
+  axSelectExecutableSkills,
+} from './agent/executableSkills.js';
 import type {
   AxAgentPlaybookConfig,
   AxAgentPlaybookLearnOptions,
@@ -185,6 +206,70 @@ import type {
   AxResolvedAgentPlaybookConfig,
   AxResolvedAgentPlaybookLearn,
 } from './agent/playbookConfig.js';
+import {
+  type AxPreferenceApplicability,
+  type AxPreferenceEvidenceAssertion,
+  type AxPreferenceEvidenceClaim,
+  type AxPreferenceEvidenceContext,
+  type AxPreferenceEvidenceErasure,
+  type AxPreferenceEvidenceExclusion,
+  type AxPreferenceEvidenceExclusionReason,
+  type AxPreferenceEvidenceKind,
+  type AxPreferenceEvidenceOperation,
+  type AxPreferenceEvidenceReceiptPurpose,
+  type AxPreferenceEvidenceReceiptRequest,
+  type AxPreferenceEvidenceRecord,
+  type AxPreferenceEvidenceRenewal,
+  type AxPreferenceEvidenceRetraction,
+  type AxPreferenceEvidenceRevision,
+  type AxPreferenceEvidenceSelection,
+  type AxPreferenceEvidenceStreamBinding,
+  type AxPreferenceEvidenceStreamRequest,
+  type AxSelectedPreferenceEvidence,
+  axErasePreferenceEvidence,
+  axPreferenceEvidenceLimits,
+  axPreferenceEvidenceToMemories,
+  axRenewPreferenceEvidence,
+  axRetractPreferenceEvidence,
+  axSelectPreferenceEvidence,
+} from './agent/preferenceEvidence.js';
+import {
+  AxAgentSessionAuthorizationError,
+  AxAgentSessionClient,
+  AxAgentSessionConflictError,
+  type AxAgentSessionEvent,
+  type AxAgentSessionFactoryContext,
+  type AxAgentSessionFunctionOptions,
+  type AxAgentSessionHandle,
+  AxAgentSessionHost,
+  type AxAgentSessionHostOptions,
+  type AxAgentSessionJob,
+  AxAgentSessionLimitError,
+  type AxAgentSessionLimits,
+  type AxAgentSessionMessage,
+  type AxAgentSessionMessageMode,
+  type AxAgentSessionMessageStatus,
+  AxAgentSessionNotFoundError,
+  type AxAgentSessionRecord,
+  type AxAgentSessionRegistration,
+  type AxAgentSessionRegistrySnapshot,
+  type AxAgentSessionRestoreOptions,
+  AxAgentSessionResultNotReadyError,
+  type AxAgentSessionRootOptions,
+  type AxAgentSessionRootRecord,
+  type AxAgentSessionRootView,
+  type AxAgentSessionScheduler,
+  type AxAgentSessionSendReceipt,
+  AxAgentSessionSerializationError,
+  AxAgentSessionStaleHandleError,
+  type AxAgentSessionStatus,
+  type AxAgentSessionStatusView,
+  type AxAgentSessionStore,
+  type AxAgentSessionUsage,
+  AxInMemoryAgentSessionScheduler,
+  AxInMemoryAgentSessionStore,
+  type AxRetainedAgent,
+} from './agent/retainedSessions.js';
 import {
   type AxCodeRuntime,
   type AxCodeSession,
@@ -666,6 +751,31 @@ import {
 import { axModelInfoGrok } from './ai/x-grok/info.js';
 import { AxAIGrokEmbedModels, AxAIGrokModel } from './ai/x-grok/types.js';
 import {
+  AxAuthorizationDeniedError,
+  axAttenuateAuthority,
+  axAuthorityClaim,
+  axAuthorize,
+  axFunctionAuthorityTarget,
+  axSnapshotAuthority,
+  axValidateCapabilityGrant,
+} from './authority/authority.js';
+import type {
+  AxActor,
+  AxAuthorityClaim,
+  AxAuthorityContext,
+  AxAuthorityDelegationOptions,
+  AxAuthorityInheritance,
+  AxAuthorityValue,
+  AxAuthorizationAuditEvent,
+  AxAuthorizationReceipt,
+  AxAuthorizationRequestContext,
+  AxAuthorizer,
+  AxCapabilityGrant,
+  AxDelegationClaims,
+  AxPrincipal,
+  AxResourceScope,
+} from './authority/types.js';
+import {
   type AxAssertion,
   AxAssertionError,
   type AxStreamingAssertion,
@@ -680,6 +790,7 @@ import type {
   AxGEPABootstrapOptions,
   AxMetricFn,
   AxMetricFnArgs,
+  AxMetricResult,
   AxMultiMetricFn,
   AxOptimizationCheckpoint,
   AxOptimizationProgress,
@@ -762,16 +873,26 @@ import {
   type AxACEResult,
 } from './dsp/optimizers/ace.js';
 import type {
+  AxACEBulletChange,
+  AxACEPlaybookRenderOptions,
+} from './dsp/optimizers/acePlaybook.js';
+import type {
+  AxACEApplicability,
   AxACEBullet,
+  AxACEBulletEvidence,
+  AxACEBulletLifecycle,
   AxACECuratorOperation,
   AxACECuratorOperationType,
   AxACECuratorOutput,
   AxACEFeedbackEvent,
   AxACEGeneratorOutput,
+  AxACEHostEvidence,
   AxACEOptimizationArtifact,
   AxACEOptions,
   AxACEPlaybook,
+  AxACEProvenance,
   AxACEReflectionOutput,
+  AxACEVerificationResult,
 } from './dsp/optimizers/aceTypes.js';
 import type { AxRolloutTrace } from './dsp/optimizers/axGenAdapter.js';
 import { AxBootstrapFewShot } from './dsp/optimizers/bootstrapFewshot.js';
@@ -789,6 +910,18 @@ import type {
   AxGEPABatchRow,
   AxGEPAEvaluationState,
 } from './dsp/optimizers/gepaEvaluation.js';
+import type {
+  AxGEPACandidateComponentDelta,
+  AxGEPACandidateDecision,
+  AxGEPACandidateDisposition,
+  AxGEPACandidateEvaluation,
+  AxGEPACandidateFailure,
+  AxGEPACandidateLineageManifest,
+  AxGEPACandidateLineageOptions,
+  AxGEPACandidateLineageRecord,
+  AxGEPACandidateStrategy,
+  AxGEPAResolvedLineageOptions,
+} from './dsp/optimizers/gepaLineage.js';
 import type {
   AxGEPAOptimizationReference,
   AxGEPAProposalOptions,
@@ -821,6 +954,23 @@ import {
   type AxPromptTemplateOptions,
   type AxRenderedPrompt,
 } from './dsp/prompt.js';
+import {
+  AxReact,
+  type AxReactAssistantEvent,
+  type AxReactCall,
+  type AxReactEvent,
+  type AxReactFailure,
+  type AxReactForwardOptions,
+  type AxReactHistory,
+  type AxReactOptions,
+  type AxReactResult,
+  type AxReactSuccess,
+  type AxReactTerminationReason,
+  type AxReactToolEvent,
+  axReactCanonicalJSON,
+  axReactSerializeHistory,
+  react,
+} from './dsp/react.js';
 import {
   type AxAttempt,
   AxBestOfN,
@@ -1389,8 +1539,18 @@ export { AxAgentClarificationError };
 export { AxAgentContextMap };
 export { AxAgentPlaybook };
 export { AxAgentProtocolCompletionSignal };
+export { AxAgentSessionAuthorizationError };
+export { AxAgentSessionClient };
+export { AxAgentSessionConflictError };
+export { AxAgentSessionHost };
+export { AxAgentSessionLimitError };
+export { AxAgentSessionNotFoundError };
+export { AxAgentSessionResultNotReadyError };
+export { AxAgentSessionSerializationError };
+export { AxAgentSessionStaleHandleError };
 export { AxAgentSharedRuntimeSession };
 export { AxAssertionError };
+export { AxAuthorizationDeniedError };
 export { AxBalancer };
 export { AxBaseAI };
 export { AxBaseOptimizer };
@@ -1419,6 +1579,8 @@ export { AxGEPA };
 export { AxGEPAComponentSelector };
 export { AxGen };
 export { AxGenerateError };
+export { AxInMemoryAgentSessionScheduler };
+export { AxInMemoryAgentSessionStore };
 export { AxInMemoryBalancerStatsStore };
 export { AxInMemoryEventStore };
 export { AxInMemoryProgramStateStore };
@@ -1451,6 +1613,7 @@ export { AxPromptTemplate };
 export { AxProviderRouter };
 export { AxPushEventSource };
 export { AxRateLimiterTokenUsage };
+export { AxReact };
 export { AxRefine };
 export { AxRefineError };
 export { AxSignature };
@@ -1500,10 +1663,13 @@ export { axAnalyzeChatPromptRequirements };
 export { axAnalyzeRequestRequirements };
 export { axApplyMCPAuthentication };
 export { axApplyOpenAIChatAudioRequest };
+export { axAttenuateAuthority };
 export { axAudioFormatFromMimeType };
 export { axAudioInputFilename };
 export { axAudioInputToBlob };
 export { axAudioMimeType };
+export { axAuthorityClaim };
+export { axAuthorize };
 export { axBaseAIDefaultConfig };
 export { axBaseAIDefaultCreativeConfig };
 export { axBuildDistillerDefinition };
@@ -1527,6 +1693,7 @@ export { axDefaultOptimizerLogger };
 export { axDefaultOptimizerMetricsConfig };
 export { axDeserializeOptimizedProgram };
 export { axEmitUsageEvent };
+export { axErasePreferenceEvidence };
 export { axEventCanonicalDigest };
 export { axEventCanonicalJson };
 export { axEventErrorMessage };
@@ -1536,9 +1703,11 @@ export { axEventMatches };
 export { axEventScopedCorrelationKey };
 export { axEventScopedDedupeKey };
 export { axEventSizeBytes };
+export { axExecutableSkillRef };
 export { axFetchJsonSpeech };
 export { axFetchMultipartTranscription };
 export { axFrameSampler };
+export { axFunctionAuthorityTarget };
 export { axGetAIProfile };
 export { axGetCompatibilityReport };
 export { axGetFormatCompatibility };
@@ -1593,7 +1762,12 @@ export { axNormalizeTranscriptionResponse };
 export { axOpenAIChatAudioDefaults };
 export { axOptimizableValidators };
 export { axPlaybookFailureSection };
+export { axPreferenceEvidenceLimits };
+export { axPreferenceEvidenceToMemories };
 export { axProcessContentForProvider };
+export { axReactCanonicalJSON };
+export { axReactSerializeHistory };
+export { axRenewPreferenceEvidence };
 export { axResolveAIProfileFeatures };
 export { axResolveAIProfileId };
 export { axResolveGeminiLiveAudioConfig };
@@ -1601,19 +1775,24 @@ export { axResolveGrokRealtimeAudioConfig };
 export { axResolveMCPExecutionContext };
 export { axResolveOpenAIChatAudioConfig };
 export { axResolveOpenAIRealtimeAudioConfig };
+export { axRetractPreferenceEvidence };
 export { axRuntimePrimitives };
 export { axScoreProvidersForRequest };
+export { axSelectExecutableSkills };
 export { axSelectOptimalProvider };
+export { axSelectPreferenceEvidence };
 export { axSerializeOptimizedProgram };
 export { axShouldUseGeminiLiveAudio };
 export { axShouldUseGrokRealtime };
 export { axShouldUseOpenAIRealtime };
 export { axSignUCPRequest };
+export { axSnapshotAuthority };
 export { axSpanAttributes };
 export { axSpanEvents };
 export { axUpdateBalancerRouteStats };
 export { axUpdateMetricsConfig };
 export { axUpdateOptimizerMetricsConfig };
+export { axValidateCapabilityGrant };
 export { axValidateChatRequestMessage };
 export { axValidateChatResponseResult };
 export { axValidateEventEnvelope };
@@ -1632,22 +1811,31 @@ export { flow };
 export { fn };
 export { optimize };
 export { playbook };
+export { react };
 export { refine };
 export { runAxEventStoreConformance };
 export { s };
 
 // Type exports
+export type { AxACEApplicability };
 export type { AxACEBullet };
+export type { AxACEBulletChange };
+export type { AxACEBulletEvidence };
+export type { AxACEBulletLifecycle };
 export type { AxACECuratorOperation };
 export type { AxACECuratorOperationType };
 export type { AxACECuratorOutput };
 export type { AxACEFeedbackEvent };
 export type { AxACEGeneratorOutput };
+export type { AxACEHostEvidence };
 export type { AxACEOptimizationArtifact };
 export type { AxACEOptions };
 export type { AxACEPlaybook };
+export type { AxACEPlaybookRenderOptions };
+export type { AxACEProvenance };
 export type { AxACEReflectionOutput };
 export type { AxACEResult };
+export type { AxACEVerificationResult };
 export type { AxAIAnthropicArgs };
 export type { AxAIAnthropicChatError };
 export type { AxAIAnthropicChatRequest };
@@ -1848,6 +2036,7 @@ export type { AxAIWebLLMModelId };
 export type { AxAPI };
 export type { AxAPIConfig };
 export type { AxAPIResponseMetadata };
+export type { AxActor };
 export type { AxAgentActorTurnCallback };
 export type { AxAgentActorTurnCallbackArgs };
 export type { AxAgentAutoPromotionRecord };
@@ -1919,6 +2108,10 @@ export type { AxAgentPlaybookEvolveResult };
 export type { AxAgentPlaybookEvolveRunRecord };
 export type { AxAgentPlaybookLearnOptions };
 export type { AxAgentPlaybookOptions };
+export type { AxAgentPlaybookRetentionAnchor };
+export type { AxAgentPlaybookRetentionPolicy };
+export type { AxAgentPlaybookRetentionReceipt };
+export type { AxAgentPlaybookRetentionSlice };
 export type { AxAgentPlaybookSkipReason };
 export type { AxAgentPlaybookUpdateResult };
 export type { AxAgentPlaybookUpdateStatus };
@@ -1935,6 +2128,29 @@ export type { AxAgentRecursiveUsage };
 export type { AxAgentRuntimeCompletionState };
 export type { AxAgentRuntimeExecutionContext };
 export type { AxAgentRuntimeInputState };
+export type { AxAgentSessionEvent };
+export type { AxAgentSessionFactoryContext };
+export type { AxAgentSessionFunctionOptions };
+export type { AxAgentSessionHandle };
+export type { AxAgentSessionHostOptions };
+export type { AxAgentSessionJob };
+export type { AxAgentSessionLimits };
+export type { AxAgentSessionMessage };
+export type { AxAgentSessionMessageMode };
+export type { AxAgentSessionMessageStatus };
+export type { AxAgentSessionRecord };
+export type { AxAgentSessionRegistration };
+export type { AxAgentSessionRegistrySnapshot };
+export type { AxAgentSessionRestoreOptions };
+export type { AxAgentSessionRootOptions };
+export type { AxAgentSessionRootRecord };
+export type { AxAgentSessionRootView };
+export type { AxAgentSessionScheduler };
+export type { AxAgentSessionSendReceipt };
+export type { AxAgentSessionStatus };
+export type { AxAgentSessionStatusView };
+export type { AxAgentSessionStore };
+export type { AxAgentSessionUsage };
 export type { AxAgentSkillResult };
 export type { AxAgentSkillsPromptState };
 export type { AxAgentSkillsSearchFn };
@@ -1960,6 +2176,15 @@ export type { AxAssertion };
 export type { AxAttempt };
 export type { AxAudioFormat };
 export type { AxAudioInput };
+export type { AxAuthorityClaim };
+export type { AxAuthorityContext };
+export type { AxAuthorityDelegationOptions };
+export type { AxAuthorityInheritance };
+export type { AxAuthorityValue };
+export type { AxAuthorizationAuditEvent };
+export type { AxAuthorizationReceipt };
+export type { AxAuthorizationRequestContext };
+export type { AxAuthorizer };
 export type { AxBalancerAdaptiveStrategy };
 export type { AxBalancerCandidateScore };
 export type { AxBalancerCostContext };
@@ -1975,6 +2200,7 @@ export type { AxBalancerStatsStore };
 export type { AxBaseAIArgs };
 export type { AxBestOfNOptions };
 export type { AxBootstrapOptimizerOptions };
+export type { AxCapabilityGrant };
 export type { AxChatAudioConfig };
 export type { AxChatAudioOutput };
 export type { AxChatLogEntry };
@@ -2011,6 +2237,7 @@ export type { AxCostTrackerOptions };
 export type { AxDateRange };
 export type { AxDateRangeValue };
 export type { AxDebugChatResponseUsage };
+export type { AxDelegationClaims };
 export type { AxDiscoveryTurnSummary };
 export type { AxDockerContainer };
 export type { AxEmbedRequest };
@@ -2078,6 +2305,17 @@ export type { AxEventVerifierTransitionRequest };
 export type { AxEvidenceDescriptor };
 export type { AxExample };
 export type { AxExamples };
+export type { AxExecutableSkillArtifact };
+export type { AxExecutableSkillAuthority };
+export type { AxExecutableSkillContext };
+export type { AxExecutableSkillExclusionReason };
+export type { AxExecutableSkillInspection };
+export type { AxExecutableSkillLifecycle };
+export type { AxExecutableSkillRef };
+export type { AxExecutableSkillRequirements };
+export type { AxExecutableSkillSelection };
+export type { AxExecutableSkillVerification };
+export type { AxExecutableSkillVerificationReceipt };
 export type { AxExecutorModelPolicy };
 export type { AxExecutorModelPolicyEntry };
 export type { AxField };
@@ -2131,6 +2369,15 @@ export type { AxGEPAAdapter };
 export type { AxGEPABatchEvaluation };
 export type { AxGEPABatchRow };
 export type { AxGEPABootstrapOptions };
+export type { AxGEPACandidateComponentDelta };
+export type { AxGEPACandidateDecision };
+export type { AxGEPACandidateDisposition };
+export type { AxGEPACandidateEvaluation };
+export type { AxGEPACandidateFailure };
+export type { AxGEPACandidateLineageManifest };
+export type { AxGEPACandidateLineageOptions };
+export type { AxGEPACandidateLineageRecord };
+export type { AxGEPACandidateStrategy };
 export type { AxGEPAComponentBanditState };
 export type { AxGEPAComponentTarget };
 export type { AxGEPAEvaluationBatch };
@@ -2141,6 +2388,7 @@ export type { AxGEPAProposalOptions };
 export type { AxGEPAProposalPolicy };
 export type { AxGEPAProposalPolicyArgs };
 export type { AxGEPAReflectiveTuple };
+export type { AxGEPAResolvedLineageOptions };
 export type { AxGEPATraceSummary };
 export type { AxGEPATraceSummaryCall };
 export type { AxGenDeltaOut };
@@ -2308,6 +2556,7 @@ export type { AxMemoryData };
 export type { AxMemoryMessageValue };
 export type { AxMetricFn };
 export type { AxMetricFnArgs };
+export type { AxMetricResult };
 export type { AxMetricsConfig };
 export type { AxMockAIServiceConfig };
 export type { AxModelConfig };
@@ -2338,6 +2587,25 @@ export type { AxPlaybookEvolveOptions };
 export type { AxPlaybookEvolveResult };
 export type { AxPlaybookOptions };
 export type { AxPlaybookSnapshot };
+export type { AxPreferenceApplicability };
+export type { AxPreferenceEvidenceAssertion };
+export type { AxPreferenceEvidenceClaim };
+export type { AxPreferenceEvidenceContext };
+export type { AxPreferenceEvidenceErasure };
+export type { AxPreferenceEvidenceExclusion };
+export type { AxPreferenceEvidenceExclusionReason };
+export type { AxPreferenceEvidenceKind };
+export type { AxPreferenceEvidenceOperation };
+export type { AxPreferenceEvidenceReceiptPurpose };
+export type { AxPreferenceEvidenceReceiptRequest };
+export type { AxPreferenceEvidenceRecord };
+export type { AxPreferenceEvidenceRenewal };
+export type { AxPreferenceEvidenceRetraction };
+export type { AxPreferenceEvidenceRevision };
+export type { AxPreferenceEvidenceSelection };
+export type { AxPreferenceEvidenceStreamBinding };
+export type { AxPreferenceEvidenceStreamRequest };
+export type { AxPrincipal };
 export type { AxProgramDemos };
 export type { AxProgramExamples };
 export type { AxProgramForwardOptions };
@@ -2362,6 +2630,17 @@ export type { AxRankedDocument };
 export type { AxRankedModule };
 export type { AxRateLimiterFunction };
 export type { AxRateLimiterTokenUsageOptions };
+export type { AxReactAssistantEvent };
+export type { AxReactCall };
+export type { AxReactEvent };
+export type { AxReactFailure };
+export type { AxReactForwardOptions };
+export type { AxReactHistory };
+export type { AxReactOptions };
+export type { AxReactResult };
+export type { AxReactSuccess };
+export type { AxReactTerminationReason };
+export type { AxReactToolEvent };
 export type { AxRefineOptions };
 export type { AxRefineStrategy };
 export type { AxRelevanceHints };
@@ -2373,9 +2652,11 @@ export type { AxResolvedCitations };
 export type { AxResolvedContextPolicy };
 export type { AxResolvedExecutorModelPolicy };
 export type { AxResolvedExecutorModelPolicyEntry };
+export type { AxResourceScope };
 export type { AxResultPickerFunction };
 export type { AxResultPickerFunctionFieldResults };
 export type { AxResultPickerFunctionFunctionResults };
+export type { AxRetainedAgent };
 export type { AxRewardFn };
 export type { AxRewardFnArgs };
 export type { AxRolloutTrace };
@@ -2388,6 +2669,9 @@ export type { AxRuntimePrimitiveOverrideMap };
 export type { AxRuntimePrimitiveSignature };
 export type { AxRuntimePrimitiveStage };
 export type { AxSamplePickerOptions };
+export type { AxSelectExecutableSkillsOptions };
+export type { AxSelectedExecutableSkill };
+export type { AxSelectedPreferenceEvidence };
 export type { AxSelfTuningConfig };
 export type { AxSerializedOptimizedProgram };
 export type { AxSetExamplesOptions };

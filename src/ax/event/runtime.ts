@@ -1,4 +1,6 @@
 import { AxAgentClarificationError } from '../agent/agentInternal/agentStateTypes.js';
+import { axAuthorize, axSnapshotAuthority } from '../authority/authority.js';
+import type { AxAuthorityContext } from '../authority/types.js';
 import type { AxGenDeltaOut, AxProgrammable } from '../dsp/types.js';
 import {
   AxEventRouteBuilder,
@@ -82,6 +84,7 @@ const VERIFIER_SOURCE = 'ax://event-runtime/verifier';
 const VERIFIER_CODE_BYTES = 256;
 const VERIFIER_FINGERPRINT_BYTES = 1_024;
 const VERIFIER_ERROR_BYTES = 1_024;
+const DEFAULT_AUTHORITY_RESOLVE_TIMEOUT_MS = 30_000;
 
 function verifierRouteId(target: Readonly<AxEventTarget>): string {
   return `ax.verifier:${target.id}:${target.verifier!.id}`;
@@ -96,6 +99,9 @@ class AxRuntimeEventContext implements AxEventContext {
     id: string;
     value: Readonly<AxEventContinuationRegistration>;
   }> = [];
+  private readonly afterRegistrationCallbacks: Array<
+    () => void | Promise<void>
+  > = [];
 
   constructor(
     readonly runtimeId: string,
@@ -110,6 +116,7 @@ class AxRuntimeEventContext implements AxEventContext {
     readonly attempt: number,
     readonly idempotencyKey: string,
     readonly abortSignal: AbortSignal,
+    readonly authority?: Readonly<AxAuthorityContext>,
     readonly continuation?: Readonly<AxEventContinuation>,
     readonly fencingToken?: number
   ) {}
@@ -134,8 +141,19 @@ class AxRuntimeEventContext implements AxEventContext {
     return id;
   }
 
+  afterContinuationsRegistered(callback: () => void | Promise<void>): void {
+    this.afterRegistrationCallbacks.push(callback);
+  }
+
   takeRegistrations() {
     return this.registrations.splice(0, this.registrations.length);
+  }
+
+  takeAfterRegistrationCallbacks() {
+    return this.afterRegistrationCallbacks.splice(
+      0,
+      this.afterRegistrationCallbacks.length
+    );
   }
 }
 
@@ -172,12 +190,18 @@ export class AxEventRuntime {
   private readonly targetSources = new Map<string, AxEventTarget<any, any>>();
   private readonly singletonTargetInstances = new Map<string, string>();
   private readonly activeRuns = new Map<string, AbortController>();
+  private readonly activeRedriveControllers = new Map<
+    string,
+    AbortController
+  >();
+  private readonly inFlightRedriveOperations = new Set<Promise<unknown>>();
   private readonly sourceHandles: AxEventSourceHandle[] = [];
   private readonly sourceController = new AbortController();
   private readonly workerController = new AbortController();
   private workerPromises: Promise<void>[] = [];
   private started = false;
   private closing = false;
+  private closePromise?: Promise<void>;
 
   constructor(options: Readonly<AxEventRuntimeOptions>) {
     this.options = options;
@@ -376,48 +400,105 @@ export class AxEventRuntime {
   }
 
   async redrive(deadLetterId: string): Promise<void> {
-    const deadLetter = await this.store.getDeadLetter(deadLetterId);
-    if (!deadLetter)
-      throw new Error(`Unknown event dead letter: ${deadLetterId}`);
-    if (deadLetter.kind === 'delivery') {
-      await this.store.redriveDelivery(deadLetter.deliveryId, this.clock.now());
-      await this.store.removeDeadLetter(deadLetterId);
-      return;
-    }
-    const run = deadLetter.runId
-      ? await this.store.getRun(deadLetter.runId)
-      : undefined;
-    const delivery = await this.store.getDelivery(deadLetter.deliveryId);
-    if (!run || !delivery || !deadLetter.sinkId || run.output === undefined) {
-      throw new Error(`Sink dead letter ${deadLetterId} cannot be redriven`);
-    }
-    const target = run.targetId ? this.targets.get(run.targetId) : undefined;
-    const sink = target?.sinks?.find((value) => value.id === deadLetter.sinkId);
-    if (!target || !sink) {
-      throw new Error(`Sink ${deadLetter.sinkId} is no longer configured`);
+    if (this.closing) throw new Error('AxEventRuntime is closing');
+    if (this.activeRedriveControllers.has(deadLetterId)) {
+      throw new Error(`Dead letter ${deadLetterId} is already being redriven`);
     }
     const controller = new AbortController();
-    const context = new AxRuntimeEventContext(
-      this.id,
-      run.id,
-      delivery.id,
-      delivery.routeId,
-      target.id,
-      delivery.instanceKey,
-      delivery.ingress,
-      delivery.ingress.identity ?? {},
-      delivery.ingress.trust ?? 'untrusted',
-      delivery.attempt,
-      delivery.id,
-      controller.signal
+    this.activeRedriveControllers.set(deadLetterId, controller);
+    const operation = this.redriveInternal(deadLetterId, controller);
+    this.inFlightRedriveOperations.add(operation);
+    void operation.then(
+      () => this.inFlightRedriveOperations.delete(operation),
+      () => this.inFlightRedriveOperations.delete(operation)
     );
-    await sink.write(run.output, {
-      run,
-      eventContext: context,
-      idempotencyKey: `${run.id}:${sink.id}`,
-      signal: controller.signal,
-    });
-    await this.store.removeDeadLetter(deadLetterId);
+    return operation;
+  }
+
+  private async redriveInternal(
+    deadLetterId: string,
+    controller: AbortController
+  ): Promise<void> {
+    if (this.closing) throw new Error('AxEventRuntime is closing');
+    try {
+      const deadLetter = await this.awaitUnlessClosing(
+        this.store.getDeadLetter(deadLetterId),
+        controller.signal
+      );
+      if (controller.signal.aborted || this.closing) {
+        throw new Error('AxEventRuntime is closing');
+      }
+      if (!deadLetter)
+        throw new Error(`Unknown event dead letter: ${deadLetterId}`);
+      if (deadLetter.kind === 'delivery') {
+        await this.store.redriveDelivery(
+          deadLetter.deliveryId,
+          this.clock.now()
+        );
+        await this.store.removeDeadLetter(deadLetterId);
+        return;
+      }
+      const run = deadLetter.runId
+        ? await this.store.getRun(deadLetter.runId)
+        : undefined;
+      const delivery = await this.store.getDelivery(deadLetter.deliveryId);
+      if (!run || !delivery || !deadLetter.sinkId || run.output === undefined) {
+        throw new Error(`Sink dead letter ${deadLetterId} cannot be redriven`);
+      }
+      const target = run.targetId ? this.targets.get(run.targetId) : undefined;
+      const sink = target?.sinks?.find(
+        (value) => value.id === deadLetter.sinkId
+      );
+      if (!target || !sink) {
+        throw new Error(`Sink ${deadLetter.sinkId} is no longer configured`);
+      }
+      if (controller.signal.aborted || this.closing) {
+        throw new Error('AxEventRuntime is closing');
+      }
+      const authority = await this.resolveAuthority(
+        delivery.ingress,
+        AbortSignal.any([controller.signal, this.workerController.signal])
+      );
+      if (controller.signal.aborted || this.closing) {
+        throw new Error('AxEventRuntime is closing');
+      }
+      const context = new AxRuntimeEventContext(
+        this.id,
+        run.id,
+        delivery.id,
+        delivery.routeId,
+        target.id,
+        delivery.instanceKey,
+        delivery.ingress,
+        delivery.ingress.identity ?? {},
+        delivery.ingress.trust ?? 'untrusted',
+        delivery.attempt,
+        delivery.id,
+        controller.signal,
+        authority
+      );
+      await this.authorizeEventOperation(
+        context,
+        'event.sink.write',
+        'event.sink',
+        sink.id
+      );
+      if (controller.signal.aborted || this.closing) {
+        throw new Error('AxEventRuntime is closing');
+      }
+      await sink.write(run.output, {
+        run,
+        eventContext: context,
+        idempotencyKey: `${run.id}:${sink.id}`,
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted || this.closing) {
+        throw new Error('AxEventRuntime is closing');
+      }
+      await this.store.removeDeadLetter(deadLetterId);
+    } finally {
+      this.activeRedriveControllers.delete(deadLetterId);
+    }
   }
 
   cancelRun(runId: string, reason = 'Cancelled by caller'): boolean {
@@ -440,8 +521,15 @@ export class AxEventRuntime {
   }
 
   async close(options: Readonly<AxEventCloseOptions> = {}): Promise<void> {
-    if (this.closing) return;
+    if (this.closePromise) return this.closePromise;
     this.closing = true;
+    this.closePromise = this.performClose(options);
+    return this.closePromise;
+  }
+
+  private async performClose(
+    options: Readonly<AxEventCloseOptions>
+  ): Promise<void> {
     this.sourceController.abort('AxEventRuntime closing');
     await Promise.allSettled(
       this.sourceHandles.map((handle) => handle.close())
@@ -458,7 +546,13 @@ export class AxEventRuntime {
     for (const controller of this.activeRuns.values()) {
       controller.abort('AxEventRuntime closed');
     }
-    await Promise.allSettled(this.workerPromises);
+    for (const controller of this.activeRedriveControllers.values()) {
+      controller.abort('AxEventRuntime closed');
+    }
+    await Promise.allSettled([
+      ...this.workerPromises,
+      ...this.inFlightRedriveOperations,
+    ]);
     await this.store.close?.();
     this.started = false;
   }
@@ -576,263 +670,314 @@ export class AxEventRuntime {
       const heartbeatController = new AbortController();
       this.activeRuns.set(runId, controller);
       const attempt = claimed.attempt + 1;
-      const eventContext = new AxRuntimeEventContext(
-        this.id,
-        runId,
-        claimed.id,
-        route.id,
-        targetId,
-        instanceKey,
-        claimed.ingress,
-        claimed.ingress.identity ?? {},
-        claimed.ingress.trust ?? 'untrusted',
-        attempt,
-        claimed.id,
-        controller.signal,
-        continuation,
-        claimed.fencingToken
-      );
-      let run: AxEventRun = {
-        id: runId,
-        deliveryId: claimed.id,
-        routeId: route.id,
-        ...(targetId ? { targetId } : {}),
-        instanceKey,
-        status: 'running',
-        attempt,
-        startedAt: this.clock.now(),
-        ...(claimed.fencingToken !== undefined
-          ? { fencingToken: claimed.fencingToken }
-          : {}),
-      };
-      await this.store.saveDelivery({
-        ...claimed,
-        status: 'running',
-        attempt,
-        runId,
-      });
-      await this.store.saveRun(run);
-      const heartbeat = this.heartbeatClaim(
-        claimed,
-        workerId,
-        controller,
-        heartbeatController.signal
-      );
-      let invoked = false;
+      let heartbeat: Promise<void> = Promise.resolve();
       try {
-        let result: InvocationResult = { waiting: false, invoked: false };
-        let verification: VerificationOutcome | undefined;
-        if (route.action === 'observe') {
-          await route.observe?.(claimed.ingress, eventContext);
-        } else if (route.action === 'invalidate') {
-          await route.invalidator!.invalidate(claimed.ingress, eventContext);
-        } else {
-          verification = target?.verifier
-            ? await this.preflightVerifier(target, eventContext)
-            : undefined;
-          if (!verification) {
-            result = await this.invokeTarget(
-              target!,
-              instanceKey,
-              claimed.ingress,
-              eventContext,
-              run,
-              async () => {
-                await this.store.saveDelivery({
-                  ...claimed,
-                  status: 'running',
-                  attempt,
-                  runId,
-                  invocationStarted: true,
-                });
-                invoked = true;
-              }
-            );
-            invoked = invoked || result.invoked;
-            run = {
-              ...run,
-              ...(result.output !== undefined ? { output: result.output } : {}),
-              ...(result.chunks ? { chunks: result.chunks } : {}),
-            };
-          }
-        }
-
-        // The verifier is host code and only runs after the target output is
-        // durable. Failed gates never reach final sinks.
-        await this.persistVerifierInput(run);
-        verification ??=
-          target?.verifier &&
-          result.invoked &&
-          !result.waiting &&
-          run.output !== undefined
-            ? await this.applyVerifier(target, run, eventContext)
-            : undefined;
-
-        const registrations = eventContext.takeRegistrations();
-        const continuations: AxEventContinuation[] = [];
-        for (const registration of registrations) {
-          const value: AxEventContinuation = {
-            id: registration.id,
-            targetId: targetId ?? `route:${route.id}`,
-            routeId: route.id,
-            instanceKey,
-            identityScope: claimed.identityScope,
-            correlation: registration.value.correlation,
-            createdAt: this.clock.now(),
-            ...(registration.value.expiresAt !== undefined
-              ? { expiresAt: registration.value.expiresAt }
-              : {}),
-            ...(registration.value.metadata
-              ? { metadata: registration.value.metadata }
-              : {}),
-          };
-          await this.store.registerContinuation(value);
-          continuations.push(value);
-        }
-        if (verification?.continuation) {
-          continuations.push(verification.continuation.value);
-        }
-        const waiting =
-          result.waiting ||
-          continuations.length > 0 ||
-          verification?.verification.status === 'fail';
-        const verificationFailed = Boolean(
-          verification &&
-            verification.verification.status !== 'pass' &&
-            !verification.continuation
+        const authority = await this.resolveAuthority(
+          claimed.ingress,
+          AbortSignal.any([controller.signal, this.workerController.signal])
         );
-        run = {
-          ...run,
-          status: verificationFailed
-            ? 'verification_failed'
-            : waiting
-              ? 'waiting_event'
-              : 'succeeded',
-          finishedAt: this.clock.now(),
-          ...(verification ? { verification: verification.verification } : {}),
-          ...(continuations.length
-            ? { continuationIds: continuations.map((value) => value.id) }
+        const eventContext = new AxRuntimeEventContext(
+          this.id,
+          runId,
+          claimed.id,
+          route.id,
+          targetId,
+          instanceKey,
+          claimed.ingress,
+          claimed.ingress.identity ?? {},
+          claimed.ingress.trust ?? 'untrusted',
+          attempt,
+          claimed.id,
+          controller.signal,
+          authority,
+          continuation,
+          claimed.fencingToken
+        );
+        let run: AxEventRun = {
+          id: runId,
+          deliveryId: claimed.id,
+          routeId: route.id,
+          ...(targetId ? { targetId } : {}),
+          instanceKey,
+          status: 'running',
+          attempt,
+          startedAt: this.clock.now(),
+          ...(claimed.fencingToken !== undefined
+            ? { fencingToken: claimed.fencingToken }
             : {}),
         };
-        if (verification?.continuation) {
-          await this.commitVerifierTransition(
-            claimed,
-            run,
-            attempt,
-            verification,
-            continuation,
-            target!,
-            controller.signal
+        await this.store.saveDelivery({
+          ...claimed,
+          status: 'running',
+          attempt,
+          runId,
+        });
+        await this.store.saveRun(run);
+        heartbeat = this.heartbeatClaim(
+          claimed,
+          workerId,
+          controller,
+          heartbeatController.signal
+        );
+        let invoked = false;
+        try {
+          let result: InvocationResult = { waiting: false, invoked: false };
+          let verification: VerificationOutcome | undefined;
+          if (route.action === 'observe') {
+            await this.authorizeEventOperation(
+              eventContext,
+              'event.observe',
+              'event.route',
+              route.id
+            );
+            await route.observe?.(claimed.ingress, eventContext);
+          } else if (route.action === 'invalidate') {
+            await this.authorizeEventOperation(
+              eventContext,
+              'event.invalidate',
+              'event.route',
+              route.id
+            );
+            await route.invalidator!.invalidate(claimed.ingress, eventContext);
+          } else {
+            await this.authorizeEventOperation(
+              eventContext,
+              'event.target.invoke',
+              'event.target',
+              target!.id
+            );
+            verification = target?.verifier
+              ? await this.preflightVerifier(target, eventContext)
+              : undefined;
+            if (!verification) {
+              result = await this.invokeTarget(
+                target!,
+                instanceKey,
+                claimed.ingress,
+                eventContext,
+                run,
+                async () => {
+                  await this.store.saveDelivery({
+                    ...claimed,
+                    status: 'running',
+                    attempt,
+                    runId,
+                    invocationStarted: true,
+                  });
+                  invoked = true;
+                }
+              );
+              invoked = invoked || result.invoked;
+              run = {
+                ...run,
+                ...(result.output !== undefined
+                  ? { output: result.output }
+                  : {}),
+                ...(result.chunks ? { chunks: result.chunks } : {}),
+              };
+            }
+          }
+
+          // The verifier is host code and only runs after the target output is
+          // durable. Failed gates never reach final sinks.
+          await this.persistVerifierInput(run);
+          verification ??=
+            target?.verifier &&
+            result.invoked &&
+            !result.waiting &&
+            run.output !== undefined
+              ? await this.applyVerifier(target, run, eventContext)
+              : undefined;
+
+          const registrations = eventContext.takeRegistrations();
+          const continuations: AxEventContinuation[] = [];
+          for (const registration of registrations) {
+            const value: AxEventContinuation = {
+              id: registration.id,
+              targetId: targetId ?? `route:${route.id}`,
+              routeId: route.id,
+              instanceKey,
+              identityScope: claimed.identityScope,
+              correlation: registration.value.correlation,
+              createdAt: this.clock.now(),
+              ...(registration.value.expiresAt !== undefined
+                ? { expiresAt: registration.value.expiresAt }
+                : {}),
+              ...(registration.value.metadata
+                ? { metadata: registration.value.metadata }
+                : {}),
+            };
+            await this.store.registerContinuation(value);
+            continuations.push(value);
+          }
+          for (const callback of eventContext.takeAfterRegistrationCallbacks()) {
+            await callback();
+          }
+          if (verification?.continuation) {
+            continuations.push(verification.continuation.value);
+          }
+          const waiting =
+            result.waiting ||
+            continuations.length > 0 ||
+            verification?.verification.status === 'fail';
+          const verificationFailed = Boolean(
+            verification &&
+              verification.verification.status !== 'pass' &&
+              !verification.continuation
           );
-        } else {
-          // Persist the complete output before any final sink dispatch.
-          await this.store.saveRun(run);
-        }
-        if (
-          !waiting &&
-          !verificationFailed &&
-          target &&
-          run.output !== undefined
-        ) {
-          run = await this.dispatchFinalSinks(target, run, eventContext);
-          await this.store.saveRun(run);
-        }
-        if (!verification?.continuation) {
-          await this.store.saveDelivery({
-            ...claimed,
+          run = {
+            ...run,
             status: verificationFailed
               ? 'verification_failed'
               : waiting
                 ? 'waiting_event'
                 : 'succeeded',
-            attempt,
-            runId,
-          });
-          if (continuation)
-            await this.store.completeContinuation(continuation.id);
-        }
-      } catch (error) {
-        if (controller.signal.aborted) {
-          run = {
-            ...run,
-            status: 'cancelled',
             finishedAt: this.clock.now(),
-            error: axEventErrorMessage(controller.signal.reason),
+            ...(verification
+              ? { verification: verification.verification }
+              : {}),
+            ...(continuations.length
+              ? { continuationIds: continuations.map((value) => value.id) }
+              : {}),
           };
-          await this.store.saveRun(run);
-          await this.store.saveDelivery({
-            ...claimed,
-            status: 'cancelled',
-            attempt,
-            runId,
-            error: run.error,
-          });
-          return;
-        }
-        if (axEventErrorMessage(error).includes('output_persistence_failed')) {
-          run = {
-            ...run,
-            output: undefined,
-            chunks: undefined,
-            verification: undefined,
-            status: 'output_persistence_failed',
-            finishedAt: this.clock.now(),
-            error: axEventErrorMessage(error),
-          };
-          await this.store.saveRun(run);
-          await this.store.saveDelivery({
-            ...claimed,
-            status: 'output_persistence_failed',
-            attempt,
-            runId,
-            error: run.error,
-          });
-          await this.store.addDeadLetter({
-            id: axEventId('dead-letter'),
-            kind: 'delivery',
-            deliveryId: claimed.id,
-            runId,
-            reason: run.error ?? 'output_persistence_failed',
-            createdAt: this.clock.now(),
-          });
-          return;
-        }
-        const unsafe =
-          error instanceof AxEventOutcomeUnknownError ||
-          (invoked && target?.retrySafety !== 'idempotent');
-        if (unsafe) {
-          run = {
-            ...run,
-            status: 'outcome_unknown',
-            finishedAt: this.clock.now(),
-            error: axEventErrorMessage(error),
-          };
-          await this.store.saveRun(run);
-          await this.store.saveDelivery({
-            ...claimed,
-            status: 'outcome_unknown',
-            attempt,
-            runId,
-            error: run.error,
-          });
-          await this.store.addDeadLetter({
-            id: axEventId('dead-letter'),
-            kind: 'delivery',
-            deliveryId: claimed.id,
-            runId,
-            reason: run.error ?? 'Event outcome is unknown',
-            createdAt: this.clock.now(),
-          });
-          return;
-        }
-        const nonRetryable =
-          error instanceof AxEventContinuationNotFoundError ||
-          error instanceof AxEventInputError;
-        if (!nonRetryable && attempt < (this.options.maxAttempts ?? 5)) {
-          const retryMs = Math.min(
-            this.options.retryMaxMs ?? 60_000,
-            (this.options.retryBaseMs ?? 1_000) * 2 ** (attempt - 1)
-          );
+          if (verification?.continuation) {
+            await this.commitVerifierTransition(
+              claimed,
+              run,
+              attempt,
+              verification,
+              continuation,
+              target!,
+              controller.signal
+            );
+          } else {
+            // Persist the complete output before any final sink dispatch.
+            await this.store.saveRun(run);
+          }
+          if (
+            !waiting &&
+            !verificationFailed &&
+            target &&
+            run.output !== undefined
+          ) {
+            run = await this.dispatchFinalSinks(target, run, eventContext);
+            await this.store.saveRun(run);
+          }
+          if (!verification?.continuation) {
+            await this.store.saveDelivery({
+              ...claimed,
+              status: verificationFailed
+                ? 'verification_failed'
+                : waiting
+                  ? 'waiting_event'
+                  : 'succeeded',
+              attempt,
+              runId,
+            });
+            if (continuation)
+              await this.store.completeContinuation(continuation.id);
+          }
+        } catch (error) {
+          if (controller.signal.aborted) {
+            run = {
+              ...run,
+              status: 'cancelled',
+              finishedAt: this.clock.now(),
+              error: axEventErrorMessage(controller.signal.reason),
+            };
+            await this.store.saveRun(run);
+            await this.store.saveDelivery({
+              ...claimed,
+              status: 'cancelled',
+              attempt,
+              runId,
+              error: run.error,
+            });
+            return;
+          }
+          if (
+            axEventErrorMessage(error).includes('output_persistence_failed')
+          ) {
+            run = {
+              ...run,
+              output: undefined,
+              chunks: undefined,
+              verification: undefined,
+              status: 'output_persistence_failed',
+              finishedAt: this.clock.now(),
+              error: axEventErrorMessage(error),
+            };
+            await this.store.saveRun(run);
+            await this.store.saveDelivery({
+              ...claimed,
+              status: 'output_persistence_failed',
+              attempt,
+              runId,
+              error: run.error,
+            });
+            await this.store.addDeadLetter({
+              id: axEventId('dead-letter'),
+              kind: 'delivery',
+              deliveryId: claimed.id,
+              runId,
+              reason: run.error ?? 'output_persistence_failed',
+              createdAt: this.clock.now(),
+            });
+            return;
+          }
+          const unsafe =
+            error instanceof AxEventOutcomeUnknownError ||
+            (invoked && target?.retrySafety !== 'idempotent');
+          if (unsafe) {
+            run = {
+              ...run,
+              status: 'outcome_unknown',
+              finishedAt: this.clock.now(),
+              error: axEventErrorMessage(error),
+            };
+            await this.store.saveRun(run);
+            await this.store.saveDelivery({
+              ...claimed,
+              status: 'outcome_unknown',
+              attempt,
+              runId,
+              error: run.error,
+            });
+            await this.store.addDeadLetter({
+              id: axEventId('dead-letter'),
+              kind: 'delivery',
+              deliveryId: claimed.id,
+              runId,
+              reason: run.error ?? 'Event outcome is unknown',
+              createdAt: this.clock.now(),
+            });
+            return;
+          }
+          const nonRetryable =
+            error instanceof AxEventContinuationNotFoundError ||
+            error instanceof AxEventInputError;
+          if (!nonRetryable && attempt < (this.options.maxAttempts ?? 5)) {
+            const retryMs = Math.min(
+              this.options.retryMaxMs ?? 60_000,
+              (this.options.retryBaseMs ?? 1_000) * 2 ** (attempt - 1)
+            );
+            run = {
+              ...run,
+              status: 'failed',
+              finishedAt: this.clock.now(),
+              error: axEventErrorMessage(error),
+            };
+            await this.store.saveRun(run);
+            await this.store.saveDelivery({
+              ...claimed,
+              status: 'queued',
+              attempt,
+              availableAt: this.clock.now() + retryMs,
+              error: run.error,
+              runId,
+            });
+            return;
+          }
           run = {
             ...run,
             status: 'failed',
@@ -840,30 +985,31 @@ export class AxEventRuntime {
             error: axEventErrorMessage(error),
           };
           await this.store.saveRun(run);
+          await this.deadLetterDelivery(
+            { ...claimed, attempt, runId },
+            run.error ?? 'Event delivery failed'
+          );
+        } finally {
+          heartbeatController.abort('Event delivery completed');
+          await heartbeat;
+        }
+      } catch (error) {
+        if (controller.signal.aborted || this.workerController.signal.aborted) {
           await this.store.saveDelivery({
             ...claimed,
-            status: 'queued',
+            status: 'cancelled',
             attempt,
-            availableAt: this.clock.now() + retryMs,
-            error: run.error,
             runId,
+            error: axEventErrorMessage(
+              controller.signal.reason ??
+                this.workerController.signal.reason ??
+                error
+            ),
           });
           return;
         }
-        run = {
-          ...run,
-          status: 'failed',
-          finishedAt: this.clock.now(),
-          error: axEventErrorMessage(error),
-        };
-        await this.store.saveRun(run);
-        await this.deadLetterDelivery(
-          { ...claimed, attempt, runId },
-          run.error ?? 'Event delivery failed'
-        );
+        throw error;
       } finally {
-        heartbeatController.abort('Event delivery completed');
-        await heartbeat;
         this.activeRuns.delete(runId);
       }
     } catch (error) {
@@ -1536,6 +1682,7 @@ export class AxEventRuntime {
       ...(target.forwardOptions ?? {}),
       eventContext,
       eventInheritance: 'all' as const,
+      ...(eventContext.authority ? { authority: eventContext.authority } : {}),
       abortSignal: eventContext.abortSignal,
     };
     let output: unknown;
@@ -1694,6 +1841,12 @@ export class AxEventRuntime {
       let count = 0;
       for (; count < (this.options.maxAttempts ?? 5); count++) {
         try {
+          await this.authorizeEventOperation(
+            eventContext,
+            'event.sink.write',
+            'event.sink',
+            sink.id
+          );
           await sink.write(run.output, {
             run,
             eventContext,
@@ -1743,6 +1896,12 @@ export class AxEventRuntime {
     eventContext: AxRuntimeEventContext
   ): Promise<void> {
     try {
+      await this.authorizeEventOperation(
+        eventContext,
+        'event.sink.write_chunk',
+        'event.sink',
+        sink.id
+      );
       await sink.writeChunk?.(chunk, {
         run,
         eventContext,
@@ -1759,6 +1918,97 @@ export class AxEventRuntime {
         reason: `Streaming chunk delivery failed: ${axEventErrorMessage(error)}`,
         createdAt: this.clock.now(),
       });
+    }
+  }
+
+  private authorizeEventOperation(
+    context: Readonly<AxEventContext>,
+    operation: string,
+    type: string,
+    id: string
+  ) {
+    const verifiedIngressTenant =
+      context.trust === 'authenticated' || context.trust === 'trusted'
+        ? context.identity.tenantId
+        : undefined;
+    const tenantId =
+      verifiedIngressTenant ?? context.authority?.principal.tenantId;
+    return axAuthorize(
+      context.authority,
+      operation,
+      {
+        type,
+        id,
+        ...(tenantId ? { tenantId } : {}),
+      },
+      context.abortSignal
+    );
+  }
+
+  private async awaitUnlessClosing<T>(
+    operation: Promise<T>,
+    signal: AbortSignal
+  ): Promise<T> {
+    if (signal.aborted || this.closing) {
+      throw new Error('AxEventRuntime is closing');
+    }
+    return await Promise.race([
+      operation,
+      new Promise<never>((_resolve, reject) => {
+        const abort = () => {
+          reject(signal.reason ?? new Error('AxEventRuntime is closing'));
+        };
+        signal.addEventListener('abort', abort, { once: true });
+        void operation.then(
+          () => signal.removeEventListener('abort', abort),
+          () => signal.removeEventListener('abort', abort)
+        );
+      }),
+    ]);
+  }
+
+  private async resolveAuthority(
+    ingress: Readonly<AxEventIngress>,
+    signal?: AbortSignal
+  ): Promise<Readonly<AxAuthorityContext> | undefined> {
+    const resolver = this.options.authority;
+    if (typeof resolver !== 'function') {
+      return resolver ? axSnapshotAuthority(resolver) : undefined;
+    }
+
+    const timeoutMs = DEFAULT_AUTHORITY_RESOLVE_TIMEOUT_MS;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let rejectAbort!: (reason: unknown) => void;
+    const aborted = new Promise<never>((_resolve, reject) => {
+      rejectAbort = reject;
+    });
+    const abort = () => {
+      rejectAbort(
+        signal?.reason ?? new Error('Authority resolution cancelled')
+      );
+    };
+    if (signal?.aborted) {
+      abort();
+    } else {
+      signal?.addEventListener('abort', abort, { once: true });
+    }
+    const timedOut = new Promise<never>((_resolve, reject) => {
+      timeout = setTimeout(() => {
+        reject(
+          new Error(`Host authority resolution timed out after ${timeoutMs}ms`)
+        );
+      }, timeoutMs);
+    });
+    const callback = Promise.resolve().then(() => resolver(ingress));
+    // Timeout/cancel drop this promise; swallow late reject so it cannot become
+    // an unhandledRejection after Promise.race settles.
+    void callback.catch(() => undefined);
+    try {
+      const authority = await Promise.race([callback, aborted, timedOut]);
+      return authority ? axSnapshotAuthority(authority) : undefined;
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
+      signal?.removeEventListener('abort', abort);
     }
   }
 

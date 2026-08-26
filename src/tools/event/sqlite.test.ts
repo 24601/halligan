@@ -47,6 +47,10 @@ describe('AxSQLiteEventStore', () => {
     );
     expect(report.assertions).toBeGreaterThanOrEqual(20);
     expect(report.capability.conformance?.multiWorker).toBe('axevent-store-v1');
+    expect(report.capability.conformance?.schemaVersion).toBe(4);
+    expect(report.capability.verifierTransitions).toBe(
+      'axevent-verifier-transition-v2'
+    );
   });
 
   it('requires explicit retention and WAL-enabled local storage', () => {
@@ -58,6 +62,62 @@ describe('AxSQLiteEventStore', () => {
           filename: join(directory, 'missing-retention.sqlite'),
         } as never)
     ).toThrow('requires explicit retention');
+  });
+
+  it('migrates legacy event schemas to verifier-v4 journal metadata', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    for (const version of [1, 3]) {
+      const filename = join(directory, `verifier-v${version}.sqlite`);
+      let store = new AxSQLiteEventStore({
+        filename,
+        retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+      });
+      const legacyDb = (store as any).db;
+      if (version === 1) {
+        legacyDb.exec(`
+          DROP TABLE event_verifier_transitions;
+          DROP TABLE event_store_metadata;
+        `);
+      } else {
+        legacyDb.exec('DROP TABLE event_store_metadata;');
+      }
+      legacyDb.pragma(`user_version = ${version}`);
+      await store.close();
+
+      store = new AxSQLiteEventStore({
+        filename,
+        retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+      });
+      const migratedDb = (store as any).db;
+      expect(store.capabilities.conformance.schemaVersion).toBe(4);
+      expect(store.capabilities.verifierTransitions).toBe(
+        'axevent-verifier-transition-v2'
+      );
+      expect(migratedDb.pragma('user_version', { simple: true })).toBe(4);
+      expect(
+        migratedDb
+          .prepare(
+            `SELECT name FROM sqlite_master
+             WHERE type='table' AND name IN
+               ('event_verifier_transitions','event_store_metadata')
+             ORDER BY name`
+          )
+          .all()
+      ).toEqual([
+        { name: 'event_store_metadata' },
+        { name: 'event_verifier_transitions' },
+      ]);
+      expect(
+        migratedDb
+          .prepare(
+            `SELECT 1 FROM event_store_metadata
+             WHERE metadata_key='verifier-v2-cleanup-pending'`
+          )
+          .get()
+      ).toBeUndefined();
+      await store.close();
+    }
   });
 
   it('records oversized output failure without dispatching sinks or rerunning', async () => {
