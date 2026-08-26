@@ -18,6 +18,12 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
 
 ## Open
 
+- `axir-2026-08-25-port-shared-runtime-capability-selection-and-conformance-observa` [axagent] Port shared runtime capability selection and conformance observations
+  - Status: open
+  - Source commit: `ca760294f5ea4f207052c39c2218e1195103bc2a`
+  - TS paths: `src/ax/agent/AxAgent.ts`, `src/ax/agent/agent.test-d.ts`, `src/ax/agent/benchmarks/runtimeCapabilities.eval.ts`, `src/ax/agent/rlm.ts`, `src/ax/agent/runtimeCapabilities.test.ts`, `src/ax/agent/runtimeCapabilities.ts`
+  - Impact: TypeScript AxCodeRuntime now exposes an explicitly versioned superset and conversion path for the generated AxIR inspect/snapshot/patch/abort/language/usage-instructions record, plus protocol/platform/persistence/resource/authority declarations, host-admitted security selection, and deterministic contradiction reporting; generated Python, Java, C++, Go, and Rust RuntimeCapabilities records and selectors do not yet expose the v1 extension or matching behavior.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 - `axir-2026-08-25-port-speculative-programmatic-tool-calling-runtime-semantics` [axagent] Port speculative programmatic tool calling runtime semantics
   - Status: open
   - Source commit: `ca760294f5ea4f207052c39c2218e1195103bc2a`

@@ -14,10 +14,36 @@ import {
   type AxFunction,
   type AxFunctionProvider,
   type AxMetricResult,
+  type AxRuntimeAdmissionReceipt,
+  type AxRuntimeCapabilities,
   agent,
+  axRuntimeCapabilityRequirementsVersion,
+  axSelectCodeRuntime,
   f,
   s,
 } from '../index.js';
+
+// Runtime declarations and requirement-aware selection are public and opt-in.
+{
+  const capabilities = {} as AxRuntimeCapabilities;
+  const runtime = {} as AxCodeRuntime;
+  const admission = {} as AxRuntimeAdmissionReceipt;
+  const selected: AxCodeRuntime = axSelectCodeRuntime(
+    [runtime],
+    {
+      schemaVersion: axRuntimeCapabilityRequirementsVersion,
+      inspect: true,
+      language: ['JavaScript', 'Python'],
+      authority: { network: 'denied' },
+    },
+    { admissions: [admission] }
+  ).runtime;
+  const _inspect: boolean = capabilities.inspect;
+  const _protocolVersion: string = capabilities.protocol.version;
+  void selected;
+  void _inspect;
+  void _protocolVersion;
+}
 
 const structuredPlaybookMetricOptions: AxAgentPlaybookEvolveOptions = {
   metric: async (): Promise<AxMetricResult<'quality'>> => ({

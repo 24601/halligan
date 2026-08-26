@@ -64,7 +64,7 @@ export type AxJSRuntimeSpeculationOptions = Readonly<{
 }>;
 
 export type NormalizedAxJSRuntimeSpeculationOptions = Readonly<{
-  callables: ReadonlyMap<string, AxJSRuntimeSpeculationPolicy>;
+  callables: Readonly<Record<string, AxJSRuntimeSpeculationPolicy>>;
   maxConcurrency: number;
   maxCallsPerExecution: number;
   onEvent?: AxJSRuntimeSpeculationOptions['onEvent'];
@@ -98,7 +98,10 @@ export function normalizeJSRuntimeSpeculationOptions(
     throw new Error('speculation.callables must be an object');
   }
 
-  const callables = new Map<string, AxJSRuntimeSpeculationPolicy>();
+  const callables = Object.create(null) as Record<
+    string,
+    AxJSRuntimeSpeculationPolicy
+  >;
   for (const [path, policy] of Object.entries(options.callables)) {
     if (!CALLABLE_PATH_PATTERN.test(path)) {
       throw new Error(
@@ -114,15 +117,20 @@ export function normalizeJSRuntimeSpeculationOptions(
         `speculation callable "${path}" must explicitly set purity: 'pure' and deterministic: boolean`
       );
     }
-    callables.set(path, {
-      purity: 'pure',
-      deterministic: policy.deterministic,
+    Object.defineProperty(callables, path, {
+      value: Object.freeze({
+        purity: 'pure' as const,
+        deterministic: policy.deterministic,
+      }),
+      enumerable: true,
+      writable: false,
+      configurable: false,
     });
   }
 
-  if (callables.size === 0) return undefined;
-  return {
-    callables,
+  if (Object.keys(callables).length === 0) return undefined;
+  return Object.freeze({
+    callables: Object.freeze(callables),
     maxConcurrency: validateBoundedInteger(
       options.maxConcurrency,
       DEFAULT_MAX_CONCURRENCY,
@@ -136,7 +144,7 @@ export function normalizeJSRuntimeSpeculationOptions(
       'speculation.maxCallsPerExecution'
     ),
     onEvent: options.onEvent,
-  };
+  });
 }
 
 type TokenKind = 'identifier' | 'string' | 'number' | 'punctuator';
@@ -1017,7 +1025,7 @@ export class JSRuntimeSpeculationTurn {
       return;
     }
 
-    const configuredTools = new Set(this.options.callables.keys());
+    const configuredTools = new Set(Object.keys(this.options.callables));
     const bindings = new Map<string, Promise<unknown>>();
     let callLimitReported = false;
     let unsafeCallBarrier = false;
@@ -1046,7 +1054,7 @@ export class JSRuntimeSpeculationTurn {
         if (hasPotentialCall(statement)) unsafeCallBarrier = true;
         continue;
       }
-      const policy = this.options.callables.get(parsed.tool)!;
+      const policy = this.options.callables[parsed.tool]!;
       if (unsafeCallBarrier) {
         this.emit({
           kind: 'blocked',
@@ -1238,7 +1246,7 @@ export class JSRuntimeSpeculationTurn {
     args: readonly unknown[]
   ): Promise<JSRuntimeSpeculationClaim> {
     const tool = this.refToFnPath.get(ref);
-    const policy = tool ? this.options.callables.get(tool) : undefined;
+    const policy = tool ? this.options.callables[tool] : undefined;
     if (!tool || !policy) return { hit: false };
 
     let actualKey: string;

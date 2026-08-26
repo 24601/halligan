@@ -287,6 +287,36 @@ import {
   axBuildResponderDefinition,
 } from './agent/rlm.js';
 import {
+  type AxIRRuntimeCapabilities,
+  type AxIRRuntimeCapabilitiesInput,
+  type AxRuntimeAdmissionEvidence,
+  type AxRuntimeAdmissionReceipt,
+  type AxRuntimeAuthority,
+  type AxRuntimeCapabilities,
+  type AxRuntimeCapabilitiesV1,
+  type AxRuntimeCapabilityContradictionReport,
+  type AxRuntimeCapabilityExtensions,
+  type AxRuntimeCapabilityObservations,
+  type AxRuntimeCapabilityRequirements,
+  type AxRuntimePlatform,
+  type AxRuntimePlatformAuthority,
+  type AxRuntimeProtocol,
+  type AxRuntimeSelection,
+  type AxRuntimeTimeoutEnforcement,
+  axCodeRuntimeProtocol,
+  axCodeRuntimeProtocolVersion,
+  axCreateRuntimeAdmissionReceipt,
+  axCreateRuntimeCapabilities,
+  axExtendAxIRRuntimeCapabilities,
+  axNormalizeAxIRRuntimeCapabilities,
+  axReportRuntimeCapabilityContradictions,
+  axRuntimeCapabilitiesToAxIR,
+  axRuntimeCapabilitiesVersion,
+  axRuntimeCapabilityRequirementsVersion,
+  axRuntimeProtocolFromToken,
+  axSelectCodeRuntime,
+} from './agent/runtimeCapabilities.js';
+import {
   type AxRuntimePrimitive,
   type AxRuntimePrimitiveExample,
   type AxRuntimePrimitiveSignature,
@@ -1728,6 +1758,8 @@ export { axBuildResponderDefinition };
 export { axCanonicalizeCausalCandidateEvidenceManifest };
 export { axCheckMetricsHealth };
 export { axCloneCausalCandidateEvidenceManifest };
+export { axCodeRuntimeProtocol };
+export { axCodeRuntimeProtocolVersion };
 export { axConcatBase64 };
 export { axCreateCausalCandidateEvidenceManifest };
 export { axCreateDefaultColorLogger };
@@ -1740,6 +1772,8 @@ export { axCreateGeminiLiveAudioApi };
 export { axCreateGrokRealtimeApi };
 export { axCreateJSRuntime };
 export { axCreateOpenAIRealtimeApi };
+export { axCreateRuntimeAdmissionReceipt };
+export { axCreateRuntimeCapabilities };
 export { axDefaultFlowLogger };
 export { axDefaultMetricsConfig };
 export { axDefaultOptimizerLogger };
@@ -1757,6 +1791,7 @@ export { axEventScopedCorrelationKey };
 export { axEventScopedDedupeKey };
 export { axEventSizeBytes };
 export { axExecutableSkillRef };
+export { axExtendAxIRRuntimeCapabilities };
 export { axFetchJsonSpeech };
 export { axFetchMultipartTranscription };
 export { axFingerprintCausalEvidence };
@@ -1811,6 +1846,7 @@ export { axModelInfoOpenAI };
 export { axModelInfoOpenAIResponses };
 export { axModelInfoReka };
 export { axModelInfoWebLLM };
+export { axNormalizeAxIRRuntimeCapabilities };
 export { axNormalizeOpenAIUsage };
 export { axNormalizeTranscriptionResponse };
 export { axOpenAIChatAudioDefaults };
@@ -1826,6 +1862,7 @@ export { axReactCanonicalJSON };
 export { axReactSerializeHistory };
 export { axRenewPreferenceEvidence };
 export { axReplaceOptimizedProgramSnapshot };
+export { axReportRuntimeCapabilityContradictions };
 export { axResolveAIProfileFeatures };
 export { axResolveAIProfileId };
 export { axResolveGeminiLiveAudioConfig };
@@ -1834,8 +1871,13 @@ export { axResolveMCPExecutionContext };
 export { axResolveOpenAIChatAudioConfig };
 export { axResolveOpenAIRealtimeAudioConfig };
 export { axRetractPreferenceEvidence };
+export { axRuntimeCapabilitiesToAxIR };
+export { axRuntimeCapabilitiesVersion };
+export { axRuntimeCapabilityRequirementsVersion };
 export { axRuntimePrimitives };
+export { axRuntimeProtocolFromToken };
 export { axScoreProvidersForRequest };
+export { axSelectCodeRuntime };
 export { axSelectExecutableSkills };
 export { axSelectOptimalProvider };
 export { axSelectPreferenceEvidence };
@@ -2473,6 +2515,8 @@ export type { AxGenStreamingOut };
 export type { AxGenerateErrorDetails };
 export type { AxGenerateResult };
 export type { AxIField };
+export type { AxIRRuntimeCapabilities };
+export type { AxIRRuntimeCapabilitiesInput };
 export type { AxInMemoryEventStoreOptions };
 export type { AxInputFunctionType };
 export type { AxJSRuntimeNodePermissionAllowlist };
@@ -2747,13 +2791,27 @@ export type { AxRewardFn };
 export type { AxRewardFnArgs };
 export type { AxRolloutTrace };
 export type { AxRoutingResult };
+export type { AxRuntimeAdmissionEvidence };
+export type { AxRuntimeAdmissionReceipt };
+export type { AxRuntimeAuthority };
 export type { AxRuntimeCallableFormatArgs };
+export type { AxRuntimeCapabilities };
+export type { AxRuntimeCapabilitiesV1 };
+export type { AxRuntimeCapabilityContradictionReport };
+export type { AxRuntimeCapabilityExtensions };
+export type { AxRuntimeCapabilityObservations };
+export type { AxRuntimeCapabilityRequirements };
 export type { AxRuntimeLanguageInfo };
+export type { AxRuntimePlatform };
+export type { AxRuntimePlatformAuthority };
 export type { AxRuntimePrimitive };
 export type { AxRuntimePrimitiveExample };
 export type { AxRuntimePrimitiveOverrideMap };
 export type { AxRuntimePrimitiveSignature };
 export type { AxRuntimePrimitiveStage };
+export type { AxRuntimeProtocol };
+export type { AxRuntimeSelection };
+export type { AxRuntimeTimeoutEnforcement };
 export type { AxSamplePickerOptions };
 export type { AxSelectExecutableSkillsOptions };
 export type { AxSelectedExecutableSkill };

@@ -11,6 +11,7 @@ import type { AxIField } from '../dsp/sig.js';
 import type { AxProgramForwardOptions } from '../dsp/types.js';
 import type { AxAgentActorTurnCallback } from './agentInternal/agentStateTypes.js';
 import type { AxAgentOnContextEvent } from './contextEvents.js';
+import type { AxRuntimeCapabilities } from './runtimeCapabilities.js';
 import {
   axRuntimePrimitives,
   renderPrimitivesList,
@@ -350,6 +351,12 @@ function renderCallableBlock(
  * Implement this interface for your target runtime (Node.js, browser, WASM, etc.).
  */
 export interface AxCodeRuntime {
+  /**
+   * Optional versioned superset of the AxIR RuntimeCapabilities declaration.
+   * Untrusted metadata: authority/resource routing requires a separate
+   * host-minted admission receipt.
+   */
+  readonly capabilities?: AxRuntimeCapabilities;
   /**
    * Human-readable language name for generated actor code.
    * Defaults to JavaScript when omitted for backwards compatibility.
