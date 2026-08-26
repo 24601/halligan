@@ -404,6 +404,115 @@ describe('AxEventRuntime effects', () => {
     await runtime.close();
   });
 
+  it('parks an unsettled effect declared by a recovered final sink', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const store = new AxInMemoryEventStore({ clock });
+    const receipt = await store.enqueue({
+      ingress: ingress('recovered-sink-effect'),
+      deliveries: [
+        {
+          routeId: 'effect-route',
+          action: 'wake',
+          targetId: 'effect-target',
+          instanceKey: 'recovered-sink-effect',
+          sizeBytes: 1,
+          retrySafety: 'effect-aware',
+          ordering: 'strict',
+        },
+      ],
+      acceptedAt: clock.now(),
+      publishTimeoutMs: 100,
+    });
+    const claimed = (await store.claim('crashed-worker', clock.now(), 100))!;
+    const run: AxEventRun = {
+      id: 'recovered-sink-run',
+      deliveryId: claimed.id,
+      routeId: claimed.routeId,
+      targetId: claimed.targetId,
+      instanceKey: claimed.instanceKey,
+      claimedBy: claimed.claimedBy,
+      fencingToken: claimed.fencingToken,
+      status: 'succeeded',
+      attempt: 1,
+      startedAt: clock.now(),
+      finishedAt: clock.now(),
+      output: { handled: true },
+    };
+    await store.saveDelivery({
+      ...claimed,
+      status: 'running',
+      attempt: 1,
+      runId: run.id,
+      invocationStarted: true,
+    });
+    await store.saveRun(run);
+    clock.advanceBy(101);
+
+    const target = vi.fn(() => ({ handled: true }));
+    const sink = vi.fn(
+      async (
+        _output: unknown,
+        context: { eventContext: Readonly<AxEventContext> }
+      ) => {
+        const effect = await context.eventContext.declareEffect({
+          operation: 'sink.deliver',
+          idempotencyKey: 'recovered-sink-42',
+        });
+        await context.eventContext.markEffectDispatched(
+          effect.id,
+          effect.version
+        );
+      }
+    );
+    const runtime = new AxEventRuntime({
+      clock,
+      store,
+      leaseMs: 100,
+      heartbeatMs: 25,
+      routes: [
+        eventRoute({
+          id: 'effect-route',
+          match: { types: ['effect.requested'] },
+          action: 'wake',
+          target: eventTarget({
+            id: 'effect-target',
+            ai,
+            program: effectProgram(target),
+            mapInput: () => ({}),
+            retrySafety: 'effect-aware',
+            sinks: [{ id: 'recovered-sink', write: sink }],
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    const deliveryId = receipt.deliveryIds[0]!;
+    await vi.waitFor(async () =>
+      expect((await store.getDelivery(deliveryId))?.status).toBe('parked')
+    );
+
+    expect(target).not.toHaveBeenCalled();
+    expect(sink).toHaveBeenCalledOnce();
+    expect(await store.getDelivery(deliveryId)).toEqual(
+      expect.objectContaining({ status: 'parked', runId: run.id })
+    );
+    expect(await store.getRun(run.id)).toEqual(
+      expect.objectContaining({ status: 'parked' })
+    );
+    expect((await runtime.getEffects(deliveryId))[0]).toEqual(
+      expect.objectContaining({
+        status: 'parked',
+        parkedReason: expect.stringContaining(
+          'Target completed with unsettled effect sink.deliver:recovered-sink-42 (dispatched)'
+        ),
+      })
+    );
+    expect(await runtime.listDeadLetters()).toEqual([
+      expect.objectContaining({ kind: 'delivery', deliveryId, runId: run.id }),
+    ]);
+    await runtime.close();
+  });
+
   it.each<{
     name: string;
     resolution: AxEventEffectResolution;

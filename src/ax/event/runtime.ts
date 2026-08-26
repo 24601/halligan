@@ -1398,6 +1398,32 @@ export class AxEventRuntime {
       if (target && run.output !== undefined) {
         run = await this.dispatchFinalSinks(target, run, context);
         this.assertRunActive(controller.signal);
+        const sinkEffectParkReason = await this.parkUnsettledCompletionEffects(
+          claimed,
+          controller.signal
+        );
+        this.assertRunActive(controller.signal);
+        if (sinkEffectParkReason) {
+          run = {
+            ...run,
+            status: 'parked',
+            finishedAt: this.clock.now(),
+            error: sinkEffectParkReason,
+          };
+          await this.store.saveRun(run);
+          this.assertRunActive(controller.signal);
+          await this.parkDelivery(
+            {
+              ...claimed,
+              attempt: Math.max(claimed.attempt, persisted.attempt),
+              runId: persisted.id,
+            },
+            sinkEffectParkReason,
+            false
+          );
+          this.assertRunActive(controller.signal);
+          return true;
+        }
         await this.store.saveRun(run);
       }
       this.assertRunActive(controller.signal);
