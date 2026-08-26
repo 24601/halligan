@@ -551,6 +551,59 @@ describe('AxEventComponentManager', () => {
     expect(lifetimeSignal?.aborted).toBe(true);
   });
 
+  it('rejects an invalid acquire label before setup runs', async () => {
+    const dispose = vi.fn();
+    const manager = new AxEventComponentManager();
+    await manager.define({
+      id: 'whitespace-label',
+      version: '1',
+      activate: (context) =>
+        context.acquire('  ', async () => ({
+          value: 'socket',
+          dispose,
+        })),
+    });
+    await expect(manager.activate()).rejects.toThrow(
+      'Event component effect label is required'
+    );
+    expect(dispose).not.toHaveBeenCalled();
+    expect(manager.inspect('whitespace-label')?.state).toBe('failed');
+  });
+
+  it('rejects a definition that depends on a disposed component', async () => {
+    const manager = new AxEventComponentManager();
+    await manager.define({
+      id: 'provider',
+      version: '1',
+      activate: () => 'ready',
+    });
+    await manager.dispose('provider');
+    await expect(
+      manager.define({
+        id: 'child',
+        version: '1',
+        dependencies: ['provider'],
+        activate: () => 'child',
+      })
+    ).rejects.toThrow('cannot depend on disposed provider');
+  });
+
+  it('marks dispose targets failed when a disposer throws', async () => {
+    const manager = new AxEventComponentManager();
+    await manager.define({
+      id: 'leaky',
+      version: '1',
+      activate: (context) => {
+        context.addDisposer('socket', () => {
+          throw new Error('socket close failed');
+        });
+      },
+    });
+    await manager.activate();
+    await expect(manager.dispose('leaky')).rejects.toThrow();
+    expect(manager.inspect('leaky')?.state).toBe('failed');
+  });
+
   it('diagnoses acquisitions that fail to return a disposer', async () => {
     const manager = new AxEventComponentManager();
     await manager.define({

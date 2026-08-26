@@ -216,6 +216,7 @@ class AxManagedEventComponentContext
         `Event component ${this.id} attempted acquisition ${label} after activation completed`
       );
     }
+    validateEffect(label, () => undefined);
     const acquired = await setup(this.signal);
     if (!acquired || typeof acquired.dispose !== 'function') {
       const error = new AxEventComponentLeakError(
@@ -264,7 +265,24 @@ class AxManagedEventComponentContext
       }
       throw error;
     }
-    this.addDisposer(label, acquired.dispose);
+    try {
+      this.addDisposer(label, acquired.dispose);
+    } catch (error) {
+      try {
+        await acquired.dispose();
+      } catch (disposeError) {
+        this.reportDiagnostic({
+          code: 'disposer-failed',
+          componentId: this.id,
+          phase: 'activate',
+          effect: label,
+          message: `Disposer ${label} for event component ${this.id} failed after registration`,
+          at: Date.now(),
+          error: disposeError,
+        });
+      }
+      throw error;
+    }
     throwIfAborted(this.signal);
     return acquired.value;
   }
@@ -321,6 +339,7 @@ export class AxEventComponentManager {
         scope: undefined,
         lastError: undefined,
       };
+      this.assertLiveDependencies(normalized);
       this.records.set(normalized.id, record);
       try {
         this.assertAcyclic();
@@ -329,6 +348,14 @@ export class AxEventComponentManager {
         throw error;
       }
     });
+  }
+
+  abortAll(reason: unknown): void {
+    for (const record of this.records.values()) {
+      if (record.scope && !record.scope.signal.aborted) {
+        record.scope.abort(reason);
+      }
+    }
   }
 
   inspect(): readonly Readonly<AxEventComponentInspection>[];
@@ -419,7 +446,16 @@ export class AxEventComponentManager {
       }
       for (const id of targets) {
         const record = this.records.get(id);
-        if (record) record.state = 'disposed';
+        if (!record) continue;
+        const failedEffects = record.effects.some(
+          (effect) => effect.state === 'failed'
+        );
+        if (teardownError || failedEffects) {
+          record.state = 'failed';
+          record.lastError = teardownError ?? record.lastError;
+        } else {
+          record.state = 'disposed';
+        }
       }
       if (teardownError) throw teardownError;
     });
@@ -443,6 +479,7 @@ export class AxEventComponentManager {
           `Replacement for event component ${normalized.id} must use a new version`
         );
       }
+      this.assertLiveDependencies(normalized);
       this.assertReplacementAcyclic(normalized);
 
       const candidate: ComponentRecord = {
@@ -819,6 +856,19 @@ export class AxEventComponentManager {
       errors.push(...(await this.cleanupRecord(record, phase)));
     }
     return errors;
+  }
+
+  private assertLiveDependencies(
+    definition: Readonly<AxEventComponentDefinition>
+  ): void {
+    for (const dependency of definition.dependencies ?? []) {
+      const record = this.records.get(dependency);
+      if (record?.state === 'disposed') {
+        throw new Error(
+          `Event component ${definition.id} cannot depend on disposed ${dependency}`
+        );
+      }
+    }
   }
 
   private assertAcyclic(): void {

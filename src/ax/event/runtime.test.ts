@@ -539,6 +539,80 @@ describe('AxEventRuntime', () => {
     expect(lifecycle).toEqual(['first:start', 'first:close']);
   });
 
+  it('aborts already-started sources immediately when a later start hangs', async () => {
+    const secondStarted = deferred();
+    const secondReleased = deferred();
+    const readyAborted = deferred();
+    const closed: string[] = [];
+    const runtime = new AxEventRuntime({
+      routes: [],
+      sources: [
+        {
+          id: 'ready',
+          start: async ({ signal }) => {
+            signal.addEventListener(
+              'abort',
+              () => {
+                readyAborted.resolve();
+              },
+              { once: true }
+            );
+            return {
+              close: () => {
+                expect(signal.aborted).toBe(true);
+                closed.push('ready');
+              },
+            };
+          },
+        },
+        {
+          id: 'hung',
+          start: async ({ signal }) => {
+            secondStarted.resolve();
+            await secondReleased.promise;
+            return {
+              close: () => {
+                expect(signal.aborted).toBe(true);
+                closed.push('hung');
+              },
+            };
+          },
+        },
+      ],
+    });
+    const starting = runtime.start();
+    await secondStarted.promise;
+    const closing = runtime.close({ drain: false });
+    await readyAborted.promise;
+    secondReleased.resolve();
+    await expect(starting).rejects.toThrow();
+    await closing;
+    expect(closed).toContain('ready');
+  });
+
+  it('rejects start while close is still tearing down', async () => {
+    const started = deferred();
+    const runtime = new AxEventRuntime({
+      routes: [],
+      sources: [
+        {
+          id: 'slow-close',
+          start: async () => {
+            started.resolve();
+            return {
+              close: () => new Promise(() => undefined),
+            };
+          },
+        },
+      ],
+    });
+    const starting = runtime.start();
+    await started.promise;
+    await starting;
+    void runtime.close({ drain: false });
+    await expect(runtime.start()).rejects.toThrow('is closing');
+  });
+
   it('refuses durable sources on the volatile store by default', async () => {
     const source = new AxPushEventSource('queue', true);
     const runtime = new AxEventRuntime({ routes: [], sources: [source] });

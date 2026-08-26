@@ -55,6 +55,21 @@ type InvocationResult = {
   invoked: boolean;
 };
 
+function combineAbortSignals(...signals: readonly AbortSignal[]): AbortSignal {
+  const controller = new AbortController();
+  const abort = (signal: AbortSignal) => {
+    if (!controller.signal.aborted) controller.abort(signal.reason);
+  };
+  for (const signal of signals) {
+    if (signal.aborted) {
+      abort(signal);
+      return controller.signal;
+    }
+    signal.addEventListener('abort', () => abort(signal), { once: true });
+  }
+  return controller.signal;
+}
+
 class AxRuntimeEventContext implements AxEventContext {
   private readonly registrations: Array<{
     id: string;
@@ -138,6 +153,7 @@ export class AxEventRuntime {
   private readonly activeRuns = new Map<string, AbortController>();
   private readonly sourceComponents = new AxEventComponentManager();
   private readonly sourceStartupController = new AbortController();
+  private readonly sourceLifetimeController = new AbortController();
   private readonly workerController = new AbortController();
   private workerPromises: Promise<void>[] = [];
   private startPromise: Promise<void> | undefined;
@@ -172,6 +188,9 @@ export class AxEventRuntime {
   }
 
   async start(): Promise<void> {
+    if (this.closing || this.closePromise) {
+      throw new Error('AxEventRuntime is closing');
+    }
     if (this.startPromise) return this.startPromise;
     const operation = this.startInternal();
     this.startPromise = operation;
@@ -183,8 +202,10 @@ export class AxEventRuntime {
   }
 
   private async startInternal(): Promise<void> {
+    if (this.closing || this.closePromise) {
+      throw new Error('AxEventRuntime is closing');
+    }
     if (this.started) return;
-    if (this.closing) throw new Error('AxEventRuntime is closing');
     const durableRequired = (this.options.sources ?? []).filter(
       (source) => source.requiresDurable
     );
@@ -237,7 +258,10 @@ export class AxEventRuntime {
           activate: (context) =>
             context.acquire('source-handle', async (signal) => {
               const handle = await source.start({
-                signal,
+                signal: combineAbortSignals(
+                  signal,
+                  this.sourceLifetimeController.signal
+                ),
                 publish: (ingress, publishSignal) =>
                   this.publish(ingress, publishSignal),
                 reportError: (error) => {
@@ -397,6 +421,8 @@ export class AxEventRuntime {
     if (this.closePromise) return this.closePromise;
     this.closing = true;
     this.sourceStartupController.abort('AxEventRuntime closing');
+    this.sourceLifetimeController.abort('AxEventRuntime closing');
+    this.sourceComponents.abortAll('AxEventRuntime closing');
     const operation = this.closeInternal(options);
     this.closePromise = operation;
     return operation;
