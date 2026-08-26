@@ -273,6 +273,11 @@ export interface AxAgentSessionSendReceipt {
   mode: AxAgentSessionMessageMode;
   acceptedAt: number;
   delivery: 'ready' | 'queued' | 'interrupting';
+  /**
+   * Present when scheduler interruption was attempted before this receipt
+   * returned. Event-continuation dispatch defers that attempt, so the field is
+   * omitted even when delivery is interrupting.
+   */
   interruptAccepted?: boolean;
 }
 
@@ -1460,6 +1465,7 @@ export class AxAgentSessionHost {
   >();
   private readonly rootDrains = new Map<string, Promise<void>>();
   private readonly recoveryJobs = new Set<string>();
+  private readonly publishingEvents = new Map<string, number>();
   private readonly ownedEpochs = new Map<string, number>();
   private detachScheduler?: () => void;
   private closed = false;
@@ -1619,6 +1625,11 @@ export class AxAgentSessionHost {
     this.assertOpen();
     const roots = rootId ? [rootId] : await this.store.listRoots();
     for (const id of roots) {
+      if ((this.publishingEvents.get(id) ?? 0) > 0) {
+        throw new Error(
+          'Retained agent session recovery cannot run from its own lifecycle event callback'
+        );
+      }
       const outcome = await this.mutate(id, (snapshot) => {
         const records: AxAgentSessionRecord[] = [];
         this.interruptRunning(snapshot, records);
@@ -1932,6 +1943,19 @@ export class AxAgentSessionHost {
   ): Promise<void> {
     this.assertOpen();
     const root = await this.rootForSession(sessionId);
+    if (!handle && sessionId === root.root.id) {
+      const outcome = await this.mutateOptional(root.root.id, (snapshot) => {
+        this.assertParent(snapshot, sessionId, capability, epoch);
+        if (snapshot.root.status === 'cancelled') return SKIP_MUTATION;
+        return {
+          ...this.cancelInSnapshot(snapshot, snapshot.root.id),
+          rootCancelled: true as const,
+        };
+      });
+      this.detachRootAbortListener(root.root.id);
+      if (outcome) await this.finishCancellation(outcome);
+      return;
+    }
     const outcome = await this.mutate(root.root.id, (snapshot) => {
       this.assertParent(snapshot, sessionId, capability, epoch);
       const targetId = handle
@@ -1943,16 +1967,17 @@ export class AxAgentSessionHost {
       };
     });
     await this.finishCancellation(outcome);
-    if (outcome.rootCancelled) this.detachRootAbortListener(root.root.id);
   }
 
   private async cancelRoot(rootId: string): Promise<void> {
     this.assertOpen();
-    const outcome = await this.mutate(rootId, (snapshot) =>
-      this.cancelInSnapshot(snapshot, snapshot.root.id)
+    const outcome = await this.mutateOptional(rootId, (snapshot) =>
+      snapshot.root.status === 'cancelled'
+        ? SKIP_MUTATION
+        : this.cancelInSnapshot(snapshot, snapshot.root.id)
     );
-    await this.finishCancellation(outcome);
     this.detachRootAbortListener(rootId);
+    if (outcome) await this.finishCancellation(outcome);
   }
 
   private async finishCancellation(
@@ -2216,7 +2241,10 @@ export class AxAgentSessionHost {
 
   private async dispatch(job: Readonly<AxAgentSessionJob>): Promise<void> {
     if (this.closed) return;
-    if (this.ownedEpochs.get(job.rootId) !== job.epoch) return;
+    if (this.ownedEpochs.get(job.rootId) !== job.epoch) {
+      if (this.recoveryJobs.has(job.id)) await this.resumeRecoveryJob(job);
+      return;
+    }
     await this.rootDrains.get(job.rootId);
     if (this.closed) return;
     if (this.ownedEpochs.get(job.rootId) !== job.epoch) return;
@@ -2529,6 +2557,17 @@ export class AxAgentSessionHost {
     job: Readonly<AxAgentSessionJob>
   ): Promise<void> {
     let retry = false;
+    if (this.recoveryJobs.has(job.id)) {
+      try {
+        if (await this.resumeRecoveryJob(job)) return;
+      } catch {
+        retry = true;
+      }
+    }
+    if (retry) {
+      if (!this.closed) await this.scheduler.enqueue(job);
+      return;
+    }
     try {
       const snapshot = await this.requireRoot(job.rootId);
       if (snapshot.root.epoch !== job.epoch) return;
@@ -2542,6 +2581,12 @@ export class AxAgentSessionHost {
           return;
         } catch {
           this.recoveryJobs.add(job.id);
+          try {
+            if (await this.resumeRecoveryJob(job)) return;
+          } catch {
+            // The marked job remains the retry intent until authority read-back
+            // and current-epoch scheduling both succeed.
+          }
           retry = true;
         }
       } else if (message.status === 'pending') {
@@ -2606,6 +2651,16 @@ export class AxAgentSessionHost {
     if (this.closed) return;
     if (this.ownedEpochs.get(rootId) !== expectedEpoch) return;
     const snapshot = await this.requireRoot(rootId);
+    await this.scheduleReadySnapshot(snapshot, expectedEpoch);
+  }
+
+  private async scheduleReadySnapshot(
+    snapshot: Readonly<AxAgentSessionRegistrySnapshot>,
+    expectedEpoch: number
+  ): Promise<void> {
+    const rootId = snapshot.root.id;
+    if (this.closed) return;
+    if (this.ownedEpochs.get(rootId) !== expectedEpoch) return;
     if (snapshot.root.epoch !== expectedEpoch) return;
     if (snapshot.root.budgetExceeded === 'tokens') return;
     const running = Object.values(snapshot.sessions).filter(
@@ -2622,6 +2677,18 @@ export class AxAgentSessionHost {
       if (!message) continue;
       if (await this.enqueueSafely(record, message)) capacity--;
     }
+  }
+
+  private async resumeRecoveryJob(
+    job: Readonly<AxAgentSessionJob>
+  ): Promise<boolean> {
+    const snapshot = await this.requireRoot(job.rootId);
+    if (snapshot.root.epoch === job.epoch) return false;
+    this.ownedEpochs.set(job.rootId, snapshot.root.epoch);
+    await this.rootDrains.get(job.rootId);
+    await this.scheduleReadySnapshot(snapshot, snapshot.root.epoch);
+    this.recoveryJobs.delete(job.id);
+    return true;
   }
 
   private nextPending(
@@ -3426,6 +3493,33 @@ export class AxAgentSessionHost {
     );
   }
 
+  private async mutateOptional<T>(
+    rootId: string,
+    mutation: (
+      snapshot: AxAgentSessionRegistrySnapshot
+    ) => T | typeof SKIP_MUTATION
+  ): Promise<T | undefined> {
+    for (let attempt = 0; attempt < 12; attempt++) {
+      const current = await this.requireRoot(rootId);
+      const next = cloneStructured(current);
+      const result = mutation(next);
+      if (result === SKIP_MUTATION) return undefined;
+      this.reconcileBudget(next);
+      next.root.updatedAt = this.now();
+      next.policyDigest = await digestPolicy(next);
+      await this.validateSnapshot(next);
+      try {
+        await this.store.save(next, current.revision);
+        return result;
+      } catch (error) {
+        if (!(error instanceof AxAgentSessionConflictError)) throw error;
+      }
+    }
+    throw new AxAgentSessionConflictError(
+      `Retained agent session registry "${rootId}" remained contended`
+    );
+  }
+
   private async mutateAtEpoch<T>(
     rootId: string,
     expectedEpoch: number,
@@ -3492,10 +3586,15 @@ export class AxAgentSessionHost {
     messageId?: string
   ): Promise<void> {
     if (!this.onEvent) return;
+    const rootId = record.handle.rootId;
+    this.publishingEvents.set(
+      rootId,
+      (this.publishingEvents.get(rootId) ?? 0) + 1
+    );
     try {
       await this.onEvent({
         type,
-        rootId: record.handle.rootId,
+        rootId,
         sessionId: record.handle.id,
         parentId: record.handle.parentId,
         ...(messageId ? { messageId } : {}),
@@ -3505,6 +3604,10 @@ export class AxAgentSessionHost {
       });
     } catch {
       // Observability/event publication must not corrupt lifecycle state.
+    } finally {
+      const remaining = (this.publishingEvents.get(rootId) ?? 1) - 1;
+      if (remaining > 0) this.publishingEvents.set(rootId, remaining);
+      else this.publishingEvents.delete(rootId);
     }
   }
 

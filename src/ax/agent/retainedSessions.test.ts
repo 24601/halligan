@@ -1737,6 +1737,46 @@ describe('retained child agent sessions', () => {
     expect(cancelledEvents).toBe(events);
   });
 
+  it('detaches the parent abort listener before publishing root cancellation', async () => {
+    const controller = new AbortController();
+    let cancelledEvents = 0;
+    let publishStarted!: () => void;
+    let releasePublish!: () => void;
+    const publishing = new Promise<void>((resolve) => {
+      publishStarted = resolve;
+    });
+    const release = new Promise<void>((resolve) => {
+      releasePublish = resolve;
+    });
+    const sessions = new AxAgentSessionHost({
+      ai: unusedAI,
+      registrations: registrations(),
+      onEvent: async (event) => {
+        if (event.type !== 'cancelled') return;
+        cancelledEvents++;
+        publishStarted();
+        await release;
+      },
+    });
+    const root = await sessions.createRoot({
+      authorizedChildren: ['worker'],
+      abortSignal: controller.signal,
+    });
+    const handle = await root.spawn('worker', { value: 'complete-first' });
+    await completed(root, handle);
+
+    const cancelling = root.cancel();
+    await publishing;
+    const revision = (await sessions.snapshot(root.sessionId)).revision;
+    controller.abort('concurrent parent abort');
+    await delay(0);
+
+    expect((await sessions.snapshot(root.sessionId)).revision).toBe(revision);
+    expect(cancelledEvents).toBe(1);
+    releasePublish();
+    await cancelling;
+  });
+
   it('rejects forged and disposed handles without resurrecting sessions', async () => {
     const sessions = host();
     const root = await sessions.createRoot({
@@ -1849,6 +1889,7 @@ class FaultInjectingDurableStore extends DurableMemoryStore {
   private loadFailures = 0;
   private completionSaveFailures = 0;
   private recoverySaveFailures = 0;
+  private postRecoveryLoadFailures = 0;
 
   failNextLoad(): void {
     this.loadFailures++;
@@ -1857,6 +1898,11 @@ class FaultInjectingDurableStore extends DurableMemoryStore {
   failNextCompletionAndRecoverySave(): void {
     this.completionSaveFailures++;
     this.recoverySaveFailures++;
+  }
+
+  failNextCompletionAndPostRecoveryLoad(): void {
+    this.completionSaveFailures++;
+    this.postRecoveryLoadFailures++;
   }
 
   override async load(rootId: string) {
@@ -1882,7 +1928,15 @@ class FaultInjectingDurableStore extends DurableMemoryStore {
       this.recoverySaveFailures--;
       throw new Error('injected recovery save failure');
     }
-    return super.save(snapshot, expectedRevision);
+    const saved = await super.save(snapshot, expectedRevision);
+    if (
+      this.postRecoveryLoadFailures > 0 &&
+      statuses.includes('outcome_unknown')
+    ) {
+      this.postRecoveryLoadFailures--;
+      this.loadFailures++;
+    }
+    return saved;
   }
 }
 
@@ -1998,6 +2052,47 @@ describe('retained session crash recovery adapters', () => {
     );
     await scheduled;
     expect(order).toEqual(['continuation', 'terminal']);
+  });
+
+  it('omits interrupt acceptance when event continuation dispatch is deferred', async () => {
+    const scheduler = new ManualScheduler();
+    const sessions = host({ scheduler });
+    const root = await sessions.createRoot({
+      authorizedChildren: ['worker'],
+    });
+    const handle = await root.spawn('worker', {
+      value: 'active',
+      delayMs: 10_000,
+    });
+    const running = scheduler.runOne();
+    await waitFor(
+      () => root.inspect(handle),
+      (view) => view.status === 'running'
+    );
+    let schedule: (() => void | Promise<void>) | undefined;
+    const eventContext = {
+      registerContinuation: () => 'continuation',
+      afterContinuationsRegistered(callback: () => void | Promise<void>) {
+        schedule = callback;
+      },
+    } as never;
+    const send = root
+      .functions({ eventContinuations: true })
+      .find((fn) => fn.name === 'send')!;
+
+    const receipt = (await send.func(
+      { handle, mode: 'steer', input: { value: 'deferred-steer' } },
+      { eventContext }
+    )) as { delivery: string; interruptAccepted?: boolean };
+    expect(receipt).toMatchObject({ delivery: 'interrupting' });
+    expect(receipt.interruptAccepted).toBeUndefined();
+
+    await schedule?.();
+    await running;
+    await scheduler.runAll();
+    expect((await root.result(handle)) as WorkOutput).toMatchObject({
+      value: 'deferred-steer',
+    });
   });
 
   it.each(['spawn', 'send'] as const)(
@@ -2257,6 +2352,82 @@ describe('retained session crash recovery adapters', () => {
     expect(fenced.sessions[handle.id]?.mailbox[0]?.status).toBe(
       'outcome_unknown'
     );
+    expect(scheduler.queuedJobs()).toEqual([]);
+  });
+
+  it('reschedules rotated pending work after a post-fence recovery load failure', async () => {
+    const scheduler = new ManualScheduler();
+    const store = new FaultInjectingDurableStore();
+    const sessions = host({ store, scheduler });
+    const root = await sessions.createRoot({
+      authorizedChildren: ['worker'],
+    });
+    const handle = await root.spawn('worker', { value: 'uncertain-first' });
+    const followUp = await root.send(
+      handle,
+      { value: 'rotated-follow-up' },
+      'follow-up'
+    );
+    store.failNextCompletionAndPostRecoveryLoad();
+
+    await scheduler.runOne();
+    const fenced = await sessions.snapshot(root.sessionId);
+    const fencedRecord = fenced.sessions[handle.id]!;
+    const rotated = fencedRecord.mailbox.find(
+      (message) => message.id === followUp.messageId
+    )!;
+    expect(fenced.root.epoch).toBe(2);
+    expect(fencedRecord.mailbox[0]?.status).toBe('outcome_unknown');
+    expect(rotated.status).toBe('pending');
+    expect(scheduler.queuedJobs()).toEqual([
+      expect.objectContaining({
+        id: rotated.jobId,
+        messageId: followUp.messageId,
+        epoch: 2,
+      }),
+    ]);
+
+    await scheduler.runAll();
+    const recoveredRoot = await sessions.restoreRoot(root.sessionId);
+    const recoveredHandle = await refreshDirectHandle(recoveredRoot, handle.id);
+    const completedFollowUp = await completed(recoveredRoot, recoveredHandle);
+    expect(completedFollowUp.latestResult).toMatchObject({
+      value: 'rotated-follow-up',
+    });
+    expect(scheduler.queuedJobs()).toEqual([]);
+  });
+
+  it('rejects reentrant recovery from a running event before fencing', async () => {
+    const scheduler = new ManualScheduler();
+    const sessionsRef: { current?: AxAgentSessionHost } = {};
+    let recoveryError: unknown;
+    const sessions = new AxAgentSessionHost({
+      ai: unusedAI,
+      registrations: registrations(),
+      scheduler,
+      onEvent: async (event) => {
+        if (event.type !== 'running') return;
+        try {
+          await sessionsRef.current!.recover(event.rootId);
+        } catch (error) {
+          recoveryError = error;
+        }
+      },
+    });
+    sessionsRef.current = sessions;
+    const root = await sessions.createRoot({
+      authorizedChildren: ['worker'],
+    });
+    const handle = await root.spawn('worker', { value: 'no-self-drain' });
+
+    await scheduler.runAll();
+    const snapshot = await sessions.snapshot(root.sessionId);
+    expect(recoveryError).toMatchObject({
+      message:
+        'Retained agent session recovery cannot run from its own lifecycle event callback',
+    });
+    expect(snapshot.root.epoch).toBe(1);
+    expect(snapshot.sessions[handle.id]?.mailbox[0]?.status).toBe('completed');
     expect(scheduler.queuedJobs()).toEqual([]);
   });
 

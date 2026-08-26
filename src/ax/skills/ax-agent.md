@@ -183,9 +183,16 @@ Rules:
   last confirmed state/artifacts to fence stale worker caches.
 - Recovery atomically advances a root-wide ownership epoch. Restore the root
   and refresh direct-child handles after recovery; all older clients, generated
-  function closures, and handles are intentionally stale.
+  function closures, and handles are intentionally stale. Do not await
+  `recover()` for a root from that root's lifecycle `onEvent` callback; the host
+  rejects the reentrant call before fencing because its active attempt cannot
+  drain until the callback returns. A post-fence recovery failure reads back
+  current authority and keeps retrying current-epoch pending scheduling rather
+  than consuming only the stale failed job.
 - `follow-up` waits behind active work; `steer` requests active cancellation
-  and gets priority at the next mailbox boundary.
+  and gets priority at the next mailbox boundary. When event-continuation mode
+  defers scheduler dispatch, a steer receipt omits `interruptAccepted` because
+  the interruption attempt occurs after the receipt returns.
 - Cancelling one child retains its last confirmed state for a later follow-up;
   cancelling the root is terminal and denies new work.
 - Root and per-registration `authorizedChildren` lists are separate privilege

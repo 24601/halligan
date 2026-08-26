@@ -77,9 +77,13 @@ remain synchronous namespaced calls and are unchanged.
 - `send(handle, input, 'steer')` requests cancellation of active work, gives the
   steering message priority at the next mailbox boundary, and then runs it in
   the same retained context. The receipt reports whether the local/custom
-  scheduler accepted interruption. If a remote scheduler cannot interrupt the
-  active worker, steering waits for that worker to return and discards its
-  result as cancelled before running the steering input.
+  scheduler accepted interruption when that attempt occurs before the receipt
+  returns. Event-continuation dispatch defers scheduling until continuation
+  registration, so its receipt omits `interruptAccepted`; the `interrupting`
+  delivery value still records the admitted steering intent. If a remote
+  scheduler cannot interrupt the active worker, steering waits for that worker
+  to return and discards its result as cancelled before running the steering
+  input.
 - `cancel(handle)` propagates through that child's descendants, cancels pending
   messages, and aborts active calls without deleting retained identity/state.
   A later follow-up may resume a cancelled child from its last confirmed state.
@@ -155,7 +159,10 @@ ownership epoch and fences messages left in `running` as `outcome_unknown`.
 Those messages are never automatically replayed because a pre-crash tool side
 effect may have happened. The last confirmed state remains intact; pending
 messages are rescheduled when their remaining conservative token budget allows.
-Application tools should still use stable idempotency keys when retry is safe.
+If a later recovery phase fails after the epoch fence commits, the host reads
+back current authority and retains a retry intent until current-epoch pending
+work is scheduled. Application tools should still use stable idempotency keys
+when retry is safe.
 
 `snapshot(rootId)` / `restore(snapshot, { expectedPolicyDigest })` support
 explicit state transfer with the same uncertainty rule. Store the expected
@@ -279,6 +286,11 @@ ahead of continuation ownership and become a lost wake-up.
 
 The session host does not couple itself to a daemon or silently create an event
 runtime.
+
+Lifecycle `onEvent` callbacks must not await `recover()` for the same root. The
+host rejects that reentrant call before changing durable authority because the
+active attempt cannot drain until its event callback returns. Invoke recovery
+after the callback completes instead.
 
 ## When retained async children help or hurt
 
