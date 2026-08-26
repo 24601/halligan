@@ -483,17 +483,21 @@ function schemas are copied and frozen, and the selected handler is bound to the
 resolved handler value so later registry-object mutation cannot swap it.
 Catalog, artifact, context, and option facts are detached and frozen before
 validation in one shared ingress session and then never reread from caller
-objects. Supported metadata is limited to finite JSON-like primitives, arrays,
-and plain or null-prototype records. Callables, symbols, bigints, custom-prototype
-objects such as `Date`, and cyclic values fail closed. The trusted context
-resolver is the ingress exception. Function resolution reads designated `func`
-exactly once from an own property only after validating that the resolved root is
-a plain or null-prototype record. Every selected root and own `func` descriptor
-is captured before any selected handler or metadata getter runs; all handlers
-are then bound before metadata is copied. Metadata snapshots never reread
-`func`, so one selected root cannot replace a later sibling handler in place.
+objects. Ingress and registry metadata must use own data properties; accessors
+are rejected without invocation, so one context, option, catalog, or registry
+getter cannot rewrite a fact that has not yet been detached. Supported metadata
+is limited to finite JSON-like primitives, dense arrays, and plain or
+null-prototype records. Callables, symbols, bigints, custom-prototype objects such
+as `Date`, and cyclic values fail closed. The trusted context resolver is the
+ingress exception. A selected function must be a plain or null-prototype record
+with an own data-property `func` whose value is callable. Its metadata is copied
+from own data properties without executing accessors or rereading `func`; the
+whole selected batch returns no artifacts if any selected root fails snapshot.
 Inherited handlers, class instances, callable aliases, missing function names,
-and throwing getters fail closed; function descriptions remain optional.
+and accessor handlers or metadata fail closed; descriptions remain optional.
+JavaScript proxies cannot be identified portably in the same realm and are
+outside this boundary; hosts must not pass proxy-backed ingress or registry
+records.
 Select immediately before registration/invocation and select again whenever host
 principal, authority, capability, receipt, or compatibility facts change.
 `provenance` is informational and must never be populated from model output as

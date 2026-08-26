@@ -511,7 +511,15 @@ function materializeDetached(
 
   visiting.add(objectValue);
   if (Array.isArray(value)) {
-    const length = value.length;
+    const lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length');
+    if (
+      !lengthDescriptor ||
+      !('value' in lengthDescriptor) ||
+      !Number.isInteger(lengthDescriptor.value) ||
+      lengthDescriptor.value < 0
+    )
+      throw new TypeError('invalid array length');
+    const length = lengthDescriptor.value as number;
     if (length > arrayLimit)
       throw new MetadataLimitError('array metadata exceeds limit');
     const keys = Reflect.ownKeys(value);
@@ -526,8 +534,13 @@ function materializeDetached(
     const copy: unknown[] = [];
     copies.set(objectValue, copy);
     for (let index = 0; index < length; index++) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!descriptor || !('value' in descriptor))
+        throw new TypeError(
+          'accessor and sparse array metadata is unsupported'
+        );
       copy[index] = materializeDetached(
-        value[index],
+        descriptor.value,
         copies,
         visiting,
         MAX_LIST_ENTRIES,
@@ -546,9 +559,12 @@ function materializeDetached(
   for (const key of Reflect.ownKeys(objectValue)) {
     if (typeof key !== 'string')
       throw new TypeError('symbol metadata is unsupported');
+    const descriptor = Object.getOwnPropertyDescriptor(objectValue, key);
+    if (!descriptor || !('value' in descriptor))
+      throw new TypeError('accessor metadata is unsupported');
     Object.defineProperty(copy, key, {
       value: materializeDetached(
-        (value as Record<string, unknown>)[key],
+        descriptor.value,
         copies,
         visiting,
         MAX_LIST_ENTRIES,
@@ -632,67 +648,32 @@ function tryMaterializeIngress(
   };
 }
 
-type CapturedFunctionRoot = Readonly<{
-  root: Record<string, unknown>;
-  funcDescriptor: PropertyDescriptor;
-}>;
-
-type CapturedFunction = CapturedFunctionRoot &
-  Readonly<{ handler: AxAgentFunction['func'] }>;
-
-function captureFunctionRoot(value: unknown): CapturedFunctionRoot | undefined {
+function snapshotFunction(
+  value: unknown
+): Readonly<AxAgentFunction> | undefined {
   if (!value || typeof value !== 'object') return undefined;
   try {
     const prototype = Object.getPrototypeOf(value);
     if (prototype !== Object.prototype && prototype !== null) return undefined;
-    const funcDescriptor = Object.getOwnPropertyDescriptor(value, 'func');
-    if (!funcDescriptor) return undefined;
+    const root = value as Record<string, unknown>;
+    const funcDescriptor = Object.getOwnPropertyDescriptor(root, 'func');
     if (
-      ('value' in funcDescriptor &&
-        typeof funcDescriptor.value !== 'function') ||
-      (!('value' in funcDescriptor) && typeof funcDescriptor.get !== 'function')
+      !funcDescriptor ||
+      !('value' in funcDescriptor) ||
+      typeof funcDescriptor.value !== 'function'
     )
       return undefined;
-    return Object.freeze({
-      root: value as Record<string, unknown>,
-      funcDescriptor: Object.freeze(funcDescriptor),
-    });
-  } catch {
-    return undefined;
-  }
-}
-
-function captureFunctionHandler(
-  captured: CapturedFunctionRoot | undefined
-): CapturedFunction | undefined {
-  if (!captured) return undefined;
-  try {
-    const { funcDescriptor, root } = captured;
-    const handler =
-      'value' in funcDescriptor
-        ? funcDescriptor.value
-        : funcDescriptor.get?.call(root);
-    if (typeof handler !== 'function') return undefined;
-    return Object.freeze({ ...captured, handler });
-  } catch {
-    return undefined;
-  }
-}
-
-function snapshotFunction(
-  captured: CapturedFunction | undefined
-): Readonly<AxAgentFunction> | undefined {
-  if (!captured) return undefined;
-  try {
-    const { handler, root } = captured;
+    const handler = funcDescriptor.value as AxAgentFunction['func'];
     const metadata: Record<string, unknown> = {};
     const copies = new WeakMap<object, unknown>([[root, metadata]]);
     const visiting = new WeakSet<object>([root]);
     for (const key of Reflect.ownKeys(root)) {
       if (typeof key !== 'string') return undefined;
       if (key === 'func') continue;
+      const descriptor = Object.getOwnPropertyDescriptor(root, key);
+      if (!descriptor || !('value' in descriptor)) return undefined;
       Object.defineProperty(metadata, key, {
-        value: materializeDetached(root[key], copies, visiting),
+        value: materializeDetached(descriptor.value, copies, visiting),
         enumerable: true,
       });
     }
@@ -935,18 +916,19 @@ export function axSelectExecutableSkills(
       return undefined;
     }
   });
-  // Capture every own func descriptor before any selected getter can mutate a
-  // sibling root, then bind every handler before copying any selected metadata.
-  const capturedRoots = resolvedRoots.map(captureFunctionRoot);
-  const capturedFunctions = capturedRoots.map(captureFunctionHandler);
+  const functionSnapshots = resolvedRoots.map(snapshotFunction);
+  if (functionSnapshots.some((snapshot) => !snapshot)) {
+    for (const [index, candidate] of selected.entries()) {
+      if (!functionSnapshots[index]) {
+        candidate.inspection.eligible = false;
+        candidate.inspection.reasons = ['unresolved_function'];
+      }
+    }
+    return { artifacts: [], inspection };
+  }
 
   for (const [index, candidate] of selected.entries()) {
-    const functionSnapshot = snapshotFunction(capturedFunctions[index]);
-    if (!functionSnapshot) {
-      candidate.inspection.eligible = false;
-      candidate.inspection.reasons = ['unresolved_function'];
-      continue;
-    }
+    const functionSnapshot = functionSnapshots[index]!;
     candidate.inspection.selected = true;
     artifacts.push(
       Object.freeze({
