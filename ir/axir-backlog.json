@@ -1215,14 +1215,14 @@
       "title": "Port host-owned principal preference evidence selection",
       "createdAt": "2026-08-25",
       "sourcePR": 19,
-      "sourceCommit": "0f70af1aa9723c7059c0850b034918ba733ee958",
+      "sourceCommit": "ac2331c083b908c1df24eb5e7c993f5452b7ec09",
       "tsPaths": [
         "src/ax/agent/preferenceEvidence.ts",
         "src/ax/agent/preferenceEvidence.test.ts",
         "src/ax/agent/preferenceEvidence.test-d.ts"
       ],
       "portableSurface": "axagent",
-      "impact": "Generated runtimes do not yet expose the optional principal-scoped preference evidence contract, nested per-record malformed isolation, current-stream versus immutable historical receipt binding, strong-claim self-contradiction resolution, content-free erase tombstones, monotonic stream/epoch lifecycle helpers, frozen publications, or memory adapter.",
+      "impact": "Generated runtimes do not yet expose the optional principal-scoped preference evidence contract, nested and per-record-byte malformed isolation without consuming the valid corpus budget, current-stream versus immutable historical receipt binding, strong-claim self-contradiction resolution, content-free erase tombstones, monotonic stream/epoch lifecycle helpers, frozen publications, or memory adapter.",
       "suggestedAxirWork": [
         "Add or update the TS-derived conformance fixture.",
         "Update AxIR/Core or descriptor data to match the portable TS behavior.",
