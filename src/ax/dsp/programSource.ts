@@ -1569,7 +1569,7 @@ export class AxProgramSource<
       spec: PredictorSpec,
       input: unknown
     ): Promise<unknown> => {
-      assertAuthority('predictor', '<unvalidated>', 'call');
+      assertAuthority('predictor', '<request>', 'call');
       const initialRequest = snapshotSerializableValue(
         { spec, input },
         this.valueLimits,
