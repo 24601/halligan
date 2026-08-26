@@ -18,6 +18,12 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
 
 ## Open
 
+- `axir-2026-08-25-port-provider-neutral-temporal-interaction-timeline` [axprogram] Port provider-neutral temporal interaction timeline
+  - Status: open
+  - Source commit: `ca760294f5ea4f207052c39c2218e1195103bc2a`
+  - TS paths: `src/ax/event/timeline.ts`
+  - Impact: Generated Python, Java, C++, Go, and Rust packages do not yet expose the bounded temporal envelope, classification, projection, and serialization semantics added to TypeScript.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 - `axir-2026-08-25-port-advisory-demand-evidence-and-disposition-proposals` [runtime] Port advisory demand evidence and disposition proposals
   - Status: open
   - Source commit: `ca760294f5ea4f207052c39c2218e1195103bc2a`

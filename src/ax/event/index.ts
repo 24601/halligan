@@ -80,6 +80,35 @@ export {
 export type { AxTimerEventSourceOptions } from './sources.js';
 export { AxPushEventSource, AxTimerEventSource } from './sources.js';
 export type {
+  AxAudioFrameInteractionEvent,
+  AxControlInteractionEvent,
+  AxGeneratedMediaInteractionEvent,
+  AxInteractionEvent,
+  AxInteractionTimelineAppendResult,
+  AxInteractionTimelineOptions,
+  AxInteractionTimelineProjection,
+  AxInteractionTimelineProjectionOptions,
+  AxInteractionTimelineResolvedOptions,
+  AxInteractionTimelineSnapshot,
+  AxInteractionTimelineStreamState,
+  AxMediaTimeRange,
+  AxSessionTimeRange,
+  AxTemporalClassification,
+  AxTemporalEnvelope,
+  AxTextInteractionEvent,
+  AxToolActivityInteractionEvent,
+  AxTranscriptInteractionEvent,
+  AxVisualObservationInteractionEvent,
+} from './timeline.js';
+export {
+  AxInteractionTimeline,
+  AxInteractionTimelineDefaults,
+  AxInteractionTimelineSchema,
+  AxInteractionTimelineVersion,
+  AxTemporalEnvelopeSchema,
+  AxTemporalValidationError,
+} from './timeline.js';
+export type {
   AxEventClock,
   AxEventCloseOptions,
   AxEventContext,
