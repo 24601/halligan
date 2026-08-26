@@ -284,6 +284,10 @@ export async function runAxEventStoreConformance(
       typeof peer.store.admitContinuation === 'function',
       'exclusive continuation admission capability'
     );
+    assert(
+      typeof peer.store.saveDeliveryAndCompleteContinuation === 'function',
+      'atomic resume completion capability'
+    );
     await expectReject(
       store.admitContinuation!(
         staleCandidate.id,
@@ -317,15 +321,6 @@ export async function runAxEventStoreConformance(
       repeatedAdmission?.id === continuation.id,
       'continuation admission is idempotent for its delivery'
     );
-    await peer.store.completeContinuation(continuation.id);
-    assert(
-      !(await store.findContinuation(
-        continuation.identityScope,
-        continuation.correlation[0]!,
-        options.clock.now()
-      )),
-      'continuation atomic consumption'
-    );
 
     const run: AxEventRun = {
       id: `${key}-run`,
@@ -355,6 +350,21 @@ export async function runAxEventStoreConformance(
       'stale output writer'
     );
     assertions++;
+    await peer.store.saveDeliveryAndCompleteContinuation!({
+      ...takeover!,
+      admittedContinuation: continuation,
+      status: 'succeeded',
+      attempt: 1,
+      runId: run.id,
+    });
+    assert(
+      !(await store.findContinuation(
+        continuation.identityScope,
+        continuation.correlation[0]!,
+        options.clock.now()
+      )),
+      'delivery success and continuation consumption are atomic'
+    );
   } finally {
     await Promise.allSettled([store.close?.(), peer.store.close?.()]);
   }

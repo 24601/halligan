@@ -94,7 +94,10 @@ The binding is also snapshotted on the run before invocation. Retry, delivery
 redrive, sink redrive, and recovery validate and use only that immutable
 continuation, target, and instance, so expiry and correlation-key reuse cannot
 retarget persisted output or consume a replacement. Stores without atomic
-admission and malformed legacy bindings fail closed. A never-invoked v5 resume
+admission/completion and malformed legacy bindings fail closed. Successful
+resume terminalization saves the delivery and consumes/de-keys its admitted
+continuation in one fenced transaction, so a completion fault cannot leave a
+successful delivery holding the correlation key. A never-invoked v5 resume
 delivery performs its first atomic admission after migration to v6.
 
 Targets may use separate `wakeInput` and `resumeInput` plans because the first
@@ -197,7 +200,11 @@ suppresses post-abort chunks,
 but timed-out host work may continue and perform later side effects because Ax
 cannot terminate JavaScript. Ax revokes runtime-owned persistence, sink
 dispatch, effect calls, continuation registration, and claim heartbeat after
-abort/store shutdown. After workers settle or the deadline expires, Ax
+abort/store shutdown. In-flight publishes recheck the composed shutdown signal
+after asynchronous route callbacks and before abort-aware enqueue. In-flight
+claim renewals are tracked within the same deadline; built-in stores recheck
+abort and their closed epoch immediately before mutation. After workers settle
+or the deadline expires, Ax
 independently attempts best-effort store close; a permanently hung worker
 cannot prevent that attempt, and a store-close rejection does not reject
 `close()`.

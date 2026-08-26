@@ -74,6 +74,7 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
   private sequence = 0;
   private pendingDeliveries = 0;
   private pendingBytes = 0;
+  private closed = false;
 
   constructor(options: Readonly<AxInMemoryEventStoreOptions> = {}) {
     this.clock = options.clock ?? new AxSystemEventClock();
@@ -86,6 +87,7 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
     request: Readonly<AxEventEnqueueRequest>,
     signal?: AbortSignal
   ): Promise<AxEventPublishReceipt> {
+    this.assertWritable(signal);
     const dedupeKey = axEventScopedDedupeKey(request.ingress);
     const ingressFingerprint = axEventIngressFingerprint(request.ingress);
     const duplicate = this.dedupe.get(dedupeKey);
@@ -122,6 +124,9 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
       required = this.capacityRequirement(request);
     }
 
+    // There are no awaits after this check, so shutdown/abort cannot race the
+    // following in-memory mutation in the same JavaScript turn.
+    this.assertWritable(signal);
     const deliveryIds: string[] = [];
     for (const descriptor of request.deliveries) {
       const coalesced =
@@ -196,6 +201,7 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
     now: number,
     leaseMs = 30_000
   ): Promise<AxEventDelivery | undefined> {
+    this.assertWritable();
     for (const id of this.deliveryOrder) {
       const delivery = this.deliveries.get(id);
       if (!delivery) continue;
@@ -226,8 +232,10 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
     deliveryId: string,
     workerId: string,
     fencingToken: number,
-    leaseExpiresAt: number
+    leaseExpiresAt: number,
+    signal?: AbortSignal
   ): Promise<void> {
+    this.assertWritable(signal);
     this.assertSafeFencingToken(deliveryId, fencingToken);
     const delivery = this.deliveries.get(deliveryId);
     const now = this.clock.now();
@@ -242,6 +250,7 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
     ) {
       throw new Error(`Stale event claim for ${deliveryId}`);
     }
+    this.assertWritable(signal);
     this.deliveries.set(deliveryId, { ...delivery, leaseExpiresAt });
   }
 
@@ -253,6 +262,7 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
   }
 
   async saveDelivery(delivery: Readonly<AxEventDelivery>): Promise<void> {
+    this.assertWritable();
     this.assertActiveClaim(
       delivery.id,
       delivery.claimedBy,
@@ -292,6 +302,7 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
   }
 
   async saveRun(run: Readonly<AxEventRun>): Promise<void> {
+    this.assertWritable();
     this.assertActiveClaim(run.deliveryId, run.claimedBy, run.fencingToken);
     this.runs.set(run.id, structuredClone(run));
   }
@@ -305,8 +316,10 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
     request: Readonly<AxEventEffectCreateRequest>,
     fence: Readonly<AxEventEffectFence>
   ): Promise<Readonly<AxEventEffect>> {
+    this.assertWritable();
     axValidateEventEffectCreateRequest(request);
     const requestDigest = await axEventEffectRequestDigest(request);
+    this.assertWritable();
     this.assertFence(fence);
     if (request.deliveryId !== fence.deliveryId) {
       throw new Error(`Event effect fence does not own ${request.deliveryId}`);
@@ -355,6 +368,7 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
     transition: Readonly<AxEventEffectTransition>,
     fence: Readonly<AxEventEffectFence>
   ): Promise<Readonly<AxEventEffect>> {
+    this.assertWritable();
     this.assertFence(fence);
     const effect = this.effects.get(effectId);
     if (!effect) throw new Error(`Unknown event effect: ${effectId}`);
@@ -382,6 +396,7 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
   async registerContinuation(
     continuation: Readonly<AxEventContinuation>
   ): Promise<void> {
+    this.assertWritable();
     for (const correlation of continuation.correlation) {
       const key = axEventScopedCorrelationKey(
         continuation.identityScope,
@@ -437,6 +452,7 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
     correlation: Readonly<AxEventCorrelationKey>,
     now: number
   ): Promise<Readonly<AxEventContinuation> | undefined> {
+    this.assertWritable();
     this.assertActiveClaim(deliveryId, workerId, fencingToken);
     const delivery = this.deliveries.get(deliveryId)!;
     if (delivery.identityScope !== identityScope) {
@@ -483,7 +499,83 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
     return structuredClone(admitted);
   }
 
+  async saveDeliveryAndCompleteContinuation(
+    delivery: Readonly<AxEventDelivery>
+  ): Promise<void> {
+    this.assertWritable();
+    if (
+      delivery.status !== 'succeeded' &&
+      delivery.status !== 'waiting_event'
+    ) {
+      throw new Error(
+        `Event delivery ${delivery.id} must be successfully terminal before continuation completion`
+      );
+    }
+    this.assertActiveClaim(
+      delivery.id,
+      delivery.claimedBy,
+      delivery.fencingToken
+    );
+    const previous = this.deliveries.get(delivery.id)!;
+    const admitted = previous.admittedContinuation;
+    if (
+      !admitted ||
+      !delivery.admittedContinuation ||
+      axEventContinuationFingerprint(admitted) !==
+        axEventContinuationFingerprint(delivery.admittedContinuation)
+    ) {
+      throw new Error(
+        `outcome_unknown: continuation admission for ${delivery.id} is missing or changed`
+      );
+    }
+    const admissionOwner = this.continuationAdmissions.get(admitted.id);
+    if (admissionOwner && admissionOwner !== delivery.id) {
+      throw new Error(
+        `outcome_unknown: continuation ${admitted.id} is bound to another delivery`
+      );
+    }
+    const continuation = this.continuations.get(admitted.id);
+    if (
+      continuation &&
+      axEventContinuationFingerprint(continuation) !==
+        axEventContinuationFingerprint(admitted)
+    ) {
+      throw new Error(
+        `outcome_unknown: continuation ${admitted.id} no longer matches its delivery admission`
+      );
+    }
+
+    const stored = structuredClone({
+      ...delivery,
+      admittedContinuation: admitted,
+    });
+    const keys = admitted.correlation.map((correlation) =>
+      axEventScopedCorrelationKey(
+        admitted.identityScope,
+        correlation.kind,
+        correlation.value
+      )
+    );
+
+    // All validation and cloning precede this synchronous mutation block. It
+    // is indivisible with respect to every other in-memory store operation.
+    this.deliveries.set(delivery.id, stored);
+    for (const key of keys) {
+      if (this.continuationKeys.get(key) === admitted.id) {
+        this.continuationKeys.delete(key);
+      }
+    }
+    this.continuations.delete(admitted.id);
+    this.continuationAdmissions.delete(admitted.id);
+    if (!this.isTerminal(previous.status)) {
+      this.pendingDeliveries--;
+      this.pendingBytes -= previous.sizeBytes;
+      this.notify(this.capacityWaiters);
+    }
+  }
+
   async completeContinuation(id: string): Promise<void> {
+    this.assertWritable();
     const continuation = this.continuations.get(id);
     if (!continuation) return;
     for (const correlation of continuation.correlation) {
@@ -500,6 +592,7 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
   }
 
   async addDeadLetter(deadLetter: Readonly<AxEventDeadLetter>): Promise<void> {
+    this.assertWritable();
     this.deadLetters.set(deadLetter.id, structuredClone(deadLetter));
   }
 
@@ -511,6 +604,7 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
   }
 
   async removeDeadLetter(id: string): Promise<void> {
+    this.assertWritable();
     this.deadLetters.delete(id);
   }
 
@@ -521,6 +615,7 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
   }
 
   async redriveDelivery(deliveryId: string, now: number): Promise<void> {
+    this.assertWritable();
     const delivery = this.deliveries.get(deliveryId);
     if (!delivery) throw new Error(`Unknown event delivery: ${deliveryId}`);
     if (!this.isTerminal(delivery.status)) {
@@ -597,12 +692,23 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
   }
 
   async close(): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
     const error = new Error('AxInMemoryEventStore closed');
     for (const waiter of [...this.workWaiters, ...this.capacityWaiters]) {
       waiter.reject(error);
     }
     this.workWaiters.clear();
     this.capacityWaiters.clear();
+  }
+
+  private assertWritable(signal?: AbortSignal): void {
+    if (signal?.aborted) {
+      throw (
+        signal.reason ?? new Error('AxInMemoryEventStore operation aborted')
+      );
+    }
+    if (this.closed) throw new Error('AxInMemoryEventStore closed');
   }
 
   private hasCapacity(count: number, bytes: number): boolean {

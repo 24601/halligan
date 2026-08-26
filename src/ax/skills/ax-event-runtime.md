@@ -65,8 +65,10 @@ await source.publish({ event, identity, trust: 'authenticated' });
   atomically admits it to one fenced delivery, then snapshots the same binding
   on the run before invocation. Retry, delivery/sink redrive, and recovery use
   that immutable continuation, target, and instance rather than looking up a
-  reused key. Stores without atomic admission and malformed legacy bindings
-  fail closed.
+  reused key. Successful terminalization atomically saves the delivery and
+  consumes/de-keys its admitted continuation; split completion is forbidden.
+  Stores without both atomic boundaries and malformed legacy bindings fail
+  closed.
 - Use `createProgram(instance)` for stateful multi-tenant Agents.
 - Declare `retrySafety: 'idempotent'` only when stable delivery keys protect
   every possible side effect.
@@ -111,9 +113,12 @@ await source.publish({ event, identity, trust: 'authenticated' });
   host work may continue and perform later side effects; use cooperative abort
   or a host revocation check before writes. Ax revokes its own persistence,
   sinks, effect context calls, continuation registration, and claim heartbeat
-  after abort/store shutdown. After worker settlement or deadline, Ax
-  independently attempts best-effort store close and suppresses its rejection;
-  a permanently hung worker cannot prevent the attempt.
+  after abort/store shutdown. In-flight publishes recheck the composed shutdown
+  signal after async route callbacks and before abort-aware enqueue. In-flight
+  renewals are deadline-tracked and built-in stores recheck abort plus their
+  closed epoch at the mutation boundary. After worker settlement or deadline,
+  Ax independently attempts best-effort store close and suppresses its
+  rejection; a permanently hung worker cannot prevent the attempt.
 - The in-memory store is volatile and single-process.
   Waiting runtimes schedule claimed/running lease expiry and reclaim with a new
   safe fencing token instead of wedging expired work.
@@ -180,7 +185,10 @@ is never repeated. Resume admission is an exclusive fenced store transaction,
 persisted on both delivery and run before invocation. Competing deliveries
 cannot fire one continuation twice; delivery and sink redrive retain and
 validate the original continuation/target/instance even after correlation
-reuse. Legacy or malformed mismatched bindings fail closed; legacy wake
+reuse. Terminal resume success atomically consumes/de-keys that admission with
+the delivery update; rollback leaves the succeeded run for completion-only
+recovery and never target replay. Legacy or malformed mismatched bindings fail
+closed; legacy wake
 recovery keeps its configured-target fallback. A never-invoked v5 resume
 delivery performs its first atomic admission after migration to v6.
 Live commit acknowledgement requires the current unexpired

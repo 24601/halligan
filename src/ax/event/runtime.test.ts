@@ -805,6 +805,160 @@ describe('AxEventRuntime', () => {
     await Promise.resolve();
   });
 
+  it('revokes an in-flight claim renewal before its delayed store mutation', async () => {
+    const backing = new AxInMemoryEventStore();
+    let releaseRenewal!: () => void;
+    const renewalGate = new Promise<void>((resolve) => {
+      releaseRenewal = resolve;
+    });
+    let renewalStarted!: () => void;
+    const renewalStart = new Promise<void>((resolve) => {
+      renewalStarted = resolve;
+    });
+    let renewalRejected = false;
+    const store = new Proxy(backing, {
+      get(target, property) {
+        if (property === 'renewClaim') {
+          return async (...args: Parameters<typeof target.renewClaim>) => {
+            renewalStarted();
+            await renewalGate;
+            try {
+              return await target.renewClaim(...args);
+            } catch (error) {
+              renewalRejected = true;
+              throw error;
+            }
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    let releaseTarget!: () => void;
+    const targetGate = new Promise<void>((resolve) => {
+      releaseTarget = resolve;
+    });
+    let targetStarted!: () => void;
+    const targetStart = new Promise<void>((resolve) => {
+      targetStarted = resolve;
+    });
+    const runtime = new AxEventRuntime({
+      store,
+      leaseMs: 100,
+      heartbeatMs: 10,
+      routes: [
+        eventRoute({
+          id: 'in-flight-heartbeat-close',
+          match: { types: ['heartbeat.in-flight-close'] },
+          action: 'wake',
+          target: eventTarget({
+            id: 'in-flight-heartbeat-close-target',
+            ai,
+            program: program(async () => {
+              targetStarted();
+              await targetGate;
+              return { handled: true };
+            }),
+            mapInput: () => ({}),
+            retrySafety: 'idempotent',
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    const receipt = await runtime.publish(
+      ingress('in-flight-heartbeat-close-1', 'heartbeat.in-flight-close')
+    );
+    await targetStart;
+    const leaseBeforeRenewal = (
+      await backing.getDelivery(receipt.deliveryIds[0]!)
+    )?.leaseExpiresAt;
+    await renewalStart;
+
+    await runtime.close({ drain: false, timeoutMs: 10 });
+    releaseRenewal();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(renewalRejected).toBe(true);
+    expect(
+      (await backing.getDelivery(receipt.deliveryIds[0]!))?.leaseExpiresAt
+    ).toBe(leaseBeforeRenewal);
+    releaseTarget();
+  });
+
+  it.each(['match', 'authorize', 'instanceKey'] as const)(
+    'aborts an in-flight publish after an async %s callback before enqueue',
+    async (phase) => {
+      const backing = new AxInMemoryEventStore();
+      let storeClosed = false;
+      let enqueueCalls = 0;
+      const store = new Proxy(backing, {
+        get(target, property) {
+          if (property === 'enqueue') {
+            return async (...args: Parameters<typeof target.enqueue>) => {
+              enqueueCalls++;
+              if (storeClosed) throw new Error('enqueue after close');
+              return target.enqueue(...args);
+            };
+          }
+          if (property === 'close') {
+            return async () => {
+              storeClosed = true;
+              await target.close();
+            };
+          }
+          const value = Reflect.get(target, property, target);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+      let releaseCallback!: () => void;
+      const callbackGate = new Promise<void>((resolve) => {
+        releaseCallback = resolve;
+      });
+      let callbackStarted!: () => void;
+      const callbackStart = new Promise<void>((resolve) => {
+        callbackStarted = resolve;
+      });
+      const waitForCallback = async <T>(result: T): Promise<T> => {
+        callbackStarted();
+        await callbackGate;
+        return result;
+      };
+      const runtime = new AxEventRuntime({
+        store,
+        routes: [
+          eventRoute({
+            id: `publish-close-${phase}`,
+            match:
+              phase === 'match'
+                ? () => waitForCallback(true)
+                : { types: ['publish.close'] },
+            action: 'observe',
+            ...(phase === 'authorize'
+              ? { authorize: () => waitForCallback(true) }
+              : {}),
+            ...(phase === 'instanceKey'
+              ? { instanceKey: () => waitForCallback('instance') }
+              : {}),
+            observe: () => undefined,
+          }),
+        ],
+      });
+      await runtime.start();
+      const publication = runtime.publish(
+        ingress(`publish-close-${phase}`, 'publish.close')
+      );
+      await callbackStart;
+
+      await runtime.close({ drain: false, timeoutMs: 10 });
+      expect(storeClosed).toBe(true);
+      releaseCallback();
+
+      await expect(publication).rejects.toThrow('closing');
+      expect(enqueueCalls).toBe(0);
+    }
+  );
+
   it('admits a one-shot continuation to only one concurrent delivery', async () => {
     const store = new AxInMemoryEventStore();
     const continuation: AxEventContinuation = {
@@ -881,6 +1035,124 @@ describe('AxEventRuntime', () => {
       )
     );
     expect(statuses.sort()).toEqual(['dead_lettered', 'succeeded']);
+    await runtime.close({ drain: false });
+  });
+
+  it('atomically terminalizes a resume delivery with continuation consumption', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const backing = new AxInMemoryEventStore({ clock });
+    const continuation: AxEventContinuation = {
+      id: 'atomic-resume-continuation',
+      targetId: 'atomic-resume-target',
+      routeId: 'atomic-resume-start',
+      instanceKey: 'atomic-resume-instance',
+      identityScope: 'anonymous',
+      correlation: [{ kind: 'job', value: 'atomic-resume-job' }],
+      createdAt: clock.now(),
+    };
+    await backing.registerContinuation(continuation);
+    let atomicAttempts = 0;
+    let splitCompletionCalls = 0;
+    const store = new Proxy(backing, {
+      get(target, property) {
+        if (property === 'saveDeliveryAndCompleteContinuation') {
+          return async (
+            delivery: Parameters<
+              typeof target.saveDeliveryAndCompleteContinuation
+            >[0]
+          ) => {
+            atomicAttempts++;
+            if (atomicAttempts === 1) {
+              throw new Error('injected atomic completion failure');
+            }
+            return target.saveDeliveryAndCompleteContinuation(delivery);
+          };
+        }
+        if (property === 'completeContinuation') {
+          return async () => {
+            splitCompletionCalls++;
+            throw new Error('split continuation completion must not run');
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    let targetCalls = 0;
+    const runtime = new AxEventRuntime({
+      clock,
+      store,
+      leaseMs: 100,
+      heartbeatMs: 25,
+      routes: [
+        eventRoute({
+          id: 'atomic-resume',
+          match: { types: ['atomic.resume'] },
+          action: 'resume',
+          correlation: () => continuation.correlation[0]!,
+          target: eventTarget({
+            id: continuation.targetId,
+            ai,
+            program: program(() => {
+              targetCalls++;
+              return { handled: true };
+            }),
+            mapInput: () => ({}),
+            retrySafety: 'idempotent',
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    const receipt = await runtime.publish(
+      ingress('atomic-resume-1', 'atomic.resume')
+    );
+    for (let index = 0; index < 100 && atomicAttempts === 0; index++) {
+      await Promise.resolve();
+    }
+    const afterFailure = await backing.getDelivery(receipt.deliveryIds[0]!);
+    expect(afterFailure?.status).toBe('running');
+    expect(targetCalls).toBe(1);
+    expect(splitCompletionCalls).toBe(0);
+    await expect(
+      backing.findContinuation(
+        continuation.identityScope,
+        continuation.correlation[0]!,
+        clock.now()
+      )
+    ).resolves.toEqual(continuation);
+
+    clock.advanceBy(101);
+    for (let index = 0; index < 100; index++) {
+      if (
+        (await backing.getDelivery(receipt.deliveryIds[0]!))?.status ===
+        'succeeded'
+      ) {
+        break;
+      }
+      await Promise.resolve();
+    }
+
+    expect(targetCalls).toBe(1);
+    expect(atomicAttempts).toBe(2);
+    expect(splitCompletionCalls).toBe(0);
+    expect((await backing.getDelivery(receipt.deliveryIds[0]!))?.status).toBe(
+      'succeeded'
+    );
+    await expect(
+      backing.findContinuation(
+        continuation.identityScope,
+        continuation.correlation[0]!,
+        clock.now()
+      )
+    ).resolves.toBeUndefined();
+    await expect(
+      backing.registerContinuation({
+        ...continuation,
+        id: 'atomic-resume-replacement',
+        createdAt: clock.now(),
+      })
+    ).resolves.toBeUndefined();
     await runtime.close({ drain: false });
   });
 

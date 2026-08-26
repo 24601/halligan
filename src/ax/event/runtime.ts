@@ -32,6 +32,7 @@ import {
   type AxEventIngress,
   AxEventInputError,
   AxEventOutcomeUnknownError,
+  AxEventOutputPersistenceError,
   type AxEventProgramStateAdapter,
   type AxEventPublishReceipt,
   type AxEventRoute,
@@ -252,6 +253,8 @@ export class AxEventRuntime {
   private readonly sourceHandles: AxEventSourceHandle[] = [];
   private readonly sourceController = new AbortController();
   private readonly workerController = new AbortController();
+  private readonly inFlightPublishes = new Set<Promise<unknown>>();
+  private readonly inFlightStoreOperations = new Set<Promise<unknown>>();
   private workerPromises: Promise<void>[] = [];
   private started = false;
   private closing = false;
@@ -329,6 +332,18 @@ export class AxEventRuntime {
         } requires an effect-aware AxEventStore`
       );
     }
+    const resumeRoutes = [...this.routes.values()].filter(
+      (route) => route.action === 'resume'
+    );
+    if (
+      resumeRoutes.length > 0 &&
+      (typeof this.store.admitContinuation !== 'function' ||
+        typeof this.store.saveDeliveryAndCompleteContinuation !== 'function')
+    ) {
+      throw new Error(
+        `Resume routes ${resumeRoutes.map((route) => route.id).join(', ')} require atomic continuation admission and delivery completion`
+      );
+    }
     const leaseMs = this.options.leaseMs ?? 30_000;
     const heartbeatMs = this.options.heartbeatMs ?? Math.floor(leaseMs / 3);
     if (leaseMs < 100 || heartbeatMs < 1 || heartbeatMs >= leaseMs) {
@@ -371,12 +386,28 @@ export class AxEventRuntime {
     }
   }
 
-  async publish(
+  publish(
+    ingress: Readonly<AxEventIngress>,
+    signal?: AbortSignal
+  ): Promise<AxEventPublishReceipt> {
+    const operation = this.publishInternal(ingress, signal);
+    this.inFlightPublishes.add(operation);
+    void operation.then(
+      () => this.inFlightPublishes.delete(operation),
+      () => this.inFlightPublishes.delete(operation)
+    );
+    return operation;
+  }
+
+  private async publishInternal(
     ingress: Readonly<AxEventIngress>,
     signal?: AbortSignal
   ): Promise<AxEventPublishReceipt> {
     if (!this.started) throw new Error('AxEventRuntime must be started first');
-    if (this.closing) throw new Error('AxEventRuntime is closing');
+    const publishSignal = signal
+      ? AbortSignal.any([signal, this.sourceController.signal])
+      : this.sourceController.signal;
+    this.assertPublishActive(publishSignal);
     axValidateEventEnvelope(ingress.event);
     const normalized: AxEventIngress = {
       event: structuredClone(ingress.event),
@@ -398,13 +429,16 @@ export class AxEventRuntime {
       retrySafety?: 'idempotent' | 'effect-aware' | 'unknown';
     }> = [];
     for (const route of this.routes.values()) {
-      if (!(await this.routeMatches(route, normalized))) continue;
+      this.assertPublishActive(publishSignal);
+      if (!(await this.routeMatches(route, normalized, publishSignal)))
+        continue;
       const identityScope = axEventIdentityScope(normalized.identity);
       const instanceKey =
         (await route.instanceKey?.(normalized)) ??
         normalized.partitionKey ??
         normalized.event.subject ??
         identityScope;
+      this.assertPublishActive(publishSignal);
       deliveries.push({
         routeId: route.id,
         action: route.action,
@@ -419,6 +453,7 @@ export class AxEventRuntime {
           : 'idempotent',
       });
     }
+    this.assertPublishActive(publishSignal);
     return this.store.enqueue(
       {
         ingress: normalized,
@@ -426,7 +461,7 @@ export class AxEventRuntime {
         acceptedAt: this.clock.now(),
         publishTimeoutMs: this.options.publishTimeoutMs ?? 5_000,
       },
-      signal
+      publishSignal
     );
   }
 
@@ -563,6 +598,10 @@ export class AxEventRuntime {
       )
     );
     await this.waitUntilCloseDeadline(sourceClose, deadline);
+    await this.waitUntilCloseDeadline(
+      this.waitForTrackedOperations(this.inFlightPublishes),
+      deadline
+    );
     if (options.drain !== false) {
       try {
         await this.waitUntilCloseDeadline(
@@ -584,7 +623,13 @@ export class AxEventRuntime {
         .catch(() => undefined);
     }
     const workers = Promise.allSettled(this.workerPromises);
-    await this.waitUntilCloseDeadline(workers, deadline);
+    await this.waitUntilCloseDeadline(
+      Promise.allSettled([
+        workers,
+        this.waitForTrackedOperations(this.inFlightStoreOperations),
+      ]),
+      deadline
+    );
     // A non-cooperative worker must not prevent the store's own best-effort
     // shutdown from ever starting. Rejections are observed but close remains a
     // bounded, non-throwing revocation attempt.
@@ -619,10 +664,29 @@ export class AxEventRuntime {
     }
   }
 
+  private async waitForTrackedOperations(
+    operations: ReadonlySet<Promise<unknown>>
+  ): Promise<void> {
+    while (operations.size > 0) {
+      await Promise.allSettled([...operations]);
+    }
+  }
+
+  private trackStoreOperation<T>(operation: Promise<T>): Promise<T> {
+    this.inFlightStoreOperations.add(operation);
+    void operation.then(
+      () => this.inFlightStoreOperations.delete(operation),
+      () => this.inFlightStoreOperations.delete(operation)
+    );
+    return operation;
+  }
+
   private async routeMatches(
     route: Readonly<AxEventRoute>,
-    ingress: Readonly<AxEventIngress>
+    ingress: Readonly<AxEventIngress>,
+    signal: AbortSignal
   ): Promise<boolean> {
+    this.assertPublishActive(signal);
     if (
       route.requireAuthenticated &&
       ingress.trust !== 'authenticated' &&
@@ -634,8 +698,11 @@ export class AxEventRuntime {
       typeof route.match === 'function'
         ? await route.match(ingress)
         : axEventMatches(ingress, route.match);
+    this.assertPublishActive(signal);
     if (!matches) return false;
-    return (await route.authorize?.(ingress)) ?? true;
+    const authorized = (await route.authorize?.(ingress)) ?? true;
+    this.assertPublishActive(signal);
+    return authorized;
   }
 
   private async workerLoop(workerId: string): Promise<void> {
@@ -799,9 +866,6 @@ export class AxEventRuntime {
       ) {
         if (this.workerController.signal.aborted || this.storeShutdownStarted) {
           return;
-        }
-        if (continuation) {
-          await this.store.completeContinuation(continuation.id);
         }
         return;
       }
@@ -980,16 +1044,16 @@ export class AxEventRuntime {
           await this.store.saveRun(run);
         }
         this.assertRunActive(controller.signal);
-        await this.store.saveDelivery({
-          ...claimed,
-          status: waiting ? 'waiting_event' : 'succeeded',
-          attempt,
-          runId,
-        });
+        await this.saveSuccessfulDelivery(
+          {
+            ...claimed,
+            status: waiting ? 'waiting_event' : 'succeeded',
+            attempt,
+            runId,
+          },
+          continuation
+        );
         this.assertRunActive(controller.signal);
-        if (continuation) {
-          await this.store.completeContinuation(continuation.id);
-        }
       } catch (error) {
         if (this.storeShutdownStarted) return;
         if (controller.signal.aborted) {
@@ -1178,6 +1242,15 @@ export class AxEventRuntime {
       if (this.workerController.signal.aborted || this.storeShutdownStarted) {
         return;
       }
+      if (
+        axIsEventOutputPersistenceError(error) &&
+        error.phase === 'recovery'
+      ) {
+        // The persisted succeeded run and admitted continuation remain the
+        // source of truth. Leave the active delivery nonterminal so an expired
+        // lease can retry only atomic completion/sink recovery.
+        return;
+      }
       await this.deadLetterDelivery(claimed, axEventErrorMessage(error));
     }
   }
@@ -1260,17 +1333,48 @@ export class AxEventRuntime {
         await this.store.saveRun(run);
       }
       this.assertRunActive(controller.signal);
-      await this.store.saveDelivery({
-        ...claimed,
-        status: 'succeeded',
-        attempt: Math.max(claimed.attempt, persisted.attempt),
-        runId: persisted.id,
-      });
+      await this.saveSuccessfulDelivery(
+        {
+          ...claimed,
+          status: 'succeeded',
+          attempt: Math.max(claimed.attempt, persisted.attempt),
+          runId: persisted.id,
+        },
+        continuation
+      );
       return true;
     } finally {
       heartbeatController.abort('Persisted event completion resumed');
       await heartbeat;
       this.activeRuns.delete(persisted.id);
+    }
+  }
+
+  private async saveSuccessfulDelivery(
+    delivery: Readonly<AxEventDelivery>,
+    continuation: Readonly<AxEventContinuation> | undefined
+  ): Promise<void> {
+    if (!continuation) {
+      await this.store.saveDelivery(delivery);
+      return;
+    }
+    if (!this.store.saveDeliveryAndCompleteContinuation) {
+      throw new AxEventOutcomeUnknownError(
+        `outcome_unknown: event store cannot atomically complete resume delivery ${delivery.id}`
+      );
+    }
+    try {
+      await this.store.saveDeliveryAndCompleteContinuation({
+        ...delivery,
+        admittedContinuation: structuredClone(continuation),
+      });
+    } catch (error) {
+      if (axIsEventOutputPersistenceError(error)) throw error;
+      throw new AxEventOutputPersistenceError(
+        `atomic resume completion failed for delivery ${delivery.id}`,
+        'recovery',
+        { cause: error }
+      );
     }
   }
 
@@ -1305,6 +1409,17 @@ export class AxEventRuntime {
     }
     if (this.storeShutdownStarted) {
       throw new Error('AxEventRuntime store shutdown has started');
+    }
+  }
+
+  private assertPublishActive(signal: AbortSignal): void {
+    if (this.closing || this.storeShutdownStarted || signal.aborted) {
+      const reason = signal.reason;
+      throw reason instanceof Error
+        ? reason
+        : new Error(
+            typeof reason === 'string' ? reason : 'AxEventRuntime is closing'
+          );
     }
   }
 
@@ -1703,11 +1818,16 @@ export class AxEventRuntime {
       try {
         await this.clock.sleep(heartbeatMs, heartbeatSignal);
         if (heartbeatSignal.aborted) return;
-        await this.store.renewClaim(
-          delivery.id,
-          workerId,
-          delivery.fencingToken,
-          this.clock.now() + leaseMs
+        await this.trackStoreOperation(
+          Promise.resolve().then(() =>
+            this.store.renewClaim(
+              delivery.id,
+              workerId,
+              delivery.fencingToken!,
+              this.clock.now() + leaseMs,
+              heartbeatSignal
+            )
+          )
         );
       } catch (error) {
         if (!heartbeatSignal.aborted) runController.abort(error);

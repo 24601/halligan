@@ -86,7 +86,7 @@ describe('AxSQLiteEventStore', () => {
       { clock }
     );
     expect(report.assertions).toBeGreaterThanOrEqual(32);
-    expect(report.capability.conformance?.multiWorker).toBe('axevent-store-v5');
+    expect(report.capability.conformance?.multiWorker).toBe('axevent-store-v6');
   });
 
   it('requires explicit retention and WAL-enabled local storage', () => {
@@ -1428,6 +1428,127 @@ describe('AxSQLiteEventStore', () => {
       firstRuntime.close({ drain: false }),
       secondRuntime.close({ drain: false }),
     ]);
+  });
+
+  it('rolls back resume terminalization when atomic continuation completion fails', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const filename = join(directory, 'atomic-resume-completion.sqlite');
+    const clock = new AxManualEventClock(1_000);
+    const store = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    const continuation: AxEventContinuation = {
+      id: 'sqlite-atomic-resume-continuation',
+      targetId: 'sqlite-atomic-resume-target',
+      routeId: 'sqlite-atomic-resume-start',
+      instanceKey: 'sqlite-atomic-resume-instance',
+      identityScope: 'anonymous',
+      correlation: [{ kind: 'job', value: 'sqlite-atomic-resume-job' }],
+      createdAt: clock.now(),
+    };
+    await store.registerContinuation(continuation);
+    const db = (store as unknown as { db: Database.Database }).db;
+    db.exec(`
+      CREATE TRIGGER fail_atomic_resume_completion
+      BEFORE UPDATE OF completed_at ON event_continuations
+      WHEN NEW.id='sqlite-atomic-resume-continuation'
+      BEGIN
+        SELECT RAISE(ABORT, 'injected atomic continuation failure');
+      END;
+    `);
+    let targetCalls = 0;
+    const signature = s('trigger?:string -> handled:boolean');
+    const program = {
+      getId: () => 'sqlite-atomic-resume-program',
+      getSignature: () => signature,
+      forward: async () => {
+        targetCalls++;
+        return { handled: true };
+      },
+      streamingForward: async function* () {},
+    } as unknown as AxProgrammable<any, any>;
+    const runtime = new AxEventRuntime({
+      clock,
+      store,
+      programStateStore: store,
+      coordination: 'multi-worker',
+      workerConcurrency: 1,
+      leaseMs: 100,
+      heartbeatMs: 25,
+      routes: [
+        eventRoute({
+          id: 'sqlite-atomic-resume',
+          match: { types: ['sqlite.atomic.resume'] },
+          action: 'resume',
+          correlation: () => continuation.correlation[0]!,
+          target: eventTarget({
+            id: continuation.targetId,
+            ai: {} as never,
+            program,
+            mapInput: () => ({}),
+            retrySafety: 'idempotent',
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    const receipt = await runtime.publish({
+      event: {
+        specversion: '1.0',
+        id: 'sqlite-atomic-resume-1',
+        source: 'test://sqlite-effects',
+        type: 'sqlite.atomic.resume',
+      },
+      trust: 'authenticated',
+    });
+    clock.advanceBy(25);
+    let failedDelivery = await store.getDelivery(receipt.deliveryIds[0]!);
+    for (let index = 0; index < 100; index++) {
+      failedDelivery = await store.getDelivery(receipt.deliveryIds[0]!);
+      const run = failedDelivery?.runId
+        ? await store.getRun(failedDelivery.runId)
+        : undefined;
+      if (failedDelivery?.status === 'running' && run?.status === 'succeeded') {
+        break;
+      }
+      await Promise.resolve();
+    }
+    expect(failedDelivery?.status).toBe('running');
+    expect(targetCalls).toBe(1);
+    await expect(
+      store.findContinuation(
+        continuation.identityScope,
+        continuation.correlation[0]!,
+        clock.now()
+      )
+    ).resolves.toEqual(continuation);
+
+    db.exec('DROP TRIGGER fail_atomic_resume_completion');
+    clock.advanceBy(101);
+    for (let index = 0; index < 100; index++) {
+      if (
+        (await store.getDelivery(receipt.deliveryIds[0]!))?.status ===
+        'succeeded'
+      ) {
+        break;
+      }
+      await Promise.resolve();
+    }
+    expect(targetCalls).toBe(1);
+    expect((await store.getDelivery(receipt.deliveryIds[0]!))?.status).toBe(
+      'succeeded'
+    );
+    await expect(
+      store.findContinuation(
+        continuation.identityScope,
+        continuation.correlation[0]!,
+        clock.now()
+      )
+    ).resolves.toBeUndefined();
+    await runtime.close({ drain: false });
   });
 
   it('recovers the persisted continuation admission after correlation reuse', async () => {

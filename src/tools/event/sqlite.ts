@@ -35,7 +35,7 @@ import {
 import Database from 'better-sqlite3';
 
 const SCHEMA_VERSION = 6;
-const MULTI_WORKER_CONFORMANCE = 'axevent-store-v5';
+const MULTI_WORKER_CONFORMANCE = 'axevent-store-v6';
 const MAX_FENCING_TOKEN = Number.MAX_SAFE_INTEGER;
 const LEGACY_UNVERIFIABLE_INGRESS_PREFIX = 'legacy-unverifiable:';
 const TERMINAL = [
@@ -240,6 +240,7 @@ export class AxSQLiteEventStore
     request: Readonly<AxEventEnqueueRequest>,
     signal?: AbortSignal
   ): Promise<AxEventPublishReceipt> {
+    this.assertWritable(signal);
     const eventBytes = Buffer.byteLength(JSON.stringify(request.ingress));
     if (eventBytes > this.maxEventBytes) {
       throw new AxEventBackpressureError(
@@ -248,7 +249,9 @@ export class AxSQLiteEventStore
     }
     const deadline = this.clock.now() + request.publishTimeoutMs;
     for (;;) {
-      if (signal?.aborted) throw signal.reason;
+      // tryEnqueue is one synchronous SQLite transaction. This final check is
+      // therefore immediately adjacent to the mutation boundary.
+      this.assertWritable(signal);
       const result = this.tryEnqueue(request);
       if (result) return result;
       const remaining = deadline - this.clock.now();
@@ -319,13 +322,17 @@ export class AxSQLiteEventStore
     deliveryId: string,
     workerId: string,
     fencingToken: number,
-    leaseExpiresAt: number
+    leaseExpiresAt: number,
+    signal?: AbortSignal
   ): Promise<void> {
+    this.assertWritable(signal);
     this.assertSafeFencingToken(deliveryId, fencingToken);
     const now = this.clock.now();
     if (leaseExpiresAt <= now) {
       throw new Error(`Stale event claim for ${deliveryId}`);
     }
+    // No await separates this revocation check from the fenced SQL update.
+    this.assertWritable(signal);
     const result = this.db
       .prepare(
         `UPDATE event_deliveries SET lease_expires_at=?
@@ -839,6 +846,135 @@ export class AxSQLiteEventStore
       .immediate();
   }
 
+  async saveDeliveryAndCompleteContinuation(
+    delivery: Readonly<AxEventDelivery>
+  ): Promise<void> {
+    this.assertWritable();
+    if (
+      delivery.status !== 'succeeded' &&
+      delivery.status !== 'waiting_event'
+    ) {
+      throw new Error(
+        `Event delivery ${delivery.id} must be successfully terminal before continuation completion`
+      );
+    }
+    if (!delivery.claimedBy || delivery.fencingToken === undefined) {
+      throw new Error(`Stale event claim for ${delivery.id}`);
+    }
+    this.assertSafeFencingToken(delivery.id, delivery.fencingToken);
+    const result = this.db
+      .transaction(() => {
+        const persisted = this.db
+          .prepare(
+            `SELECT admitted_continuation_json FROM event_deliveries
+             WHERE id=? AND claimed_by=? AND fencing_token=?
+               AND status IN ('claimed','running')
+               AND lease_expires_at > ?`
+          )
+          .get(
+            delivery.id,
+            delivery.claimedBy,
+            delivery.fencingToken,
+            this.clock.now()
+          ) as { admitted_continuation_json: string | null } | undefined;
+        if (!persisted) return { changes: 0 };
+        if (
+          persisted.admitted_continuation_json === null ||
+          !delivery.admittedContinuation
+        ) {
+          throw new Error(
+            `outcome_unknown: continuation admission for ${delivery.id} is missing`
+          );
+        }
+        const admitted = parseContinuationAdmission(
+          delivery.id,
+          persisted.admitted_continuation_json
+        );
+        if (
+          axEventContinuationFingerprint(admitted) !==
+          axEventContinuationFingerprint(delivery.admittedContinuation)
+        ) {
+          throw new Error(
+            `outcome_unknown: continuation admission for ${delivery.id} changed before completion`
+          );
+        }
+        const continuation = this.db
+          .prepare(
+            `SELECT continuation_json, admitted_delivery_id
+             FROM event_continuations WHERE id=?`
+          )
+          .get(admitted.id) as
+          | {
+              continuation_json: string;
+              admitted_delivery_id: string | null;
+            }
+          | undefined;
+        if (
+          continuation?.admitted_delivery_id &&
+          continuation.admitted_delivery_id !== delivery.id
+        ) {
+          throw new Error(
+            `outcome_unknown: continuation ${admitted.id} is bound to another delivery`
+          );
+        }
+        if (
+          continuation &&
+          axEventContinuationFingerprint(
+            parseContinuationAdmission(
+              delivery.id,
+              continuation.continuation_json
+            )
+          ) !== axEventContinuationFingerprint(admitted)
+        ) {
+          throw new Error(
+            `outcome_unknown: continuation ${admitted.id} no longer matches its delivery admission`
+          );
+        }
+
+        const deliveryUpdate = this.db
+          .prepare(
+            `UPDATE event_deliveries SET
+              status=?, attempt=?, available_at=?, run_id=?, error=?,
+              invocation_started=?, retry_safety=?, ordering_mode=?
+             WHERE id=? AND claimed_by=? AND fencing_token=?
+               AND status IN ('claimed','running')
+               AND lease_expires_at > ?`
+          )
+          .run(
+            delivery.status,
+            delivery.attempt,
+            delivery.availableAt,
+            delivery.runId ?? null,
+            delivery.error ?? null,
+            delivery.invocationStarted ? 1 : 0,
+            delivery.retrySafety,
+            delivery.ordering,
+            delivery.id,
+            delivery.claimedBy,
+            delivery.fencingToken,
+            this.clock.now()
+          );
+        if (deliveryUpdate.changes !== 1) return deliveryUpdate;
+        this.db
+          .prepare(
+            'DELETE FROM event_continuation_keys WHERE continuation_id=?'
+          )
+          .run(admitted.id);
+        this.db
+          .prepare(
+            `UPDATE event_continuations SET completed_at=COALESCE(completed_at, ?)
+             WHERE id=?
+               AND (admitted_delivery_id IS NULL OR admitted_delivery_id=?)`
+          )
+          .run(this.clock.now(), admitted.id, delivery.id);
+        return deliveryUpdate;
+      })
+      .immediate();
+    if (result.changes !== 1) {
+      throw new Error(`Stale or expired event claim for ${delivery.id}`);
+    }
+  }
+
   async completeContinuation(id: string): Promise<void> {
     this.db.transaction(() => {
       this.db
@@ -1009,9 +1145,14 @@ export class AxSQLiteEventStore
 
   async close(): Promise<void> {
     if (this.closed) return;
-    await this.reconcilePayloadStages();
-    this.db.close();
+    // Establish a store epoch before asynchronous close reconciliation. Any
+    // delayed public mutation that resumes later must fail before touching DB.
     this.closed = true;
+    try {
+      await this.reconcilePayloadStages();
+    } finally {
+      this.db.close();
+    }
   }
 
   private async saveStagedRun(
@@ -1761,6 +1902,13 @@ export class AxSQLiteEventStore
       invocationStarted: row.invocation_started === 1,
       ...(admittedContinuation ? { admittedContinuation } : {}),
     };
+  }
+
+  private assertWritable(signal?: AbortSignal): void {
+    if (signal?.aborted) {
+      throw signal.reason ?? new Error('AxSQLiteEventStore operation aborted');
+    }
+    if (this.closed) throw new Error('AxSQLiteEventStore closed');
   }
 
   private assertFence(deliveryId: string, fencingToken?: number): void {

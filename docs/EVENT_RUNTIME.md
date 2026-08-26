@@ -192,10 +192,14 @@ use `observe`; terminal events use `resume`. Missing, ambiguous, or expired
 continuations are dead-lettered rather than converted into fresh work. Resume
 admission is one fenced store transaction: one continuation can bind to only
 one delivery, and the immutable snapshot is retained when that delivery is
-redriven. A store that does not implement `admitContinuation(...)` fails resume
-closed while preserving source compatibility for existing `AxEventStore`
-implementations. Legacy or malformed resume records without matching delivery
-and run bindings also fail closed rather than looking up a replacement.
+redriven. Successful resume terminalization is also one fenced transaction: the
+delivery cannot become `succeeded` or `waiting_event` unless its admitted
+continuation is completed and de-keyed in the same commit. A store that does
+not implement `admitContinuation(...)` and
+`saveDeliveryAndCompleteContinuation(...)` fails resume closed while preserving
+source compatibility for existing `AxEventStore` implementations. Legacy or
+malformed resume records without matching delivery and run bindings also fail
+closed rather than looking up a replacement.
 
 ## Delivery and Side Effects
 
@@ -363,10 +367,15 @@ best-effort requests `return()` after abort, ignores synchronous or asynchronous
 iterator cancellation failures, and suppresses chunks that arrive after the
 abort signal. Runtime-owned persistence, sink dispatch, effect calls, and
 continuation registration recheck abort/revocation after host awaits; claim
-heartbeats stop with the active run or runtime abort and do not retain lease
-authority after close. This bounds when `close()` returns only: Ax cannot
-terminate non-cooperative JavaScript, revoke capabilities it already captured,
-or prevent its later host side effects.
+heartbeats stop with the active run or runtime abort. In-flight claim renewals
+receive the composed abort signal, are tracked within the close deadline, and
+built-in stores recheck that signal and their closed epoch immediately before
+mutation. In-flight publishes are likewise tracked, recheck shutdown after
+each asynchronous route/authorization/instance callback, and pass the composed
+signal to an abort-aware enqueue boundary. They cannot enqueue through a
+built-in store after close revokes it. This bounds when `close()` returns only:
+Ax cannot terminate non-cooperative JavaScript, revoke capabilities it already
+captured, or prevent its later host side effects.
 Sources, iterators, tools, and stores must cooperate with abort or use a
 host-owned revocation/epoch check before external writes. Timed-out work and
 store close may continue after the returned promise settles. Once workers
@@ -425,7 +434,11 @@ and persists the same snapshot on the run before invocation. Competing workers
 cannot admit the same one-shot continuation. Delivery redrive retains the
 delivery binding even though it starts a new run; sink redrive validates both
 persisted copies and reconstructs context from the original target, instance,
-and continuation. An expired original plus a replacement under the same
+and continuation. Terminal resume success and consumption/de-keying of that
+admission are one fenced SQLite transaction (or one indivisible in-memory
+mutation). A failure rolls the whole boundary back; the persisted succeeded run
+remains eligible only for sink/completion recovery, not target replay. An
+expired original plus a replacement under the same
 correlation key does not retarget output or consume the replacement. Legacy or
 malformed resume records without matching delivery/run admission snapshots
 fail closed instead of performing a fresh lookup; legacy wake runs retain their

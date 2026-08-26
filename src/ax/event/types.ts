@@ -660,7 +660,8 @@ export interface AxEventStore {
     deliveryId: string,
     workerId: string,
     fencingToken: number,
-    leaseExpiresAt: number
+    leaseExpiresAt: number,
+    signal?: AbortSignal
   ): Promise<void>;
   getDelivery(
     deliveryId: string
@@ -688,6 +689,14 @@ export interface AxEventStore {
     correlation: Readonly<AxEventCorrelationKey>,
     now: number
   ): Promise<Readonly<AxEventContinuation> | undefined>;
+  /**
+   * Atomically persists a successful terminal resume delivery and consumes
+   * the immutable continuation admitted to that delivery. Resume routes fail
+   * closed when a store does not implement this operation.
+   */
+  saveDeliveryAndCompleteContinuation?(
+    delivery: Readonly<AxEventDelivery>
+  ): Promise<void>;
   completeContinuation(id: string): Promise<void>;
   addDeadLetter(deadLetter: Readonly<AxEventDeadLetter>): Promise<void>;
   getDeadLetter(id: string): Promise<Readonly<AxEventDeadLetter> | undefined>;
