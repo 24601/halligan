@@ -362,6 +362,19 @@ describe('agent.playbook().evolve()', () => {
     );
   });
 
+  it('rejects non-string task.id values with the disjointness error', async () => {
+    const { ag } = makeAgent();
+    await expect(
+      ag.playbook().evolve(
+        {
+          train: [{ ...TASKS[0]!, id: 1 as unknown as string }],
+          validation: VALIDATION_TASKS,
+        },
+        { requireHeldOut: true, metric: scoreByAnswer }
+      )
+    ).rejects.toThrow(/has no semantic task id/);
+  });
+
   it('verify: false applies the mined lesson without the gate (trust-batch)', async () => {
     const { ag } = makeAgent();
     const result = await ag.playbook().evolve(TASKS, {
@@ -491,6 +504,7 @@ describe('agent.playbook().evolve()', () => {
         requireHeldOut: true,
         metric: async (args: any) => {
           metricCalls++;
+          if (metricCalls === 2) return 0;
           return scoreByAnswer(args);
         },
         runsPerTask: 2,

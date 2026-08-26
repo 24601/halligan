@@ -57,7 +57,8 @@ function assertRequiredHeldOut<IN extends AxGenIn>(args: {
   const idOf = args.taskId ?? ((task: AxAgentEvalTask<IN>) => task.id);
   const ids = (split: 'train' | 'validation', tasks: typeof args.train) =>
     tasks.map((task, index) => {
-      const id = idOf(task)?.trim();
+      const raw = idOf(task);
+      const id = typeof raw === 'string' ? raw.trim() : '';
       if (!id) {
         throw new Error(
           `AxAgent.playbook().evolve(): requireHeldOut cannot prove disjointness: ${split}[${index}] has no semantic task id; set task.id or provide taskId.`
@@ -348,6 +349,11 @@ export async function evolveAgentPlaybook<
       }
     } catch (err) {
       applied.rollback();
+      if (options?.apply === false) {
+        for (const previous of [...accepted].reverse()) {
+          previous.rollback();
+        }
+      }
       throw err;
     }
     let revalHeldOut: number | undefined;
