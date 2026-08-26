@@ -105,8 +105,10 @@ Rules:
   share it; rotate it for provider defaults, adapter/API, endpoint/deployment,
   routing, or native-ID changes. Without it, native resume is fail-closed to the
   current provider object. Native request model/config values must be a bounded
-  plain JSON tree and never use mutable provider-global `getLastUsed*` state.
-  Prompt resume remains provider-neutral. Both values support per-run overrides.
+  plain JSON tree; the digest also binds forwarded `thinkingTokenBudget` and
+  `showThoughts` values and never uses mutable provider-global `getLastUsed*`
+  state. Prompt resume remains provider-neutral. Both values support per-run
+  overrides.
 - `abortSignal` cancels one run; `program.stop()` cancels all its active runs.
 - Canonical JSON stabilizes prompt-cache input, tool arguments/results, and
   persisted history. Structural validation does not authenticate semantic

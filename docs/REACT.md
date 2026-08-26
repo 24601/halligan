@@ -171,10 +171,11 @@ not present in the forward `modelConfig`, routing pin, and native call-ID
 semantics. Rotate it when any of those change, including relevant Ax/provider
 adapter upgrades. Do not put credentials or other secrets in it.
 
-Ax independently hashes an explicitly requested model and the exact ReAct
-request config (`stream: false`, `n: 1`, plus the caller config), so those
-changes fail closed even with a matching profile. Native replay accepts only a
-bounded plain JSON tree for these values: finite numbers and enumerable data
+Ax independently hashes an explicitly requested model, the exact ReAct request
+config (`stream: false`, `n: 1`, plus the caller config), and the forwarded
+`thinkingTokenBudget` and `showThoughts` values, so those changes fail closed
+even with a matching profile. Native replay accepts only a bounded plain JSON
+tree for model and model-config values: finite numbers and enumerable data
 properties, with no cycles, shared references, sparse arrays, accessors,
 symbols, `toJSON`, or non-plain objects. Unsupported values are rejected before
 history creation or `ai.chat()` instead of being lossy-normalized.

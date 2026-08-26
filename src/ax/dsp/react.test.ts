@@ -4,6 +4,7 @@ import { AxMockAIService } from '../ai/mock/api.js';
 import type { AxChatRequest, AxChatResponse, AxFunction } from '../ai/types.js';
 import type { AxMCPClient } from '../mcp/client.js';
 import { AxMCPExecutionContext } from '../mcp/execution.js';
+import { AxAIServiceAbortedError } from '../util/apicall.js';
 import {
   axReactCanonicalJSON,
   axReactSerializeHistory,
@@ -832,7 +833,11 @@ describe('react', () => {
     const first = await program.forward(
       ai,
       { question: 'Replay profile binding' },
-      { modelConfig: { temperature: 0 } }
+      {
+        modelConfig: { temperature: 0 },
+        thinkingTokenBudget: 'low',
+        showThoughts: true,
+      }
     );
     expect(first.success).toBe(false);
 
@@ -840,7 +845,38 @@ describe('react', () => {
       program.forward(
         ai,
         { question: 'Replay profile binding' },
-        { history: first.history, modelConfig: { temperature: 0.5 } }
+        {
+          history: first.history,
+          modelConfig: { temperature: 0.5 },
+          thinkingTokenBudget: 'low',
+          showThoughts: true,
+        }
+      )
+    ).rejects.toThrow('current native replay profile/protocol');
+
+    await expect(
+      program.forward(
+        ai,
+        { question: 'Replay profile binding' },
+        {
+          history: first.history,
+          modelConfig: { temperature: 0 },
+          thinkingTokenBudget: 'medium',
+          showThoughts: true,
+        }
+      )
+    ).rejects.toThrow('current native replay profile/protocol');
+
+    await expect(
+      program.forward(
+        ai,
+        { question: 'Replay profile binding' },
+        {
+          history: first.history,
+          modelConfig: { temperature: 0 },
+          thinkingTokenBudget: 'low',
+          showThoughts: false,
+        }
       )
     ).rejects.toThrow('current native replay profile/protocol');
 
@@ -855,7 +891,12 @@ describe('react', () => {
       program.forward(
         differentAdapter,
         { question: 'Replay profile binding' },
-        { history: first.history, modelConfig: { temperature: 0 } }
+        {
+          history: first.history,
+          modelConfig: { temperature: 0 },
+          thinkingTokenBudget: 'low',
+          showThoughts: true,
+        }
       )
     ).rejects.toThrow('current native replay profile/protocol');
   });
@@ -1161,6 +1202,81 @@ describe('react', () => {
     expect(result.history.events).toEqual([]);
   });
 
+  it('registers stop synchronously before setup awaits', async () => {
+    const chat = vi.fn(async () =>
+      nativeTurn([{ name: 'submit', args: { answer: 'too late' } }])
+    );
+    const ai = new AxMockAIService({
+      features: { functions: true },
+      chatResponse: chat,
+    });
+    const program = react('question:string -> answer:string');
+
+    const pending = program.forward(ai, { question: 'Stop immediately' });
+    program.stop();
+    const result = await pending;
+
+    expect(result).toMatchObject({
+      success: false,
+      output: { answer: null },
+      terminationReason: 'aborted',
+      error: { code: 'aborted' },
+    });
+    expect(result.history.events).toEqual([]);
+    expect(chat).not.toHaveBeenCalled();
+  });
+
+  it('keeps foreign tool abort errors as recoverable ordered observations', async () => {
+    let turn = 0;
+    const completed = tool(
+      'completed',
+      async ({ value }: { value: number }) => ({
+        value,
+      })
+    );
+    const nestedAbort = tool('nestedAbort', async () => {
+      throw new AxAIServiceAbortedError('nested-tool', 'foreign abort');
+    });
+    const ai = new AxMockAIService({
+      features: { functions: true },
+      chatResponse: async () => {
+        turn++;
+        return turn === 1
+          ? nativeTurn([
+              { name: 'completed', args: { value: 1 } },
+              { name: 'nestedAbort', args: { value: 2 } },
+            ])
+          : nativeTurn([{ name: 'submit', args: { answer: 'recovered' } }]);
+      },
+    });
+
+    const result = await react('question:string -> answer:string', {
+      functions: [completed, nestedAbort],
+      maxParallelTools: 2,
+    }).forward(ai, { question: 'Preserve sibling results' });
+
+    expect(result).toMatchObject({
+      success: true,
+      output: { answer: 'recovered' },
+      terminationReason: 'submit',
+    });
+    expect(result.history.events.slice(1, 3)).toMatchObject([
+      {
+        role: 'tool',
+        name: 'completed',
+        result: '{"value":1}',
+        isError: false,
+      },
+      {
+        role: 'tool',
+        name: 'nestedAbort',
+        result:
+          '{"error":{"code":"tool_error","message":"Tool execution failed"}}',
+        isError: true,
+      },
+    ]);
+  });
+
   it('awaits sibling workers on abort so later rejections are handled', async () => {
     const controller = new AbortController();
     let started = 0;
@@ -1193,7 +1309,11 @@ describe('react', () => {
     const promise = react('question:string -> answer:string', {
       functions: [blocking],
       maxParallelTools: 2,
-    }).forward(ai, { question: 'Abort both' }, { abortSignal: controller.signal });
+    }).forward(
+      ai,
+      { question: 'Abort both' },
+      { abortSignal: controller.signal }
+    );
 
     await vi.waitFor(() => expect(started).toBe(2));
     controller.abort('test abort');
@@ -1235,7 +1355,9 @@ describe('react', () => {
     }).forward(ai, { question: 'Keep newest' });
     expect(result.success).toBe(true);
     const replay = requests.at(-1)?.chatPrompt ?? [];
-    const replayResults = replay.filter((message) => message.role === 'function');
+    const replayResults = replay.filter(
+      (message) => message.role === 'function'
+    );
     expect(replayResults.length).toBeGreaterThan(0);
   });
 
@@ -1244,9 +1366,7 @@ describe('react', () => {
     const ai = new AxMockAIService({
       features: { functions: true },
       chatResponse: async (request) => {
-        requested.push(
-          ...(request.functions ?? []).map((fn) => fn.name)
-        );
+        requested.push(...(request.functions ?? []).map((fn) => fn.name));
         return nativeTurn([{ name: 'submit', args: { answer: 'none' } }]);
       },
     });

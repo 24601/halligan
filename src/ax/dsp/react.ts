@@ -206,6 +206,10 @@ type ToolExecution = {
 type NativeReplayRequest = {
   model: unknown;
   modelConfig: NonNullable<AxReactForwardOptions<unknown>['modelConfig']>;
+  thinkingTokenBudget:
+    | AxReactForwardOptions<unknown>['thinkingTokenBudget']
+    | null;
+  showThoughts: boolean | null;
 };
 
 function positiveInteger(value: number | undefined, fallback: number): number {
@@ -612,7 +616,10 @@ function nativeProviderInstance(ai: Readonly<AxAIService>): string {
 
 function nativeReplayRequest(
   options: Readonly<
-    Pick<AxReactForwardOptions<unknown>, 'model' | 'modelConfig'>
+    Pick<
+      AxReactForwardOptions<unknown>,
+      'model' | 'modelConfig' | 'thinkingTokenBudget' | 'showThoughts'
+    >
   >
 ): NativeReplayRequest {
   const config = strictReplayJSONClone(
@@ -632,6 +639,8 @@ function nativeReplayRequest(
       stream: false,
       n: 1,
     },
+    thinkingTokenBudget: options.thinkingTokenBudget ?? null,
+    showThoughts: options.showThoughts ?? null,
   } as NativeReplayRequest;
 }
 
@@ -667,6 +676,10 @@ function replayProtocolHash(
         modelConfig: {
           request: request.modelConfig,
           providerDefaults: replayProfile ? 'host-profile' : 'service-instance',
+        },
+        forwardOptions: {
+          thinkingTokenBudget: request.thinkingTokenBudget,
+          showThoughts: request.showThoughts,
         },
         toolCalls: NATIVE_REPLAY_PROTOCOL,
       },
@@ -1231,37 +1244,6 @@ export class AxReact<IN extends AxGenIn, OUT extends AxGenOut> {
   ): Promise<AxReactResult<OUT>> {
     const inputValues = this.validateInputs(values);
     const input = axReactCanonicalJSON(inputValues);
-    const signatureHash = await this.signatureHash;
-    const authorityHash = await sha256(
-      validatedHistoryAuthority(
-        options.historyAuthority ?? this.historyAuthority
-      )
-    );
-    const replayProfile =
-      options.replayProfile === undefined
-        ? this.replayProfile
-        : validatedReplayProfile(options.replayProfile);
-    const configured = options.functions
-      ? parseFunctions(options.functions, this.functions)
-      : [...this.functions];
-    this.assertToolNames(configured);
-    const submit = this.createSubmitTool();
-    const native = this.resolveNativeMode(ai, options);
-    const nativeRequest = native ? nativeReplayRequest(options) : undefined;
-    const [initialCatalogHash, protocolHash] = await Promise.all([
-      toolCatalogHash([...configured, submit]),
-      replayProtocolHash(ai, native, nativeRequest, replayProfile),
-    ]);
-    const history = options.history
-      ? cloneHistory(options.history)
-      : createHistory(
-          signatureHash,
-          input,
-          initialCatalogHash,
-          authorityHash,
-          protocolHash
-        );
-
     const controller = new AbortController();
     this.activeControllers.add(controller);
     const signal =
@@ -1269,8 +1251,42 @@ export class AxReact<IN extends AxGenIn, OUT extends AxGenOut> {
         controller.signal,
         mergeAbortSignals(options.abortSignal, axGlobals.abortSignal)
       ) ?? controller.signal;
+    let history: AxReactHistory | undefined;
 
     try {
+      const signatureHash = await this.signatureHash;
+      const authorityHash = await sha256(
+        validatedHistoryAuthority(
+          options.historyAuthority ?? this.historyAuthority
+        )
+      );
+      const replayProfile =
+        options.replayProfile === undefined
+          ? this.replayProfile
+          : validatedReplayProfile(options.replayProfile);
+      const configured = options.functions
+        ? parseFunctions(options.functions, this.functions)
+        : [...this.functions];
+      this.assertToolNames(configured);
+      const submit = this.createSubmitTool();
+      const native = this.resolveNativeMode(ai, options);
+      const nativeRequest = native ? nativeReplayRequest(options) : undefined;
+      const [initialCatalogHash, protocolHash] = await Promise.all([
+        toolCatalogHash([...configured, submit]),
+        replayProtocolHash(ai, native, nativeRequest, replayProfile),
+      ]);
+      history = options.history
+        ? cloneHistory(options.history)
+        : createHistory(
+            signatureHash,
+            input,
+            initialCatalogHash,
+            authorityHash,
+            protocolHash
+          );
+      if (signal.aborted) {
+        return this.failure(history, 'aborted', 'aborted', signal.reason);
+      }
       const mcpContext = await axResolveMCPExecutionContext(options, {});
       const tools = (
         mcpContext
@@ -1405,6 +1421,7 @@ export class AxReact<IN extends AxGenIn, OUT extends AxGenOut> {
         'The forced submit-only turn did not produce a valid submit call'
       );
     } catch (error) {
+      if (!history) throw error;
       if (error instanceof AxReactHistoryValidationError) throw error;
       if (signal.aborted || error instanceof AxAIServiceAbortedError) {
         return this.failure(
@@ -1824,8 +1841,7 @@ export class AxReact<IN extends AxGenIn, OUT extends AxGenOut> {
           }
           rawResult = executed.rawResult;
         } catch (error) {
-          if (signal.aborted || error instanceof AxAIServiceAbortedError)
-            throw error;
+          if (signal.aborted) throw error;
           if (error instanceof FunctionError) {
             return errorResult(
               'invalid_arguments',
@@ -1859,7 +1875,7 @@ export class AxReact<IN extends AxGenIn, OUT extends AxGenOut> {
         }
       }
     ).catch((error) => {
-      if (signal.aborted || error instanceof AxAIServiceAbortedError) return;
+      if (signal.aborted) return;
       throw error;
     });
 
