@@ -46,7 +46,13 @@ export class AxTestPrompt<
           maxRetries: 1,
         });
         const score = await metricFn({ prediction: res, example: ex });
-        sumOfScores += score;
+        const scalar =
+          typeof score === 'number'
+            ? score
+            : typeof score?.score === 'number'
+              ? score.score
+              : 0;
+        sumOfScores += Number.isFinite(scalar) ? scalar : 0;
       } catch (error) {
         console.warn(
           `Program evaluation failed for example ${i}: ${error instanceof Error ? error.message : 'Unknown error'}`

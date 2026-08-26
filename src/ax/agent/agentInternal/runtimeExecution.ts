@@ -223,6 +223,8 @@ export function createRuntimeExecutionContext(
 
   s._activeMCPExecutionContext = options?._mcpExecutionContext;
   s._activeEventContext = options?.eventContext;
+  s._activeAuthority = options?.authority;
+  s._activeAuthorityInheritance = options?.authorityInheritance;
 
   const toolGlobals = s.buildRuntimeGlobals(
     effectiveAbortSignal,

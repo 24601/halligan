@@ -13,7 +13,7 @@ import {
 import { AxBootstrapFewShot } from './optimizers/bootstrapFewshot.js';
 import { AxGEPA } from './optimizers/gepa.js';
 import {
-  normalizeGEPAScores,
+  normalizeGEPAMetricResult,
   scalarizeGEPAScores,
 } from './optimizers/gepaEvaluation.js';
 import type { AxGenOut, AxProgramDemos, AxProgrammable } from './types.js';
@@ -52,8 +52,15 @@ export async function optimize<IN, OUT extends AxGenOut>(
       options: bootstrapOptions,
     });
     const bootstrapMetric: AxMetricFn = async ({ prediction, example }) => {
-      const scores = await normalizeGEPAScores(metricFn, prediction, example);
-      return scalarizeGEPAScores(scores, compileOptions as any);
+      const result = await normalizeGEPAMetricResult(
+        metricFn,
+        prediction,
+        example
+      );
+      return (
+        result.scalar ??
+        scalarizeGEPAScores(result.scores, compileOptions as any)
+      );
     };
     const bootstrapResult = await bootstrapOptimizer.compile(
       program,
@@ -85,6 +92,7 @@ export async function optimize<IN, OUT extends AxGenOut>(
       stats: optimizedProgram.stats,
       componentMap: optimizedProgram.componentMap,
       selectorState: optimizedProgram.selectorState,
+      candidateLineage: optimizedProgram.candidateLineage,
       demos,
       examples: (optimizedProgram as any).examples,
       modelConfig: optimizedProgram.modelConfig,
