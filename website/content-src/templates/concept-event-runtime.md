@@ -49,6 +49,67 @@ database, queue, callback, or other destination.
 The core rule is simple: an event invokes a model only when a route you wrote
 chooses `wake` or `resume`.
 
+## Advisory Demand Proposals
+
+TypeScript applications can attach `axDemandEventObserver(boundary)` to an
+`observe` route when a host-supplied detector should turn observations into a
+retained, reviewable proposal. `AxDemandBoundary` records explicit `demand`,
+`no_demand`, or `uncertain` evidence; confidence and calibration; provenance;
+expiry; an opaque standing-grant reference; and an `ignore`, `annotate`,
+`notify`, `propose`, or `act` disposition.
+
+These names describe proposals, not effects. Every record says
+`authority: 'advisory'` and `requiresHostReview: true`; the boundary has no
+target, tool, sink, notification, or effect callback. The host must authorize
+again and settle any effect separately. Detector prose is retained but never
+becomes policy or authority, detector reason codes remain separate from
+boundary-owned proposal policy codes, malformed output becomes explicit
+uncertainty, and only the host-owned observation can choose dedupe identity.
+
+Confidence estimates demand probability; it is not an action score. Host
+disposition allowlists must retain `ignore` or `annotate` as a fail-closed
+fallback. Observation validation failures reject explicitly before detection.
+
+Detector and grant callbacks receive deeply frozen copies while a separate
+canonical clone is retained. Boundary, route, instance, and principal scope
+wraps every local dedupe key even when a custom mapper supplies the observation.
+Callbacks have bounded timeouts, and runtime cancellation remains cancellation
+rather than successful evidence. Observation and detector fields are read once
+into plain snapshots used consistently for validation, byte limits, and
+retention. Detector metadata and callback are also captured once at boundary
+construction and bind callback identity and retained provenance.
+
+Detector latency metrics remain finite and nonnegative. Extreme or reversing
+clocks clamp to the safe-integer range and mark the sample as capped rather than
+serializing a non-finite duration.
+
+Timeout does not free an abort-ignoring callback's bounded count or evidence-byte
+reservation; it stays charged until the underlying promise settles. Transient
+keyed work and unsettled callbacks use separate per-class ceilings. Observe
+options and scope fields are captured once, and provenance polarity is
+restricted to `supports`, `contradicts`, or `neutral`.
+
+The built-in demand store is process-local and volatile. Supply an application
+store when cursor/backlog and dedupe must survive a restart or coordinate
+workers. Custom stores must atomically check the signal passed to
+`append(record, { signal })` immediately before commit and retain no new record
+when it is aborted. The event runtime remains responsible for scheduling; this
+API does not add a timer, notification product, user profile, or autonomous
+loop.
+Observations and detections are bounded; applications should map only
+consented, necessary evidence and apply their own redaction and retention
+policy.
+
+One boundary single-flights concurrent callbacks for a scoped key with
+per-waiter cancellation and bounded pending keys/bytes. The in-memory store also
+bounds records, bytes, scopes, records per scope, and age, evicting oldest
+entries and their dedupe keys. Distributed callback-level exactly-once behavior
+still requires a host reservation protocol.
+
+Dedupe keys identify immutable observations: proposal expiry does not reopen a
+previously processed key. Duplicate receipts are historical, and a new
+observation needs a new host-selected key.
+
 ## Wake: Start A Program From An Event
 
 A `wake` route starts a new run. This minimal assembly creates a source, maps
@@ -97,8 +158,8 @@ retarget persisted output or consume a replacement. Stores without atomic
 admission/completion and malformed legacy bindings fail closed. Successful
 resume terminalization saves the delivery and consumes/de-keys its admitted
 continuation in one fenced transaction, so a completion fault cannot leave a
-successful delivery holding the correlation key. A never-invoked v5 resume
-delivery performs its first atomic admission after migration to v6.
+successful delivery holding the correlation key. A never-invoked legacy resume
+delivery performs its first atomic admission under the combined migration.
 
 Targets may use separate `wakeInput` and `resumeInput` plans because the first
 event and the returning event often carry different shapes. The action-specific
@@ -152,10 +213,19 @@ reference. Legacy `put/delete` payload stores therefore fail closed before
 upload. Count, byte, payload-size, TTL, and operation-time limits are required;
 this is recoverable coordination, not an atomic commit across SQLite and the
 payload provider. Recovery atomically binds committed payload ownership to the
-existing succeeded run; lease takeover then performs sink-only resume without
-invoking the target. Resume-route sink contexts preserve the admitted
-continuation snapshot and its original target/instance binding. Failed provider
+existing nonterminal `finalizing` run; lease takeover then performs sink-only
+resume without invoking the target. The run becomes `succeeded` only when every
+sink-created effect is receipt-complete (`succeeded` or `failed`); `intent`,
+`dispatched`, and `parked` block successful completion. Resume-route sink
+contexts preserve the admitted continuation snapshot and its original
+target/instance binding. Failed provider
 reconciliation quarantines that delivery without blocking unrelated claims.
+
+Combined SQLite schema v7 migration classifies the actual verifier and effect
+lineages under one immediate transaction, preserves their rows, installs and
+validates the complete journal/metadata, effect/fingerprint, payload-stage, and
+admission schema, and only then records version 7. The SQLite event store does
+not persist advisory demand-boundary records or temporal interaction timelines.
 
 The runtime persists output before dispatching sinks. Sink retries use the
 stable `(runId, sinkId)` key and redrive only the failed sink; they never repeat
@@ -178,7 +248,11 @@ I/O, call `markEffectDispatched(...)` immediately before crossing the external
 boundary, and write a conclusive success/failure receipt with
 `settleEffect(...)`. After restart, intent is not dispatched, a dispatch without
 settlement is indeterminate, settlement is completed, and a parked effect
-blocks automatic dispatch.
+blocks automatic dispatch. Only `succeeded` and `failed` are receipt-complete;
+`intent`, `dispatched`, and `parked` block successful run/delivery completion.
+The ledger and exclusive admission are additive to host authority, verifier
+transitions, and trusted component lifecycle ownership. Unknown target recovery
+continues to use `outcome_unknown`.
 
 The bounded, redacted effect metadata is a request descriptor. Ax persists a
 digest of its canonical bytes with operation, idempotency key, and replay
@@ -214,6 +288,48 @@ Caller-owned protocol clients must still be closed by the caller. For
 deterministic tests, `AxManualEventClock` advances retries,
 debounce windows, and continuation expiry without waiting for wall-clock time.
 
+## Temporal Interaction Records (TypeScript)
+
+TypeScript also exports `AxTemporalEnvelope` and `AxInteractionTimeline` for
+applications that need a bounded, provider-neutral record of audio frames,
+transcripts, visual observations, text, tool activity, generated media, and
+control signals. The application supplies a monotonic session clock and any
+media clocks; optional wall time is diagnostic only. Sequence, epoch, revision,
+causal-parent, and non-causal link fields make duplicate, reordered, late,
+stale, and conflicting arrivals explicit.
+
+This structure is standalone. It does not capture or store media, estimate
+clock offset or drift, create rooms, invoke a model, or establish semantic
+alignment merely because timestamps or links are present. Generated language
+packages do not yet claim this API. See the
+[temporal interaction timeline guide](https://github.com/ax-llm/ax/blob/main/docs/INTERACTION_TIMELINE.md)
+for the TypeScript contract, bounds, and deterministic zero-cost evaluation.
+
+## Trusted Live Components In TypeScript
+
+TypeScript additionally exposes `AxEventComponentManager` for trusted,
+host-defined process-local listeners, adapters, and source registrations. It
+orders declared dependencies, serializes graph transitions, scopes every
+registered disposer, rolls failed activation back in reverse order, and stages
+a replacement candidate plus its active transitive dependents before switching
+all manager-visible bindings together. Inactive replacements remain inactive,
+and partial disposal includes the transitive dependent definition closure.
+`AxEventRuntime` uses it internally for source handles and fences overlapping
+startup/close. Cleanup keeps reverse order but can be bounded; timeout is
+reported as failed and uncertain while later cleanup and runtime close proceed.
+Failed or otherwise unsettled effect ownership fences reactivation and
+replacement—including newly introduced external dependencies—before another
+external resource can be acquired; retry remains available after a failed
+activation only when rollback fully settled.
+Caller-created protocol clients remain caller-owned.
+
+This is not a durable plugin loader or a general transaction system. It does
+not load model-generated code, persist or auto-deploy definitions, reverse
+unregistered or arbitrary external I/O, or make candidate setup externally
+invisible. The TypeScript mechanism/boundary evaluator explicitly labels its
+unmanaged baseline and deterministic-schedule limits. Its exact command and the
+full API example are in the [Event Runtime maintainer guide](https://github.com/ax-llm/ax/blob/main/docs/EVENT_RUNTIME.md#trusted-live-components).
+
 ## Generated Languages
 
 Generated Python, Java, C++, Go, and Rust packages use the same deterministic
@@ -223,6 +339,7 @@ single-worker state machine and conformance rules. Their runtime is inline:
 is no hidden worker thread. The packages cover continuations, state restoration,
 cooperative cancellation, dead letters, output-before-sink ordering, and
 sink-only redrive; persistent multi-worker support requires a separately
-conforming store.
+conforming store. The generic live-component manager described above is
+TypeScript-only until its open AxIR backlog entry is completed.
 
 See [MCP]({{langRoot}}/concepts/mcp/), [MCP Subscriptions]({{langRoot}}/concepts/mcp-subscriptions/), and the [Event Runtime maintainer guide](https://github.com/ax-llm/ax/blob/main/docs/EVENT_RUNTIME.md).

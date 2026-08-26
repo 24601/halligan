@@ -52,6 +52,7 @@ export {
   type AxAgentContextMapSnapshot,
   type AxAgentContextMapUpdateResult,
 } from './contextMap.js';
+export * from './runtimeCapabilities.js';
 
 import { runActorLoop } from './agentInternal/actorLoop.js';
 import {

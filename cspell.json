@@ -6,9 +6,7 @@
       "addWords": true
     }
   ],
-  "dictionaries": [
-    "project-words"
-  ],
+  "dictionaries": ["project-words"],
   "ignorePaths": [
     "CHANGELOG.md",
     "node_modules",
@@ -21,11 +19,15 @@
     "tools/axir/internal/axir/templates"
   ],
   "words": [
+    "crossmodal",
     "indegree",
     "parallelizable",
+    "receiptless",
     "reconvergence",
     "reconverging",
     "scalarizes",
+    "timebase",
+    "timebases",
     "topo",
     "unproduced"
   ]

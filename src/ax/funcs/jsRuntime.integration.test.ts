@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
+import {
+  axCreateRuntimeAdmissionReceipt,
+  axRuntimeCapabilityRequirementsVersion,
+  axSelectCodeRuntime,
+} from '../agent/runtimeCapabilities.js';
 import { AxJSRuntime, AxJSRuntimePermission } from './jsRuntime.js';
 
 describe('AxJSRuntime integration', () => {
@@ -1248,10 +1253,168 @@ describe('AxJSRuntime sandbox hardening', () => {
       }
     });
 
-    it('useNodePermissionModel: false disables OS-level block', async () => {
+    it('does not widen OS access after permission input mutation', async () => {
+      const permissions: AxJSRuntimePermission[] = [];
+      const fsRead: string[] = [];
+      const nodePermissionAllowlist = { fsRead };
+      const runtime = new AxJSRuntime({
+        outputMode: 'return',
+        blockDynamicImport: false,
+        allowUnsafeNodeHostAccess: true,
+        freezeIntrinsics: false,
+        permissions,
+        nodePermissionAllowlist,
+      });
+      permissions.push(AxJSRuntimePermission.FILESYSTEM);
+      fsRead.push('*');
+
+      const session = runtime.createSession();
+      try {
+        const result = await session.execute(`
+          try {
+            const fs = await import('node:fs');
+            fs.readFileSync('/etc/hosts');
+            return 'NOT BLOCKED';
+          } catch (e) {
+            return e && e.code ? e.code : String(e).slice(0, 80);
+          }
+        `);
+        expect(result).toBe('ERR_ACCESS_DENIED');
+      } finally {
+        session.close();
+      }
+    });
+
+    it('does not widen host access after admission-time instance mutation', async () => {
+      const runtime = new AxJSRuntime({
+        outputMode: 'return',
+        useNodePermissionModel: false,
+      });
+      const admission = axCreateRuntimeAdmissionReceipt(runtime, {
+        evaluator: 'AxJSRuntime immutable configuration test',
+        source: 'host-policy',
+        authority: runtime.capabilities.authority,
+        resources: runtime.capabilities.resources,
+      });
+
+      expect(Reflect.set(runtime, 'allowUnsafeNodeHostAccess', true)).toBe(
+        false
+      );
+      const selected = axSelectCodeRuntime(
+        [runtime],
+        {
+          schemaVersion: axRuntimeCapabilityRequirementsVersion,
+          authority: {
+            host: 'denied',
+            platform: { filesystem: 'denied' },
+          },
+        },
+        { admissions: [admission] }
+      );
+
+      const session = selected.runtime.createSession();
+      try {
+        const result = await session.execute(`
+          await Promise.resolve();
+          return (() => {
+            try {
+              const loadBuiltin =
+                typeof process !== 'undefined' &&
+                typeof process.getBuiltinModule === 'function'
+                  ? process.getBuiltinModule.bind(process)
+                  : typeof require === 'function'
+                    ? require
+                    : undefined;
+              if (!loadBuiltin) return 'BLOCKED';
+              loadBuiltin('node:fs').readFileSync('/etc/hosts');
+              return 'FILESYSTEM READ SUCCEEDED';
+            } catch {
+              return 'BLOCKED';
+            }
+          })()
+        `);
+        expect(result).toBe('BLOCKED');
+      } finally {
+        session.close();
+      }
+    });
+
+    it('does not execute a subclass host-access override through a denied admission', async () => {
+      let overrideExecutions = 0;
+      class UnsafeSubclassRuntime extends AxJSRuntime {
+        override createSession(): ReturnType<AxJSRuntime['createSession']> {
+          overrideExecutions++;
+          return {
+            execute: async () => {
+              const loadBuiltin = (
+                process as typeof process & {
+                  getBuiltinModule(name: string): {
+                    readFileSync(path: string): unknown;
+                  };
+                }
+              ).getBuiltinModule;
+              loadBuiltin('node:fs').readFileSync('/etc/hosts');
+              return 'FILESYSTEM READ SUCCEEDED';
+            },
+            patchGlobals: async () => {},
+            close: () => {},
+          };
+        }
+      }
+
+      const runtime = new UnsafeSubclassRuntime({
+        outputMode: 'return',
+        useNodePermissionModel: false,
+      });
+      const admission = axCreateRuntimeAdmissionReceipt(runtime, {
+        evaluator: 'AxJSRuntime subclass dispatch test',
+        source: 'host-policy',
+        authority: runtime.capabilities.authority,
+        resources: runtime.capabilities.resources,
+      });
+      const selected = axSelectCodeRuntime(
+        [runtime],
+        {
+          schemaVersion: axRuntimeCapabilityRequirementsVersion,
+          authority: {
+            host: 'denied',
+            platform: { filesystem: 'denied' },
+          },
+        },
+        { admissions: [admission] }
+      );
+
+      const session = selected.runtime.createSession();
+      try {
+        const result = await session.execute(`
+          await Promise.resolve();
+          return (() => {
+            try {
+              const loadBuiltin =
+                typeof process !== 'undefined' &&
+                typeof process.getBuiltinModule === 'function'
+                  ? process.getBuiltinModule.bind(process)
+                  : typeof require === 'function'
+                    ? require
+                    : undefined;
+              if (!loadBuiltin) return 'BLOCKED';
+              loadBuiltin('node:fs').readFileSync('/etc/hosts');
+              return 'FILESYSTEM READ SUCCEEDED';
+            } catch {
+              return 'BLOCKED';
+            }
+          })()
+        `);
+        expect(result).toBe('BLOCKED');
+        expect(overrideExecutions).toBe(0);
+      } finally {
+        session.close();
+      }
+    });
+
+    it('unsafe host access reaches fs and child process when OS blocking is disabled', async () => {
       // When the permission model is explicitly disabled, fs reads are NOT
-      // kernel-blocked. The caller opts out of OS-layer defense (they still
-      // have the language-level defenses).
+      // kernel-blocked and ambient Node access can invoke child processes.
       const runtime = new AxJSRuntime({
         outputMode: 'return',
         blockDynamicImport: false,
@@ -1264,12 +1427,18 @@ describe('AxJSRuntime sandbox hardening', () => {
         const result = await session.execute(`
           try {
             const fs = await import('node:fs');
-            return typeof fs.readFileSync('/etc/hosts', 'utf8');
+            const childProcess = await import('node:child_process');
+            const child = childProcess.execFileSync(
+              process.execPath,
+              ['-e', 'process.stdout.write("child")'],
+              { encoding: 'utf8' }
+            );
+            return typeof fs.readFileSync('/etc/hosts', 'utf8') + ':' + child;
           } catch (e) {
             return e && e.code ? e.code : String(e).slice(0, 80);
           }
         `);
-        expect(result).toBe('string');
+        expect(result).toBe('string:child');
       } finally {
         session.close();
       }

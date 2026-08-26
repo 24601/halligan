@@ -1,5 +1,59 @@
 import type { AxExample } from '../common_types.js';
 
+export type AxACEApplicability = {
+  /** Conditions that must all be present before this guidance is rendered. */
+  allOf?: string[];
+  /** At least one of these conditions must be present before rendering. */
+  anyOf?: string[];
+  /** Conditions that make this guidance inapplicable. */
+  noneOf?: string[];
+};
+
+export type AxACEProvenance = {
+  source: 'compile' | 'online' | 'agent-evolve' | 'manual';
+  sourceRunId?: string;
+  feedbackIds?: string[];
+};
+
+export type AxACEVerificationResult = {
+  verifierId: string;
+  testId?: string;
+  result: 'passed' | 'failed' | 'unknown';
+  timestamp?: string;
+  /** Host/evaluator summary, trimmed to 500 characters on trusted updates. */
+  summary?: string;
+};
+
+export type AxACEBulletLifecycle = {
+  status?: 'active' | 'deprecated' | 'superseded';
+  expiresAt?: string;
+  supersededBy?: string;
+  reason?: string;
+};
+
+/** Auditable, non-executable procedural-memory metadata. */
+export type AxACEBulletEvidence = {
+  confidence?: number;
+  evidenceCount?: number;
+  applicability?: AxACEApplicability;
+  provenance?: AxACEProvenance[];
+  verification?: AxACEVerificationResult[];
+  lifecycle?: AxACEBulletLifecycle;
+};
+
+/**
+ * Evidence supplied by a trusted host/evaluator caller. This is an authority
+ * boundary, not a cryptographic attestation.
+ */
+export type AxACEHostEvidence = {
+  source?: AxACEProvenance['source'];
+  sourceRunId?: string;
+  feedbackIds?: readonly string[];
+  evidenceCount?: number;
+  confidence?: number;
+  verification?: readonly AxACEVerificationResult[];
+};
+
 /**
  * Individual playbook bullet with metadata used for incremental updates.
  * Mirrors the structure described in the ACE paper (Section 3.1).
@@ -14,6 +68,14 @@ export interface AxACEBullet extends Record<string, unknown> {
   updatedAt: string;
   tags?: string[];
   metadata?: Record<string, unknown>;
+  /** Starts at 1 for evidence-aware bullets and increments on every update. */
+  revision?: number;
+  /** Prior revision and explicit bullet supersession links. */
+  lineage?: {
+    previousRevision?: number;
+    supersedes?: string[];
+  };
+  evidence?: AxACEBulletEvidence;
 }
 
 /**
@@ -67,6 +129,16 @@ export interface AxACECuratorOperation {
   bulletId?: string;
   content?: string;
   metadata?: Record<string, unknown>;
+  /**
+   * Model-editable guidance metadata. Provenance, evidence counts, and
+   * verification receipts are ignored here and supplied by the host.
+   */
+  evidence?: Pick<
+    AxACEBulletEvidence,
+    'confidence' | 'applicability' | 'lifecycle'
+  >;
+  /** Existing bullets made obsolete by this ADD/UPDATE. */
+  supersedes?: string[];
 }
 
 export interface AxACECuratorOutput extends Record<string, unknown> {
@@ -79,6 +151,9 @@ export interface AxACECuratorOutput extends Record<string, unknown> {
  * Runtime feedback captured after each generator rollout for online updates.
  */
 export interface AxACEFeedbackEvent {
+  /** Host-generated identifier used by bullet provenance. */
+  id?: string;
+  sourceRunId?: string;
   example: AxExample;
   prediction: unknown;
   score: number;
@@ -120,6 +195,8 @@ export interface AxACEOptions {
    * Maximum serialized characters per field stored in ACE trajectories.
    */
   maxSerializedFieldChars?: number;
+  /** Optional host run identifier attached to compile-generated provenance. */
+  sourceRunId?: string;
 }
 
 /**
@@ -129,7 +206,7 @@ export interface AxACEOptimizationArtifact {
   playbook: AxACEPlaybook;
   feedback: AxACEFeedbackEvent[];
   history: {
-    source?: 'compile' | 'online';
+    source?: AxACEProvenance['source'];
     epoch: number;
     exampleIndex: number;
     operations: AxACECuratorOperation[];
@@ -139,5 +216,11 @@ export interface AxACEOptimizationArtifact {
      * mapped back to surviving bullets — this field can.
      */
     updatedBulletIds?: string[];
+    /** Before/after snapshots make revision history independently auditable. */
+    changes?: {
+      bulletId: string;
+      before?: AxACEBullet;
+      after?: AxACEBullet;
+    }[];
   }[];
 }

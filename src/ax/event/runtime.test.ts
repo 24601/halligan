@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { AxAgentClarificationError } from '../agent/agentInternal/agentStateTypes.js';
+import type { AxAuthorityContext } from '../authority/types.js';
 import { AxSignature } from '../dsp/sig.js';
 import type { AxProgrammable } from '../dsp/types.js';
 import { AxInMemoryEventStore } from './memoryStore.js';
@@ -15,6 +16,17 @@ import {
 } from './types.js';
 
 const ai = {} as any;
+
+function deferred(): {
+  promise: Promise<void>;
+  resolve: () => void;
+} {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
 
 function program(
   forward: (input: any, options?: any) => unknown | Promise<unknown>,
@@ -220,6 +232,1030 @@ describe('AxEventRuntime', () => {
     expect(firstA.duplicate).toBe(false);
     expect(secondA.duplicate).toBe(true);
     expect(firstB.duplicate).toBe(false);
+    await runtime.close();
+  });
+
+  it('uses host-resolved authority instead of event claims and binds tenant scope', async () => {
+    const invoked = vi.fn(() => ({ handled: true }));
+    const authority: AxAuthorityContext = {
+      principal: { id: 'principal-a', tenantId: 'tenant-a' },
+      actor: { id: 'worker-a', kind: 'agent' },
+      grants: [
+        {
+          version: 1,
+          id: 'event-grant',
+          principalId: 'principal-a',
+          actor: { id: 'worker-a', kind: 'agent' },
+          operations: ['event.target.invoke'],
+          resources: [
+            { type: 'event.target', id: 'secure-target', tenantId: 'tenant-a' },
+          ],
+          leaseEpoch: 2,
+        },
+      ],
+      leaseEpoch: 2,
+      now: () => 100,
+      authorize: (operation, context) => ({
+        version: 1,
+        receiptId: `receipt-${context.requestId}`,
+        requestId: context.requestId,
+        decision: 'allow',
+        operation,
+        resource: context.resource,
+        principalId: context.principal.id,
+        actor: { id: context.actor.id, kind: context.actor.kind },
+        grantIds: context.grants.map((grant) => grant.id),
+        leaseEpoch: context.leaseEpoch,
+        authorizedAt: context.now,
+      }),
+    };
+    const target = eventTarget({
+      id: 'secure-target',
+      ai,
+      program: program(invoked),
+      mapInput: () => ({ eventId: 'event' }),
+      retrySafety: 'idempotent',
+    });
+    const runtime = new AxEventRuntime({
+      authority: () => authority,
+      maxAttempts: 1,
+      routes: [
+        eventRoute({
+          id: 'secure-route',
+          match: { types: ['secure.event'] },
+          action: 'wake',
+          target,
+        }),
+      ],
+    });
+    await runtime.start();
+    await runtime.publish(
+      ingress('allowed', 'secure.event', {
+        identity: { tenantId: 'tenant-a' },
+        trust: 'authenticated',
+      })
+    );
+    await runtime.publish(
+      ingress('denied', 'secure.event', {
+        identity: { tenantId: 'tenant-b' },
+        trust: 'authenticated',
+        event: {
+          ...ingress('forged', 'secure.event').event,
+          id: 'denied',
+          data: { grants: [{ id: 'forged', operations: ['*'] }] },
+        },
+      })
+    );
+    await runtime.waitForIdle();
+    expect(invoked).toHaveBeenCalledOnce();
+    await runtime.close();
+  });
+
+  it('clears a rejecting authority resolver from activeRuns so waitForIdle can finish', async () => {
+    const invoked = vi.fn();
+    const runtime = new AxEventRuntime({
+      maxAttempts: 1,
+      authority: async () => {
+        throw new Error('resolver rejected');
+      },
+      routes: [
+        eventRoute({
+          id: 'rejecting-authority',
+          match: { types: ['authority.reject'] },
+          action: 'wake',
+          target: eventTarget({
+            id: 'rejecting-authority-target',
+            ai,
+            program: program(invoked),
+            mapInput: () => ({}),
+            retrySafety: 'idempotent',
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    const receipt = await runtime.publish(
+      ingress('authority-reject-1', 'authority.reject')
+    );
+    await expect(runtime.waitForIdle(200)).resolves.toBeUndefined();
+    expect(invoked).not.toHaveBeenCalled();
+    expect((await runtime.listDeadLetters()).length).toBeGreaterThan(0);
+    expect(receipt.deliveryIds).toHaveLength(1);
+    await runtime.close({ drain: false });
+  });
+
+  it('does not wedge close({drain:false}) on a never-settling authority resolver', async () => {
+    const invoked = vi.fn();
+    let lateReject: ((reason?: unknown) => void) | undefined;
+    const runtime = new AxEventRuntime({
+      maxAttempts: 1,
+      authority: () =>
+        new Promise<undefined>((_resolve, reject) => {
+          lateReject = reject;
+        }),
+      routes: [
+        eventRoute({
+          id: 'hanging-authority',
+          match: { types: ['authority.hang'] },
+          action: 'wake',
+          target: eventTarget({
+            id: 'hanging-authority-target',
+            ai,
+            program: program(invoked),
+            mapInput: () => ({}),
+            retrySafety: 'idempotent',
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    await runtime.publish(ingress('authority-hang-1', 'authority.hang'));
+    for (let index = 0; index < 20; index++) await Promise.resolve();
+    const closed = runtime.close({ drain: false });
+    await expect(
+      Promise.race([
+        closed.then(() => 'closed'),
+        new Promise((resolve) => setTimeout(() => resolve('timeout'), 100)),
+      ])
+    ).resolves.toBe('closed');
+    expect(invoked).not.toHaveBeenCalled();
+    lateReject?.(new Error('late resolver rejection'));
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+
+  it('does not wedge close({drain:false}) on a never-settling onAudit hook', async () => {
+    const invoked = vi.fn();
+    let lateReject: ((reason?: unknown) => void) | undefined;
+    const neverAuthorize = new Promise<never>(() => {});
+    const authority: AxAuthorityContext = {
+      principal: { id: 'principal-a', tenantId: 'tenant-a' },
+      actor: { id: 'worker-a', kind: 'agent' },
+      grants: [
+        {
+          version: 1,
+          id: 'event-grant',
+          principalId: 'principal-a',
+          operations: ['event.target.invoke'],
+          resources: [
+            {
+              type: 'event.target',
+              id: 'audit-hang-target',
+              tenantId: 'tenant-a',
+            },
+          ],
+          leaseEpoch: 1,
+        },
+      ],
+      leaseEpoch: 1,
+      now: () => 100,
+      authorize: () => neverAuthorize,
+      onAudit: () =>
+        new Promise<void>((_resolve, reject) => {
+          lateReject = reject;
+        }),
+    };
+    const runtime = new AxEventRuntime({
+      maxAttempts: 1,
+      authority: () => authority,
+      routes: [
+        eventRoute({
+          id: 'audit-hang',
+          match: { types: ['authority.audit-hang'] },
+          action: 'wake',
+          target: eventTarget({
+            id: 'audit-hang-target',
+            ai,
+            program: program(invoked),
+            mapInput: () => ({}),
+            retrySafety: 'idempotent',
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    await runtime.publish(ingress('audit-hang-1', 'authority.audit-hang'));
+    for (let index = 0; index < 20; index++) await Promise.resolve();
+    const closed = runtime.close({ drain: false });
+    await expect(
+      Promise.race([
+        closed.then(() => 'closed'),
+        new Promise((resolve) => setTimeout(() => resolve('timeout'), 100)),
+      ])
+    ).resolves.toBe('closed');
+    expect(invoked).not.toHaveBeenCalled();
+    lateReject?.(new Error('late audit rejection'));
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+
+  it('terminally cancels a delivery aborted before authority resolution returns', async () => {
+    const invoked = vi.fn();
+    const store = new AxInMemoryEventStore();
+    let release!: () => void;
+    const gate = new Promise<undefined>((resolve) => {
+      release = () => resolve(undefined);
+    });
+    const runtime = new AxEventRuntime({
+      maxAttempts: 1,
+      store,
+      authority: () => gate,
+      routes: [
+        eventRoute({
+          id: 'pre-resolution-cancel',
+          match: { types: ['authority.pre-cancel'] },
+          action: 'wake',
+          target: eventTarget({
+            id: 'pre-cancel-target',
+            ai,
+            program: program(invoked),
+            mapInput: () => ({}),
+            retrySafety: 'idempotent',
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    const receipt = await runtime.publish(
+      ingress('pre-cancel-1', 'authority.pre-cancel')
+    );
+    for (let index = 0; index < 30; index++) await Promise.resolve();
+    await runtime.close({ drain: false });
+    release();
+    await Promise.resolve();
+    await Promise.resolve();
+    const delivery = await store.getDelivery(receipt.deliveryIds[0]!);
+    expect(delivery?.status).toBe('cancelled');
+    expect(invoked).not.toHaveBeenCalled();
+    await expect(runtime.waitForIdle(50)).resolves.toBeUndefined();
+  });
+
+  it('does not write a sink after close returns during a hanging redrive resolver', async () => {
+    const store = new AxInMemoryEventStore();
+    const write = vi
+      .fn<(output: unknown) => Promise<void>>()
+      .mockRejectedValueOnce(new Error('synthetic sink failure'))
+      .mockResolvedValue(undefined);
+    const makeAuthority = (): AxAuthorityContext => ({
+      principal: { id: 'principal-a', tenantId: 'tenant-a' },
+      actor: { id: 'worker-a', kind: 'agent' },
+      grants: [
+        {
+          version: 1,
+          id: 'target-1',
+          principalId: 'principal-a',
+          operations: ['event.target.invoke'],
+          resources: [
+            {
+              type: 'event.target',
+              id: 'redrive-hang-target',
+              tenantId: 'tenant-a',
+            },
+          ],
+          leaseEpoch: 1,
+        },
+        {
+          version: 1,
+          id: 'sink-1',
+          principalId: 'principal-a',
+          operations: ['event.sink.write'],
+          resources: [
+            {
+              type: 'event.sink',
+              id: 'redrive-hang-sink',
+              tenantId: 'tenant-a',
+            },
+          ],
+          leaseEpoch: 1,
+        },
+      ],
+      leaseEpoch: 1,
+      now: () => 100,
+      authorize: (operation, context) => ({
+        version: 1,
+        receiptId: `receipt-${operation}`,
+        requestId: context.requestId,
+        decision: 'allow',
+        operation,
+        resource: context.resource,
+        principalId: context.principal.id,
+        actor: { id: context.actor.id, kind: context.actor.kind },
+        grantIds: context.grants.map((grant) => grant.id),
+        leaseEpoch: context.leaseEpoch,
+        authorizedAt: context.now,
+      }),
+    });
+    let hanging = false;
+    let lateResolve: ((value?: unknown) => void) | undefined;
+    const runtime = new AxEventRuntime({
+      authority: () => {
+        if (!hanging) return makeAuthority();
+        return new Promise((resolve) => {
+          lateResolve = () => resolve(makeAuthority());
+        });
+      },
+      maxAttempts: 1,
+      store,
+      routes: [
+        eventRoute({
+          id: 'redrive-hang-route',
+          match: { types: ['redrive.hang'] },
+          action: 'wake',
+          target: eventTarget({
+            id: 'redrive-hang-target',
+            ai,
+            program: program(() => ({ ok: true })),
+            mapInput: () => ({}),
+            retrySafety: 'idempotent',
+            sinks: [{ id: 'redrive-hang-sink', write }],
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    await runtime.publish(ingress('redrive-hang-1', 'redrive.hang'));
+    await runtime.waitForIdle();
+    const deadLetter = (await runtime.listDeadLetters()).find(
+      (value) => value.kind === 'sink'
+    );
+    expect(deadLetter).toBeDefined();
+    expect(write).toHaveBeenCalledOnce();
+
+    hanging = true;
+    const redrive = runtime.redrive(deadLetter!.id);
+    for (let index = 0; index < 20; index++) await Promise.resolve();
+    const closed = runtime.close({ drain: false });
+    await expect(
+      Promise.race([
+        closed.then(() => 'closed'),
+        new Promise((resolve) => setTimeout(() => resolve('timeout'), 100)),
+      ])
+    ).resolves.toBe('closed');
+    lateResolve?.();
+    await expect(redrive).rejects.toThrow(/clos(ing|ed)/);
+    expect(write).toHaveBeenCalledOnce();
+    expect(await runtime.listDeadLetters()).toContainEqual(deadLetter);
+  });
+
+  it('does not invoke a target when close cancels during a successful authorization audit', async () => {
+    const invoked = vi.fn();
+    const store = new AxInMemoryEventStore();
+    let lateReject: ((reason?: unknown) => void) | undefined;
+    let auditStarted!: () => void;
+    const auditStart = new Promise<void>((resolve) => {
+      auditStarted = resolve;
+    });
+    const authority: AxAuthorityContext = {
+      principal: { id: 'principal-a', tenantId: 'tenant-a' },
+      actor: { id: 'worker-a', kind: 'agent' },
+      grants: [
+        {
+          version: 1,
+          id: 'event-grant',
+          principalId: 'principal-a',
+          operations: ['event.target.invoke'],
+          resources: [
+            {
+              type: 'event.target',
+              id: 'audit-success-cancel-target',
+              tenantId: 'tenant-a',
+            },
+          ],
+          leaseEpoch: 1,
+        },
+      ],
+      leaseEpoch: 1,
+      now: () => 100,
+      authorize: (operation, context) => ({
+        version: 1,
+        receiptId: `receipt-${operation}`,
+        requestId: context.requestId,
+        decision: 'allow',
+        operation,
+        resource: context.resource,
+        principalId: context.principal.id,
+        actor: { id: context.actor.id, kind: context.actor.kind },
+        grantIds: context.grants.map((grant) => grant.id),
+        leaseEpoch: context.leaseEpoch,
+        authorizedAt: context.now,
+      }),
+      onAudit: () => {
+        auditStarted();
+        return new Promise<void>((_resolve, reject) => {
+          lateReject = reject;
+        });
+      },
+    };
+    const runtime = new AxEventRuntime({
+      maxAttempts: 1,
+      store,
+      authority: () => authority,
+      routes: [
+        eventRoute({
+          id: 'audit-success-cancel',
+          match: { types: ['authority.audit-success-cancel'] },
+          action: 'wake',
+          target: eventTarget({
+            id: 'audit-success-cancel-target',
+            ai,
+            program: program(invoked),
+            mapInput: () => ({}),
+            retrySafety: 'idempotent',
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    const receipt = await runtime.publish(
+      ingress('audit-success-cancel-1', 'authority.audit-success-cancel')
+    );
+    await auditStart;
+    const closed = runtime.close({ drain: false });
+    await expect(
+      Promise.race([
+        closed.then(() => 'closed'),
+        new Promise((resolve) => setTimeout(() => resolve('timeout'), 100)),
+      ])
+    ).resolves.toBe('closed');
+    lateReject?.(new Error('late successful-audit rejection'));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(invoked).not.toHaveBeenCalled();
+    expect((await store.getDelivery(receipt.deliveryIds[0]!))?.status).toBe(
+      'cancelled'
+    );
+  });
+
+  it('does not return from close until an already-started redrive write settles', async () => {
+    const store = new AxInMemoryEventStore();
+    let releaseWrite!: () => void;
+    const writeGate = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
+    let writeStarted!: () => void;
+    const writeStart = new Promise<void>((resolve) => {
+      writeStarted = resolve;
+    });
+    let postCloseWrites = 0;
+    const write = vi.fn(async () => {
+      if (write.mock.calls.length === 1) {
+        throw new Error('synthetic sink failure');
+      }
+      writeStarted();
+      await writeGate;
+      postCloseWrites++;
+    });
+    const makeAuthority = (): AxAuthorityContext => ({
+      principal: { id: 'principal-a', tenantId: 'tenant-a' },
+      actor: { id: 'worker-a', kind: 'agent' },
+      grants: [
+        {
+          version: 1,
+          id: 'target-1',
+          principalId: 'principal-a',
+          operations: ['event.target.invoke'],
+          resources: [
+            {
+              type: 'event.target',
+              id: 'redrive-write-target',
+              tenantId: 'tenant-a',
+            },
+          ],
+          leaseEpoch: 1,
+        },
+        {
+          version: 1,
+          id: 'sink-1',
+          principalId: 'principal-a',
+          operations: ['event.sink.write'],
+          resources: [
+            {
+              type: 'event.sink',
+              id: 'redrive-write-sink',
+              tenantId: 'tenant-a',
+            },
+          ],
+          leaseEpoch: 1,
+        },
+      ],
+      leaseEpoch: 1,
+      now: () => 100,
+      authorize: (operation, context) => ({
+        version: 1,
+        receiptId: `receipt-${operation}`,
+        requestId: context.requestId,
+        decision: 'allow',
+        operation,
+        resource: context.resource,
+        principalId: context.principal.id,
+        actor: { id: context.actor.id, kind: context.actor.kind },
+        grantIds: context.grants.map((grant) => grant.id),
+        leaseEpoch: context.leaseEpoch,
+        authorizedAt: context.now,
+      }),
+    });
+    const runtime = new AxEventRuntime({
+      authority: () => makeAuthority(),
+      maxAttempts: 1,
+      store,
+      routes: [
+        eventRoute({
+          id: 'redrive-write-route',
+          match: { types: ['redrive.write'] },
+          action: 'wake',
+          target: eventTarget({
+            id: 'redrive-write-target',
+            ai,
+            program: program(() => ({ ok: true })),
+            mapInput: () => ({}),
+            retrySafety: 'idempotent',
+            sinks: [{ id: 'redrive-write-sink', write }],
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    await runtime.publish(ingress('redrive-write-1', 'redrive.write'));
+    await runtime.waitForIdle();
+    const deadLetter = (await runtime.listDeadLetters()).find(
+      (value) => value.kind === 'sink'
+    );
+    expect(deadLetter).toBeDefined();
+    const redrive = runtime.redrive(deadLetter!.id);
+    await writeStart;
+    let closeSettled = false;
+    const closed = runtime.close({ drain: false }).then(() => {
+      closeSettled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(closeSettled).toBe(false);
+    expect(postCloseWrites).toBe(0);
+    releaseWrite();
+    await expect(redrive).rejects.toThrow(/clos(ing|ed)/);
+    await closed;
+    expect(closeSettled).toBe(true);
+    expect(postCloseWrites).toBe(1);
+    expect(await runtime.listDeadLetters()).toContainEqual(deadLetter);
+  });
+
+  it('does not requeue a delivery dead letter after close returns', async () => {
+    const backing = new AxInMemoryEventStore();
+    let releaseLookup!: () => void;
+    const lookupGate = new Promise<void>((resolve) => {
+      releaseLookup = resolve;
+    });
+    let lookupStarted!: () => void;
+    const lookupStart = new Promise<void>((resolve) => {
+      lookupStarted = resolve;
+    });
+    let postCloseMutations = 0;
+    const store = new Proxy(backing, {
+      get(target, property, receiver) {
+        if (property === 'getDeadLetter') {
+          return async (id: string) => {
+            lookupStarted();
+            await lookupGate;
+            return target.getDeadLetter(id);
+          };
+        }
+        if (property === 'redriveDelivery' || property === 'removeDeadLetter') {
+          return async (...args: unknown[]) => {
+            postCloseMutations++;
+            const value = Reflect.get(target, property, receiver);
+            return (value as (...inner: unknown[]) => unknown).apply(
+              target,
+              args
+            );
+          };
+        }
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const runtime = new AxEventRuntime({
+      maxAttempts: 1,
+      store,
+      routes: [
+        eventRoute({
+          id: 'delivery-redrive',
+          match: { types: ['delivery.redrive'] },
+          action: 'observe',
+          observe: () => {
+            throw new Error('observed failure');
+          },
+        }),
+      ],
+    });
+    await runtime.start();
+    await runtime.publish(ingress('delivery-redrive-1', 'delivery.redrive'));
+    await runtime.waitForIdle();
+    const deadLetter = (await backing.listDeadLetters())[0];
+    expect(deadLetter?.kind).toBe('delivery');
+    const redrive = runtime.redrive(deadLetter!.id);
+    await lookupStart;
+    await runtime.close({ drain: false });
+    releaseLookup();
+    await expect(redrive).rejects.toThrow(/clos(ing|ed)/);
+    expect(postCloseMutations).toBe(0);
+    expect((await backing.getDelivery(deadLetter!.deliveryId))?.status).toBe(
+      'dead_lettered'
+    );
+  });
+
+  it('rejects a concurrent redrive of the same dead letter so close can abort the first', async () => {
+    const backing = new AxInMemoryEventStore();
+    let releaseLookup!: () => void;
+    const lookupGate = new Promise<void>((resolve) => {
+      releaseLookup = resolve;
+    });
+    let lookupStarted!: () => void;
+    const lookupStart = new Promise<void>((resolve) => {
+      lookupStarted = resolve;
+    });
+    const store = new Proxy(backing, {
+      get(target, property, receiver) {
+        if (property === 'getDeadLetter') {
+          return async (id: string) => {
+            lookupStarted();
+            await lookupGate;
+            return target.getDeadLetter(id);
+          };
+        }
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const runtime = new AxEventRuntime({
+      maxAttempts: 1,
+      store,
+      routes: [
+        eventRoute({
+          id: 'duplicate-redrive',
+          match: { types: ['duplicate.redrive'] },
+          action: 'observe',
+          observe: () => {
+            throw new Error('observed failure');
+          },
+        }),
+      ],
+    });
+    await runtime.start();
+    await runtime.publish(ingress('duplicate-redrive-1', 'duplicate.redrive'));
+    await runtime.waitForIdle();
+    const deadLetter = (await backing.listDeadLetters())[0];
+    expect(deadLetter).toBeDefined();
+    const first = runtime.redrive(deadLetter!.id);
+    await lookupStart;
+    await expect(runtime.redrive(deadLetter!.id)).rejects.toThrow(
+      /already being redriven/
+    );
+    const closed = runtime.close({ drain: false });
+    await expect(
+      Promise.race([
+        closed.then(() => 'closed'),
+        new Promise((resolve) => setTimeout(() => resolve('timeout'), 100)),
+      ])
+    ).resolves.toBe('closed');
+    releaseLookup();
+    await expect(first).rejects.toThrow(/clos(ing|ed)/);
+  });
+
+  it('does not emit unhandledRejection when a delayed lookup rejects after close', async () => {
+    const backing = new AxInMemoryEventStore();
+    let releaseLookup!: (reason?: unknown) => void;
+    const lookupGate = new Promise<void>((_resolve, reject) => {
+      releaseLookup = reject;
+    });
+    let lookupStarted!: () => void;
+    const lookupStart = new Promise<void>((resolve) => {
+      lookupStarted = resolve;
+    });
+    const store = new Proxy(backing, {
+      get(target, property, receiver) {
+        if (property === 'getDeadLetter') {
+          return async (id: string) => {
+            lookupStarted();
+            await lookupGate;
+            return target.getDeadLetter(id);
+          };
+        }
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const runtime = new AxEventRuntime({
+      maxAttempts: 1,
+      store,
+      routes: [
+        eventRoute({
+          id: 'late-reject-redrive',
+          match: { types: ['late.reject.redrive'] },
+          action: 'observe',
+          observe: () => {
+            throw new Error('observed failure');
+          },
+        }),
+      ],
+    });
+    await runtime.start();
+    await runtime.publish(ingress('late-reject-1', 'late.reject.redrive'));
+    await runtime.waitForIdle();
+    const deadLetter = (await backing.listDeadLetters())[0];
+    const redrive = runtime.redrive(deadLetter!.id);
+    await lookupStart;
+    const rejections: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      rejections.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    await runtime.close({ drain: false });
+    releaseLookup(new Error('late getDeadLetter rejection'));
+    await expect(redrive).rejects.toThrow(/clos(ing|ed)/);
+    await Promise.resolve();
+    await Promise.resolve();
+    process.off('unhandledRejection', onUnhandled);
+    expect(rejections).toEqual([]);
+  });
+
+  it('shares one close promise so a second close waits for redrive quiescence', async () => {
+    const store = new AxInMemoryEventStore();
+    let releaseWrite!: () => void;
+    const writeGate = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
+    let writeStarted!: () => void;
+    const writeStart = new Promise<void>((resolve) => {
+      writeStarted = resolve;
+    });
+    let writesAfterFirstCloseReturned = 0;
+    let firstCloseReturned = false;
+    const write = vi.fn(async () => {
+      if (write.mock.calls.length === 1) {
+        throw new Error('synthetic sink failure');
+      }
+      writeStarted();
+      await writeGate;
+      if (firstCloseReturned) writesAfterFirstCloseReturned++;
+    });
+    const makeAuthority = (): AxAuthorityContext => ({
+      principal: { id: 'principal-a', tenantId: 'tenant-a' },
+      actor: { id: 'worker-a', kind: 'agent' },
+      grants: [
+        {
+          version: 1,
+          id: 'target-1',
+          principalId: 'principal-a',
+          operations: ['event.target.invoke'],
+          resources: [
+            {
+              type: 'event.target',
+              id: 'shared-close-target',
+              tenantId: 'tenant-a',
+            },
+          ],
+          leaseEpoch: 1,
+        },
+        {
+          version: 1,
+          id: 'sink-1',
+          principalId: 'principal-a',
+          operations: ['event.sink.write'],
+          resources: [
+            {
+              type: 'event.sink',
+              id: 'shared-close-sink',
+              tenantId: 'tenant-a',
+            },
+          ],
+          leaseEpoch: 1,
+        },
+      ],
+      leaseEpoch: 1,
+      now: () => 100,
+      authorize: (operation, context) => ({
+        version: 1,
+        receiptId: `receipt-${operation}`,
+        requestId: context.requestId,
+        decision: 'allow',
+        operation,
+        resource: context.resource,
+        principalId: context.principal.id,
+        actor: { id: context.actor.id, kind: context.actor.kind },
+        grantIds: context.grants.map((grant) => grant.id),
+        leaseEpoch: context.leaseEpoch,
+        authorizedAt: context.now,
+      }),
+    });
+    const runtime = new AxEventRuntime({
+      authority: () => makeAuthority(),
+      maxAttempts: 1,
+      store,
+      routes: [
+        eventRoute({
+          id: 'shared-close-route',
+          match: { types: ['shared.close'] },
+          action: 'wake',
+          target: eventTarget({
+            id: 'shared-close-target',
+            ai,
+            program: program(() => ({ ok: true })),
+            mapInput: () => ({}),
+            retrySafety: 'idempotent',
+            sinks: [{ id: 'shared-close-sink', write }],
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    await runtime.publish(ingress('shared-close-1', 'shared.close'));
+    await runtime.waitForIdle();
+    const deadLetter = (await runtime.listDeadLetters()).find(
+      (value) => value.kind === 'sink'
+    );
+    const redrive = runtime.redrive(deadLetter!.id);
+    await writeStart;
+    const firstClose = runtime.close({ drain: false }).then(() => {
+      firstCloseReturned = true;
+    });
+    let secondReturnedEarly = false;
+    const secondClose = runtime.close({ drain: false }).then(() => {
+      if (!firstCloseReturned) secondReturnedEarly = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(firstCloseReturned).toBe(false);
+    expect(secondReturnedEarly).toBe(false);
+    releaseWrite();
+    await firstClose;
+    await secondClose;
+    await expect(redrive).rejects.toThrow(/clos(ing|ed)/);
+    expect(secondReturnedEarly).toBe(false);
+    expect(writesAfterFirstCloseReturned).toBe(0);
+  });
+
+  it('finishes dead-letter deletion after a committed delivery requeue even if close starts', async () => {
+    const backing = new AxInMemoryEventStore();
+    let releaseRedrive!: () => void;
+    const redriveGate = new Promise<void>((resolve) => {
+      releaseRedrive = resolve;
+    });
+    let redriveStarted!: () => void;
+    const redriveStart = new Promise<void>((resolve) => {
+      redriveStarted = resolve;
+    });
+    const store = new Proxy(backing, {
+      get(target, property, receiver) {
+        if (property === 'redriveDelivery') {
+          return async (deliveryId: string, now: number) => {
+            await target.redriveDelivery(deliveryId, now);
+            redriveStarted();
+            await redriveGate;
+          };
+        }
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const runtime = new AxEventRuntime({
+      maxAttempts: 1,
+      store,
+      routes: [
+        eventRoute({
+          id: 'atomic-delivery-redrive',
+          match: { types: ['atomic.delivery.redrive'] },
+          action: 'observe',
+          observe: () => {
+            throw new Error('observed failure');
+          },
+        }),
+      ],
+    });
+    await runtime.start();
+    await runtime.publish(
+      ingress('atomic-delivery-redrive-1', 'atomic.delivery.redrive')
+    );
+    await runtime.waitForIdle();
+    const deadLetter = (await backing.listDeadLetters())[0];
+    expect(deadLetter?.kind).toBe('delivery');
+    const redrive = runtime.redrive(deadLetter!.id);
+    await redriveStart;
+    expect(['queued', 'claimed', 'running']).toContain(
+      (await backing.getDelivery(deadLetter!.deliveryId))?.status
+    );
+    const closed = runtime.close({ drain: false });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    releaseRedrive();
+    await redrive;
+    await closed;
+    expect(await backing.listDeadLetters()).toEqual([]);
+    expect(
+      (await backing.getDelivery(deadLetter!.deliveryId))?.status
+    ).not.toBe('dead_lettered');
+  });
+
+  it('re-resolves current authority before sink dead-letter redrive', async () => {
+    const store = new AxInMemoryEventStore();
+    const write = vi
+      .fn<(output: unknown) => Promise<void>>()
+      .mockRejectedValueOnce(new Error('synthetic sink failure'))
+      .mockResolvedValue(undefined);
+    const makeAuthority = (
+      leaseEpoch: number,
+      includeSink: boolean
+    ): AxAuthorityContext => ({
+      principal: { id: 'principal-a', tenantId: 'tenant-a' },
+      actor: { id: 'worker-a', kind: 'agent' },
+      grants: [
+        {
+          version: 1,
+          id: `target-${leaseEpoch}`,
+          principalId: 'principal-a',
+          operations: ['event.target.invoke'],
+          resources: [
+            {
+              type: 'event.target',
+              id: 'redrive-target',
+              tenantId: 'tenant-a',
+            },
+          ],
+          leaseEpoch,
+        },
+        ...(includeSink
+          ? [
+              {
+                version: 1 as const,
+                id: `sink-${leaseEpoch}`,
+                principalId: 'principal-a',
+                operations: ['event.sink.write'],
+                resources: [
+                  {
+                    type: 'event.sink',
+                    id: 'redrive-sink',
+                    tenantId: 'tenant-a',
+                  },
+                ],
+                leaseEpoch,
+              },
+            ]
+          : []),
+      ],
+      leaseEpoch,
+      now: () => 100,
+      authorize: (operation, context) => ({
+        version: 1,
+        receiptId: `receipt-${leaseEpoch}-${operation}`,
+        requestId: context.requestId,
+        decision: 'allow',
+        operation,
+        resource: context.resource,
+        principalId: context.principal.id,
+        actor: { id: context.actor.id, kind: context.actor.kind },
+        grantIds: context.grants.map((grant) => grant.id),
+        leaseEpoch: context.leaseEpoch,
+        authorizedAt: context.now,
+      }),
+    });
+    let currentAuthority = makeAuthority(1, true);
+    const target = eventTarget({
+      id: 'redrive-target',
+      ai,
+      program: program(() => ({ ok: true })),
+      mapInput: () => ({}),
+      retrySafety: 'idempotent',
+      sinks: [{ id: 'redrive-sink', write }],
+    });
+    const runtime = new AxEventRuntime({
+      authority: () => currentAuthority,
+      maxAttempts: 1,
+      store,
+      routes: [
+        eventRoute({
+          id: 'redrive-route',
+          match: { types: ['redrive.event'] },
+          action: 'wake',
+          target,
+        }),
+      ],
+    });
+    await runtime.start();
+    await runtime.publish(ingress('redrive-1', 'redrive.event'));
+    await runtime.waitForIdle();
+    const deadLetter = (await runtime.listDeadLetters()).find(
+      (value) => value.kind === 'sink'
+    );
+    expect(deadLetter).toBeDefined();
+    expect(write).toHaveBeenCalledOnce();
+
+    currentAuthority = makeAuthority(2, false);
+    await expect(runtime.redrive(deadLetter!.id)).rejects.toMatchObject({
+      code: 'no_matching_grant',
+    });
+    expect(write).toHaveBeenCalledOnce();
+    expect(await runtime.listDeadLetters()).toContainEqual(deadLetter);
+
+    currentAuthority = makeAuthority(2, true);
+    await runtime.redrive(deadLetter!.id);
+    expect(write).toHaveBeenCalledTimes(2);
+    expect(await runtime.listDeadLetters()).not.toContainEqual(deadLetter);
     await runtime.close();
   });
 
@@ -505,6 +1541,258 @@ describe('AxEventRuntime', () => {
       expect.objectContaining({ message: 'timer failed' })
     );
     await runtime.close({ drain: false });
+  });
+
+  it('closes every started source when runtime startup or close runs', async () => {
+    const lifecycle: string[] = [];
+    const source = (id: string, fail = false) => ({
+      id,
+      start: async ({ signal }: { signal: AbortSignal }) => {
+        lifecycle.push(`${id}:start`);
+        if (fail) throw new Error(`${id}:failed`);
+        return {
+          close: () => {
+            expect(signal.aborted).toBe(true);
+            lifecycle.push(`${id}:close`);
+          },
+        };
+      },
+    });
+    const runtime = new AxEventRuntime({
+      routes: [],
+      sources: [source('first'), source('second')],
+    });
+    await runtime.start();
+    await runtime.close({ drain: false });
+    await runtime.close({ drain: false });
+    expect(lifecycle).toEqual([
+      'first:start',
+      'second:start',
+      'second:close',
+      'first:close',
+    ]);
+
+    lifecycle.length = 0;
+    const failing = new AxEventRuntime({
+      routes: [],
+      sources: [source('first'), source('broken', true)],
+    });
+    await expect(failing.start()).rejects.toThrow('broken:failed');
+    expect(lifecycle).toEqual(['first:start', 'broken:start', 'first:close']);
+  });
+
+  it('fences and cleans source startup that overlaps close', async () => {
+    const startupGate = deferred();
+    const firstStarted = deferred();
+    const lifecycle: string[] = [];
+    let liveSources = 0;
+    const runtime = new AxEventRuntime({
+      routes: [],
+      sources: [
+        {
+          id: 'first',
+          start: async ({ signal }) => {
+            lifecycle.push('first:start');
+            firstStarted.resolve();
+            await startupGate.promise;
+            liveSources++;
+            return {
+              close: () => {
+                expect(signal.aborted).toBe(true);
+                liveSources--;
+                lifecycle.push('first:close');
+              },
+            };
+          },
+        },
+        {
+          id: 'second',
+          start: () => {
+            liveSources++;
+            lifecycle.push('second:start');
+            return {
+              close: () => {
+                liveSources--;
+                lifecycle.push('second:close');
+              },
+            };
+          },
+        },
+      ],
+    });
+
+    const starting = runtime.start();
+    await firstStarted.promise;
+    const closing = runtime.close({ drain: false });
+    startupGate.resolve();
+    const [startResult, closeResult] = await Promise.allSettled([
+      starting,
+      closing,
+    ]);
+
+    expect(startResult.status).toBe('rejected');
+    expect(closeResult.status).toBe('fulfilled');
+    expect(lifecycle).toEqual(['first:start', 'first:close']);
+    expect(liveSources).toBe(0);
+    await Promise.resolve();
+    expect(lifecycle).toEqual(['first:start', 'first:close']);
+  });
+
+  it('aborts already-started sources immediately when a later start hangs', async () => {
+    const secondStarted = deferred();
+    const secondReleased = deferred();
+    const readyAborted = deferred();
+    const closed: string[] = [];
+    const runtime = new AxEventRuntime({
+      routes: [],
+      sources: [
+        {
+          id: 'ready',
+          start: async ({ signal }) => {
+            signal.addEventListener(
+              'abort',
+              () => {
+                readyAborted.resolve();
+              },
+              { once: true }
+            );
+            return {
+              close: () => {
+                expect(signal.aborted).toBe(true);
+                closed.push('ready');
+              },
+            };
+          },
+        },
+        {
+          id: 'hung',
+          start: async ({ signal }) => {
+            secondStarted.resolve();
+            await secondReleased.promise;
+            return {
+              close: () => {
+                expect(signal.aborted).toBe(true);
+                closed.push('hung');
+              },
+            };
+          },
+        },
+      ],
+    });
+    const starting = runtime.start();
+    await secondStarted.promise;
+    const closing = runtime.close({ drain: false });
+    await readyAborted.promise;
+    secondReleased.resolve();
+    await expect(starting).rejects.toThrow();
+    await closing;
+    expect(closed).toContain('ready');
+  });
+
+  it('rejects start while close is still tearing down', async () => {
+    const started = deferred();
+    const runtime = new AxEventRuntime({
+      routes: [],
+      sources: [
+        {
+          id: 'slow-close',
+          start: async () => {
+            started.resolve();
+            return {
+              close: () => new Promise(() => undefined),
+            };
+          },
+        },
+      ],
+    });
+    const starting = runtime.start();
+    await started.promise;
+    await starting;
+    const closing = runtime.close({ drain: false, timeoutMs: 10 });
+    await expect(runtime.start()).rejects.toThrow('is closing');
+    await expect(closing).resolves.toBeUndefined();
+  });
+
+  it('bounds a hanging source disposer and still closes the store', async () => {
+    const store = new AxInMemoryEventStore();
+    const closeStore = vi.spyOn(store, 'close');
+    const runtime = new AxEventRuntime({
+      routes: [],
+      store,
+      sources: [
+        {
+          id: 'hanging-disposer',
+          start: () => ({
+            close: () => new Promise<void>(() => undefined),
+          }),
+        },
+      ],
+    });
+    await runtime.start();
+
+    await expect(
+      Promise.race([
+        runtime.close({ drain: false, timeoutMs: 10 }).then(() => 'closed'),
+        new Promise((resolve) => setTimeout(() => resolve('hung'), 100)),
+      ])
+    ).resolves.toBe('closed');
+    expect(closeStore).toHaveBeenCalledOnce();
+  });
+
+  it('observes rejecting source-error callbacks without unhandled rejection', async () => {
+    const clock = new AxManualEventClock();
+    const callback = vi.fn(async () => {
+      throw new Error('source-error callback failed');
+    });
+    const runtime = new AxEventRuntime({
+      clock,
+      routes: [],
+      sources: [
+        new AxTimerEventSource({
+          id: 'rejecting-source-error-callback',
+          intervalMs: 10,
+          type: 'timer.tick',
+          clock,
+          data: () => {
+            throw new Error('timer failed');
+          },
+        }),
+      ],
+      onSourceError: callback,
+    });
+    await runtime.start();
+    clock.advanceBy(10);
+    for (let index = 0; index < 5; index++) await Promise.resolve();
+    expect(callback).toHaveBeenCalledOnce();
+    await runtime.close({ drain: false, timeoutMs: 50 });
+  });
+
+  it('contains throwing source-error callbacks without stopping the source', async () => {
+    const clock = new AxManualEventClock();
+    const callback = vi.fn(() => {
+      throw new Error('source-error callback failed');
+    });
+    const runtime = new AxEventRuntime({
+      clock,
+      routes: [],
+      sources: [
+        new AxTimerEventSource({
+          id: 'throwing-source-error-callback',
+          intervalMs: 10,
+          type: 'timer.tick',
+          clock,
+          data: () => {
+            throw new Error('timer failed');
+          },
+        }),
+      ],
+      onSourceError: callback,
+    });
+    await runtime.start();
+    clock.advanceBy(10);
+    for (let index = 0; index < 5; index++) await Promise.resolve();
+    expect(callback).toHaveBeenCalledOnce();
+    await runtime.close({ drain: false, timeoutMs: 50 });
   });
 
   it('contains synchronous and asynchronous onSourceError failures', async () => {

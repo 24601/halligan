@@ -1,3 +1,4 @@
+import { sha256 } from '../util/crypto.js';
 import type {
   AxEventContinuation,
   AxEventEffect,
@@ -63,6 +64,31 @@ export function axEventScopedCorrelationKey(
   value: string
 ): string {
   return `${identityScope}\n${kind}\n${value}`;
+}
+
+export function axEventCanonicalJson(value: unknown): string {
+  const normalize = (current: unknown): unknown => {
+    if (Array.isArray(current)) return current.map(normalize);
+    if (current && typeof current === 'object') {
+      return Object.fromEntries(
+        Object.keys(current)
+          .sort()
+          .filter(
+            (key) => (current as Record<string, unknown>)[key] !== undefined
+          )
+          .map((key) => [
+            key,
+            normalize((current as Record<string, unknown>)[key]),
+          ])
+      );
+    }
+    return current;
+  };
+  return JSON.stringify(normalize(value));
+}
+
+export async function axEventCanonicalDigest(value: unknown): Promise<string> {
+  return sha256(axEventCanonicalJson(value));
 }
 
 function assertPersistable(

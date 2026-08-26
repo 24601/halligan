@@ -15,8 +15,13 @@ import type {
 
 export type AxAppliedProposal = {
   proposal: AxAgentPlaybookEvolveProposal;
+  bulletIds: readonly string[];
   rollback: () => void;
 };
+
+const RESTORATION_FAILURE = Symbol.for(
+  '@ax-llm/ax/agent-playbook-restoration-failure'
+);
 
 /** The playbook text currently applied to the agent, fed to the miner. */
 export function currentPlaybookText(agent: any): string | undefined {
@@ -66,18 +71,47 @@ export async function applyProposal(args: {
     );
   }
   const snapshot = handle.getState();
-  await handle.update({
-    example: {
-      task: 'playbook.evolve(): repair a diagnosed agent weakness',
-      failureSignatures: [proposal.clusterSignature],
-    },
-    prediction: {},
-    feedback: proposal.feedback,
-  });
-  return {
-    proposal,
-    rollback: () => {
+  try {
+    await handle.update({
+      example: {
+        task: 'playbook.evolve(): repair a diagnosed agent weakness',
+        failureSignatures: [proposal.clusterSignature],
+      },
+      prediction: {},
+      feedback: proposal.feedback,
+      evidence: {
+        source: 'agent-evolve',
+        sourceRunId: proposal.clusterSignature,
+        feedbackIds: [proposal.weaknessId],
+      },
+    });
+    const updated = handle.getState();
+    const bulletIds: string[] = updated.artifact.history
+      .slice(snapshot.artifact.history.length)
+      .flatMap(
+        (entry: { updatedBulletIds?: string[] }): string[] =>
+          entry.updatedBulletIds ?? []
+      );
+    return {
+      proposal,
+      bulletIds: [...new Set(bulletIds)].sort(),
+      rollback: () => {
+        handle.load(snapshot);
+      },
+    };
+  } catch (applicationError) {
+    try {
       handle.load(snapshot);
-    },
-  };
+    } catch (rollbackError) {
+      const restorationError = new AggregateError(
+        [applicationError, rollbackError],
+        'AxAgent.playbook().evolve(): proposal update failed and exact rollback also failed.'
+      );
+      Object.defineProperty(restorationError, RESTORATION_FAILURE, {
+        value: true,
+      });
+      throw restorationError;
+    }
+    throw applicationError;
+  }
 }

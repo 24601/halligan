@@ -1,4 +1,5 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -62,6 +63,32 @@ function storeRequest(id: string, now: number) {
   };
 }
 
+function sqliteLogicalHash(filename: string): string {
+  const db = new Database(filename, { readonly: true });
+  const schema = db
+    .prepare(
+      `SELECT type, name, sql FROM sqlite_master
+       WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name`
+    )
+    .all();
+  const tables = (
+    db
+      .prepare(
+        `SELECT name FROM sqlite_master
+         WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`
+      )
+      .all() as Array<{ name: string }>
+  ).map(({ name }) => ({
+    name,
+    rows: db.prepare(`SELECT * FROM ${name} ORDER BY rowid`).all(),
+  }));
+  const version = db.pragma('user_version', { simple: true });
+  db.close();
+  return createHash('sha256')
+    .update(JSON.stringify({ version, schema, tables }))
+    .digest('hex');
+}
+
 afterEach(() => {
   for (const directory of directories.splice(0)) {
     rmSync(directory, { recursive: true, force: true });
@@ -86,7 +113,7 @@ describe('AxSQLiteEventStore', () => {
       { clock }
     );
     expect(report.assertions).toBeGreaterThanOrEqual(32);
-    expect(report.capability.conformance?.multiWorker).toBe('axevent-store-v6');
+    expect(report.capability.conformance?.multiWorker).toBe('axevent-store-v7');
   });
 
   it('requires explicit retention and WAL-enabled local storage', () => {
@@ -265,7 +292,13 @@ describe('AxSQLiteEventStore', () => {
 
     const legacy = new Database(filename);
     legacy.exec(`
+      DROP TABLE event_verifier_transitions;
+      DROP TABLE event_store_metadata;
       DROP TABLE event_effects;
+      DROP TABLE event_payload_stages;
+      DROP INDEX event_continuation_admission;
+      ALTER TABLE event_continuations DROP COLUMN admitted_delivery_id;
+      ALTER TABLE event_deliveries DROP COLUMN admitted_continuation_json;
       ALTER TABLE event_dedupe DROP COLUMN ingress_fingerprint;
       ALTER TABLE event_dedupe DROP COLUMN ingress_json;
       PRAGMA user_version = 1;
@@ -280,7 +313,7 @@ describe('AxSQLiteEventStore', () => {
         completedContinuationsMs: 1_000,
       },
     });
-    expect(migrated.capabilities.conformance.schemaVersion).toBe(6);
+    expect(migrated.capabilities.conformance.schemaVersion).toBe(7);
     expect(await migrated.getDelivery(receipt.deliveryIds[0]!)).toEqual(
       expect.objectContaining({ status: 'queued' })
     );
@@ -333,7 +366,14 @@ describe('AxSQLiteEventStore', () => {
 
     const legacy = new Database(filename);
     legacy.exec(`
+      DROP TABLE event_verifier_transitions;
+      DROP TABLE event_store_metadata;
+      DROP TABLE event_payload_stages;
+      DROP INDEX event_continuation_admission;
+      ALTER TABLE event_continuations DROP COLUMN admitted_delivery_id;
+      ALTER TABLE event_deliveries DROP COLUMN admitted_continuation_json;
       ALTER TABLE event_dedupe DROP COLUMN ingress_fingerprint;
+      ALTER TABLE event_dedupe DROP COLUMN ingress_json;
       UPDATE event_effects
       SET effect_json=json_remove(effect_json, '$.requestDigest');
       PRAGMA user_version = 2;
@@ -396,6 +436,12 @@ describe('AxSQLiteEventStore', () => {
 
     const legacy = new Database(filename);
     legacy.exec(`
+      DROP TABLE event_verifier_transitions;
+      DROP TABLE event_store_metadata;
+      DROP TABLE event_payload_stages;
+      DROP INDEX event_continuation_admission;
+      ALTER TABLE event_continuations DROP COLUMN admitted_delivery_id;
+      ALTER TABLE event_deliveries DROP COLUMN admitted_continuation_json;
       ALTER TABLE event_dedupe DROP COLUMN ingress_fingerprint;
       PRAGMA user_version = 2;
     `);
@@ -412,7 +458,7 @@ describe('AxSQLiteEventStore', () => {
     await migrated.close();
 
     const verified = new Database(filename);
-    expect(verified.pragma('user_version', { simple: true })).toBe(6);
+    expect(verified.pragma('user_version', { simple: true })).toBe(7);
     expect(
       verified
         .prepare(
@@ -443,6 +489,12 @@ describe('AxSQLiteEventStore', () => {
 
     const legacy = new Database(filename);
     legacy.exec(`
+      DROP TABLE event_verifier_transitions;
+      DROP TABLE event_store_metadata;
+      DROP TABLE event_payload_stages;
+      DROP INDEX event_continuation_admission;
+      ALTER TABLE event_continuations DROP COLUMN admitted_delivery_id;
+      ALTER TABLE event_deliveries DROP COLUMN admitted_continuation_json;
       ALTER TABLE event_dedupe DROP COLUMN ingress_fingerprint;
       ALTER TABLE event_dedupe DROP COLUMN ingress_json;
       UPDATE event_dedupe SET created_at=0;
@@ -476,6 +528,12 @@ describe('AxSQLiteEventStore', () => {
 
     const legacy = new Database(filename);
     legacy.exec(`
+      DROP TABLE event_verifier_transitions;
+      DROP TABLE event_store_metadata;
+      DROP TABLE event_payload_stages;
+      DROP INDEX event_continuation_admission;
+      ALTER TABLE event_continuations DROP COLUMN admitted_delivery_id;
+      ALTER TABLE event_deliveries DROP COLUMN admitted_continuation_json;
       ALTER TABLE event_dedupe DROP COLUMN ingress_fingerprint;
       ALTER TABLE event_dedupe DROP COLUMN ingress_json;
       PRAGMA user_version = 2;
@@ -1361,8 +1419,669 @@ describe('AxSQLiteEventStore', () => {
         clock.now()
       )
     ).resolves.toEqual(pendingContinuation);
-    expect(migrated.capabilities.conformance.schemaVersion).toBe(6);
+    expect(migrated.capabilities.conformance.schemaVersion).toBe(7);
     await migrated.close();
+  });
+
+  it('classifies row-bearing effect and verifier lineages by shape, not user_version', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    for (const lineage of [
+      'fingerprint',
+      'payload',
+      'admission',
+      'verifier',
+    ] as const) {
+      const filename = join(directory, `${lineage}.sqlite`);
+      const clock = new AxManualEventClock(1_000);
+      const initial = new AxSQLiteEventStore({
+        filename,
+        clock,
+        retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+      });
+      const receipt = await initial.enqueue(
+        storeRequest(`lineage-${lineage}`, clock.now())
+      );
+      const claimed = (await initial.claim(
+        'lineage-worker',
+        clock.now(),
+        100
+      ))!;
+      await initial.declareEffect(
+        {
+          id: `lineage-${lineage}-effect`,
+          deliveryId: claimed.id,
+          runId: `lineage-${lineage}-run`,
+          identityScope: claimed.identityScope,
+          operation: 'lineage.write',
+          idempotencyKey: `lineage-${lineage}-key`,
+          replaySafety: 'idempotent',
+          createdAt: clock.now(),
+        },
+        { deliveryId: claimed.id, fencingToken: claimed.fencingToken! }
+      );
+      await initial.close();
+
+      const legacy = new Database(filename);
+      if (lineage !== 'verifier') {
+        legacy.exec(`
+          DROP TABLE event_verifier_transitions;
+          DROP TABLE event_store_metadata;
+        `);
+      }
+      if (lineage === 'fingerprint') {
+        legacy.exec('DROP TABLE event_payload_stages;');
+      }
+      if (lineage === 'fingerprint' || lineage === 'payload') {
+        legacy.exec(`
+          DROP INDEX event_continuation_admission;
+          ALTER TABLE event_continuations DROP COLUMN admitted_delivery_id;
+          ALTER TABLE event_deliveries DROP COLUMN admitted_continuation_json;
+        `);
+      } else if (lineage === 'verifier') {
+        legacy.exec(`
+          DROP TABLE event_effects;
+          DROP TABLE event_payload_stages;
+          DROP INDEX event_continuation_admission;
+          ALTER TABLE event_continuations DROP COLUMN admitted_delivery_id;
+          ALTER TABLE event_deliveries DROP COLUMN admitted_continuation_json;
+          ALTER TABLE event_dedupe DROP COLUMN ingress_fingerprint;
+          ALTER TABLE event_dedupe DROP COLUMN ingress_json;
+        `);
+      }
+      legacy.pragma(`user_version = ${lineage === 'payload' ? 1 : 6}`);
+      legacy.close();
+
+      const migrated = new AxSQLiteEventStore({
+        filename,
+        clock,
+        retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+      });
+      expect(await migrated.getDelivery(receipt.deliveryIds[0]!)).toEqual(
+        expect.objectContaining({ id: receipt.deliveryIds[0] })
+      );
+      expect(migrated.capabilities).toEqual(
+        expect.objectContaining({
+          effectLedger: true,
+          verifierTransitions: 'axevent-verifier-transition-v2',
+          conformance: expect.objectContaining({ schemaVersion: 7 }),
+        })
+      );
+      if (lineage === 'verifier') {
+        expect(await migrated.listEffects(receipt.deliveryIds[0]!)).toEqual([]);
+      } else {
+        expect(await migrated.listEffects(receipt.deliveryIds[0]!)).toEqual([
+          expect.objectContaining({ id: `lineage-${lineage}-effect` }),
+        ]);
+      }
+      await migrated.close();
+      const verified = new Database(filename);
+      expect(verified.pragma('user_version', { simple: true })).toBe(7);
+      expect(
+        verified
+          .prepare(
+            `SELECT name FROM sqlite_master WHERE type='table' AND name IN
+             ('event_effects','event_payload_stages','event_verifier_transitions','event_store_metadata')
+             ORDER BY name`
+          )
+          .all()
+      ).toEqual([
+        { name: 'event_effects' },
+        { name: 'event_payload_stages' },
+        { name: 'event_store_metadata' },
+        { name: 'event_verifier_transitions' },
+      ]);
+      verified.close();
+    }
+  });
+
+  it('normalizes row-bearing verifier-v2 and verifier-v3 journals idempotently', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    for (const lineage of ['legacy-v2', 'compact-v3'] as const) {
+      const filename = join(directory, `${lineage}.sqlite`);
+      const initial = new AxSQLiteEventStore({
+        filename,
+        retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+      });
+      await initial.enqueue(storeRequest(`${lineage}-core`, 1_000));
+      await initial.close();
+      const fixture = new Database(filename);
+      fixture.exec('DROP TABLE event_store_metadata;');
+      if (lineage === 'legacy-v2') {
+        fixture.exec(`
+          DROP TABLE event_verifier_transitions;
+          CREATE TABLE event_verifier_transitions (
+            operation_id TEXT PRIMARY KEY,
+            request_json TEXT NOT NULL,
+            record_json TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+          );
+        `);
+        const child = {
+          id: 'legacy-verifier-child',
+          sequence: 2,
+          ingress: storeRequest('legacy-verifier-child', 1_000).ingress,
+          identityScope: 'tenantId=tenant',
+          routeId: 'route',
+          action: 'wake',
+          targetId: 'target',
+          instanceKey: 'legacy-verifier-child',
+          status: 'queued',
+          attempt: 0,
+          availableAt: 1_000,
+          acceptedAt: 1_000,
+          sizeBytes: 128,
+          retrySafety: 'idempotent',
+          ordering: 'strict',
+          fencingToken: 0,
+          invocationStarted: false,
+        };
+        fixture
+          .prepare(`INSERT INTO event_verifier_transitions VALUES(?,?,?,?)`)
+          .run(
+            'legacy-verifier-operation',
+            JSON.stringify({ operationId: 'legacy-verifier-operation' }),
+            JSON.stringify({
+              receipt: {
+                eventId: 'legacy-verifier-child',
+                accepted: true,
+                duplicate: false,
+                durability: 'persistent',
+                deliveryIds: [child.id],
+              },
+              child,
+            }),
+            1_000
+          );
+      } else {
+        fixture
+          .prepare(`INSERT INTO event_verifier_transitions VALUES(?,?,?,?,?,?)`)
+          .run(
+            'compact-verifier-operation',
+            'request-commitment',
+            JSON.stringify({
+              eventId: 'compact-verifier-child',
+              accepted: true,
+              duplicate: false,
+              durability: 'persistent',
+              deliveryIds: ['compact-verifier-child'],
+            }),
+            'compact-verifier-child',
+            'child-commitment',
+            1_000
+          );
+      }
+      fixture.pragma(`user_version = ${lineage === 'legacy-v2' ? 4 : 2}`);
+      fixture.close();
+
+      let migrated = new AxSQLiteEventStore({
+        filename,
+        retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+      });
+      const operationId =
+        lineage === 'legacy-v2'
+          ? 'legacy-verifier-operation'
+          : 'compact-verifier-operation';
+      const migratedDb = (migrated as any).db as Database.Database;
+      expect(
+        migratedDb
+          .prepare(
+            `SELECT child_delivery_id, receipt_json
+             FROM event_verifier_transitions WHERE operation_id=?`
+          )
+          .get(operationId)
+      ).toEqual(
+        expect.objectContaining({
+          child_delivery_id:
+            lineage === 'legacy-v2'
+              ? 'legacy-verifier-child'
+              : 'compact-verifier-child',
+          receipt_json: expect.stringContaining('"accepted":true'),
+        })
+      );
+      expect(
+        migratedDb
+          .prepare(
+            `SELECT 1 FROM event_store_metadata
+             WHERE metadata_key='verifier-v2-cleanup-pending'`
+          )
+          .get()
+      ).toBeUndefined();
+      await migrated.close();
+      const expectedHash = sqliteLogicalHash(filename);
+      migrated = new AxSQLiteEventStore({
+        filename,
+        retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+      });
+      await migrated.close();
+      expect(sqliteLogicalHash(filename)).toBe(expectedHash);
+    }
+  });
+
+  it('rejects future and partial schemas without mutating schema or version', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    for (const malformed of ['future', 'partial'] as const) {
+      const filename = join(directory, `${malformed}.sqlite`);
+      const initial = new AxSQLiteEventStore({
+        filename,
+        retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+      });
+      await initial.enqueue(storeRequest(`malformed-${malformed}`, Date.now()));
+      await initial.close();
+      const fixture = new Database(filename);
+      if (malformed === 'future') {
+        fixture.pragma('user_version = 8');
+      } else {
+        fixture.exec('DROP INDEX event_payload_stage_run;');
+        fixture.pragma('user_version = 5');
+      }
+      const beforeVersion = fixture.pragma('user_version', {
+        simple: true,
+      });
+      const beforeSchema = fixture
+        .prepare(
+          `SELECT type, name, sql FROM sqlite_master
+           WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name`
+        )
+        .all();
+      fixture.close();
+
+      expect(
+        () =>
+          new AxSQLiteEventStore({
+            filename,
+            retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+          })
+      ).toThrow(
+        malformed === 'future' ? 'Unsupported' : 'payload staging schema'
+      );
+      const after = new Database(filename);
+      expect(after.pragma('user_version', { simple: true })).toBe(
+        beforeVersion
+      );
+      expect(
+        after
+          .prepare(
+            `SELECT type, name, sql FROM sqlite_master
+             WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name`
+          )
+          .all()
+      ).toEqual(beforeSchema);
+      after.close();
+    }
+  });
+
+  it('rolls back every migration phase when legacy row normalization fails', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const filename = join(directory, 'rollback.sqlite');
+    const clock = new AxManualEventClock(1_000);
+    const initial = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    await initial.enqueue(storeRequest('rollback', clock.now()));
+    const claimed = (await initial.claim('rollback-worker', clock.now(), 100))!;
+    await initial.declareEffect(
+      {
+        id: 'rollback-effect',
+        deliveryId: claimed.id,
+        runId: 'rollback-run',
+        identityScope: claimed.identityScope,
+        operation: 'rollback.write',
+        idempotencyKey: 'rollback-key',
+        replaySafety: 'idempotent',
+        createdAt: clock.now(),
+      },
+      { deliveryId: claimed.id, fencingToken: claimed.fencingToken! }
+    );
+    await initial.close();
+    const legacy = new Database(filename);
+    legacy.exec(`
+      DROP TABLE event_verifier_transitions;
+      DROP TABLE event_store_metadata;
+      DROP TABLE event_payload_stages;
+      DROP INDEX event_continuation_admission;
+      ALTER TABLE event_continuations DROP COLUMN admitted_delivery_id;
+      ALTER TABLE event_deliveries DROP COLUMN admitted_continuation_json;
+      ALTER TABLE event_dedupe DROP COLUMN ingress_fingerprint;
+      ALTER TABLE event_dedupe DROP COLUMN ingress_json;
+      UPDATE event_effects SET effect_json='not-json';
+      PRAGMA user_version = 2;
+    `);
+    const beforeSchema = legacy
+      .prepare(
+        `SELECT type, name, sql FROM sqlite_master
+         WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name`
+      )
+      .all();
+    legacy.close();
+
+    expect(
+      () =>
+        new AxSQLiteEventStore({
+          filename,
+          clock,
+          retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+        })
+    ).toThrow();
+    const after = new Database(filename);
+    expect(after.pragma('user_version', { simple: true })).toBe(2);
+    expect(
+      after
+        .prepare(
+          `SELECT type, name, sql FROM sqlite_master
+           WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name`
+        )
+        .all()
+    ).toEqual(beforeSchema);
+    expect(
+      (after.pragma('table_info(event_dedupe)') as Array<{ name: string }>).map(
+        ({ name }) => name
+      )
+    ).not.toContain('ingress_fingerprint');
+    after.close();
+  });
+
+  it('rolls back a late final assertion after every v7 migration phase', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const filename = join(directory, 'late-rollback.sqlite');
+    const initial = new AxSQLiteEventStore({
+      filename,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    await initial.enqueue(storeRequest('late-rollback', 1_000));
+    await initial.close();
+    const legacy = new Database(filename);
+    legacy.exec(`
+      DROP TABLE event_effects;
+      DROP TABLE event_payload_stages;
+      DROP INDEX event_continuation_admission;
+      ALTER TABLE event_continuations DROP COLUMN admitted_delivery_id;
+      ALTER TABLE event_deliveries DROP COLUMN admitted_continuation_json;
+      ALTER TABLE event_dedupe DROP COLUMN ingress_fingerprint;
+      ALTER TABLE event_dedupe DROP COLUMN ingress_json;
+      DROP TABLE event_store_metadata;
+      INSERT INTO event_verifier_transitions VALUES(
+        'late-verifier-operation',
+        'request-commitment',
+        'not-json',
+        'late-verifier-child',
+        'child-commitment',
+        1000
+      );
+      PRAGMA user_version = 3;
+    `);
+    const beforeSchema = legacy
+      .prepare(
+        `SELECT type, name, sql FROM sqlite_master
+         WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name`
+      )
+      .all();
+    legacy.close();
+
+    expect(
+      () =>
+        new AxSQLiteEventStore({
+          filename,
+          retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+        })
+    ).toThrow('malformed verifier data');
+    const after = new Database(filename);
+    expect(after.pragma('user_version', { simple: true })).toBe(3);
+    expect(
+      after
+        .prepare(
+          `SELECT type, name, sql FROM sqlite_master
+           WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name`
+        )
+        .all()
+    ).toEqual(beforeSchema);
+    expect(
+      after
+        .prepare(
+          `SELECT name FROM sqlite_master WHERE type='table' AND name IN
+           ('event_effects','event_payload_stages','event_store_metadata')`
+        )
+        .all()
+    ).toEqual([]);
+    after.close();
+  });
+
+  it('is logically hash-idempotent across repeated v7 reopen migrations', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const filename = join(directory, 'idempotent.sqlite');
+    const clock = new AxManualEventClock(1_000);
+    let store = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    await store.enqueue(storeRequest('idempotent', clock.now()));
+    const claimed = (await store.claim('idempotent-worker', clock.now(), 100))!;
+    await store.declareEffect(
+      {
+        id: 'idempotent-effect',
+        deliveryId: claimed.id,
+        runId: 'idempotent-run',
+        identityScope: claimed.identityScope,
+        operation: 'idempotent.write',
+        idempotencyKey: 'idempotent-key',
+        replaySafety: 'idempotent',
+        createdAt: clock.now(),
+      },
+      { deliveryId: claimed.id, fencingToken: claimed.fencingToken! }
+    );
+    await store.close();
+    const expectedHash = sqliteLogicalHash(filename);
+    for (let reopen = 0; reopen < 3; reopen++) {
+      store = new AxSQLiteEventStore({
+        filename,
+        clock,
+        retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+      });
+      await store.close();
+      expect(sqliteLogicalHash(filename)).toBe(expectedHash);
+    }
+  });
+
+  it('completes the verifier migration WAL cleanup handshake after commit', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const filename = join(directory, 'wal-cleanup.sqlite');
+    const initial = new AxSQLiteEventStore({
+      filename,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    await initial.close();
+    const sensitive = 'verifier-v2-sensitive-migration-row';
+    const legacy = new Database(filename);
+    legacy.pragma('secure_delete = ON');
+    legacy.exec(`
+      CREATE TABLE migration_crash_sentinel(value TEXT NOT NULL);
+      INSERT INTO migration_crash_sentinel(value) VALUES('${sensitive}');
+      DROP TABLE migration_crash_sentinel;
+      INSERT OR REPLACE INTO event_store_metadata(metadata_key, metadata_value)
+      VALUES('verifier-v2-cleanup-pending', '1');
+    `);
+    expect(
+      readFileSync(`${filename}-wal`).includes(Buffer.from(sensitive))
+    ).toBe(true);
+
+    const cleanup = new AxSQLiteEventStore({
+      filename,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    expect(
+      (cleanup as any).db
+        .prepare(
+          `SELECT 1 FROM event_store_metadata
+           WHERE metadata_key='verifier-v2-cleanup-pending'`
+        )
+        .get()
+    ).toBeUndefined();
+    await cleanup.close();
+    legacy.close();
+    for (const entry of readdirSync(directory)) {
+      expect(
+        readFileSync(join(directory, entry)).includes(Buffer.from(sensitive))
+      ).toBe(false);
+    }
+  });
+
+  it('atomically fences ordinary, verifier, and resume completion on nonterminal effects', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const clock = new AxManualEventClock(1_000);
+    const store = new AxSQLiteEventStore({
+      filename: join(directory, 'effect-fences.sqlite'),
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    const receipt = await store.enqueue(
+      storeRequest('effect-fence', clock.now())
+    );
+    const claimed = (await store.claim('effect-worker', clock.now(), 100))!;
+    await store.saveDelivery({
+      ...claimed,
+      status: 'running',
+      invocationStarted: true,
+    });
+    await store.declareEffect(
+      {
+        id: 'effect-fence-intent',
+        deliveryId: claimed.id,
+        runId: 'effect-fence-run',
+        identityScope: claimed.identityScope,
+        operation: 'effect-fence.write',
+        idempotencyKey: 'effect-fence-key',
+        replaySafety: 'idempotent',
+        createdAt: clock.now(),
+      },
+      { deliveryId: claimed.id, fencingToken: claimed.fencingToken! }
+    );
+    for (const status of ['succeeded', 'waiting_event'] as const) {
+      await expect(store.saveDelivery({ ...claimed, status })).rejects.toThrow(
+        'nonterminal effect'
+      );
+      expect(await store.getDelivery(receipt.deliveryIds[0]!)).toEqual(
+        expect.objectContaining({ status: 'running' })
+      );
+    }
+
+    const verifierRequest = {
+      operationId: 'effect-fence-transition',
+      childDeliveryId: 'effect-fence-child',
+      parent: {
+        delivery: {
+          ...claimed,
+          status: 'waiting_event' as const,
+          runId: 'effect-fence-run',
+        },
+        run: {
+          id: 'effect-fence-run',
+          deliveryId: claimed.id,
+          routeId: claimed.routeId,
+          targetId: claimed.targetId,
+          instanceKey: claimed.instanceKey,
+          claimedBy: claimed.claimedBy,
+          fencingToken: claimed.fencingToken,
+          status: 'waiting_event' as const,
+          attempt: 1,
+          startedAt: clock.now(),
+          finishedAt: clock.now(),
+        },
+        expectedFencingToken: claimed.fencingToken!,
+      },
+      child: storeRequest('effect-fence-child', clock.now()),
+      continuation: {
+        id: 'effect-fence-continuation',
+        targetId: 'target',
+        routeId: 'route',
+        instanceKey: 'effect-fence-child',
+        identityScope: claimed.identityScope,
+        correlation: [{ kind: 'effect', value: 'child' }],
+        createdAt: clock.now(),
+      },
+    };
+    await expect(store.transitionVerifier(verifierRequest)).rejects.toThrow(
+      'nonterminal effect'
+    );
+    expect(await store.getDelivery('effect-fence-child')).toBeUndefined();
+    expect(
+      await store.confirmVerifierTransition(verifierRequest)
+    ).toBeUndefined();
+
+    const continuation: AxEventContinuation = {
+      id: 'resume-effect-continuation',
+      targetId: 'target',
+      routeId: 'route',
+      instanceKey: 'resume-effect',
+      identityScope: claimed.identityScope,
+      correlation: [{ kind: 'resume-effect', value: 'one' }],
+      createdAt: clock.now(),
+    };
+    await store.registerContinuation(continuation);
+    const resumeReceipt = await store.enqueue({
+      ...storeRequest('resume-effect', clock.now()),
+      deliveries: [
+        {
+          routeId: 'route',
+          action: 'resume',
+          targetId: 'target',
+          instanceKey: 'resume-effect',
+          sizeBytes: 128,
+          retrySafety: 'effect-aware',
+          ordering: 'strict',
+        },
+      ],
+    });
+    const resume = (await store.claim('resume-worker', clock.now(), 100))!;
+    expect(resume.id).toBe(resumeReceipt.deliveryIds[0]);
+    const admitted = await store.admitContinuation(
+      resume.id,
+      resume.claimedBy!,
+      resume.fencingToken!,
+      continuation.identityScope,
+      continuation.correlation[0]!,
+      clock.now()
+    );
+    await store.declareEffect(
+      {
+        id: 'resume-effect-intent',
+        deliveryId: resume.id,
+        runId: 'resume-effect-run',
+        identityScope: resume.identityScope,
+        operation: 'resume-effect.write',
+        idempotencyKey: 'resume-effect-key',
+        replaySafety: 'idempotent',
+        createdAt: clock.now(),
+      },
+      { deliveryId: resume.id, fencingToken: resume.fencingToken! }
+    );
+    await expect(
+      store.saveDeliveryAndCompleteContinuation({
+        ...resume,
+        admittedContinuation: admitted,
+        status: 'succeeded',
+      })
+    ).rejects.toThrow('nonterminal effect');
+    expect(
+      await store.findContinuation(
+        continuation.identityScope,
+        continuation.correlation[0]!,
+        clock.now()
+      )
+    ).toEqual(continuation);
+    expect(await store.getDelivery(resume.id)).toEqual(
+      expect.objectContaining({ status: 'claimed' })
+    );
+    await store.close();
   });
 
   it('exclusively admits a continuation across concurrent SQLite runtimes', async () => {
@@ -2457,10 +3176,14 @@ describe('AxSQLiteEventStore', () => {
     expect(deadLetter).toEqual(
       expect.objectContaining({ kind: 'sink', sinkId: 'failing-sink' })
     );
-    await runtime.redrive(deadLetter!.id);
-    await runtime.waitForIdle();
+    await expect(runtime.redrive(deadLetter!.id)).rejects.toThrow(
+      'sink unavailable'
+    );
     expect(modelCalls).toBe(1);
-    expect(sinkCalls).toBe(4);
+    expect(sinkCalls).toBe(3);
+    await expect(runtime.listDeadLetters()).resolves.toEqual([
+      expect.objectContaining({ id: deadLetter!.id }),
+    ]);
     await runtime.close({ drain: false });
   });
 

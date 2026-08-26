@@ -2,6 +2,7 @@ export interface AxGEPAEvaluationBatch<Traj = any, Out = any> {
   outputs: Out[];
   scores: number[];
   scoreVectors?: Record<string, number>[];
+  feedback?: Array<string | undefined>;
   trajectories?: Traj[] | null;
 }
 

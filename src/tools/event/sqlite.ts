@@ -3,6 +3,7 @@ import {
   AxEventBackpressureError,
   type AxEventClock,
   type AxEventContinuation,
+  type AxEventContinuationEnqueueRequest,
   type AxEventCorrelationKey,
   type AxEventDeadLetter,
   type AxEventDelivery,
@@ -18,10 +19,13 @@ import {
   type AxEventRun,
   type AxEventStagedPayloadStore,
   type AxEventStore,
+  type AxEventVerifierTransitionRecord,
+  type AxEventVerifierTransitionRequest,
   type AxProgramStateEnvelope,
   type AxProgramStateStore,
   AxSystemEventClock,
   axApplyEventEffectTransition,
+  axEventCanonicalJson,
   axEventContinuationFingerprint,
   axEventEffectRequestDigest,
   axEventEffectRequestFingerprint,
@@ -34,14 +38,16 @@ import {
 } from '@ax-llm/ax';
 import Database from 'better-sqlite3';
 
-const SCHEMA_VERSION = 6;
-const MULTI_WORKER_CONFORMANCE = 'axevent-store-v6';
+const SCHEMA_VERSION = 7;
+const MULTI_WORKER_CONFORMANCE = 'axevent-store-v7';
+const VERIFIER_MIGRATION_CLEANUP_KEY = 'verifier-v2-cleanup-pending';
 const MAX_FENCING_TOKEN = Number.MAX_SAFE_INTEGER;
 const LEGACY_UNVERIFIABLE_INGRESS_PREFIX = 'legacy-unverifiable:';
 const TERMINAL = [
   'waiting_event',
   'succeeded',
   'failed',
+  'verification_failed',
   'cancelled',
   'dead_lettered',
   'output_persistence_failed',
@@ -122,6 +128,12 @@ type PayloadStageRow = {
   expires_at: number;
   state: 'staging' | 'commit_pending' | 'committed' | 'abort_pending';
 };
+
+type AxSQLiteEventMigrationShape = Readonly<{
+  empty: boolean;
+  effects: 'absent' | 'ledger' | 'fingerprint' | 'payload' | 'admission';
+  verifier: 'absent' | 'legacy-v2' | 'compact-v3' | 'current-v4';
+}>;
 
 function parseContinuationAdmission(
   deliveryId: string,
@@ -205,6 +217,7 @@ export class AxSQLiteEventStore
       multiWorker: MULTI_WORKER_CONFORMANCE,
       schemaVersion: SCHEMA_VERSION,
     },
+    verifierTransitions: 'axevent-verifier-transition-v2',
   } as const;
 
   private readonly db: Database.Database;
@@ -232,7 +245,9 @@ export class AxSQLiteEventStore
     this.db.pragma(`busy_timeout = ${options.busyTimeoutMs ?? 5_000}`);
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
+    this.db.pragma('secure_delete = ON');
     this.migrate();
+    this.completeVerifierMigrationCleanup();
     this.prune(this.clock.now());
   }
 
@@ -258,6 +273,169 @@ export class AxSQLiteEventStore
       if (remaining <= 0) throw new AxEventBackpressureError();
       await this.clock.sleep(Math.min(25, remaining), signal);
     }
+  }
+
+  async enqueueContinuation(
+    request: Readonly<AxEventContinuationEnqueueRequest>,
+    signal?: AbortSignal
+  ): Promise<AxEventPublishReceipt> {
+    const eventBytes = Buffer.byteLength(
+      JSON.stringify(request.enqueue.ingress)
+    );
+    if (eventBytes > this.maxEventBytes) {
+      throw new AxEventBackpressureError(
+        `Event is ${eventBytes} bytes; maximum is ${this.maxEventBytes}`
+      );
+    }
+    const deadline = this.clock.now() + request.enqueue.publishTimeoutMs;
+    for (;;) {
+      if (signal?.aborted) throw signal.reason;
+      const result = this.db.transaction(() => {
+        const receipt = this.tryEnqueue(request.enqueue);
+        if (!receipt) return;
+        if (receipt.duplicate) {
+          this.assertContinuationMatch(request.continuation);
+        } else {
+          this.insertContinuation(request.continuation);
+        }
+        return receipt;
+      })();
+      if (result) return result;
+      const remaining = deadline - this.clock.now();
+      if (remaining <= 0) throw new AxEventBackpressureError();
+      await this.clock.sleep(Math.min(25, remaining), signal);
+    }
+  }
+
+  async transitionVerifier(
+    request: Readonly<AxEventVerifierTransitionRequest>,
+    signal?: AbortSignal
+  ): Promise<AxEventPublishReceipt> {
+    if (signal?.aborted) {
+      throw signal.reason ?? new Error('Verifier transition cancelled');
+    }
+    const eventBytes = Buffer.byteLength(JSON.stringify(request.child.ingress));
+    if (eventBytes > this.maxEventBytes) {
+      throw new AxEventBackpressureError(
+        `Event is ${eventBytes} bytes; maximum is ${this.maxEventBytes}`
+      );
+    }
+    const requestCommitment = this.canonicalCommitment(request);
+    const expectedChildCommitment = this.canonicalCommitment(
+      this.verifierChildProjection(request)
+    );
+    return this.db.transaction(() => {
+      const journal = this.readVerifierTransition(request.operationId);
+      if (journal) {
+        this.assertVerifierTransitionRequest(
+          journal,
+          request,
+          requestCommitment,
+          expectedChildCommitment
+        );
+        return { ...journal.receipt, duplicate: true };
+      }
+      const parent = this.db
+        .prepare('SELECT * FROM event_deliveries WHERE id=?')
+        .get(request.parent.delivery.id) as DeliveryRow | undefined;
+      if (
+        !parent ||
+        parent.fencing_token !== request.parent.expectedFencingToken ||
+        (parent.status !== 'claimed' && parent.status !== 'running')
+      ) {
+        throw new Error(
+          `Stale verifier transition for ${request.parent.delivery.id}`
+        );
+      }
+      if (
+        request.parent.delivery.status !== 'waiting_event' ||
+        request.parent.run.status !== 'waiting_event' ||
+        request.child.deliveries.length !== 1
+      ) {
+        throw new Error('Verifier transition requires one waiting child');
+      }
+
+      this.assertNoNonterminalEffects(request.parent.delivery.id);
+      this.updateDelivery(request.parent.delivery);
+      const receipt = this.tryEnqueue(request.child, [request.childDeliveryId]);
+      if (!receipt) throw new AxEventBackpressureError();
+      if (receipt.duplicate) {
+        throw new Error(
+          `Verifier transition child is already owned: ${request.childDeliveryId}`
+        );
+      }
+      this.insertContinuation(request.continuation);
+      if (request.consumeContinuationId) {
+        this.completeContinuationNow(request.consumeContinuationId);
+      }
+      this.saveTransitionRun(request.parent.run);
+      const child = this.db
+        .prepare('SELECT * FROM event_deliveries WHERE id=?')
+        .get(request.childDeliveryId) as DeliveryRow | undefined;
+      if (!child)
+        throw new Error('Verifier transition child was not persisted');
+      const persistedChild = this.rowToDelivery(child);
+      const childCommitment = this.canonicalCommitment(
+        this.persistedChildProjection(persistedChild)
+      );
+      if (childCommitment !== expectedChildCommitment) {
+        throw new Error('Verifier transition child does not match request');
+      }
+      const record: AxEventVerifierTransitionRecord = {
+        operationId: request.operationId,
+        requestCommitment,
+        receipt,
+        childDeliveryId: request.childDeliveryId,
+        childCommitment,
+      };
+      this.db
+        .prepare(
+          `INSERT INTO event_verifier_transitions
+           (operation_id, request_commitment, receipt_json, child_delivery_id,
+            child_commitment, created_at)
+           VALUES(?,?,?,?,?,?)`
+        )
+        .run(
+          request.operationId,
+          record.requestCommitment,
+          JSON.stringify(record.receipt),
+          record.childDeliveryId,
+          record.childCommitment,
+          this.clock.now()
+        );
+      return receipt;
+    })();
+  }
+
+  async confirmVerifierTransition(
+    request: Readonly<AxEventVerifierTransitionRequest>
+  ): Promise<Readonly<AxEventPublishReceipt> | undefined> {
+    const requestCommitment = this.canonicalCommitment(request);
+    const expectedChildCommitment = this.canonicalCommitment(
+      this.verifierChildProjection(request)
+    );
+    const record = this.readVerifierTransition(request.operationId);
+    if (!record) return;
+    this.assertVerifierTransitionRequest(
+      record,
+      request,
+      requestCommitment,
+      expectedChildCommitment
+    );
+    const child = this.db
+      .prepare('SELECT * FROM event_deliveries WHERE id=?')
+      .get(record.childDeliveryId) as DeliveryRow | undefined;
+    if (
+      child &&
+      this.canonicalCommitment(
+        this.persistedChildProjection(this.rowToDelivery(child))
+      ) !== record.childCommitment
+    ) {
+      throw new Error(
+        `Verifier transition child is corrupt: ${request.operationId}`
+      );
+    }
+    return record.receipt;
   }
 
   async claim(
@@ -357,70 +535,78 @@ export class AxSQLiteEventStore
   }
 
   async saveDelivery(delivery: Readonly<AxEventDelivery>): Promise<void> {
+    this.db.transaction(() => this.updateDelivery(delivery)).immediate();
+  }
+
+  private updateDelivery(delivery: Readonly<AxEventDelivery>): void {
     if (!delivery.claimedBy || delivery.fencingToken === undefined) {
       throw new Error(`Stale event claim for ${delivery.id}`);
     }
     this.assertSafeFencingToken(delivery.id, delivery.fencingToken);
+    if (
+      delivery.status === 'succeeded' ||
+      delivery.status === 'waiting_event'
+    ) {
+      this.assertNoNonterminalEffects(delivery.id);
+    }
+    const persisted = this.db
+      .prepare(
+        `SELECT admitted_continuation_json FROM event_deliveries
+         WHERE id=? AND claimed_by=? AND fencing_token=?
+           AND status IN ('claimed','running')
+           AND lease_expires_at > ?`
+      )
+      .get(
+        delivery.id,
+        delivery.claimedBy,
+        delivery.fencingToken,
+        this.clock.now()
+      ) as { admitted_continuation_json: string | null } | undefined;
+    if (!persisted) {
+      throw new Error(`Stale or expired event claim for ${delivery.id}`);
+    }
+    if (delivery.admittedContinuation) {
+      if (persisted.admitted_continuation_json === null) {
+        throw new Error(
+          `Continuation admission for ${delivery.id} must be created atomically`
+        );
+      }
+      const admitted = parseContinuationAdmission(
+        delivery.id,
+        persisted.admitted_continuation_json
+      );
+      if (
+        axEventContinuationFingerprint(admitted) !==
+        axEventContinuationFingerprint(delivery.admittedContinuation)
+      ) {
+        throw new Error(
+          `Continuation admission for ${delivery.id} is immutable`
+        );
+      }
+    }
     const result = this.db
-      .transaction(() => {
-        const persisted = this.db
-          .prepare(
-            `SELECT admitted_continuation_json FROM event_deliveries
-             WHERE id=? AND claimed_by=? AND fencing_token=?
-               AND status IN ('claimed','running')
-               AND lease_expires_at > ?`
-          )
-          .get(
-            delivery.id,
-            delivery.claimedBy,
-            delivery.fencingToken,
-            this.clock.now()
-          ) as { admitted_continuation_json: string | null } | undefined;
-        if (!persisted) return { changes: 0 };
-        if (delivery.admittedContinuation) {
-          if (persisted.admitted_continuation_json === null) {
-            throw new Error(
-              `Continuation admission for ${delivery.id} must be created atomically`
-            );
-          }
-          const admitted = parseContinuationAdmission(
-            delivery.id,
-            persisted.admitted_continuation_json
-          );
-          if (
-            axEventContinuationFingerprint(admitted) !==
-            axEventContinuationFingerprint(delivery.admittedContinuation)
-          ) {
-            throw new Error(
-              `Continuation admission for ${delivery.id} is immutable`
-            );
-          }
-        }
-        return this.db
-          .prepare(
-            `UPDATE event_deliveries SET
-              status=?, attempt=?, available_at=?, run_id=?, error=?,
-              invocation_started=?, retry_safety=?, ordering_mode=?
-             WHERE id=? AND claimed_by=? AND fencing_token=?
-               AND status IN ('claimed','running')
-               AND lease_expires_at > ?`
-          )
-          .run(
-            delivery.status,
-            delivery.attempt,
-            delivery.availableAt,
-            delivery.runId ?? null,
-            delivery.error ?? null,
-            delivery.invocationStarted ? 1 : 0,
-            delivery.retrySafety,
-            delivery.ordering,
-            delivery.id,
-            delivery.claimedBy,
-            delivery.fencingToken,
-            this.clock.now()
-          );
-      })
-      .immediate();
+      .prepare(
+        `UPDATE event_deliveries SET
+          status=?, attempt=?, available_at=?, run_id=?, error=?,
+          invocation_started=?, retry_safety=?, ordering_mode=?
+         WHERE id=? AND claimed_by=? AND fencing_token=?
+           AND status IN ('claimed','running')
+           AND lease_expires_at > ?`
+      )
+      .run(
+        delivery.status,
+        delivery.attempt,
+        delivery.availableAt,
+        delivery.runId ?? null,
+        delivery.error ?? null,
+        delivery.invocationStarted ? 1 : 0,
+        delivery.retrySafety,
+        delivery.ordering,
+        delivery.id,
+        delivery.claimedBy,
+        delivery.fencingToken,
+        this.clock.now()
+      );
     if (result.changes !== 1) {
       throw new Error(`Stale or expired event claim for ${delivery.id}`);
     }
@@ -641,34 +827,7 @@ export class AxSQLiteEventStore
   async registerContinuation(
     continuation: Readonly<AxEventContinuation>
   ): Promise<void> {
-    this.db.transaction(() => {
-      this.db
-        .prepare(
-          `INSERT INTO event_continuations
-           (id, identity_scope, continuation_json, created_at, expires_at)
-           VALUES(?,?,?,?,?)`
-        )
-        .run(
-          continuation.id,
-          continuation.identityScope,
-          JSON.stringify(continuation),
-          continuation.createdAt,
-          continuation.expiresAt ?? null
-        );
-      const insert = this.db.prepare(
-        'INSERT INTO event_continuation_keys(correlation_key, continuation_id) VALUES(?,?)'
-      );
-      for (const correlation of continuation.correlation) {
-        insert.run(
-          axEventScopedCorrelationKey(
-            continuation.identityScope,
-            correlation.kind,
-            correlation.value
-          ),
-          continuation.id
-        );
-      }
-    })();
+    this.db.transaction(() => this.insertContinuation(continuation))();
   }
 
   async findContinuation(
@@ -866,6 +1025,7 @@ export class AxSQLiteEventStore
     this.assertSafeFencingToken(delivery.id, delivery.fencingToken);
     const result = this.db
       .transaction(() => {
+        this.assertNoNonterminalEffects(delivery.id);
         const persisted = this.db
           .prepare(
             `SELECT admitted_continuation_json FROM event_deliveries
@@ -978,16 +1138,7 @@ export class AxSQLiteEventStore
   }
 
   async completeContinuation(id: string): Promise<void> {
-    this.db.transaction(() => {
-      this.db
-        .prepare('DELETE FROM event_continuation_keys WHERE continuation_id=?')
-        .run(id);
-      this.db
-        .prepare(
-          'UPDATE event_continuations SET completed_at=? WHERE id=? AND completed_at IS NULL'
-        )
-        .run(this.clock.now(), id);
-    })();
+    this.db.transaction(() => this.completeContinuationNow(id))();
   }
 
   async addDeadLetter(deadLetter: Readonly<AxEventDeadLetter>): Promise<void> {
@@ -1771,7 +1922,8 @@ export class AxSQLiteEventStore
   }
 
   private tryEnqueue(
-    request: Readonly<AxEventEnqueueRequest>
+    request: Readonly<AxEventEnqueueRequest>,
+    deliveryIdsOverride?: readonly string[]
   ): AxEventPublishReceipt | undefined {
     return this.db.transaction((): AxEventPublishReceipt | undefined => {
       const dedupeKey = axEventScopedDedupeKey(request.ingress);
@@ -1836,6 +1988,12 @@ export class AxSQLiteEventStore
         return;
       }
       const deliveryIds: string[] = [];
+      if (
+        deliveryIdsOverride &&
+        deliveryIdsOverride.length !== request.deliveries.length
+      ) {
+        throw new Error('Explicit event delivery IDs do not match deliveries');
+      }
       const insert = this.db.prepare(
         `INSERT INTO event_deliveries(
           id, ingress_json, identity_scope, route_id, action, target_id,
@@ -1843,8 +2001,8 @@ export class AxSQLiteEventStore
           retry_safety, ordering_mode
         ) VALUES(?,?,?,?,?,?,?,'queued',0,?,?,?,?,?)`
       );
-      for (const descriptor of request.deliveries) {
-        const id = randomUUID();
+      for (const [index, descriptor] of request.deliveries.entries()) {
+        const id = deliveryIdsOverride?.[index] ?? randomUUID();
         deliveryIds.push(id);
         insert.run(
           id,
@@ -1884,6 +2042,238 @@ export class AxSQLiteEventStore
         deliveryIds,
       };
     })();
+  }
+
+  private insertContinuation(
+    continuation: Readonly<AxEventContinuation>
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO event_continuations
+         (id, identity_scope, continuation_json, created_at, expires_at)
+         VALUES(?,?,?,?,?)`
+      )
+      .run(
+        continuation.id,
+        continuation.identityScope,
+        JSON.stringify(continuation),
+        continuation.createdAt,
+        continuation.expiresAt ?? null
+      );
+    const insert = this.db.prepare(
+      'INSERT INTO event_continuation_keys(correlation_key, continuation_id) VALUES(?,?)'
+    );
+    for (const correlation of continuation.correlation) {
+      insert.run(
+        axEventScopedCorrelationKey(
+          continuation.identityScope,
+          correlation.kind,
+          correlation.value
+        ),
+        continuation.id
+      );
+    }
+  }
+
+  private completeContinuationNow(id: string): void {
+    this.db
+      .prepare('DELETE FROM event_continuation_keys WHERE continuation_id=?')
+      .run(id);
+    this.db
+      .prepare(
+        'UPDATE event_continuations SET completed_at=? WHERE id=? AND completed_at IS NULL'
+      )
+      .run(this.clock.now(), id);
+  }
+
+  private getDuplicateReceipt(
+    ingress: Readonly<AxEventEnqueueRequest['ingress']>
+  ): AxEventPublishReceipt | undefined {
+    const row = this.db
+      .prepare(
+        'SELECT event_id, delivery_ids_json FROM event_dedupe WHERE dedupe_key=?'
+      )
+      .get(axEventScopedDedupeKey(ingress)) as
+      | { event_id: string; delivery_ids_json: string }
+      | undefined;
+    return row
+      ? {
+          eventId: row.event_id,
+          accepted: true,
+          duplicate: true,
+          durability: 'persistent',
+          deliveryIds: JSON.parse(row.delivery_ids_json) as string[],
+        }
+      : undefined;
+  }
+
+  private saveTransitionRun(run: Readonly<AxEventRun>): void {
+    const existing = this.db
+      .prepare('SELECT run_json FROM event_runs WHERE id=?')
+      .get(run.id) as { run_json: string } | undefined;
+    if (!existing) throw new Error(`Unknown event run: ${run.id}`);
+    const previous = JSON.parse(existing.run_json) as AxEventRun;
+    const stored = previous.outputRef
+      ? {
+          ...run,
+          output: undefined,
+          chunks: undefined,
+          outputRef: previous.outputRef,
+        }
+      : run;
+    if (
+      Buffer.byteLength(JSON.stringify(stored)) > this.maxInlinePayloadBytes
+    ) {
+      throw new Error(
+        `output_persistence_failed: run ${run.id} metadata exceeded ${this.maxInlinePayloadBytes} inline bytes`
+      );
+    }
+    this.db
+      .prepare(
+        `UPDATE event_runs SET run_json=?, updated_at=?, finished_at=?
+         WHERE id=? AND delivery_id=?`
+      )
+      .run(
+        JSON.stringify(stored),
+        this.clock.now(),
+        run.finishedAt ?? null,
+        run.id,
+        run.deliveryId
+      );
+  }
+
+  private assertContinuationMatch(
+    requested: Readonly<AxEventContinuation>
+  ): void {
+    const row = this.db
+      .prepare(
+        `SELECT continuation_json FROM event_continuations
+         WHERE id=? AND completed_at IS NULL`
+      )
+      .get(requested.id) as { continuation_json: string } | undefined;
+    if (!row) {
+      throw new Error(
+        `Duplicate resume event has no active continuation: ${requested.id}`
+      );
+    }
+    const existing = JSON.parse(row.continuation_json) as AxEventContinuation;
+    if (JSON.stringify(existing) !== JSON.stringify(requested)) {
+      throw new Error(
+        `Event continuation id is already owned: ${requested.id}`
+      );
+    }
+  }
+
+  private readVerifierTransition(
+    operationId: string
+  ): AxEventVerifierTransitionRecord | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT operation_id, request_commitment, receipt_json,
+                child_delivery_id, child_commitment
+         FROM event_verifier_transitions
+         WHERE operation_id=?`
+      )
+      .get(operationId) as
+      | {
+          operation_id: string;
+          request_commitment: string;
+          receipt_json: string;
+          child_delivery_id: string;
+          child_commitment: string;
+        }
+      | undefined;
+    if (!row) return;
+    return {
+      operationId: row.operation_id,
+      requestCommitment: row.request_commitment,
+      receipt: JSON.parse(row.receipt_json) as AxEventPublishReceipt,
+      childDeliveryId: row.child_delivery_id,
+      childCommitment: row.child_commitment,
+    };
+  }
+
+  private assertVerifierTransitionRequest(
+    record: Readonly<AxEventVerifierTransitionRecord>,
+    request: Readonly<AxEventVerifierTransitionRequest>,
+    requestCommitment: string,
+    childCommitment: string
+  ): void {
+    if (
+      record.operationId !== request.operationId ||
+      record.requestCommitment !== requestCommitment ||
+      record.childDeliveryId !== request.childDeliveryId ||
+      record.childCommitment !== childCommitment ||
+      axEventCanonicalJson(record.receipt) !==
+        axEventCanonicalJson({
+          eventId: request.child.ingress.event.id,
+          accepted: true,
+          duplicate: false,
+          durability: 'persistent',
+          deliveryIds: [request.childDeliveryId],
+        })
+    ) {
+      throw new Error(
+        `Verifier transition operation is already owned: ${request.operationId}`
+      );
+    }
+  }
+
+  private verifierChildProjection(
+    request: Readonly<AxEventVerifierTransitionRequest>
+  ): Omit<
+    AxEventDelivery,
+    | 'sequence'
+    | 'status'
+    | 'attempt'
+    | 'claimedBy'
+    | 'runId'
+    | 'error'
+    | 'leaseExpiresAt'
+    | 'fencingToken'
+    | 'invocationStarted'
+    | 'recoveredFromExpiredLease'
+  > {
+    const descriptor = request.child.deliveries[0]!;
+    return {
+      id: request.childDeliveryId,
+      ingress: request.child.ingress,
+      identityScope: axEventIdentityScope(request.child.ingress.identity),
+      routeId: descriptor.routeId,
+      action: descriptor.action,
+      ...(descriptor.targetId ? { targetId: descriptor.targetId } : {}),
+      instanceKey: descriptor.instanceKey,
+      availableAt: descriptor.availableAt ?? request.child.acceptedAt,
+      acceptedAt: request.child.acceptedAt,
+      sizeBytes: descriptor.sizeBytes,
+      retrySafety: descriptor.retrySafety ?? 'unknown',
+      ordering: descriptor.ordering ?? 'strict',
+    };
+  }
+
+  private persistedChildProjection(
+    delivery: Readonly<AxEventDelivery>
+  ): ReturnType<AxSQLiteEventStore['verifierChildProjection']> {
+    return {
+      id: delivery.id,
+      ingress: delivery.ingress,
+      identityScope: delivery.identityScope,
+      routeId: delivery.routeId,
+      action: delivery.action,
+      ...(delivery.targetId ? { targetId: delivery.targetId } : {}),
+      instanceKey: delivery.instanceKey,
+      availableAt: delivery.availableAt,
+      acceptedAt: delivery.acceptedAt,
+      sizeBytes: delivery.sizeBytes,
+      retrySafety: delivery.retrySafety,
+      ordering: delivery.ordering,
+    };
+  }
+
+  private canonicalCommitment(value: unknown): string {
+    return createHash('sha256')
+      .update(axEventCanonicalJson(value))
+      .digest('hex');
   }
 
   private rowToDelivery(row: DeliveryRow): AxEventDelivery {
@@ -2013,6 +2403,19 @@ export class AxSQLiteEventStore
     }
   }
 
+  private assertNoNonterminalEffects(deliveryId: string): void {
+    const pending = this.db
+      .prepare(
+        `SELECT 1 FROM event_effects
+         WHERE delivery_id=? AND status IN ('intent','dispatched','parked')
+         LIMIT 1`
+      )
+      .get(deliveryId);
+    if (pending) {
+      throw new Error(`Event delivery ${deliveryId} has a nonterminal effect`);
+    }
+  }
+
   private assertSafeFencingToken(
     deliveryId: string,
     fencingToken: number
@@ -2036,15 +2439,483 @@ export class AxSQLiteEventStore
     }
   }
 
-  private migrate(): void {
-    let version = this.db.pragma('user_version', { simple: true }) as number;
-    if (version > SCHEMA_VERSION) {
-      throw new Error(`Unsupported AxSQLiteEventStore schema ${version}`);
+  private tableColumns(table: string): string[] {
+    return (
+      this.db.pragma(`table_info(${table})`) as ReadonlyArray<{ name: string }>
+    ).map((column) => column.name);
+  }
+
+  private hasExactColumns(table: string, expected: readonly string[]): boolean {
+    const actual = this.tableColumns(table);
+    return (
+      actual.length === expected.length &&
+      actual.every((column, index) => column === expected[index])
+    );
+  }
+
+  private indexColumns(index: string): string[] {
+    return (
+      this.db.pragma(`index_info(${index})`) as ReadonlyArray<{
+        seqno: number;
+        name: string;
+      }>
+    )
+      .toSorted((left, right) => left.seqno - right.seqno)
+      .map((column) => column.name);
+  }
+
+  private hasExactIndex(index: string, expected: readonly string[]): boolean {
+    const actual = this.indexColumns(index);
+    return (
+      actual.length === expected.length &&
+      actual.every((column, position) => column === expected[position])
+    );
+  }
+
+  private hasUniqueIndex(table: string, expected: readonly string[]): boolean {
+    const indexes = this.db.pragma(`index_list(${table})`) as ReadonlyArray<{
+      name: string;
+      unique: 0 | 1;
+    }>;
+    return indexes.some(
+      (index) => index.unique === 1 && this.hasExactIndex(index.name, expected)
+    );
+  }
+
+  private inspectMigrationShape(
+    reportedVersion: number
+  ): AxSQLiteEventMigrationShape {
+    if (!Number.isSafeInteger(reportedVersion) || reportedVersion < 0) {
+      throw new Error(
+        `Unsupported AxSQLiteEventStore schema ${reportedVersion}`
+      );
     }
-    if (version === 0) {
+    if (reportedVersion > SCHEMA_VERSION) {
+      throw new Error(
+        `Unsupported AxSQLiteEventStore schema ${reportedVersion}`
+      );
+    }
+
+    const coreTables = [
+      'event_deliveries',
+      'event_dedupe',
+      'event_runs',
+      'event_continuations',
+      'event_continuation_keys',
+      'event_dead_letters',
+      'event_program_state',
+    ] as const;
+    const corePresence = coreTables.map(
+      (table) => this.tableColumns(table).length > 0
+    );
+    if (corePresence.every((present) => !present)) {
+      const featureTables = [
+        'event_effects',
+        'event_payload_stages',
+        'event_verifier_transitions',
+        'event_store_metadata',
+      ];
+      if (featureTables.some((table) => this.tableColumns(table).length > 0)) {
+        throw new Error('Malformed partial AxSQLiteEventStore schema');
+      }
+      return { empty: true, effects: 'absent', verifier: 'absent' };
+    }
+    if (!corePresence.every(Boolean)) {
+      throw new Error('Malformed partial AxSQLiteEventStore core schema');
+    }
+
+    const deliveryBase = [
+      'sequence',
+      'id',
+      'ingress_json',
+      'identity_scope',
+      'route_id',
+      'action',
+      'target_id',
+      'instance_key',
+      'status',
+      'attempt',
+      'available_at',
+      'accepted_at',
+      'claimed_by',
+      'run_id',
+      'error',
+      'size_bytes',
+      'retry_safety',
+      'ordering_mode',
+      'lease_expires_at',
+      'fencing_token',
+      'invocation_started',
+    ] as const;
+    const continuationBase = [
+      'id',
+      'identity_scope',
+      'continuation_json',
+      'created_at',
+      'expires_at',
+      'completed_at',
+    ] as const;
+    const dedupeBase = [
+      'dedupe_key',
+      'event_id',
+      'delivery_ids_json',
+      'created_at',
+    ] as const;
+    const deliveryLegacy = this.hasExactColumns(
+      'event_deliveries',
+      deliveryBase
+    );
+    const deliveryAdmission = this.hasExactColumns('event_deliveries', [
+      ...deliveryBase,
+      'admitted_continuation_json',
+    ]);
+    const continuationLegacy = this.hasExactColumns(
+      'event_continuations',
+      continuationBase
+    );
+    const continuationAdmission = this.hasExactColumns('event_continuations', [
+      ...continuationBase,
+      'admitted_delivery_id',
+    ]);
+    const dedupeLegacy = this.hasExactColumns('event_dedupe', dedupeBase);
+    const dedupeIngress =
+      this.hasExactColumns('event_dedupe', [
+        'dedupe_key',
+        'event_id',
+        'delivery_ids_json',
+        'ingress_json',
+        'created_at',
+      ]) ||
+      this.hasExactColumns('event_dedupe', [...dedupeBase, 'ingress_json']);
+    const dedupeFingerprint =
+      this.hasExactColumns('event_dedupe', [
+        'dedupe_key',
+        'event_id',
+        'delivery_ids_json',
+        'ingress_json',
+        'ingress_fingerprint',
+        'created_at',
+      ]) ||
+      this.hasExactColumns('event_dedupe', [
+        'dedupe_key',
+        'event_id',
+        'delivery_ids_json',
+        'ingress_json',
+        'created_at',
+        'ingress_fingerprint',
+      ]) ||
+      this.hasExactColumns('event_dedupe', [
+        'dedupe_key',
+        'event_id',
+        'delivery_ids_json',
+        'created_at',
+        'ingress_json',
+        'ingress_fingerprint',
+      ]);
+    if (
+      (!deliveryLegacy && !deliveryAdmission) ||
+      (!continuationLegacy && !continuationAdmission) ||
+      (!dedupeLegacy && !dedupeIngress && !dedupeFingerprint) ||
+      !this.hasExactColumns('event_runs', [
+        'id',
+        'delivery_id',
+        'run_json',
+        'updated_at',
+        'finished_at',
+      ]) ||
+      !this.hasExactColumns('event_continuation_keys', [
+        'correlation_key',
+        'continuation_id',
+      ]) ||
+      !this.hasExactColumns('event_dead_letters', [
+        'id',
+        'delivery_id',
+        'dead_letter_json',
+        'created_at',
+      ]) ||
+      !this.hasExactColumns('event_program_state', [
+        'state_key',
+        'revision',
+        'state_json',
+        'updated_at',
+      ]) ||
+      !this.hasExactIndex('event_delivery_claim', [
+        'status',
+        'available_at',
+        'lease_expires_at',
+        'sequence',
+      ])
+    ) {
+      throw new Error('Malformed AxSQLiteEventStore core table or index shape');
+    }
+
+    const admissionIndexSql = (
       this.db
-        .transaction(() =>
-          this.db.exec(`
+        .prepare(
+          `SELECT sql FROM sqlite_master WHERE type='index' AND name='event_continuation_admission'`
+        )
+        .get() as { sql: string | null } | undefined
+    )?.sql
+      ?.replaceAll(/\s+/g, ' ')
+      .toLowerCase();
+    const hasAdmissionIndex =
+      this.hasUniqueIndex('event_continuations', ['admitted_delivery_id']) &&
+      Boolean(
+        admissionIndexSql?.includes('where admitted_delivery_id is not null')
+      );
+    const admissionSignals = [
+      deliveryAdmission,
+      continuationAdmission,
+      hasAdmissionIndex,
+    ];
+    if (!admissionSignals.every(Boolean) && admissionSignals.some(Boolean)) {
+      throw new Error('Malformed partial continuation admission schema');
+    }
+    if (
+      admissionSignals.every(Boolean) &&
+      (!dedupeFingerprint || deliveryLegacy || continuationLegacy)
+    ) {
+      throw new Error('Malformed continuation admission lineage');
+    }
+
+    const effectColumns = this.tableColumns('event_effects');
+    const effects = effectColumns.length > 0;
+    if (
+      effects &&
+      (!this.hasExactColumns('event_effects', [
+        'id',
+        'delivery_id',
+        'operation',
+        'idempotency_key',
+        'status',
+        'effect_json',
+        'created_at',
+        'updated_at',
+        'settled_at',
+      ]) ||
+        !this.hasUniqueIndex('event_effects', [
+          'delivery_id',
+          'operation',
+          'idempotency_key',
+        ]) ||
+        !this.hasExactIndex('event_effects_delivery', [
+          'delivery_id',
+          'status',
+          'created_at',
+        ]))
+    ) {
+      throw new Error('Malformed event effect ledger schema');
+    }
+    if (
+      !effects &&
+      (dedupeIngress || dedupeFingerprint || admissionSignals.some(Boolean))
+    ) {
+      throw new Error('Malformed partial event effect schema');
+    }
+
+    const payloadColumns = this.tableColumns('event_payload_stages');
+    const payload = payloadColumns.length > 0;
+    const payloadTableSql = (
+      this.db
+        .prepare(
+          `SELECT sql FROM sqlite_master WHERE type='table' AND name='event_payload_stages'`
+        )
+        .get() as { sql: string | null } | undefined
+    )?.sql
+      ?.replaceAll(/\s+/g, '')
+      .toLowerCase();
+    if (
+      payload &&
+      (!effects ||
+        !dedupeFingerprint ||
+        !this.hasExactColumns('event_payload_stages', [
+          'stage_id',
+          'run_id',
+          'delivery_id',
+          'fencing_token',
+          'reference',
+          'size_bytes',
+          'expires_at',
+          'state',
+          'created_at',
+          'updated_at',
+        ]) ||
+        !this.hasExactIndex('event_payload_stage_state', [
+          'state',
+          'expires_at',
+        ]) ||
+        !this.hasExactIndex('event_payload_stage_run', ['run_id']) ||
+        !payloadTableSql?.includes(
+          "check(statein('staging','commit_pending','committed','abort_pending'))"
+        ))
+    ) {
+      throw new Error('Malformed partial event payload staging schema');
+    }
+    if (admissionSignals.every(Boolean) && !payload) {
+      throw new Error(
+        'Malformed continuation admission without payload schema'
+      );
+    }
+
+    const journal = this.tableColumns('event_verifier_transitions');
+    const metadata = this.tableColumns('event_store_metadata');
+    let verifier: AxSQLiteEventMigrationShape['verifier'];
+    if (journal.length === 0) {
+      if (metadata.length > 0) {
+        throw new Error('Malformed partial event verifier schema');
+      }
+      verifier = 'absent';
+    } else if (
+      this.hasExactColumns('event_verifier_transitions', [
+        'operation_id',
+        'request_json',
+        'record_json',
+        'created_at',
+      ])
+    ) {
+      if (metadata.length > 0) {
+        throw new Error('Malformed mixed event verifier schema');
+      }
+      verifier = 'legacy-v2';
+    } else if (
+      this.hasExactColumns('event_verifier_transitions', [
+        'operation_id',
+        'request_commitment',
+        'receipt_json',
+        'child_delivery_id',
+        'child_commitment',
+        'created_at',
+      ])
+    ) {
+      if (metadata.length === 0) {
+        verifier = 'compact-v3';
+      } else if (
+        this.hasExactColumns('event_store_metadata', [
+          'metadata_key',
+          'metadata_value',
+        ])
+      ) {
+        verifier = 'current-v4';
+      } else {
+        throw new Error('Malformed event verifier metadata schema');
+      }
+    } else {
+      throw new Error('Malformed event verifier transition journal');
+    }
+
+    const effectLineage: AxSQLiteEventMigrationShape['effects'] =
+      admissionSignals.every(Boolean)
+        ? 'admission'
+        : payload
+          ? 'payload'
+          : dedupeFingerprint
+            ? 'fingerprint'
+            : effects
+              ? 'ledger'
+              : 'absent';
+
+    return {
+      empty: false,
+      effects: effectLineage,
+      verifier,
+    };
+  }
+
+  private assertCombinedSchema(): void {
+    const shape = this.inspectMigrationShape(SCHEMA_VERSION);
+    if (
+      shape.empty ||
+      shape.effects !== 'admission' ||
+      shape.verifier !== 'current-v4' ||
+      !this.tableColumns('event_payload_stages').length ||
+      !this.tableColumns('event_deliveries').includes(
+        'admitted_continuation_json'
+      )
+    ) {
+      throw new Error('AxSQLiteEventStore v7 migration is incomplete');
+    }
+    const missingFingerprint = this.db
+      .prepare(
+        `SELECT 1 FROM event_dedupe
+         WHERE ingress_fingerprint IS NULL LIMIT 1`
+      )
+      .get();
+    if (missingFingerprint) {
+      throw new Error(
+        'Cannot safely migrate event dedupe rows without canonical ingress fingerprints'
+      );
+    }
+    const malformedDedupe = this.db
+      .prepare(
+        `SELECT 1 FROM event_dedupe
+         WHERE json_valid(delivery_ids_json)=0
+            OR (ingress_json IS NOT NULL AND json_valid(ingress_json)=0)
+            OR (ingress_json IS NULL AND ingress_fingerprint NOT LIKE ?)
+         LIMIT 1`
+      )
+      .get(`${LEGACY_UNVERIFIABLE_INGRESS_PREFIX}%`);
+    if (malformedDedupe) {
+      throw new Error('AxSQLiteEventStore v7 has malformed dedupe data');
+    }
+    const malformedEffect = this.db
+      .prepare(
+        `SELECT 1 FROM event_effects
+         WHERE json_valid(effect_json)=0
+            OR json_extract(effect_json, '$.id') IS NOT id
+            OR json_extract(effect_json, '$.deliveryId') IS NOT delivery_id
+            OR json_extract(effect_json, '$.operation') IS NOT operation
+            OR json_extract(effect_json, '$.idempotencyKey') IS NOT idempotency_key
+            OR json_type(effect_json, '$.requestDigest') IS NOT 'text'
+         LIMIT 1`
+      )
+      .get();
+    if (malformedEffect) {
+      throw new Error('AxSQLiteEventStore v7 has malformed effect data');
+    }
+    const malformedVerifier = this.db
+      .prepare(
+        `SELECT 1 FROM event_verifier_transitions
+         WHERE request_commitment=''
+            OR child_delivery_id=''
+            OR child_commitment=''
+            OR json_valid(receipt_json)=0
+         LIMIT 1`
+      )
+      .get();
+    if (malformedVerifier) {
+      throw new Error('AxSQLiteEventStore v7 has malformed verifier data');
+    }
+    const malformedAdmission = this.db
+      .prepare(
+        `SELECT 1 FROM event_deliveries
+         WHERE admitted_continuation_json IS NOT NULL
+           AND json_valid(admitted_continuation_json)=0
+         LIMIT 1`
+      )
+      .get();
+    if (malformedAdmission) {
+      throw new Error('AxSQLiteEventStore v7 has malformed admission data');
+    }
+    const foreignKeyViolation = (
+      this.db.pragma('foreign_key_check') as unknown[]
+    )[0];
+    if (foreignKeyViolation) {
+      throw new Error('AxSQLiteEventStore v7 has a foreign-key violation');
+    }
+  }
+
+  private migrate(): void {
+    this.db
+      .transaction(() => {
+        const reportedVersion = this.db.pragma('user_version', {
+          simple: true,
+        }) as number;
+        const shape = this.inspectMigrationShape(reportedVersion);
+        let version = shape.empty ? 0 : shape.effects === 'absent' ? 1 : 2;
+        if (version === 0) {
+          this.db
+            .transaction(() =>
+              this.db.exec(`
         CREATE TABLE event_deliveries (
           sequence INTEGER PRIMARY KEY AUTOINCREMENT,
           id TEXT NOT NULL UNIQUE,
@@ -2140,16 +3011,15 @@ export class AxSQLiteEventStore
         );
         CREATE INDEX IF NOT EXISTS event_payload_stage_state ON event_payload_stages(state, expires_at);
         CREATE INDEX IF NOT EXISTS event_payload_stage_run ON event_payload_stages(run_id);
-        PRAGMA user_version = 6;
       `)
-        )
-        .immediate();
-      return;
-    }
-    if (version === 1) {
-      this.db
-        .transaction(() =>
-          this.db.exec(`
+            )
+            .immediate();
+          version = 6;
+        }
+        if (version === 1) {
+          this.db
+            .transaction(() =>
+              this.db.exec(`
         CREATE TABLE event_effects (
           id TEXT PRIMARY KEY,
           delivery_id TEXT NOT NULL,
@@ -2165,16 +3035,16 @@ export class AxSQLiteEventStore
         CREATE INDEX event_effects_delivery ON event_effects(delivery_id, status, created_at);
         PRAGMA user_version = 2;
       `)
-        )
-        .immediate();
-      version = 2;
-    }
-    if (version === 2) {
-      this.db
-        .transaction(() => {
+            )
+            .immediate();
+          version = 2;
+        }
+        if (version === 2) {
           this.db
-            .prepare(
-              `DELETE FROM event_dedupe
+            .transaction(() => {
+              this.db
+                .prepare(
+                  `DELETE FROM event_dedupe
                WHERE created_at < ?
                  AND NOT EXISTS (
                    SELECT 1 FROM json_each(event_dedupe.delivery_ids_json) ids
@@ -2185,131 +3055,131 @@ export class AxSQLiteEventStore
                    SELECT 1 FROM json_each(event_dedupe.delivery_ids_json) ids
                    JOIN event_effects e ON e.delivery_id=ids.value
                  )`
-            )
-            .run(
-              this.clock.now() - this.options.retention.eventAndResultMs,
-              ...TERMINAL
-            );
-          const columns = new Set(
-            (
-              this.db.pragma('table_info(event_dedupe)') as {
-                name: string;
-              }[]
-            ).map((column) => column.name)
-          );
-          if (!columns.has('ingress_json')) {
-            this.db.exec(
-              'ALTER TABLE event_dedupe ADD COLUMN ingress_json TEXT'
-            );
-          }
-          if (!columns.has('ingress_fingerprint')) {
-            this.db.exec(
-              'ALTER TABLE event_dedupe ADD COLUMN ingress_fingerprint TEXT'
-            );
-          }
-          const rows = this.db
-            .prepare(
-              `SELECT dedupe_key, delivery_ids_json, ingress_json
+                )
+                .run(
+                  this.clock.now() - this.options.retention.eventAndResultMs,
+                  ...TERMINAL
+                );
+              const columns = new Set(
+                (
+                  this.db.pragma('table_info(event_dedupe)') as {
+                    name: string;
+                  }[]
+                ).map((column) => column.name)
+              );
+              if (!columns.has('ingress_json')) {
+                this.db.exec(
+                  'ALTER TABLE event_dedupe ADD COLUMN ingress_json TEXT'
+                );
+              }
+              if (!columns.has('ingress_fingerprint')) {
+                this.db.exec(
+                  'ALTER TABLE event_dedupe ADD COLUMN ingress_fingerprint TEXT'
+                );
+              }
+              const rows = this.db
+                .prepare(
+                  `SELECT dedupe_key, delivery_ids_json, ingress_json
                FROM event_dedupe`
-            )
-            .all() as {
-            dedupe_key: string;
-            delivery_ids_json: string;
-            ingress_json: string | null;
-          }[];
-          const lookup = this.db.prepare(
-            'SELECT ingress_json FROM event_deliveries WHERE id=?'
-          );
-          const update = this.db.prepare(
-            `UPDATE event_dedupe SET ingress_json=?, ingress_fingerprint=?
+                )
+                .all() as {
+                dedupe_key: string;
+                delivery_ids_json: string;
+                ingress_json: string | null;
+              }[];
+              const lookup = this.db.prepare(
+                'SELECT ingress_json FROM event_deliveries WHERE id=?'
+              );
+              const update = this.db.prepare(
+                `UPDATE event_dedupe SET ingress_json=?, ingress_fingerprint=?
              WHERE dedupe_key=?`
-          );
-          for (const row of rows) {
-            let ingressJson = row.ingress_json;
-            if (!ingressJson) {
-              const [deliveryId] = JSON.parse(
-                row.delivery_ids_json
-              ) as string[];
-              const delivery = deliveryId
-                ? (lookup.get(deliveryId) as
-                    | { ingress_json: string }
-                    | undefined)
-                : undefined;
-              ingressJson = delivery?.ingress_json ?? null;
-            }
-            const ingressFingerprint = ingressJson
-              ? axEventIngressFingerprint(JSON.parse(ingressJson))
-              : `${LEGACY_UNVERIFIABLE_INGRESS_PREFIX}${createHash('sha256')
-                  .update(row.dedupe_key)
-                  .digest('hex')}`;
-            update.run(ingressJson, ingressFingerprint, row.dedupe_key);
-          }
-          const effects = this.db
-            .prepare('SELECT id, effect_json FROM event_effects')
-            .all() as { id: string; effect_json: string }[];
-          const updateEffect = this.db.prepare(
-            'UPDATE event_effects SET effect_json=? WHERE id=?'
-          );
-          for (const row of effects) {
-            const effect = JSON.parse(row.effect_json) as AxEventEffect;
-            if (effect.requestDigest) continue;
-            effect.requestDigest = createHash('sha256')
-              .update(
-                axEventEffectRequestFingerprint({
-                  id: effect.id,
-                  deliveryId: effect.deliveryId,
-                  runId: effect.runId,
-                  identityScope: effect.identityScope,
-                  operation: effect.operation,
-                  idempotencyKey: effect.idempotencyKey,
-                  replaySafety: effect.replaySafety,
-                  metadata: effect.metadata,
-                  createdAt: effect.createdAt,
-                })
-              )
-              .digest('hex');
-            updateEffect.run(JSON.stringify(effect), effect.id);
-          }
-          this.db.pragma('user_version = 3');
-        })
-        .immediate();
-      version = 3;
-    }
-    if (version === 3) {
-      this.db
-        .transaction(() => {
-          const columns = new Set(
-            (
-              this.db.pragma('table_info(event_dedupe)') as {
-                name: string;
-              }[]
-            ).map((column) => column.name)
-          );
-          if (!columns.has('ingress_json')) {
-            this.db.exec(
-              'ALTER TABLE event_dedupe ADD COLUMN ingress_json TEXT'
-            );
-          }
-          const missingFingerprint = this.db
-            .prepare(
-              `SELECT COUNT(*) AS count FROM event_dedupe
+              );
+              for (const row of rows) {
+                let ingressJson = row.ingress_json;
+                if (!ingressJson) {
+                  const [deliveryId] = JSON.parse(
+                    row.delivery_ids_json
+                  ) as string[];
+                  const delivery = deliveryId
+                    ? (lookup.get(deliveryId) as
+                        | { ingress_json: string }
+                        | undefined)
+                    : undefined;
+                  ingressJson = delivery?.ingress_json ?? null;
+                }
+                const ingressFingerprint = ingressJson
+                  ? axEventIngressFingerprint(JSON.parse(ingressJson))
+                  : `${LEGACY_UNVERIFIABLE_INGRESS_PREFIX}${createHash('sha256')
+                      .update(row.dedupe_key)
+                      .digest('hex')}`;
+                update.run(ingressJson, ingressFingerprint, row.dedupe_key);
+              }
+              const effects = this.db
+                .prepare('SELECT id, effect_json FROM event_effects')
+                .all() as { id: string; effect_json: string }[];
+              const updateEffect = this.db.prepare(
+                'UPDATE event_effects SET effect_json=? WHERE id=?'
+              );
+              for (const row of effects) {
+                const effect = JSON.parse(row.effect_json) as AxEventEffect;
+                if (effect.requestDigest) continue;
+                effect.requestDigest = createHash('sha256')
+                  .update(
+                    axEventEffectRequestFingerprint({
+                      id: effect.id,
+                      deliveryId: effect.deliveryId,
+                      runId: effect.runId,
+                      identityScope: effect.identityScope,
+                      operation: effect.operation,
+                      idempotencyKey: effect.idempotencyKey,
+                      replaySafety: effect.replaySafety,
+                      metadata: effect.metadata,
+                      createdAt: effect.createdAt,
+                    })
+                  )
+                  .digest('hex');
+                updateEffect.run(JSON.stringify(effect), effect.id);
+              }
+              this.db.pragma('user_version = 3');
+            })
+            .immediate();
+          version = 3;
+        }
+        if (version === 3) {
+          this.db
+            .transaction(() => {
+              const columns = new Set(
+                (
+                  this.db.pragma('table_info(event_dedupe)') as {
+                    name: string;
+                  }[]
+                ).map((column) => column.name)
+              );
+              if (!columns.has('ingress_json')) {
+                this.db.exec(
+                  'ALTER TABLE event_dedupe ADD COLUMN ingress_json TEXT'
+                );
+              }
+              const missingFingerprint = this.db
+                .prepare(
+                  `SELECT COUNT(*) AS count FROM event_dedupe
                WHERE ingress_fingerprint IS NULL`
-            )
-            .get() as { count: number };
-          if (missingFingerprint.count > 0) {
-            throw new Error(
-              'Cannot safely migrate event dedupe rows without canonical ingress fingerprints'
-            );
-          }
-          this.db.pragma('user_version = 4');
-        })
-        .immediate();
-      version = 4;
-    }
-    if (version === 4) {
-      this.db
-        .transaction(() =>
-          this.db.exec(`
+                )
+                .get() as { count: number };
+              if (missingFingerprint.count > 0) {
+                throw new Error(
+                  'Cannot safely migrate event dedupe rows without canonical ingress fingerprints'
+                );
+              }
+              this.db.pragma('user_version = 4');
+            })
+            .immediate();
+          version = 4;
+        }
+        if (version === 4) {
+          this.db
+            .transaction(() =>
+              this.db.exec(`
         CREATE TABLE IF NOT EXISTS event_payload_stages (
           stage_id TEXT PRIMARY KEY,
           run_id TEXT NOT NULL,
@@ -2326,161 +3196,274 @@ export class AxSQLiteEventStore
         CREATE INDEX IF NOT EXISTS event_payload_stage_run ON event_payload_stages(run_id);
         PRAGMA user_version = 5;
       `)
-        )
-        .immediate();
-      version = 5;
-    }
-    if (version === 5) {
-      this.db
-        .transaction(() => {
-          const deliveryColumns = new Set(
-            (
-              this.db.pragma('table_info(event_deliveries)') as {
-                name: string;
-              }[]
-            ).map((column) => column.name)
-          );
-          if (!deliveryColumns.has('admitted_continuation_json')) {
-            this.db.exec(
-              `ALTER TABLE event_deliveries
+            )
+            .immediate();
+          version = 5;
+        }
+        if (version === 5) {
+          this.db
+            .transaction(() => {
+              const deliveryColumns = new Set(
+                (
+                  this.db.pragma('table_info(event_deliveries)') as {
+                    name: string;
+                  }[]
+                ).map((column) => column.name)
+              );
+              if (!deliveryColumns.has('admitted_continuation_json')) {
+                this.db.exec(
+                  `ALTER TABLE event_deliveries
                ADD COLUMN admitted_continuation_json TEXT`
-            );
-          }
-          const continuationColumns = new Set(
-            (
-              this.db.pragma('table_info(event_continuations)') as {
-                name: string;
-              }[]
-            ).map((column) => column.name)
-          );
-          if (!continuationColumns.has('admitted_delivery_id')) {
-            this.db.exec(
-              `ALTER TABLE event_continuations
+                );
+              }
+              const continuationColumns = new Set(
+                (
+                  this.db.pragma('table_info(event_continuations)') as {
+                    name: string;
+                  }[]
+                ).map((column) => column.name)
+              );
+              if (!continuationColumns.has('admitted_delivery_id')) {
+                this.db.exec(
+                  `ALTER TABLE event_continuations
                ADD COLUMN admitted_delivery_id TEXT`
-            );
-          }
-          this.db.exec(`
+                );
+              }
+              this.db.exec(`
             CREATE UNIQUE INDEX IF NOT EXISTS event_continuation_admission
               ON event_continuations(admitted_delivery_id)
               WHERE admitted_delivery_id IS NOT NULL;
           `);
-          const candidates = this.db
-            .prepare(
-              `SELECT d.id AS delivery_id, d.run_id, d.invocation_started,
+              const candidates = this.db
+                .prepare(
+                  `SELECT d.id AS delivery_id, d.run_id, d.invocation_started,
                       r.run_json
                FROM event_deliveries d
                LEFT JOIN event_runs r ON r.delivery_id=d.id
                WHERE d.action='resume'
                ORDER BY d.id, r.updated_at, r.id`
-            )
-            .all() as {
-            delivery_id: string;
-            run_id: string | null;
-            invocation_started: number;
-            run_json: string | null;
-          }[];
-          const byDelivery = new Map<
-            string,
-            Map<
-              string,
-              { continuation: AxEventContinuation; continuationId: string }
-            >
-          >();
-          const invalidate = this.db.prepare(
-            `UPDATE event_deliveries SET admitted_continuation_json='null'
+                )
+                .all() as {
+                delivery_id: string;
+                run_id: string | null;
+                invocation_started: number;
+                run_json: string | null;
+              }[];
+              const byDelivery = new Map<
+                string,
+                Map<
+                  string,
+                  { continuation: AxEventContinuation; continuationId: string }
+                >
+              >();
+              const invalidate = this.db.prepare(
+                `UPDATE event_deliveries SET admitted_continuation_json='null'
              WHERE id=?`
-          );
-          const invalidDeliveries = new Set<string>();
-          for (const candidate of candidates) {
-            if (invalidDeliveries.has(candidate.delivery_id)) continue;
-            if (
-              candidate.run_json === null &&
-              candidate.run_id === null &&
-              candidate.invocation_started === 0
-            ) {
-              // A never-invoked delivery has no legacy admission to preserve;
-              // leave it eligible for its first atomic admission under v6.
-              continue;
-            }
-            try {
-              const run = JSON.parse(candidate.run_json ?? '') as AxEventRun;
-              const continuation = run.admittedContinuation;
-              if (
-                !continuation ||
-                run.deliveryId !== candidate.delivery_id ||
-                run.targetId !== continuation.targetId ||
-                run.instanceKey !== continuation.instanceKey
-              ) {
-                invalidate.run(candidate.delivery_id);
-                byDelivery.delete(candidate.delivery_id);
-                invalidDeliveries.add(candidate.delivery_id);
-                continue;
+              );
+              const invalidDeliveries = new Set<string>();
+              for (const candidate of candidates) {
+                if (invalidDeliveries.has(candidate.delivery_id)) continue;
+                if (
+                  candidate.run_json === null &&
+                  candidate.run_id === null &&
+                  candidate.invocation_started === 0
+                ) {
+                  // A never-invoked delivery has no legacy admission to preserve;
+                  // leave it eligible for its first atomic admission under v6.
+                  continue;
+                }
+                try {
+                  const run = JSON.parse(
+                    candidate.run_json ?? ''
+                  ) as AxEventRun;
+                  const continuation = run.admittedContinuation;
+                  if (
+                    !continuation ||
+                    run.deliveryId !== candidate.delivery_id ||
+                    run.targetId !== continuation.targetId ||
+                    run.instanceKey !== continuation.instanceKey
+                  ) {
+                    invalidate.run(candidate.delivery_id);
+                    byDelivery.delete(candidate.delivery_id);
+                    invalidDeliveries.add(candidate.delivery_id);
+                    continue;
+                  }
+                  const entries =
+                    byDelivery.get(candidate.delivery_id) ?? new Map();
+                  entries.set(axEventContinuationFingerprint(continuation), {
+                    continuation,
+                    continuationId: continuation.id,
+                  });
+                  byDelivery.set(candidate.delivery_id, entries);
+                } catch {
+                  invalidate.run(candidate.delivery_id);
+                  byDelivery.delete(candidate.delivery_id);
+                  invalidDeliveries.add(candidate.delivery_id);
+                }
               }
-              const entries =
-                byDelivery.get(candidate.delivery_id) ?? new Map();
-              entries.set(axEventContinuationFingerprint(continuation), {
-                continuation,
-                continuationId: continuation.id,
-              });
-              byDelivery.set(candidate.delivery_id, entries);
-            } catch {
-              invalidate.run(candidate.delivery_id);
-              byDelivery.delete(candidate.delivery_id);
-              invalidDeliveries.add(candidate.delivery_id);
-            }
-          }
-          const valid = new Map<
-            string,
-            Array<{ deliveryId: string; continuation: AxEventContinuation }>
-          >();
-          for (const [deliveryId, entries] of byDelivery) {
-            if (entries.size !== 1) {
-              invalidate.run(deliveryId);
-              continue;
-            }
-            const entry = [...entries.values()][0]!;
-            const owners = valid.get(entry.continuationId) ?? [];
-            owners.push({ deliveryId, continuation: entry.continuation });
-            valid.set(entry.continuationId, owners);
-          }
-          const bindContinuation = this.db.prepare(
-            `UPDATE event_continuations SET admitted_delivery_id=?
+              const valid = new Map<
+                string,
+                Array<{ deliveryId: string; continuation: AxEventContinuation }>
+              >();
+              for (const [deliveryId, entries] of byDelivery) {
+                if (entries.size !== 1) {
+                  invalidate.run(deliveryId);
+                  continue;
+                }
+                const entry = [...entries.values()][0]!;
+                const owners = valid.get(entry.continuationId) ?? [];
+                owners.push({ deliveryId, continuation: entry.continuation });
+                valid.set(entry.continuationId, owners);
+              }
+              const bindContinuation = this.db.prepare(
+                `UPDATE event_continuations SET admitted_delivery_id=?
              WHERE id=?
                AND (admitted_delivery_id IS NULL OR admitted_delivery_id=?)`
-          );
-          const bindDelivery = this.db.prepare(
-            `UPDATE event_deliveries SET admitted_continuation_json=?
-             WHERE id=? AND admitted_continuation_json IS NULL`
-          );
-          for (const [continuationId, entries] of valid) {
-            if (entries.length !== 1) {
-              for (const entry of entries) invalidate.run(entry.deliveryId);
-              continue;
-            }
-            const entry = entries[0]!;
-            const existing = this.db
-              .prepare('SELECT id FROM event_continuations WHERE id=?')
-              .get(continuationId);
-            if (existing) {
-              const result = bindContinuation.run(
-                entry.deliveryId,
-                continuationId,
-                entry.deliveryId
               );
-              if (result.changes !== 1) {
-                invalidate.run(entry.deliveryId);
-                continue;
+              const bindDelivery = this.db.prepare(
+                `UPDATE event_deliveries SET admitted_continuation_json=?
+             WHERE id=? AND admitted_continuation_json IS NULL`
+              );
+              for (const [continuationId, entries] of valid) {
+                if (entries.length !== 1) {
+                  for (const entry of entries) invalidate.run(entry.deliveryId);
+                  continue;
+                }
+                const entry = entries[0]!;
+                const existing = this.db
+                  .prepare('SELECT id FROM event_continuations WHERE id=?')
+                  .get(continuationId);
+                if (existing) {
+                  const result = bindContinuation.run(
+                    entry.deliveryId,
+                    continuationId,
+                    entry.deliveryId
+                  );
+                  if (result.changes !== 1) {
+                    invalidate.run(entry.deliveryId);
+                    continue;
+                  }
+                }
+                bindDelivery.run(
+                  JSON.stringify(entry.continuation),
+                  entry.deliveryId
+                );
               }
-            }
-            bindDelivery.run(
-              JSON.stringify(entry.continuation),
-              entry.deliveryId
+              this.db.pragma('user_version = 6');
+            })
+            .immediate();
+        }
+        this.db
+          .transaction(() => {
+            const journalColumns = new Set(
+              (
+                this.db.pragma(
+                  'table_info(event_verifier_transitions)'
+                ) as Array<{
+                  name: string;
+                }>
+              ).map((column) => column.name)
             );
-          }
-          this.db.pragma('user_version = 6');
-        })
-        .immediate();
+            if (journalColumns.size === 0) {
+              this.db.exec(`
+            CREATE TABLE event_verifier_transitions (
+              operation_id TEXT PRIMARY KEY,
+              request_commitment TEXT NOT NULL,
+              receipt_json TEXT NOT NULL,
+              child_delivery_id TEXT NOT NULL,
+              child_commitment TEXT NOT NULL,
+              created_at INTEGER NOT NULL
+            );
+          `);
+            } else if (journalColumns.has('request_json')) {
+              const rows = this.db
+                .prepare(
+                  `SELECT operation_id, request_json, record_json, created_at
+               FROM event_verifier_transitions`
+                )
+                .all() as Array<{
+                operation_id: string;
+                request_json: string;
+                record_json: string;
+                created_at: number;
+              }>;
+              this.db.exec(`
+            ALTER TABLE event_verifier_transitions RENAME TO event_verifier_transitions_v2;
+            CREATE TABLE event_verifier_transitions (
+              operation_id TEXT PRIMARY KEY,
+              request_commitment TEXT NOT NULL,
+              receipt_json TEXT NOT NULL,
+              child_delivery_id TEXT NOT NULL,
+              child_commitment TEXT NOT NULL,
+              created_at INTEGER NOT NULL
+            );
+          `);
+              const insert = this.db.prepare(
+                `INSERT INTO event_verifier_transitions VALUES(?,?,?,?,?,?)`
+              );
+              for (const row of rows) {
+                const request = JSON.parse(
+                  row.request_json
+                ) as AxEventVerifierTransitionRequest;
+                const record = JSON.parse(row.record_json) as {
+                  receipt: AxEventPublishReceipt;
+                  child: AxEventDelivery;
+                };
+                insert.run(
+                  row.operation_id,
+                  this.canonicalCommitment(request),
+                  JSON.stringify(record.receipt),
+                  record.child.id,
+                  this.canonicalCommitment(
+                    this.persistedChildProjection(record.child)
+                  ),
+                  row.created_at
+                );
+              }
+              this.db.exec('DROP TABLE event_verifier_transitions_v2');
+            } else if (!journalColumns.has('request_commitment')) {
+              throw new Error('Malformed event verifier transition journal');
+            }
+            this.db.exec(`
+          CREATE TABLE IF NOT EXISTS event_store_metadata (
+            metadata_key TEXT PRIMARY KEY,
+            metadata_value TEXT NOT NULL
+          );
+        `);
+            if (
+              shape.verifier === 'legacy-v2' ||
+              shape.verifier === 'compact-v3'
+            ) {
+              this.db
+                .prepare(
+                  `INSERT OR REPLACE INTO event_store_metadata VALUES(?, '1')`
+                )
+                .run(VERIFIER_MIGRATION_CLEANUP_KEY);
+            }
+            this.db.pragma('user_version = 7');
+          })
+          .immediate();
+        this.assertCombinedSchema();
+      })
+      .immediate();
+  }
+
+  private completeVerifierMigrationCleanup(): void {
+    const pending = this.db
+      .prepare(
+        'SELECT 1 FROM event_store_metadata WHERE metadata_key=? AND metadata_value=?'
+      )
+      .get(VERIFIER_MIGRATION_CLEANUP_KEY, '1');
+    if (!pending) return;
+    const [checkpoint] = this.db.pragma('wal_checkpoint(TRUNCATE)') as Array<{
+      busy: number;
+    }>;
+    if (checkpoint?.busy) {
+      throw new Error('Verifier journal migration cleanup is still pending');
     }
+    this.db
+      .prepare('DELETE FROM event_store_metadata WHERE metadata_key=?')
+      .run(VERIFIER_MIGRATION_CLEANUP_KEY);
   }
 
   private prune(now: number): void {

@@ -22,6 +22,7 @@ import {
   type AxEventScalar,
   type AxEventSink,
   type AxEventTarget,
+  type AxEventVerifierPolicy,
 } from './types.js';
 
 const unsafeSegments = new Set(['__proto__', 'constructor', 'prototype']);
@@ -400,9 +401,66 @@ export function validateEventTarget<IN, OUT>(
       );
     }
   }
+  if (target.verifier) {
+    if (
+      !target.verifier.id.trim() ||
+      new TextEncoder().encode(target.verifier.id).byteLength > 256
+    ) {
+      throw new Error(
+        `AxEventTarget ${target.id} verifier id must be 1 to 256 UTF-8 bytes`
+      );
+    }
+    if (target.execution === 'streaming') {
+      throw new Error(
+        `AxEventTarget ${target.id} cannot combine verifier with streaming execution because chunk sinks run before a complete output can be verified`
+      );
+    }
+    for (const [name, value] of Object.entries({
+      maxTokens: target.verifier.maxTokens,
+      maxWallTimeMs: target.verifier.maxWallTimeMs,
+      maxCostUSD: target.verifier.maxCostUSD,
+      timeoutMs: target.verifier.timeoutMs ?? 30_000,
+    })) {
+      if (value !== undefined && (!Number.isFinite(value) || value <= 0)) {
+        throw new Error(
+          `AxEventTarget ${target.id} verifier ${name} must be positive`
+        );
+      }
+    }
+    if (
+      target.verifier.maxRuns !== undefined &&
+      (!Number.isInteger(target.verifier.maxRuns) ||
+        target.verifier.maxRuns < 1)
+    ) {
+      throw new Error(
+        `AxEventTarget ${target.id} verifier maxRuns must be a positive integer`
+      );
+    }
+    if (
+      target.verifier.maxEvidenceBytes !== undefined &&
+      (!Number.isInteger(target.verifier.maxEvidenceBytes) ||
+        target.verifier.maxEvidenceBytes < 16)
+    ) {
+      throw new Error(
+        `AxEventTarget ${target.id} verifier maxEvidenceBytes must be at least 16`
+      );
+    }
+    if (
+      typeof target.verifier.backoffMs === 'number' &&
+      (!Number.isFinite(target.verifier.backoffMs) ||
+        target.verifier.backoffMs < 0)
+    ) {
+      throw new Error(
+        `AxEventTarget ${target.id} verifier backoffMs must be non-negative`
+      );
+    }
+  }
   return {
     ...target,
     ...(target.waitFor ? { waitFor: [...target.waitFor] } : {}),
+    ...(target.verifier
+      ? { verifier: Object.freeze({ ...target.verifier }) }
+      : {}),
   };
 }
 
@@ -498,6 +556,11 @@ export class AxEventTargetBuilder<IN = Record<string, unknown>, OUT = unknown> {
 
   state(state: AxEventProgramStateAdapter<AxProgrammable<IN, OUT>>): this {
     this.value.state = state;
+    return this;
+  }
+
+  verifier(verifier: Readonly<AxEventVerifierPolicy<OUT>>): this {
+    this.value.verifier = verifier;
     return this;
   }
 

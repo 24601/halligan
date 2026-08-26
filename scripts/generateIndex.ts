@@ -90,7 +90,9 @@ function hasValidPrefix(name: string): boolean {
       name === 'optimize' ||
       name === 'bestOfN' ||
       name === 'refine' ||
-      name === 'playbook')
+      name === 'react' ||
+      name === 'playbook' ||
+      name === 'programSource')
   );
 }
 
