@@ -1186,6 +1186,25 @@
       "completedAt": null,
       "completedByCommit": null,
       "verification": null
+    },
+    {
+      "id": "axir-2026-08-25-port-provider-neutral-visual-observation-sampling-policy",
+      "status": "open",
+      "title": "Port provider-neutral visual observation sampling policy",
+      "createdAt": "2026-08-25",
+      "sourcePR": 18,
+      "sourceCommit": "ca760294f5ea4f207052c39c2218e1195103bc2a",
+      "tsPaths": ["src/ax/ai/index.ts", "src/ax/ai/visual"],
+      "portableSurface": "axai",
+      "impact": "TypeScript hosts can apply revision-, freshness-, authority-, change-, and rolling-budget-aware selection to host-captured visual observations; generated language packages do not yet expose the AxVisualObservation or AxFrameSampler policy.",
+      "suggestedAxirWork": [
+        "Add or update the TS-derived conformance fixture.",
+        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
+        "Run npm run axir:conformance:check and npm run test:axir."
+      ],
+      "completedAt": null,
+      "completedByCommit": null,
+      "verification": null
     }
   ],
   "nonPortableExemptions": [
