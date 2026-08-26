@@ -1233,7 +1233,7 @@
         "src/ax/dsp/playbook.test.ts"
       ],
       "portableSurface": "axoptimize",
-      "impact": "TypeScript ACE bullets now support optional provenance, confidence/evidence counts, declarative applicability, host-owned verifier receipts, lifecycle/supersession, revision lineage, auditable before/after deltas, condition-aware rendering, and verified-agent receipts. Legacy artifacts remain valid. Generated runtimes do not yet expose this schema, host evidence boundary, or inactive-entry filtering.",
+      "impact": "TypeScript ACE bullets now support optional provenance, confidence/evidence counts, declarative applicability, host-owned verifier receipts, lifecycle/supersession, revision lineage, auditable before/after deltas, condition-aware rendering, and verified-agent receipts. Legacy artifacts remain valid. Generated runtimes do not yet expose this schema, host evidence boundary, inactive-entry filtering, or filtered-empty-section omission.",
       "suggestedAxirWork": [
         "Add or update the TS-derived conformance fixture.",
         "Update AxIR/Core or descriptor data to match the portable TS behavior.",

@@ -16,7 +16,7 @@ Use this skill to generate context-playbook code. A playbook grows an evolving b
 - Apply with `pb.applyTo(program)` (defaults to the bound program).
 - Persist with `pb.toJSON()` and restore with `playbook(program, opts).load(snapshot)`.
 - Inspect with `pb.render()` (markdown) and `pb.getState()` (`{ playbook, artifact }`).
-- Scope retrieval with `pb.render({ conditions })` / `pb.applyTo(program, { conditions })`; entries with unmet applicability, expiry, deprecation, or supersession are excluded by default. Use `{ includeInactive: true }` only for inspection.
+- Scope retrieval with `pb.render({ conditions })` / `pb.applyTo(program, { conditions })`; entries with unmet applicability, expiry, deprecation, or supersession are excluded by default, and sections with no visible bullets are omitted. Use `{ includeInactive: true }` only for inspection.
 - For agents use `agent.playbook({ target: 'actor' | 'responder' })`; default target is `'actor'`.
 - Use a cheaper `studentAI` to run the program and an optional stronger `teacherAI` to reflect/curate.
 - Prefer `ai()`, `ax()`, and `agent()` for new code.
