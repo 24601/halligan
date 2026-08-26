@@ -25,6 +25,13 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
   - TS paths: `src/ax/event/types.ts`, `src/ax/event/mapping.ts`, `src/ax/event/runtime.ts`, `src/ax/event/memoryStore.ts`
   - Impact: Generated event runtimes need host-owned verifier callbacks, bounded failure continuations, limits, fingerprint suppression, and verification statuses matching TypeScript AxEventRuntime.
   - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+- `axir-2026-08-25-port-causal-candidate-evidence-artifacts` [axoptimize] Port causal candidate evidence artifacts
+  - Status: open
+  - Source PR: #15
+  - Source commit: `ca760294f5ea4f207052c39c2218e1195103bc2a`
+  - TS paths: `src/ax/dsp/optimize.ts`, `src/ax/dsp/optimizer.ts`, `src/ax/dsp/optimizers/causalCandidateEvidence.test-d.ts`, `src/ax/dsp/optimizers/causalCandidateEvidence.test.ts`, `src/ax/dsp/optimizers/causalCandidateEvidence.ts`
+  - Impact: TypeScript optimized-program artifacts can carry bounded immutable host-verified causal evidence linking well-formed canonical SHA-256 evidence identities, hypotheses, affected components, predictions, held-in and held-out outcomes, chronological decisions and settlements, and optional comparable ablations; detached replay prevents post-verification mutation, per-batch authority receipts remain chained across append, and snapshot rollback preserves append-only history. Generated runtimes do not expose this manifest or attachment and rollback helpers.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 - `axir-2026-08-25-port-evidence-aware-ace-playbook-metadata-and-retrieval` [axoptimize] Port evidence-aware ACE playbook metadata and retrieval
   - Status: open
   - Source PR: #6
