@@ -36,10 +36,15 @@ import {
   type AxEventSink,
   type AxEventSourceHandle,
   type AxEventTarget,
+  type AxEventValue,
+  type AxEventVerificationResult,
+  type AxEventVerifierContext,
+  type AxEventVerifierPolicy,
   type AxProgramStateEnvelope,
   AxSystemEventClock,
 } from './types.js';
 import {
+  axEventCanonicalJson,
   axEventErrorMessage,
   axEventId,
   axEventIdentityScope,
@@ -57,7 +62,37 @@ type InvocationResult = {
   invoked: boolean;
 };
 
+type VerifierPolicyState = {
+  startedAt: number;
+  runs: number;
+  tokens: number;
+  costUSD: number;
+  lastFingerprint?: string;
+  lastFailure?: Readonly<{ code: string; evidence?: AxEventValue }>;
+};
+
+type VerificationOutcome = {
+  verification: Readonly<AxEventVerificationResult>;
+  continuation?: Readonly<{
+    value: AxEventContinuation;
+    ingress: AxEventIngress;
+    availableAt: number;
+  }>;
+};
+
+const VERIFIER_SOURCE = 'ax://event-runtime/verifier';
+const VERIFIER_CODE_BYTES = 256;
+const VERIFIER_FINGERPRINT_BYTES = 1_024;
+const VERIFIER_ERROR_BYTES = 1_024;
 const DEFAULT_AUTHORITY_RESOLVE_TIMEOUT_MS = 30_000;
+
+function verifierRouteId(target: Readonly<AxEventTarget>): string {
+  return `ax.verifier:${target.id}:${target.verifier!.id}`;
+}
+
+function verifierEventType(target: Readonly<AxEventTarget>): string {
+  return `ax.event.verifier.resume.${encodeURIComponent(target.id)}.${encodeURIComponent(target.verifier!.id)}`;
+}
 
 class AxRuntimeEventContext implements AxEventContext {
   private readonly registrations: Array<{
@@ -192,6 +227,30 @@ export class AxEventRuntime {
         this.targets.set(target.id, target);
       }
     }
+    for (const target of this.targets.values()) {
+      if (!target.verifier) continue;
+      const route = eventRoute({
+        id: verifierRouteId(target),
+        match: {
+          sources: [VERIFIER_SOURCE],
+          types: [verifierEventType(target)],
+        },
+        action: 'resume',
+        target,
+        correlation: (ingress) => ({
+          kind: 'ax.verifier',
+          value: String(
+            (ingress.event.data as { continuation: string }).continuation
+          ),
+        }),
+      });
+      if (this.routes.has(route.id)) {
+        throw new Error(
+          `Reserved AxEventRoute id is already configured: ${route.id}`
+        );
+      }
+      this.routes.set(route.id, route);
+    }
   }
 
   async start(): Promise<void> {
@@ -221,6 +280,18 @@ export class AxEventRuntime {
       ) {
         throw new Error(
           'AxEventRuntime multi-worker mode requires a conforming persistent store with leases, transactions, compare-and-set, and output persistence'
+        );
+      }
+    }
+    if ([...this.targets.values()].some((target) => target.verifier)) {
+      if (
+        this.store.capabilities.verifierTransitions !==
+          'axevent-verifier-transition-v2' ||
+        !this.store.transitionVerifier ||
+        !this.store.confirmVerifierTransition
+      ) {
+        throw new Error(
+          'Verifier targets require an AxEventStore with axevent-verifier-transition-v2 fenced transitions'
         );
       }
     }
@@ -263,6 +334,11 @@ export class AxEventRuntime {
     if (!this.started) throw new Error('AxEventRuntime must be started first');
     if (this.closing) throw new Error('AxEventRuntime is closing');
     axValidateEventEnvelope(ingress.event);
+    if (ingress.event.source.startsWith('ax://event-runtime/')) {
+      throw new Error(
+        `Public event publish cannot use reserved source ${ingress.event.source}`
+      );
+    }
     const normalized: AxEventIngress = {
       event: structuredClone(ingress.event),
       identity: structuredClone(ingress.identity ?? {}),
@@ -646,6 +722,7 @@ export class AxEventRuntime {
         let invoked = false;
         try {
           let result: InvocationResult = { waiting: false, invoked: false };
+          let verification: VerificationOutcome | undefined;
           if (route.action === 'observe') {
             await this.authorizeEventOperation(
               eventContext,
@@ -669,30 +746,48 @@ export class AxEventRuntime {
               'event.target',
               target!.id
             );
-            result = await this.invokeTarget(
-              target!,
-              instanceKey,
-              claimed.ingress,
-              eventContext,
-              run,
-              async () => {
-                await this.store.saveDelivery({
-                  ...claimed,
-                  status: 'running',
-                  attempt,
-                  runId,
-                  invocationStarted: true,
-                });
-                invoked = true;
-              }
-            );
-            invoked = invoked || result.invoked;
-            run = {
-              ...run,
-              ...(result.output !== undefined ? { output: result.output } : {}),
-              ...(result.chunks ? { chunks: result.chunks } : {}),
-            };
+            verification = target?.verifier
+              ? await this.preflightVerifier(target, eventContext)
+              : undefined;
+            if (!verification) {
+              result = await this.invokeTarget(
+                target!,
+                instanceKey,
+                claimed.ingress,
+                eventContext,
+                run,
+                async () => {
+                  await this.store.saveDelivery({
+                    ...claimed,
+                    status: 'running',
+                    attempt,
+                    runId,
+                    invocationStarted: true,
+                  });
+                  invoked = true;
+                }
+              );
+              invoked = invoked || result.invoked;
+              run = {
+                ...run,
+                ...(result.output !== undefined
+                  ? { output: result.output }
+                  : {}),
+                ...(result.chunks ? { chunks: result.chunks } : {}),
+              };
+            }
           }
+
+          // The verifier is host code and only runs after the target output is
+          // durable. Failed gates never reach final sinks.
+          await this.persistVerifierInput(run);
+          verification ??=
+            target?.verifier &&
+            result.invoked &&
+            !result.waiting &&
+            run.output !== undefined
+              ? await this.applyVerifier(target, run, eventContext)
+              : undefined;
 
           const registrations = eventContext.takeRegistrations();
           const continuations: AxEventContinuation[] = [];
@@ -718,29 +813,70 @@ export class AxEventRuntime {
           for (const callback of eventContext.takeAfterRegistrationCallbacks()) {
             await callback();
           }
-          const waiting = result.waiting || continuations.length > 0;
+          if (verification?.continuation) {
+            continuations.push(verification.continuation.value);
+          }
+          const waiting =
+            result.waiting ||
+            continuations.length > 0 ||
+            verification?.verification.status === 'fail';
+          const verificationFailed = Boolean(
+            verification &&
+              verification.verification.status !== 'pass' &&
+              !verification.continuation
+          );
           run = {
             ...run,
-            status: waiting ? 'waiting_event' : 'succeeded',
+            status: verificationFailed
+              ? 'verification_failed'
+              : waiting
+                ? 'waiting_event'
+                : 'succeeded',
             finishedAt: this.clock.now(),
+            ...(verification
+              ? { verification: verification.verification }
+              : {}),
             ...(continuations.length
               ? { continuationIds: continuations.map((value) => value.id) }
               : {}),
           };
-          // Persist the complete output before any final sink dispatch.
-          await this.store.saveRun(run);
-          if (!waiting && target && run.output !== undefined) {
+          if (verification?.continuation) {
+            await this.commitVerifierTransition(
+              claimed,
+              run,
+              attempt,
+              verification,
+              continuation,
+              target!,
+              controller.signal
+            );
+          } else {
+            // Persist the complete output before any final sink dispatch.
+            await this.store.saveRun(run);
+          }
+          if (
+            !waiting &&
+            !verificationFailed &&
+            target &&
+            run.output !== undefined
+          ) {
             run = await this.dispatchFinalSinks(target, run, eventContext);
             await this.store.saveRun(run);
           }
-          await this.store.saveDelivery({
-            ...claimed,
-            status: waiting ? 'waiting_event' : 'succeeded',
-            attempt,
-            runId,
-          });
-          if (continuation)
-            await this.store.completeContinuation(continuation.id);
+          if (!verification?.continuation) {
+            await this.store.saveDelivery({
+              ...claimed,
+              status: verificationFailed
+                ? 'verification_failed'
+                : waiting
+                  ? 'waiting_event'
+                  : 'succeeded',
+              attempt,
+              runId,
+            });
+            if (continuation)
+              await this.store.completeContinuation(continuation.id);
+          }
         } catch (error) {
           if (controller.signal.aborted) {
             run = {
@@ -766,6 +902,7 @@ export class AxEventRuntime {
               ...run,
               output: undefined,
               chunks: undefined,
+              verification: undefined,
               status: 'output_persistence_failed',
               finishedAt: this.clock.now(),
               error: axEventErrorMessage(error),
@@ -878,6 +1015,576 @@ export class AxEventRuntime {
     } catch (error) {
       await this.deadLetterDelivery(claimed, axEventErrorMessage(error));
     }
+  }
+
+  private async commitVerifierTransition(
+    claimed: Readonly<AxEventDelivery>,
+    run: Readonly<AxEventRun>,
+    attempt: number,
+    outcome: Readonly<VerificationOutcome>,
+    consumed: Readonly<AxEventContinuation> | undefined,
+    target: Readonly<AxEventTarget>,
+    signal: AbortSignal
+  ): Promise<void> {
+    const next = outcome.continuation!;
+    const delivery: AxEventDelivery = {
+      ...claimed,
+      status: 'waiting_event',
+      attempt,
+      runId: run.id,
+    };
+    const request = {
+      operationId: `${outcome.verification.chainId}:${outcome.verification.run}`,
+      childDeliveryId: `verifier-delivery:${outcome.verification.chainId}:${outcome.verification.run}`,
+      parent: {
+        delivery,
+        run,
+        expectedFencingToken: claimed.fencingToken!,
+      },
+      continuation: next.value,
+      child: {
+        ingress: next.ingress,
+        deliveries: [
+          {
+            routeId: next.value.routeId,
+            action: 'resume' as const,
+            targetId: next.value.targetId,
+            instanceKey: claimed.instanceKey,
+            sizeBytes: axEventSizeBytes(next.ingress),
+            availableAt: next.availableAt,
+            retrySafety: target.retrySafety ?? 'unknown',
+            ordering: 'strict' as const,
+          },
+        ],
+        acceptedAt: this.clock.now(),
+        publishTimeoutMs: this.options.publishTimeoutMs ?? 5_000,
+      },
+      ...(consumed ? { consumeContinuationId: consumed.id } : {}),
+    };
+    if (signal.aborted) {
+      throw signal.reason ?? new Error('Verifier transition cancelled');
+    }
+    const commit = Promise.resolve().then(() => {
+      if (signal.aborted) {
+        throw signal.reason ?? new Error('Verifier transition cancelled');
+      }
+      return this.store.transitionVerifier!(request, signal);
+    });
+    try {
+      await commit;
+    } catch (error) {
+      if (await this.verifierTransitionCommitted(request)) return;
+      if (signal.aborted) {
+        throw signal.reason ?? error;
+      }
+      try {
+        await this.store.transitionVerifier!(request, signal);
+      } catch {
+        if (await this.verifierTransitionCommitted(request)) return;
+        throw error;
+      }
+    }
+  }
+
+  private async verifierTransitionCommitted(
+    request: Readonly<import('./types.js').AxEventVerifierTransitionRequest>
+  ): Promise<boolean> {
+    const receipt = await this.store.confirmVerifierTransition!(request);
+    if (!receipt) return false;
+    if (
+      axEventCanonicalJson(receipt) !==
+      axEventCanonicalJson({
+        eventId: request.child.ingress.event.id,
+        accepted: true,
+        duplicate: false,
+        durability: this.store.capabilities.durability,
+        deliveryIds: [request.childDeliveryId],
+      })
+    ) {
+      throw new Error(
+        `Verifier transition confirmation is invalid: ${request.operationId}`
+      );
+    }
+    return true;
+  }
+
+  private async persistVerifierInput(run: Readonly<AxEventRun>): Promise<void> {
+    try {
+      await this.store.saveRun(run);
+    } catch (error) {
+      // Saving a run is idempotent. Replay once so a pre-commit failure can
+      // recover and a lost commit acknowledgement can be confirmed without
+      // invoking the target again.
+      try {
+        await this.store.saveRun(run);
+      } catch {
+        throw error;
+      }
+    }
+  }
+
+  private async applyVerifier(
+    target: Readonly<AxEventTarget<any, any>>,
+    run: Readonly<AxEventRun>,
+    eventContext: Readonly<AxEventContext>
+  ): Promise<VerificationOutcome> {
+    const policy = target.verifier!;
+    let chain: Readonly<{
+      chainId: string;
+      previous?: Readonly<VerifierPolicyState>;
+    }> = { chainId: eventContext.deliveryId };
+    let state: VerifierPolicyState = {
+      startedAt: run.startedAt,
+      runs: 0,
+      tokens: 0,
+      costUSD: 0,
+    };
+    const context: AxEventVerifierContext = {
+      run,
+      eventContext,
+      signal: eventContext.abortSignal,
+    };
+    try {
+      chain = this.verifierChain(target, eventContext);
+      const previous = chain.previous;
+      state = previous
+        ? { ...previous }
+        : {
+            startedAt: run.startedAt,
+            runs: 0,
+            tokens: 0,
+            costUSD: 0,
+          };
+      const usage = policy.usage
+        ? await this.invokeVerifierCallback(
+            policy,
+            context,
+            (callbackContext) => policy.usage!(run.output, callbackContext)
+          )
+        : {};
+      this.validateVerifierMeasure('tokens', usage.tokens);
+      this.validateVerifierMeasure('costUSD', usage.costUSD);
+      const cumulativeTokens = state.tokens + (usage.tokens ?? 0);
+      const cumulativeCostUSD = state.costUSD + (usage.costUSD ?? 0);
+      this.validateVerifierMeasure('cumulative tokens', cumulativeTokens);
+      this.validateVerifierMeasure('cumulative costUSD', cumulativeCostUSD);
+      state = {
+        startedAt: state.startedAt,
+        runs: state.runs + 1,
+        tokens: cumulativeTokens,
+        costUSD: cumulativeCostUSD,
+        ...(previous?.lastFingerprint !== undefined
+          ? { lastFingerprint: previous.lastFingerprint }
+          : {}),
+        ...(previous?.lastFailure ? { lastFailure: previous.lastFailure } : {}),
+      };
+      const rawFingerprint = policy.fingerprint
+        ? await this.invokeVerifierCallback(
+            policy,
+            context,
+            (callbackContext) =>
+              policy.fingerprint!(run.output, callbackContext)
+          )
+        : undefined;
+      if (rawFingerprint !== undefined && !rawFingerprint.length) {
+        throw new Error('Verifier fingerprint must be non-empty');
+      }
+      const fingerprint =
+        rawFingerprint === undefined
+          ? undefined
+          : this.boundVerifierString(
+              rawFingerprint,
+              VERIFIER_FINGERPRINT_BYTES
+            );
+      const base = {
+        policyId: policy.id,
+        chainId: chain.chainId,
+        run: state.runs,
+        checkedAt: this.clock.now(),
+        cumulativeUsage: {
+          tokens: state.tokens,
+          costUSD: state.costUSD,
+        },
+        ...(fingerprint !== undefined ? { fingerprint } : {}),
+      };
+
+      if (
+        fingerprint !== undefined &&
+        fingerprint === previous?.lastFingerprint &&
+        previous.lastFailure
+      ) {
+        return {
+          verification: {
+            ...base,
+            status: 'unchanged_state',
+            failure: previous.lastFailure,
+          },
+        };
+      }
+
+      const result = await this.invokeVerifierCallback(
+        policy,
+        context,
+        (callbackContext) => policy.verify(run.output, callbackContext)
+      );
+      if (result.status === 'pass') {
+        return { verification: { ...base, status: 'pass' } };
+      }
+      if (!result.failure.code.trim()) {
+        throw new Error('Verifier failure code must be non-empty');
+      }
+      const failure = {
+        code: this.boundVerifierString(
+          result.failure.code,
+          VERIFIER_CODE_BYTES
+        ),
+        ...(result.failure.evidence !== undefined
+          ? {
+              evidence: this.boundVerifierEvidence(
+                result.failure.evidence,
+                policy.maxEvidenceBytes ?? 4_096
+              ),
+            }
+          : {}),
+      };
+      if (state.runs >= (policy.maxRuns ?? 3)) {
+        return {
+          verification: {
+            ...base,
+            status: 'exhausted',
+            reason: 'max_runs',
+            failure,
+          },
+        };
+      }
+      const exhausted = this.verifierLimit(policy, state, this.clock.now());
+      if (exhausted) {
+        return {
+          verification: {
+            ...base,
+            status: 'exhausted',
+            reason: exhausted,
+            failure,
+          },
+        };
+      }
+
+      const nextState: VerifierPolicyState = {
+        ...state,
+        ...(fingerprint !== undefined ? { lastFingerprint: fingerprint } : {}),
+        lastFailure: failure,
+      };
+      const correlationValue = `${chain.chainId}:${state.runs}`;
+      const continuation: AxEventContinuation = {
+        id: `ax-verifier-continuation:${correlationValue}`,
+        targetId: target.id,
+        routeId: verifierRouteId(target),
+        instanceKey: eventContext.instanceKey,
+        identityScope: axEventIdentityScope(eventContext.identity),
+        correlation: [{ kind: 'ax.verifier', value: correlationValue }],
+        createdAt: this.clock.now(),
+        stateVersion: state.runs,
+        metadata: {
+          verification: {
+            policyId: policy.id,
+            chainId: chain.chainId,
+            run: state.runs,
+            failure,
+            state: nextState,
+          },
+        },
+      };
+      const backoffPolicy = policy.backoffMs;
+      let backoff = 0;
+      if (typeof backoffPolicy === 'function') {
+        try {
+          backoff = await this.invokeVerifierCallback(policy, context, () =>
+            backoffPolicy(state.runs, failure)
+          );
+        } catch {
+          backoff = 0;
+        }
+      } else if (backoffPolicy !== undefined) {
+        backoff = backoffPolicy;
+      }
+      if (!Number.isFinite(backoff) || backoff < 0) {
+        backoff = 0;
+      }
+      return {
+        verification: { ...base, status: 'fail', failure },
+        continuation: {
+          value: continuation,
+          ingress: {
+            event: {
+              specversion: '1.0',
+              id: `verification:${chain.chainId}:${state.runs}`,
+              source: VERIFIER_SOURCE,
+              type: verifierEventType(target),
+              time: new Date(this.clock.now()).toISOString(),
+              data: { continuation: correlationValue },
+            },
+            identity: structuredClone(eventContext.identity),
+            trust: eventContext.trust,
+            correlation: continuation.correlation,
+            partitionKey: eventContext.instanceKey,
+          },
+          availableAt: this.clock.now() + backoff,
+        },
+      };
+    } catch (error) {
+      if (eventContext.abortSignal.aborted) throw error;
+      return {
+        verification: {
+          policyId: policy.id,
+          chainId: chain.chainId,
+          status:
+            error instanceof Error &&
+            error.name === 'AxEventVerifierTimeoutError'
+              ? 'timeout'
+              : 'error',
+          run: state.runs,
+          checkedAt: this.clock.now(),
+          cumulativeUsage: {
+            tokens: state.tokens,
+            costUSD: state.costUSD,
+          },
+          error: this.boundVerifierString(
+            axEventErrorMessage(error),
+            VERIFIER_ERROR_BYTES
+          ),
+        },
+      };
+    }
+  }
+
+  private async preflightVerifier(
+    target: Readonly<AxEventTarget>,
+    eventContext: Readonly<AxEventContext>
+  ): Promise<VerificationOutcome | undefined> {
+    const policy = target.verifier!;
+    try {
+      const chain = this.verifierChain(target, eventContext);
+      if (!chain.previous) return;
+      const state = chain.previous;
+      const reason =
+        state.runs >= (policy.maxRuns ?? 3)
+          ? ('max_runs' as const)
+          : this.verifierLimit(policy, state, this.clock.now());
+      if (!reason) return;
+      return {
+        verification: {
+          policyId: policy.id,
+          chainId: chain.chainId,
+          status: 'exhausted',
+          run: state.runs,
+          checkedAt: this.clock.now(),
+          cumulativeUsage: {
+            tokens: state.tokens,
+            costUSD: state.costUSD,
+          },
+          reason,
+          ...(state.lastFingerprint !== undefined
+            ? { fingerprint: state.lastFingerprint }
+            : {}),
+          ...(state.lastFailure ? { failure: state.lastFailure } : {}),
+        },
+      };
+    } catch (error) {
+      return {
+        verification: {
+          policyId: policy.id,
+          chainId: eventContext.deliveryId,
+          status: 'error',
+          run: 0,
+          checkedAt: this.clock.now(),
+          cumulativeUsage: { tokens: 0, costUSD: 0 },
+          error: this.boundVerifierString(
+            axEventErrorMessage(error),
+            VERIFIER_ERROR_BYTES
+          ),
+        },
+      };
+    }
+  }
+
+  private verifierChain(
+    target: Readonly<AxEventTarget>,
+    eventContext: Readonly<AxEventContext>
+  ): Readonly<{
+    chainId: string;
+    previous?: Readonly<VerifierPolicyState>;
+  }> {
+    if (eventContext.continuation?.routeId !== verifierRouteId(target)) {
+      return { chainId: eventContext.deliveryId };
+    }
+    const metadata = eventContext.continuation.metadata?.verification;
+    if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+      throw new Error('Verifier continuation metadata is missing');
+    }
+    const value = metadata as Record<string, AxEventValue>;
+    const chainId = value.chainId;
+    const stateValue = value.state;
+    if (
+      value.policyId !== target.verifier!.id ||
+      typeof chainId !== 'string' ||
+      !chainId ||
+      new TextEncoder().encode(chainId).byteLength > 256 ||
+      !stateValue ||
+      typeof stateValue !== 'object' ||
+      Array.isArray(stateValue)
+    ) {
+      throw new Error('Verifier continuation ownership is invalid');
+    }
+    const state = stateValue as unknown as VerifierPolicyState;
+    const failure = state.lastFailure;
+    if (
+      !Number.isFinite(state.startedAt) ||
+      !Number.isInteger(state.runs) ||
+      state.runs < 1 ||
+      !Number.isFinite(state.tokens) ||
+      state.tokens < 0 ||
+      !Number.isFinite(state.costUSD) ||
+      state.costUSD < 0 ||
+      (state.lastFingerprint !== undefined &&
+        (typeof state.lastFingerprint !== 'string' ||
+          new TextEncoder().encode(state.lastFingerprint).byteLength >
+            VERIFIER_FINGERPRINT_BYTES)) ||
+      (failure !== undefined &&
+        (typeof failure.code !== 'string' ||
+          new TextEncoder().encode(failure.code).byteLength >
+            VERIFIER_CODE_BYTES ||
+          (failure.evidence !== undefined &&
+            new TextEncoder().encode(JSON.stringify(failure.evidence))
+              .byteLength > (target.verifier!.maxEvidenceBytes ?? 4_096)))) ||
+      eventContext.continuation.stateVersion !== state.runs ||
+      value.run !== state.runs ||
+      eventContext.continuation.id !==
+        `ax-verifier-continuation:${chainId}:${state.runs}` ||
+      !eventContext.continuation.correlation.some(
+        (correlation) =>
+          correlation.kind === 'ax.verifier' &&
+          correlation.value === `${chainId}:${state.runs}`
+      )
+    ) {
+      throw new Error('Verifier continuation state version is invalid');
+    }
+    return { chainId, previous: state };
+  }
+
+  private async invokeVerifierCallback<T>(
+    policy: Readonly<AxEventVerifierPolicy>,
+    context: Readonly<AxEventVerifierContext>,
+    callback: (context: Readonly<AxEventVerifierContext>) => T | Promise<T>
+  ): Promise<T> {
+    const verifierController = new AbortController();
+    const timeoutController = new AbortController();
+    const forwardAbort = () => verifierController.abort(context.signal.reason);
+    context.signal.addEventListener('abort', forwardAbort, { once: true });
+    let timedOut = false;
+    const timeout = this.clock
+      .sleep(policy.timeoutMs ?? 30_000, timeoutController.signal)
+      .then(() => {
+        timedOut = true;
+        verifierController.abort('Verifier timed out');
+        const error = new Error('Verifier timed out');
+        error.name = 'AxEventVerifierTimeoutError';
+        throw error;
+      })
+      .catch((error) => {
+        if (timeoutController.signal.aborted && !timedOut) {
+          return new Promise<never>(() => undefined);
+        }
+        throw error;
+      });
+    try {
+      return await Promise.race([
+        Promise.resolve().then(() =>
+          callback({
+            ...context,
+            signal: verifierController.signal,
+          })
+        ),
+        timeout,
+      ]);
+    } catch (error) {
+      if (timedOut) {
+        const timeoutError = new Error('Verifier timed out');
+        timeoutError.name = 'AxEventVerifierTimeoutError';
+        throw timeoutError;
+      }
+      throw error;
+    } finally {
+      timeoutController.abort('Verifier completed');
+      context.signal.removeEventListener('abort', forwardAbort);
+    }
+  }
+
+  private verifierLimit(
+    policy: Readonly<AxEventVerifierPolicy>,
+    state: Readonly<VerifierPolicyState>,
+    now: number
+  ): AxEventVerificationResult['reason'] | undefined {
+    if (policy.maxTokens !== undefined && state.tokens >= policy.maxTokens) {
+      return 'max_tokens';
+    }
+    if (
+      policy.maxWallTimeMs !== undefined &&
+      now - state.startedAt >= policy.maxWallTimeMs
+    ) {
+      return 'max_wall_time';
+    }
+    if (policy.maxCostUSD !== undefined && state.costUSD >= policy.maxCostUSD) {
+      return 'max_cost';
+    }
+    return;
+  }
+
+  private validateVerifierMeasure(name: string, value: number | undefined) {
+    if (value !== undefined && (!Number.isFinite(value) || value < 0)) {
+      throw new Error(`Verifier usage ${name} must be non-negative`);
+    }
+  }
+
+  private boundVerifierEvidence(
+    evidence: AxEventValue,
+    maxBytes: number
+  ): AxEventValue {
+    const json = JSON.stringify(evidence);
+    const encoder = new TextEncoder();
+    if (encoder.encode(json).byteLength <= maxBytes) {
+      return structuredClone(evidence);
+    }
+    const preview = `[truncated]${json}`;
+    let low = 0;
+    let high = preview.length;
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2);
+      if (
+        encoder.encode(JSON.stringify(preview.slice(0, middle))).byteLength <=
+        maxBytes
+      ) {
+        low = middle;
+      } else {
+        high = middle - 1;
+      }
+    }
+    return preview.slice(0, low);
+  }
+
+  private boundVerifierString(value: string, maxBytes: number): string {
+    const encoder = new TextEncoder();
+    if (encoder.encode(value).byteLength <= maxBytes) return value;
+    let low = 0;
+    let high = value.length;
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2);
+      if (encoder.encode(value.slice(0, middle)).byteLength <= maxBytes) {
+        low = middle;
+      } else {
+        high = middle - 1;
+      }
+    }
+    return value.slice(0, low);
   }
 
   private async invokeTarget(

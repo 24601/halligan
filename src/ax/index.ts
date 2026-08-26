@@ -1112,6 +1112,7 @@ import {
   type AxEventCloseOptions,
   type AxEventContext,
   type AxEventContinuation,
+  type AxEventContinuationEnqueueRequest,
   AxEventContinuationNotFoundError,
   type AxEventContinuationPlan,
   type AxEventContinuationRegistration,
@@ -1156,6 +1157,14 @@ import {
   type AxEventTargetInputContext,
   type AxEventTrust,
   type AxEventValue,
+  type AxEventVerificationResult,
+  type AxEventVerificationStatus,
+  type AxEventVerificationUsage,
+  type AxEventVerifierContext,
+  type AxEventVerifierPolicy,
+  type AxEventVerifierResult,
+  type AxEventVerifierTransitionRecord,
+  type AxEventVerifierTransitionRequest,
   AxManualEventClock,
   type AxProgramStateEnvelope,
   type AxProgramStateStore,
@@ -1166,6 +1175,8 @@ import {
   type AxUCPWebhookEventSourceOptions,
 } from './event/ucpSource.js';
 import {
+  axEventCanonicalDigest,
+  axEventCanonicalJson,
   axEventErrorMessage,
   axEventId,
   axEventIdentityScope,
@@ -1708,6 +1719,8 @@ export { axDefaultOptimizerMetricsConfig };
 export { axDeserializeOptimizedProgram };
 export { axEmitUsageEvent };
 export { axErasePreferenceEvidence };
+export { axEventCanonicalDigest };
+export { axEventCanonicalJson };
 export { axEventErrorMessage };
 export { axEventId };
 export { axEventIdentityScope };
@@ -2275,6 +2288,7 @@ export type { AxEventClock };
 export type { AxEventCloseOptions };
 export type { AxEventContext };
 export type { AxEventContinuation };
+export type { AxEventContinuationEnqueueRequest };
 export type { AxEventContinuationPlan };
 export type { AxEventContinuationRegistration };
 export type { AxEventCorrelationKey };
@@ -2320,6 +2334,14 @@ export type { AxEventTarget };
 export type { AxEventTargetInputContext };
 export type { AxEventTrust };
 export type { AxEventValue };
+export type { AxEventVerificationResult };
+export type { AxEventVerificationStatus };
+export type { AxEventVerificationUsage };
+export type { AxEventVerifierContext };
+export type { AxEventVerifierPolicy };
+export type { AxEventVerifierResult };
+export type { AxEventVerifierTransitionRecord };
+export type { AxEventVerifierTransitionRequest };
 export type { AxEvidenceDescriptor };
 export type { AxExample };
 export type { AxExamples };

@@ -78,6 +78,31 @@ await source.publish({ event, identity, trust: 'authenticated' });
 - Declare `retrySafety: 'idempotent'` only when stable delivery keys protect
   every possible side effect.
 - Persist outputs before final sink delivery; redrive sink failures separately.
+- For bounded autonomous attempts, attach a host-owned `.verifier(...)`. Its
+  callback runs only after output persistence; failed evidence is bounded and
+  resumed through an owned continuation, while pass alone releases final sinks.
+- Verifier targets are non-streaming and require a store advertising the fenced,
+  atomic `axevent-verifier-transition-v2` handoff. The transition replaces the
+  parent with its child for capacity accounting and carries chain state through
+  the owned continuation. Its immutable operation journal stores only SHA-256
+  commitments to the canonical request and deterministic child plus a minimal
+  receipt; it never duplicates payloads or verifier state. Confirmation
+  requires the complete fenced request. SQLite commitments outlive payload
+  retention, and V2 migration securely removes legacy full journal rows. A
+  durable cleanup marker makes later startups finish WAL checkpoint/truncation
+  after a migration-time crash. These semantics are SQLite event schema v4;
+  subsequent migrations must build from verifier-v4 without reusing its schema
+  versions or capability marker. This does not make arbitrary external I/O
+  exactly once.
+- Set explicit verifier run/token/wall-time/cost limits. Exhaustion, verifier
+  error/timeout, and unchanged fingerprints fail closed; abort stays cancelled.
+  Accepted `cancelRun` during an in-flight V2 transition rejects the store
+  handoff after commitment awaits and does not install or run the child.
+- Host `usage`, `fingerprint`, and `verify` callbacks share timeout and abort
+  handling. Outputless clarification waits bypass verification.
+- Compute verifier fingerprints from all relevant deterministic host state.
+  An unchanged post-failure fingerprint suppresses the repeated verifier call
+  and loop. The target never receives the verifier callback itself.
 - Use `debounceMs` and `coalesce: 'latest'` only when replacing intermediate
   events is part of the route's declared policy.
 - Observe source failures with `onSourceError`.
