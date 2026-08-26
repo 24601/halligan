@@ -392,7 +392,7 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
               left.localeCompare(right)
             )
           ),
-          scalarScore: scalarize(evaluation.avg),
+          scalarScore: average(evaluation.scalars),
           metricCallsBefore,
           metricCallsAfter: evaluationState.totalCalls,
           metricCallBudget: rolloutBudgetPareto,
