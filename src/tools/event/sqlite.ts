@@ -1558,7 +1558,7 @@ export class AxSQLiteEventStore
           reference TEXT,
           size_bytes INTEGER NOT NULL,
           expires_at INTEGER NOT NULL,
-          state TEXT NOT NULL,
+          state TEXT NOT NULL CHECK(state IN ('staging','commit_pending','committed','abort_pending')),
           created_at INTEGER NOT NULL,
           updated_at INTEGER NOT NULL
         );
@@ -1742,7 +1742,7 @@ export class AxSQLiteEventStore
           reference TEXT,
           size_bytes INTEGER NOT NULL,
           expires_at INTEGER NOT NULL,
-          state TEXT NOT NULL,
+          state TEXT NOT NULL CHECK(state IN ('staging','commit_pending','committed','abort_pending')),
           created_at INTEGER NOT NULL,
           updated_at INTEGER NOT NULL
         );
