@@ -856,9 +856,11 @@ import {
   type AxOptimizerResult,
   type AxParetoResult,
   type AxSerializedOptimizedProgram,
+  axAttachCausalCandidateEvidence,
   axDefaultOptimizerMetricsConfig,
   axDeserializeOptimizedProgram,
   axGetOptimizerMetricsConfig,
+  axReplaceOptimizedProgramSnapshot,
   axSerializeOptimizedProgram,
   axUpdateOptimizerMetricsConfig,
 } from './dsp/optimizer.js';
@@ -896,6 +898,25 @@ import type {
 } from './dsp/optimizers/aceTypes.js';
 import type { AxRolloutTrace } from './dsp/optimizers/axGenAdapter.js';
 import { AxBootstrapFewShot } from './dsp/optimizers/bootstrapFewshot.js';
+import {
+  type AxCausalAffectedComponent,
+  type AxCausalCandidateAblation,
+  type AxCausalCandidateEvidenceManifest,
+  type AxCausalCandidateEvidenceOptions,
+  type AxCausalCandidateEvidenceRecord,
+  type AxCausalCandidateSplitOutcome,
+  type AxCausalEvidenceAuthority,
+  type AxCausalEvidenceAuthorityVerifier,
+  type AxCausalEvidenceKind,
+  type AxCausalEvidenceReceipt,
+  type AxCausalEvidenceReference,
+  type AxCausalMetricOutcome,
+  type AxCausalMetricPrediction,
+  axCanonicalizeCausalCandidateEvidenceManifest,
+  axCloneCausalCandidateEvidenceManifest,
+  axCreateCausalCandidateEvidenceManifest,
+  axFingerprintCausalEvidence,
+} from './dsp/optimizers/causalCandidateEvidence.js';
 import {
   AxGEPA,
   type AxGEPAOptimizationReport,
@@ -1657,6 +1678,7 @@ export { axAnalyzeChatPromptRequirements };
 export { axAnalyzeRequestRequirements };
 export { axApplyMCPAuthentication };
 export { axApplyOpenAIChatAudioRequest };
+export { axAttachCausalCandidateEvidence };
 export { axAttenuateAuthority };
 export { axAudioFormatFromMimeType };
 export { axAudioInputFilename };
@@ -1669,8 +1691,11 @@ export { axBaseAIDefaultCreativeConfig };
 export { axBuildDistillerDefinition };
 export { axBuildExecutorDefinition };
 export { axBuildResponderDefinition };
+export { axCanonicalizeCausalCandidateEvidenceManifest };
 export { axCheckMetricsHealth };
+export { axCloneCausalCandidateEvidenceManifest };
 export { axConcatBase64 };
+export { axCreateCausalCandidateEvidenceManifest };
 export { axCreateDefaultColorLogger };
 export { axCreateDefaultOptimizerColorLogger };
 export { axCreateDefaultOptimizerTextLogger };
@@ -1698,6 +1723,7 @@ export { axEventSizeBytes };
 export { axExecutableSkillRef };
 export { axFetchJsonSpeech };
 export { axFetchMultipartTranscription };
+export { axFingerprintCausalEvidence };
 export { axFrameSampler };
 export { axFunctionAuthorityTarget };
 export { axGetAIProfile };
@@ -1760,6 +1786,7 @@ export { axProcessContentForProvider };
 export { axReactCanonicalJSON };
 export { axReactSerializeHistory };
 export { axRenewPreferenceEvidence };
+export { axReplaceOptimizedProgramSnapshot };
 export { axResolveAIProfileFeatures };
 export { axResolveAIProfileId };
 export { axResolveGeminiLiveAudioConfig };
@@ -2193,6 +2220,19 @@ export type { AxBaseAIArgs };
 export type { AxBestOfNOptions };
 export type { AxBootstrapOptimizerOptions };
 export type { AxCapabilityGrant };
+export type { AxCausalAffectedComponent };
+export type { AxCausalCandidateAblation };
+export type { AxCausalCandidateEvidenceManifest };
+export type { AxCausalCandidateEvidenceOptions };
+export type { AxCausalCandidateEvidenceRecord };
+export type { AxCausalCandidateSplitOutcome };
+export type { AxCausalEvidenceAuthority };
+export type { AxCausalEvidenceAuthorityVerifier };
+export type { AxCausalEvidenceKind };
+export type { AxCausalEvidenceReceipt };
+export type { AxCausalEvidenceReference };
+export type { AxCausalMetricOutcome };
+export type { AxCausalMetricPrediction };
 export type { AxChatAudioConfig };
 export type { AxChatAudioOutput };
 export type { AxChatLogEntry };
