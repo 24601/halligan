@@ -552,14 +552,14 @@ function validateExpression(
       exactKeys(value, ['op', 'items'], ['op', 'items'], path);
       if (!Array.isArray(value.items))
         fail(`${path}.items`, 'must be an array');
-      value.items.forEach((expression, index) =>
+      for (const [index, expression] of value.items.entries()) {
         validateExpression(
           expression,
           knownVariables,
           `${path}.items[${index}]`,
           depth + 1
-        )
-      );
+        );
+      }
       return;
     case 'eq':
       exactKeys(value, ['op', 'left', 'right'], ['op', 'left', 'right'], path);
@@ -603,14 +603,14 @@ function validateExpression(
       if (!Array.isArray(value.values) || value.values.length === 0) {
         fail(`${path}.values`, 'must be a non-empty array');
       }
-      value.values.forEach((expression, index) =>
+      for (const [index, expression] of value.values.entries()) {
         validateExpression(
           expression,
           knownVariables,
           `${path}.values[${index}]`,
           depth + 1
-        )
-      );
+        );
+      }
       return;
     default:
       fail(`${path}.op`, `unsupported expression '${String(value.op)}'`);
@@ -880,7 +880,7 @@ const validateStatementList = (
           if (
             !field.isInternal &&
             !field.isOptional &&
-            !(field.name in rawStatement.outputs)
+            !Object.hasOwn(rawStatement.outputs, field.name)
           ) {
             fail(
               `${statementPath}.outputs`,
@@ -1440,7 +1440,16 @@ export class AxProgramSource<
       }
       validateValue(field, value as never);
     }
-    snapshotSerializableValue(values, this.valueLimits, 'Program source input');
+    const snapshotInputs: Record<string, unknown> = {};
+    for (const field of this.signature.getInputFields()) {
+      const value = (values as Record<string, unknown>)[field.name];
+      if (value !== undefined) snapshotInputs[field.name] = value;
+    }
+    snapshotSerializableValue(
+      snapshotInputs,
+      this.valueLimits,
+      'Program source input'
+    );
 
     const epoch = ++this.nextSessionEpoch;
     const authorityStartedAt = Date.now();
@@ -1526,14 +1535,16 @@ export class AxProgramSource<
           `Program source tool '${name}' result`
         );
         if (emitTrace) {
-          await options?.onFunctionCall?.({
-            fn: name,
-            componentId: tool.componentId ?? name,
-            args: normalizedArgs,
-            result: capturedResult,
-            ok: true,
-            ms: Date.now() - startedAt,
-          });
+          try {
+            await options?.onFunctionCall?.({
+              fn: name,
+              componentId: tool.componentId ?? name,
+              args: normalizedArgs,
+              result: capturedResult,
+              ok: true,
+              ms: Date.now() - startedAt,
+            });
+          } catch {}
           assertAuthority('tool', name, 'completion');
         }
         return capturedResult;
@@ -1545,14 +1556,16 @@ export class AxProgramSource<
           throw expiredError();
         }
         if (emitTrace) {
-          await options?.onFunctionCall?.({
-            fn: name,
-            componentId: tool.componentId ?? name,
-            args: normalizedArgs,
-            result: error instanceof Error ? error.message : String(error),
-            ok: false,
-            ms: Date.now() - startedAt,
-          });
+          try {
+            await options?.onFunctionCall?.({
+              fn: name,
+              componentId: tool.componentId ?? name,
+              args: normalizedArgs,
+              result: error instanceof Error ? error.message : String(error),
+              ok: false,
+              ms: Date.now() - startedAt,
+            });
+          } catch {}
         }
         throw error;
       }
@@ -1632,7 +1645,7 @@ export class AxProgramSource<
           } as AxFunction;
           return {
             ...metadata,
-            func: async (args?: unknown) =>
+            func: async (args?: unknown, _options?: unknown) =>
               await callTool(name, args, false, executableTool),
           } as AxFunction;
         }
