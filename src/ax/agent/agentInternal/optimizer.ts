@@ -159,6 +159,7 @@ export async function optimizeAgent<IN extends AxGenIn, OUT extends AxGenOut>(
         | undefined,
       maxMetricCalls,
       verbose: options?.verbose,
+      gepaProposal: options?.gepaProposal,
     }
   );
 

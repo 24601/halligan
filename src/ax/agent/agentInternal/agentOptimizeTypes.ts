@@ -8,6 +8,7 @@ import type {
 } from '../../dsp/common_types.js';
 import type { AxJudgeOptions } from '../../dsp/judgeTypes.js';
 import type { AxParetoResult } from '../../dsp/optimizer.js';
+import type { AxGEPAProposalOptions } from '../../dsp/optimizers/gepaReflection.js';
 import type { AxOptimizerLoggerFunction } from '../../dsp/optimizerTypes.js';
 import type { AxPlaybookOptions } from '../../dsp/playbook.js';
 import type {
@@ -137,6 +138,8 @@ export type AxAgentOptimizeOptions<
   apply?: boolean;
   maxMetricCalls?: number;
   bootstrap?: boolean | AxGEPABootstrapOptions;
+  /** Proposal policy and trusted optimization-only references for GEPA. */
+  gepaProposal?: AxGEPAProposalOptions;
   /** Optional deterministic scorer. If omitted, optimize() uses the built-in LLM judge. */
   metric?: AxMetricFn;
   verbose?: boolean;

@@ -138,6 +138,27 @@ npm run build:index --workspace=@ax-llm/ax
 - keep `src/ax/` browser-compatible; do not add `fs`, `path`, or `os` there
 - never commit API keys; use environment variables
 
+## Tests And Evaluation
+
+Behavioral features and changes require all applicable static, type, unit, and
+integration tests plus a meaningful, truthful evaluation matched to the claim.
+
+- Claimed outcome improvement: a held-out hill-climbing comparison against a
+  declared baseline.
+- Latency or cost: a reproducible benchmark against a declared baseline.
+- Recovery or durability: fault injection covering the claimed failure mode.
+- Infrastructure: audit-fidelity and overhead checks.
+
+Declare the baseline and bound calls, tokens, wall-clock time, and cost. Report
+negative or regression results and provide exact commands and artifacts. Never
+hard-code outcomes, mutate evaluators or hidden tests, or claim more than the
+evidence supports. Documentation-only, typo-only, and mechanical metadata
+changes may mark an outcome evaluation as not applicable, but must explain why
+instead of inventing one.
+
+See `.github/CONTRIBUTING.md` and the pull request template for the required
+evaluation type, evidence, exemptions, and zero-cost/live-evaluation rules.
+
 ## Examples
 
 Examples should usually follow these conventions:
