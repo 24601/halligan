@@ -281,7 +281,12 @@ Selection validates strictly increasing timestamps and versions, principal
 scope, exact host stream state, receipt bindings, scope/applicability, expiry,
 terminal lifecycle state, contradiction, supersession, confidence, and host
 policy before using Ax's existing deterministic lexical ranker. Equal-time or
-older supersession and unresolved contradictions fail closed.
+older supersession and unresolved contradictions fail closed. Within a single
+stream's current epoch, a uniquely stronger claim resolves a self-contradiction
+by authority kind (`confirmed-preference` over `observation` over `inference`),
+then confidence; an equal-strength or otherwise unresolved conflict still fails
+closed. This prevents a weak later inference from silently displacing a
+stronger confirmed preference.
 Only `applied` confirmed preferences convert to memory; observations and
 inferences remain available for host inspection under `informational`.
 Convert the returned selection directly; the memory adapter rejects copied or
@@ -340,12 +345,13 @@ npm run evaluate:preference-evidence
 The final corpus, expected outcomes, and event-bound host policy live in the
 separately authored post-baseline artifact
 `scripts/fixtures/preference-evidence-later-v1.json`. The artifact was committed
-at `0b304636348533e62f66ba8067f1fb6d98452081` after mechanism baseline
+at `45ac57e0f6757da1995c9ded36442dcd5ca1e837` after mechanism baseline
 `8e1152f8974231ea7e81d8078acbd7e84386c438`; its frozen SHA-256 is
-`613da6a2b29256575b872a367021df59b3b2e905192ea6026c4457d354e17f46`.
+`fda0ff1679f511eecaf5c1477a7ab6226ee709a4ca03a57c95d8dc6ab2298f05`.
 The evaluator checks that digest before parsing and records the provenance in
 its output. Artifact-owned expectations include exact exclusions and callback
-counts/purposes, so an empty applied set rejected for the wrong reason fails.
+counts/purposes for successful and rejected cases, so a callback regression or
+an empty applied set rejected for the wrong reason fails.
 Cases cover stable benefit, contradiction, expiry, cross-principal leakage,
 forged consent/provenance and destructive authority, retraction, erasure and
 stale replay, explicit epoch renewal, uncertain inference, unseen
@@ -354,21 +360,18 @@ small-data. Separate stress probes exercise count, query, total-byte, and
 cyclic-shape rejection before callbacks.
 
 On the 17-case artifact, static/no personalization scores 14/17 exact with
-three missed-personalization cases; naive latest-value and evidence-aware
-selection both score 16/17 by applied IDs with two correct applications, zero
-false personalization cases, and one missed-personalization case. Exact
-applied-ID, exclusion-reason, and callback evidence passes 13/17 cases. Three
-additional cases match applied IDs but fail their artifact-owned exclusion
-reason: unresolved observation contradiction, uncertain inference threshold,
-and equal-time observation supersession. The noisy weak-contradiction case is
-the fourth preserved failure: the corpus expects the stronger confirmed
-preference, while the mechanism applies nothing. Retention/expiry,
-retraction/erasure, stale replay, renewal, authority, and stress checks pass
-their exact expectations. The artifact is 27,045 UTF-8 bytes. The evaluator
-reports measured latency, every exclusion/callback check, and failures without
-suppressing them. Named negative-result aggregates derive from each case's full
-exact check; the output exposes all four preserved failure identities with
-expected and actual applied IDs, exclusions, callback counts, and purposes.
+three missed-personalization cases; naive latest-value scores 16/17 with two
+correct applications, zero false-personalization cases, and one missed case.
+Evidence-aware selection scores 17/17 with three correct applications, zero
+false-personalization cases, and zero missed cases. All 17 exact applied-ID,
+exclusion-reason, and callback checks pass, including unresolved observation
+contradiction, an explicitly configured `minConfidence: 0.5` uncertain
+inference rejection, equal-time observation supersession, and preservation of
+a stronger confirmed preference over a weak later inference. Retention/expiry,
+retraction/erasure, stale replay, renewal, authority, and stress checks also
+pass. The artifact is 27,649 UTF-8 bytes. The evaluator reports measured
+latency and every exclusion/callback check, exits nonzero on any failure, and
+does not suppress or golden known failures.
 
 The default bound is 17 cases × 1,000 iterations = 17,000 local selections,
 four one-shot stress probes, zero provider calls/tokens, and $0 provider cost.

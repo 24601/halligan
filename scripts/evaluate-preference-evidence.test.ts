@@ -10,9 +10,9 @@ describe('preference evidence evaluation', () => {
 
     expect(result.artifact).toMatchObject({
       id: 'preference-evidence-later-v1',
-      commit: '0b304636348533e62f66ba8067f1fb6d98452081',
+      commit: '45ac57e0f6757da1995c9ded36442dcd5ca1e837',
       sha256:
-        '613da6a2b29256575b872a367021df59b3b2e905192ea6026c4457d354e17f46',
+        'fda0ff1679f511eecaf5c1477a7ab6226ee709a4ca03a57c95d8dc6ab2298f05',
       digestVerifiedBeforeParse: true,
       mechanismBaselineCommit: '8e1152f8974231ea7e81d8078acbd7e84386c438',
       policyAuthority: 'synthetic-event-policy-v1',

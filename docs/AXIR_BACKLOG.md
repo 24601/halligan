@@ -35,9 +35,9 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
 - `axir-2026-08-25-port-host-owned-principal-preference-evidence-selection` [axagent] Port host-owned principal preference evidence selection
   - Status: open
   - Source PR: #19
-  - Source commit: `2ef9eb795dd3198060743365456815501aa88908`
+  - Source commit: `45ac57e0f6757da1995c9ded36442dcd5ca1e837`
   - TS paths: `src/ax/agent/preferenceEvidence.ts`, `src/ax/agent/preferenceEvidence.test.ts`, `src/ax/agent/preferenceEvidence.test-d.ts`
-  - Impact: Generated runtimes do not yet expose the optional principal-scoped preference evidence contract, bounded receipt-verified retrieval, monotonic stream/epoch lifecycle helpers, frozen publications, or memory adapter.
+  - Impact: Generated runtimes do not yet expose the optional principal-scoped preference evidence contract, per-record malformed isolation, receipt-verified retrieval, strong-claim self-contradiction resolution, content-free erase tombstones, monotonic stream/epoch lifecycle helpers, frozen publications, or memory adapter.
   - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 
 ## Done
