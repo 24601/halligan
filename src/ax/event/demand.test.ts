@@ -896,6 +896,44 @@ describe('AxDemandBoundary', () => {
     expect(raced.record.cursor).toBe(original.record.cursor);
   });
 
+  it('honors cancellation while a historical lookup is pending', async () => {
+    const original = await boundary(detection()).value.observe(
+      observation('cancel-during-lookup')
+    );
+    let releaseLookup: (() => void) | undefined;
+    let lookupStarted: (() => void) | undefined;
+    const lookupGate = new Promise<void>((resolve) => {
+      releaseLookup = resolve;
+    });
+    const lookupPending = new Promise<void>((resolve) => {
+      lookupStarted = resolve;
+    });
+    const append = vi.fn(async () => {
+      throw new Error('append must not run after cancelled lookup');
+    });
+    const store: AxDemandStore = {
+      getByDedupeKey: async () => {
+        lookupStarted?.();
+        await lookupGate;
+        return original.record;
+      },
+      append,
+      list: async () => ({ records: [original.record] }),
+    };
+    const target = boundary(detection(), { store });
+    const controller = new AbortController();
+    const cancelled = target.value.observe(
+      observation('cancel-during-lookup'),
+      { signal: controller.signal }
+    );
+    await lookupPending;
+    controller.abort('host cancelled during lookup');
+    releaseLookup?.();
+    await expect(cancelled).rejects.toMatchObject({ name: 'AbortError' });
+    expect(target.detect).not.toHaveBeenCalled();
+    expect(append).not.toHaveBeenCalled();
+  });
+
   it('cancels an atomic store append without retaining evidence', async () => {
     const records: AxDemandRecord[] = [];
     let releaseFirstAppend: (() => void) | undefined;
@@ -979,6 +1017,22 @@ describe('AxDemandBoundary', () => {
           now: () => now,
         })
     ).toThrow('seed cursors must be unique');
+    expect(
+      () =>
+        new AxInMemoryDemandStore({
+          seed: [
+            seed[0]!,
+            {
+              ...seed[1]!,
+              proposal: {
+                ...seed[1]!.proposal,
+                dedupeKey: seed[0]!.proposal.dedupeKey,
+              },
+            },
+          ],
+          now: () => now,
+        })
+    ).toThrow('seed dedupe keys must be unique');
   });
 
   it('treats a host dedupe key as immutable after proposal expiry', async () => {

@@ -100,9 +100,9 @@ await source.publish({ event, identity, trust: 'authenticated' });
 - Use a host `AxDemandStore` for durable/distributed cursor and dedupe
   guarantees. `AxInMemoryDemandStore` is volatile; its snapshots are suitable
   for deterministic restart tests, not a durable service. Seed cursors are
-  numerically ordered for pagination and must be unique. Custom stores must
-  atomically check the signal passed to `append` immediately before commit and
-  retain no new record when it is aborted.
+  numerically ordered for pagination; seed cursors and dedupe keys must be
+  unique. Custom stores must atomically check the signal passed to `append`
+  immediately before commit and retain no new record when it is aborted.
 - Bound retention explicitly. In-memory defaults are 10,000 records, 64 MiB,
   1,000 scopes, 1,000 records per scope, and seven days; eviction removes the
   corresponding dedupe key.

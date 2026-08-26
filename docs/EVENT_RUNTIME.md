@@ -177,7 +177,7 @@ is aborted only when no waiters remain. Pending work is bounded to 1,000 keys
 and 64 MiB by default. Separate processes or boundary instances still need a
 host reservation protocol if callback-level exactly-once behavior is required.
 Restored seed records are ordered by numeric cursor before pagination, and
-duplicate seed cursors are rejected.
+duplicate seed cursors or dedupe keys are rejected.
 
 Every `AxDemandStore.append` receives the boundary's internal abort signal and
 must check it atomically immediately before committing a new record. If the

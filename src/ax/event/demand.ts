@@ -616,6 +616,11 @@ export class AxInMemoryDemandStore implements AxDemandStore {
       finiteTimestamp(copied.createdAt, 'AxDemandRecord.createdAt');
       validateRecordMetrics(copied);
       const size = bytes(copied);
+      if (this.byDedupeKey.has(copied.proposal.dedupeKey)) {
+        throw new Error(
+          'AxInMemoryDemandStore seed dedupe keys must be unique'
+        );
+      }
       this.records.push({ record: copied, size });
       this.totalBytes += size;
       this.byDedupeKey.set(copied.proposal.dedupeKey, copied);
@@ -963,6 +968,9 @@ export class AxDemandBoundary {
       localDedupeKey,
     ]);
     const existing = await this.store.getByDedupeKey(dedupeKey);
+    if (signal?.aborted) {
+      throw new AxDemandCancelledError(signal.reason);
+    }
     if (existing) {
       return { record: existing, duplicate: true, historical: true };
     }
