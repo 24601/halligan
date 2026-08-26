@@ -4,6 +4,7 @@ import {
   type AxDemandDetection,
   type AxDemandDetector,
   type AxDemandObservation,
+  type AxDemandRecord,
   type AxDemandStore,
   AxInMemoryDemandStore,
   axDemandEventObserver,
@@ -893,6 +894,65 @@ describe('AxDemandBoundary', () => {
     );
     expect(raced).toMatchObject({ duplicate: true, historical: true });
     expect(raced.record.cursor).toBe(original.record.cursor);
+  });
+
+  it('cancels an atomic store append without retaining evidence', async () => {
+    const records: AxDemandRecord[] = [];
+    let releaseFirstAppend: (() => void) | undefined;
+    let appendStarted: (() => void) | undefined;
+    const firstAppendStarted = new Promise<void>((resolve) => {
+      appendStarted = resolve;
+    });
+    const firstAppendGate = new Promise<void>((resolve) => {
+      releaseFirstAppend = resolve;
+    });
+    let finishFirstAppend: (() => void) | undefined;
+    const firstAppendFinished = new Promise<void>((resolve) => {
+      finishFirstAppend = resolve;
+    });
+    let appendCalls = 0;
+    const store: AxDemandStore = {
+      getByDedupeKey: async (key) =>
+        records.find((record) => record.proposal.dedupeKey === key),
+      append: async (value, { signal }) => {
+        appendCalls++;
+        const first = appendCalls === 1;
+        if (first) {
+          appendStarted?.();
+          await firstAppendGate;
+        }
+        if (signal.aborted) {
+          finishFirstAppend?.();
+          throw new DOMException('Demand append cancelled', 'AbortError');
+        }
+        if (first) {
+          finishFirstAppend?.();
+        }
+        const record = { ...value, cursor: String(records.length + 1) };
+        records.push(record);
+        return { record, duplicate: false };
+      },
+      list: async () => ({ records }),
+    };
+    const value = boundary(detection(), { store });
+    const controller = new AbortController();
+    const cancelled = value.value.observe(observation('cancel-during-append'), {
+      signal: controller.signal,
+    });
+    await firstAppendStarted;
+    controller.abort('host cancelled during append');
+    await expect(cancelled).rejects.toMatchObject({ name: 'AbortError' });
+    releaseFirstAppend?.();
+    await firstAppendFinished;
+    expect(records).toHaveLength(0);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    const retried = await value.value.observe(
+      observation('cancel-during-append')
+    );
+    expect(retried).toMatchObject({ duplicate: false, historical: false });
+    expect(records).toHaveLength(1);
+    expect(value.detect).toHaveBeenCalledTimes(2);
   });
 
   it('paginates restored seed records in cursor order', async () => {

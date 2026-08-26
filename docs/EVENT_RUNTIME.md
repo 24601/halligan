@@ -179,6 +179,13 @@ host reservation protocol if callback-level exactly-once behavior is required.
 Restored seed records are ordered by numeric cursor before pagination, and
 duplicate seed cursors are rejected.
 
+Every `AxDemandStore.append` receives the boundary's internal abort signal and
+must check it atomically immediately before committing a new record. If the
+signal is already aborted, append must reject without retaining the record.
+This store contract prevents cancellation during an asynchronous durable append
+from becoming historical evidence; a post-append boundary check cannot undo an
+external commit.
+
 `maxInFlight` and `maxInFlightBytes` are applied as separate per-class ceilings:
 once to transient keyed work and once to unsettled detector/grant callback
 reservations shared together. They are not one aggregate pool, avoiding double

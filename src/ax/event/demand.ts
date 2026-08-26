@@ -129,8 +129,13 @@ export interface AxDemandAppendResult {
 
 export interface AxDemandStore {
   getByDedupeKey(key: string): Promise<Readonly<AxDemandRecord> | undefined>;
+  /**
+   * Atomically check signal immediately before committing a new record. If it
+   * is aborted before commit, reject without retaining the record.
+   */
   append(
-    record: Readonly<Omit<AxDemandRecord, 'cursor'>>
+    record: Readonly<Omit<AxDemandRecord, 'cursor'>>,
+    options: Readonly<{ signal: AbortSignal }>
   ): Promise<Readonly<AxDemandAppendResult>>;
   list(
     options?: Readonly<{
@@ -645,8 +650,12 @@ export class AxInMemoryDemandStore implements AxDemandStore {
   }
 
   append(
-    value: Readonly<Omit<AxDemandRecord, 'cursor'>>
+    value: Readonly<Omit<AxDemandRecord, 'cursor'>>,
+    options: Readonly<{ signal: AbortSignal }>
   ): Promise<Readonly<AxDemandAppendResult>> {
+    if (options.signal.aborted) {
+      throw new AxDemandCancelledError(options.signal.reason);
+    }
     this.pruneExpired();
     finiteTimestamp(value.createdAt, 'AxDemandRecord.createdAt');
     validateRecordMetrics(value);
@@ -656,6 +665,9 @@ export class AxInMemoryDemandStore implements AxDemandStore {
     }
     if (!Number.isSafeInteger(this.nextCursor)) {
       throw new Error('AxInMemoryDemandStore cursor capacity was exhausted');
+    }
+    if (options.signal.aborted) {
+      throw new AxDemandCancelledError(options.signal.reason);
     }
     const cursor = this.nextCursor;
     this.nextCursor =
@@ -1002,7 +1014,7 @@ export class AxDemandBoundary {
     scopeBytes: number,
     scope: Readonly<AxDemandScope>,
     dedupeKey: string,
-    signal: AbortSignal | undefined
+    signal: AbortSignal
   ): Promise<Readonly<AxDemandReceipt>> {
     const startedAt = this.measureNow();
     if (!Number.isFinite(startedAt)) {
@@ -1057,24 +1069,27 @@ export class AxDemandBoundary {
       signal,
       observationBytes + scopeBytes
     );
-    if (signal?.aborted) {
+    if (signal.aborted) {
       throw new AxDemandCancelledError(signal.reason);
     }
-    const appended = await this.store.append({
-      scope,
-      observation,
-      detection,
-      proposal,
-      detector: this.detectorIdentity,
-      createdAt: finiteTimestamp(this.now(), 'AxDemandBoundary.now()'),
-      metrics: {
-        detectorCalls: 1,
-        detectorLatencyMs: detectorLatency.value,
-        detectorLatencyCapped: detectorLatency.capped,
-        observationBytes,
-        detectionBytes: bytes(detection),
+    const appended = await this.store.append(
+      {
+        scope,
+        observation,
+        detection,
+        proposal,
+        detector: this.detectorIdentity,
+        createdAt: finiteTimestamp(this.now(), 'AxDemandBoundary.now()'),
+        metrics: {
+          detectorCalls: 1,
+          detectorLatencyMs: detectorLatency.value,
+          detectorLatencyCapped: detectorLatency.capped,
+          observationBytes,
+          detectionBytes: bytes(detection),
+        },
       },
-    });
+      { signal }
+    );
     return {
       ...appended,
       historical: appended.duplicate,
