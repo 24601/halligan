@@ -7,6 +7,7 @@ export type AxGEPAReflectiveTuple = {
   input: AxExample;
   prediction: unknown;
   score: number;
+  feedback?: string;
 };
 
 export type AxGEPATraceSummaryCall = {
@@ -20,6 +21,7 @@ export type AxGEPATraceSummaryCall = {
 
 export type AxGEPATraceSummary = {
   score: number;
+  feedback?: string;
   calls: AxGEPATraceSummaryCall[];
   output?: string;
   error?: string;
@@ -123,6 +125,10 @@ export function summarizeGEPATraces(
 
   return traceDataset.slice(0, maxRows).map((item: any) => ({
     score: Number(item?.score ?? 0),
+    feedback:
+      typeof item?.feedback === 'string'
+        ? renderReflectiveValue(item.feedback, maxValueChars)
+        : undefined,
     calls: Array.isArray(item?.calls)
       ? item.calls.map((call: any) => ({
           componentId:
@@ -209,6 +215,12 @@ export async function proposeGEPAComponentValue(args: {
   traceDataset?: readonly unknown[];
   maxAttempts?: number;
   proposal?: Readonly<AxGEPAProposalOptions>;
+  onFailure?: (
+    failure: Readonly<{
+      kind: 'runtime' | 'validator';
+      message: string;
+    }>
+  ) => void;
 }): Promise<string | undefined> {
   const attempts = Math.max(1, args.maxAttempts ?? 2);
   let previousValidationError: string | undefined;
@@ -252,6 +264,7 @@ export async function proposeGEPAComponentValue(args: {
       if (isAbortError(error)) throw error;
       previousValidationError =
         error instanceof Error ? error.message : String(error);
+      args.onFailure?.({ kind: 'runtime', message: previousValidationError });
       continue;
     }
     if (!proposed) {
@@ -261,6 +274,7 @@ export async function proposeGEPAComponentValue(args: {
     const validation = validateGEPAComponentValue(args.target, proposed);
     if (validation === true) return proposed;
     previousValidationError = validation;
+    args.onFailure?.({ kind: 'validator', message: validation });
   }
   return undefined;
 }

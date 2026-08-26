@@ -490,6 +490,56 @@ Rules:
 - Batched `llmQuery([...])` returns per-item `[ERROR] ...`.
 - If a result starts with `[ERROR]`, inspect or branch on it instead of assuming success.
 
+### Retained AxAgent delegation is different
+
+`AxAgentSessionHost` is the opt-in path for a real retained AxAgent child. Add
+an owning session client's generated functions to `functions`; executor code
+can then admit work without blocking:
+
+```javascript
+const handle = await sessions.spawn({
+  agent: 'researcher.v1',
+  input: { task: 'Inspect the incident evidence' },
+});
+console.log(handle);
+```
+
+On later turns, inspect the handle or send complete child-signature inputs:
+
+```javascript
+await sessions.send({
+  handle,
+  mode: 'follow-up',
+  input: { task: 'Now compare it with the remediation log' },
+});
+```
+
+Use `mode: 'steer'` only when current child work should be cancelled and the
+new input should run first. `follow-up` never interrupts. Child runtime state
+is captured through the existing AxAgent state format; values Ax cannot
+serialize do not become durable merely because the session is retained.
+Recovery advances a root-wide lease epoch: restore the root and refresh handles
+before sending more mail; executor closures from the previous owner are stale.
+Ambiguous running work keeps its pre-dispatch token reservation charged.
+Explicit snapshot restore also rotates destination authority, and its
+separately trusted digest covers canonical policy, lifecycle diagnostics,
+mailbox payloads, retained state/artifacts, enumerable string data keys/key
+order, and accounting aggregates. Ordinary objects/arrays reject
+non-enumerable or symbol keys and accessors (apart from intrinsic array
+`length`); intrinsic values reject custom own keys. One bounded
+descriptor-based capture creates detached trusted data without invoking caller
+getters or cloning the live graph; import is capped at depth 64, 100,000
+visited values/typed-array elements, 16 MiB aggregate string/binary data, and
+4,096-bit bigints. Proxy reflection traps remain executable host code, so
+restore accepts host-owned snapshots only. A lazy `Error.stack` accessor is
+discarded without invocation and replaced by an inert marker; it is not durable
+stack text.
+
+This mechanism does not expose a second interpreter, inherit parent tools, or
+change `llmQuery(...)` budgets. The host independently bounds child count,
+depth, concurrency, pending/retained mail, tokens, and admitted subcalls. See
+`docs/RETAINED_CHILD_SESSIONS.md`.
+
 Minimal example:
 
 ```javascript
@@ -544,6 +594,7 @@ Delegation decision guide:
 - **JS-only**: deterministic logic such as filter, sort, count, regex, or date math -> do it inline.
 - **Single-shot semantic**: needs LLM reasoning but no tools or multi-step exploration -> single `llmQuery(...)` with narrow context.
 - **Specialist/tool delegation**: needs its own tools, discovery, runtime, or reusable role -> create a child `agent(...)` and pass it in `functions: [...]`.
+- **Retained concurrent specialist**: work should outlive the current actor turn, retain isolated state, or accept later steering/follow-up -> use an explicitly authorized `AxAgentSessionHost` registration.
 - **Parallel semantic fan-out**: two or more independent semantic-only subtasks -> batched `llmQuery([...])`.
 
 Context handling:

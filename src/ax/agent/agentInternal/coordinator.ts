@@ -1148,7 +1148,10 @@ export class AxAgent<IN extends AxGenIn, OUT extends AxGenOut>
         // save/restore because the events ride the artifact. Coverage lapses
         // when the curated bullets have since been pruned, so lost lessons
         // re-learn (see `collectCoveredFailureSignatures`).
-        const curated = collectCoveredFailureSignatures(handle.getState());
+        const curated = collectCoveredFailureSignatures(
+          handle.getState(),
+          handle._getRenderOptions()
+        );
         fresh = signals.filter((signal) => !curated.has(signal.signature));
         if (fresh.length === 0) {
           return skip('all_duplicates', signals);

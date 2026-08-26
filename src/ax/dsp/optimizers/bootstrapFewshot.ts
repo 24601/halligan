@@ -137,7 +137,9 @@ export class AxBootstrapFewShot extends AxBaseOptimizer {
             prediction: res,
             example: ex as AxExample,
           });
-          const success = score >= this.qualityThreshold;
+          const scalar = typeof score === 'number' ? score : score.score;
+          const success =
+            Number.isFinite(scalar) && scalar >= this.qualityThreshold;
           if (success) {
             this.traces = [...this.traces, ...program.getTraces()];
             this.stats.successfulDemos++;

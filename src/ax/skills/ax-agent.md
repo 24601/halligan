@@ -173,6 +173,67 @@ Rules:
 - Set `agentIdentity.namespace` on the child to control its runtime call site.
 - `onFunctionCall` observers receive `kind: 'internal'` for agent-derived calls and `kind: 'external'` for user-registered tools.
 
+### Retained asynchronous child sessions
+
+Ordinary child agents in `functions: [...]` are synchronous and unchanged. For
+concurrent work that must return a handle immediately, retain its own AxAgent
+runtime/state, and accept later mail, use the opt-in `AxAgentSessionHost`.
+
+Register a stable key with a factory (never a shared singleton), create a root
+with an explicit key allowlist, and add `root.functions()` to the parent
+agent's ordinary function list. Actor code then uses `sessions.spawn(...)`,
+`sessions.inspect(...)`, `sessions.result(...)`, `sessions.send(...)`,
+`sessions.cancel(...)`, and `sessions.dispose(...)` through the normal runtime
+function boundary.
+
+Rules:
+
+- `spawn` is admission, not a result future; it returns a serializable handle
+  before the child completes.
+- Registration factories create state-isolated AxAgents. Single-worker hosts
+  reuse the live instance; multi-worker hosts restore each attempt from the
+  last confirmed state/artifacts to fence stale worker caches.
+- Recovery atomically advances a root-wide ownership epoch. Restore the root
+  and refresh direct-child handles after recovery; all older clients, generated
+  function closures, and handles are intentionally stale. Do not await
+  `recover()` for a root from that root's lifecycle `onEvent` callback; the host
+  rejects the reentrant call before fencing because its active attempt cannot
+  drain until the callback returns. A post-fence recovery failure reads back
+  current authority and keeps retrying current-epoch pending scheduling rather
+  than consuming only the stale failed job.
+- `follow-up` waits behind active work; `steer` requests active cancellation
+  and gets priority at the next mailbox boundary. When event-continuation mode
+  defers scheduler dispatch, a steer receipt omits `interruptAccepted` because
+  the interruption attempt occurs after the receipt returns.
+- Cancelling one child retains its last confirmed state for a later follow-up;
+  cancelling the root is terminal and denies new work.
+- Root and per-registration `authorizedChildren` lists are separate privilege
+  boundaries. Child tools and runtime permissions come only from the factory.
+- The in-memory store/scheduler are volatile. Process-restart durability needs
+  persistent host adapters and `host.recover()`.
+- Running messages reserve conservative tokens before execution; an
+  `outcome_unknown` attempt keeps that reservation charged. Explicit snapshot
+  restore requires a separately trusted digest covering canonical authority,
+  lifecycle timestamps/diagnostics, mailbox payloads, retained state/artifacts,
+  and accounting. Restore reconciles usage/reservations/subcalls and rotates
+  destination epoch, capabilities, and pending job authority; dispatch checks
+  both epoch and job ID. Refresh handles after transfer.
+- Snapshot import authenticates enumerable string data keys and observable
+  object-key order. Ordinary objects/arrays reject non-enumerable or symbol
+  keys and accessors (apart from intrinsic array `length`); intrinsic values
+  reject custom own keys. One descriptor-based capture creates detached trusted
+  data without invoking caller getters or cloning the live graph; depth 64,
+  100,000 visited values/typed-array elements, 16 MiB aggregate string/binary
+  data, and 4,096-bit bigint caps apply during capture. Proxy reflection traps
+  remain executable host code, so restore accepts host-owned snapshots only. A
+  lazy `Error.stack` getter is discarded without invocation and replaced by an
+  inert marker accessor; it is not durable stack text.
+- Existing synchronous namespaced child calls remain the smallest choice when
+  the parent needs the answer now.
+
+See `docs/RETAINED_CHILD_SESSIONS.md` for the complete API, limits, durability,
+security, event continuation integration, and evaluation commands.
+
 ### Reserved namespace names
 
 The agent runtime injects a fixed set of globals into the runtime session. These names cannot be used as `agentIdentity.namespace` values or as agent-function namespaces.
@@ -614,6 +675,7 @@ These construction-time options are portable across TypeScript and the generated
 Python, Java, C++, Go, and Rust packages (both default off):
 
 - `playbook`: attach an ACE playbook at construction. `learn` is on by default — after each run that produced failure signals (error turns, dead-ends, failing tool calls) one bounded update curates durable avoidance rules that ride the next run's actor prompt; zero LLM cost on clean runs. TypeScript seeds a prior session with `playbook: { playbook: snapshot }`; generated packages accept their full `{ playbook, artifact }` snapshot under `seed`. Persist via `onUpdate`, read the live handle with `getPlaybook()` (or the language-shaped equivalent), gate with `learn: { minSignals, dedupe }`, or disable with `learn: false`. To grow the same playbook from a task set with a held-out verify gate, use the agent-bound playbook evolve method — see `ax-playbook`.
+- TypeScript playbook bullets may carry optional evidence, applicability, lifecycle, and revision-lineage metadata. Runtime rendering excludes unmet, malformed, expired, deprecated, or superseded bullets by default; `render({ includeInactive: true })` preserves audit inspection. Trusted callers can attach host IDs/receipts through `update({ ..., evidence })` or `recordEvidence(...)`; curator output cannot populate those fields. This is a caller authority boundary, not cryptographic authenticity—loaded snapshots remain caller-trusted. See `ax-playbook`; generated-language parity is tracked in AxIR.
 - `citations`: add an optional `evidenceCitations: string[]` responder output listing which evidence entries (top-level keys of the curated evidence, plus memory ids) the answer relied on. Validated in-pipeline — the model cannot cite evidence it never collected (existence, not entailment). Pass `true`, or `{ field?, surface?: 'output' | 'hidden', includeMemoryIds?, onCitations? }`.
 
 Stage guidance is portable too. `setInstruction` replaces the stage-owned actor
@@ -645,7 +707,7 @@ Use these method groups as the compact AxAgent surface map:
 - State and control: `getState()`, `setState(state?)`, `getContextMap()`, `setContextMap(map?)`, `stop()`, `getSignature()`, `setSignature(signature)`, `getFunction()`, `getId()`, and `setId(id)`. Context-map evolve policy lives on `AxAgentContextMap` (`infiniteEvolve`, `evolveSteps`, `maxChars`), not on the agent config. See [`src/examples/rlm-context-map-live.ts`](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/rlm-context-map-live.ts) for provider-backed persistence and finite-evolve usage.
 - Observability: `getChatLog()`, `getUsage()`, `getStagedUsage()`, `resetUsage()`, and `getTraces()`; use `ax-agent-observability` for details.
 - Demos and tuning: `setDemos(...)`, `namedPrograms()`, `namedProgramInstances()`, `optimize(...)`, `applyOptimization(...)`, `getOptimizableComponents()`, and `applyOptimizedComponents(...)`; use `ax-agent-optimize` for tuning details.
-- Learning: `playbook()` returns an agent-aware playbook handle (`update(...)`, `render()`, state/load methods, and verified dataset evolution); `getPlaybook()` reads the current handle. Generated packages expose the same behavior with language-shaped method names. Use `ax-playbook` for details.
+- Learning: `playbook()` returns an agent-aware playbook handle (`update(...)`, condition-aware `render(...)` / `applyTo(...)`, `recordEvidence(...)`, state/load methods, and verified dataset evolution); `getPlaybook()` reads the current handle. Accepted TypeScript verified-evolve proposals receive a trusted evaluator receipt; rejection restores the exact prior snapshot. Generated packages expose the established playbook behavior with language-shaped method names; evidence-aware parity is pending AxIR. Use `ax-playbook` for details.
 
 Rules:
 
