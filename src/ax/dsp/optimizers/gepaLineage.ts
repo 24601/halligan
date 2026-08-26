@@ -41,6 +41,7 @@ export interface AxGEPACandidateComponentDelta {
 export interface AxGEPACandidateEvaluation {
   readonly phase: string;
   readonly objectives: Readonly<Record<string, number>>;
+  /** Mean scalar used by GEPA's acceptance and score decisions. */
   readonly scalarScore: number;
   readonly metricCallsBefore: number;
   readonly metricCallsAfter: number;

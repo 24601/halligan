@@ -460,6 +460,58 @@ describe('AxGEPA Optimizer', () => {
       expect(records[1]?.reason).toBe('insufficient_minibatch_improvement');
     });
 
+    it('records the explicit structured scalar that drives acceptance', async () => {
+      const optimizer = new AxGEPA({
+        studentAI: {} as AxAIService,
+        teacherAI: {} as AxAIService,
+        numTrials: 1,
+        minibatch: false,
+        mergeMax: 0,
+        minImprovementThreshold: 0,
+      });
+      const program = createSingleRootProgram('task', async (instruction) => ({
+        score: instruction === 'better' ? 0.9 : 0.1,
+      }));
+      (optimizer as any).reflectTargetInstruction = async () => 'better';
+
+      const result = await optimizer.compile(
+        program as any,
+        [{ question: 'q1' }, { question: 'q2' }],
+        async ({ prediction }) => ({
+          score: prediction.score,
+          scores: { quality: 0 },
+        }),
+        {
+          maxMetricCalls: 20,
+          skipPerfectScore: false,
+          candidateLineage: true,
+        }
+      );
+
+      expect(result.optimizedProgram?.componentMap).toEqual({
+        'root::instruction': 'better',
+      });
+      const records = result.optimizedProgram?.candidateLineage?.records ?? [];
+      expect(records).toHaveLength(2);
+      expect(records[0]?.evaluations).toEqual([
+        expect.objectContaining({
+          objectives: { quality: 0 },
+          scalarScore: 0.1,
+        }),
+      ]);
+      expect(records[1]).toMatchObject({
+        decision: 'accepted',
+        reason: 'improved_minibatch_score',
+      });
+      expect(records[1]?.evaluations).not.toHaveLength(0);
+      for (const evaluation of records[1]?.evaluations ?? []) {
+        expect(evaluation).toMatchObject({
+          objectives: { quality: 0 },
+          scalarScore: 0.9,
+        });
+      }
+    });
+
     it('preserves legacy events and checkpoints when lineage is omitted or false', async () => {
       const run = async (candidateLineage?: boolean) => {
         let instruction = 'base';
