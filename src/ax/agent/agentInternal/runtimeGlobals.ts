@@ -476,7 +476,7 @@ export function buildRuntimeGlobals(
                 `mcp.${namespace}.resources.read`,
                 'mcp.resource.read',
                 'mcp.resource',
-                uri,
+                `${namespace}:${uri}`,
                 () => client.readResource(uri)
               )
           ),
@@ -487,7 +487,7 @@ export function buildRuntimeGlobals(
                 `mcp.${namespace}.resources.subscribe`,
                 'mcp.resource.subscribe',
                 'mcp.resource',
-                uri,
+                `${namespace}:${uri}`,
                 () => client.subscribeResource(uri)
               )
           ),
@@ -498,7 +498,7 @@ export function buildRuntimeGlobals(
                 `mcp.${namespace}.resources.unsubscribe`,
                 'mcp.resource.unsubscribe',
                 'mcp.resource',
-                uri,
+                `${namespace}:${uri}`,
                 () => client.unsubscribeResource(uri)
               )
           ),
@@ -520,7 +520,7 @@ export function buildRuntimeGlobals(
               `mcp.${namespace}.tasks.get`,
               'mcp.task.get',
               'mcp.task',
-              taskId,
+              `${namespace}:${taskId}`,
               () => client.getTask(taskId)
             )
           ),
@@ -531,7 +531,7 @@ export function buildRuntimeGlobals(
                 `mcp.${namespace}.tasks.result`,
                 'mcp.task.result',
                 'mcp.task',
-                taskId,
+                `${namespace}:${taskId}`,
                 () => client.getTaskResult(taskId)
               )
           ),
@@ -542,7 +542,7 @@ export function buildRuntimeGlobals(
                 `mcp.${namespace}.tasks.cancel`,
                 'mcp.task.cancel',
                 'mcp.task',
-                taskId,
+                `${namespace}:${taskId}`,
                 () => client.cancelTask(taskId)
               )
           ),

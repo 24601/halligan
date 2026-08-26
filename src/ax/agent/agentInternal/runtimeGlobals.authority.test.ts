@@ -84,13 +84,17 @@ describe('live runtime function authority', () => {
       ['mcp.prompt.get', 'mcp.prompt', `${namespace}:summary`],
       ['mcp.resource.list', 'mcp.resource.catalog', namespace],
       ['mcp.resource.templates', 'mcp.resource.catalog', namespace],
-      ['mcp.resource.read', 'mcp.resource', 'resource://one'],
-      ['mcp.resource.subscribe', 'mcp.resource', 'resource://one'],
-      ['mcp.resource.unsubscribe', 'mcp.resource', 'resource://one'],
+      ['mcp.resource.read', 'mcp.resource', `${namespace}:resource://one`],
+      ['mcp.resource.subscribe', 'mcp.resource', `${namespace}:resource://one`],
+      [
+        'mcp.resource.unsubscribe',
+        'mcp.resource',
+        `${namespace}:resource://one`,
+      ],
       ['mcp.task.list', 'mcp.task.catalog', namespace],
-      ['mcp.task.get', 'mcp.task', 'task-1'],
-      ['mcp.task.result', 'mcp.task', 'task-1'],
-      ['mcp.task.cancel', 'mcp.task', 'task-1'],
+      ['mcp.task.get', 'mcp.task', `${namespace}:task-1`],
+      ['mcp.task.result', 'mcp.task', `${namespace}:task-1`],
+      ['mcp.task.cancel', 'mcp.task', `${namespace}:task-1`],
       [
         'mcp.completion.complete',
         'mcp.completion',
@@ -193,5 +197,90 @@ describe('live runtime function authority', () => {
       }
     );
     expect(clientCalls).toBe(targets.length);
+  });
+
+  it('does not authorize one MCP namespace with another namespace grant', async () => {
+    const customerReads: string[] = [];
+    const adminReads: string[] = [];
+    const authority: AxAuthorityContext = {
+      principal: { id: 'principal-a', tenantId: 'tenant-a' },
+      actor: { id: 'agent-a', kind: 'agent' },
+      grants: [
+        {
+          version: 1,
+          id: 'grant-customer',
+          principalId: 'principal-a',
+          operations: ['mcp.resource.read'],
+          resources: [
+            {
+              type: 'mcp.resource',
+              id: 'customer:file:///records/1',
+              tenantId: 'tenant-a',
+            },
+          ],
+          leaseEpoch: 1,
+        },
+      ],
+      leaseEpoch: 1,
+      now: () => 100,
+      authorize: (operation, context) => ({
+        version: 1,
+        receiptId: 'receipt-customer',
+        requestId: context.requestId,
+        decision: 'allow',
+        operation,
+        resource: context.resource,
+        principalId: context.principal.id,
+        actor: { id: context.actor.id, kind: context.actor.kind },
+        grantIds: context.grants.map((grant) => grant.id),
+        leaseEpoch: context.leaseEpoch,
+        authorizedAt: context.now,
+      }),
+    };
+    const customer = {
+      getNamespace: () => 'customer',
+      getPrompts: () => [],
+      getPrompt: async () => ({ messages: [] }),
+      getResources: () => [],
+      getResourceTemplates: () => [],
+      readResource: async (uri: string) => {
+        customerReads.push(uri);
+        return { contents: [] };
+      },
+      subscribeResource: async () => undefined,
+      unsubscribeResource: async () => undefined,
+      listTasks: async () => ({ tasks: [] }),
+      getTask: async () => ({ taskId: 'task-1' }),
+      getTaskResult: async () => ({}),
+      cancelTask: async () => undefined,
+      complete: async () => ({ completion: { values: [] } }),
+    };
+    const admin = {
+      ...customer,
+      getNamespace: () => 'admin',
+      readResource: async (uri: string) => {
+        adminReads.push(uri);
+        return { contents: [] };
+      },
+    };
+    const globals = buildRuntimeGlobals({
+      agentFunctionModuleMetadata: new Map(),
+      agentFunctions: [],
+      _activeAuthority: authority,
+      _activeMCPExecutionContext: {
+        clients: [customer, admin],
+        ucpClients: [],
+        getToolBindings: () => [],
+      },
+    }) as any;
+
+    await expect(
+      globals.mcp.customer.resources.read('file:///records/1')
+    ).resolves.toEqual({ contents: [] });
+    await expect(
+      globals.mcp.admin.resources.read('file:///records/1')
+    ).rejects.toMatchObject({ code: 'no_matching_grant' });
+    expect(customerReads).toEqual(['file:///records/1']);
+    expect(adminReads).toEqual([]);
   });
 });

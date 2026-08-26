@@ -435,7 +435,11 @@ async function callAuthorizer(
       new AxAuthorizationDeniedError('cancelled', 'Authorization cancelled')
     );
   };
-  signal?.addEventListener('abort', abort, { once: true });
+  if (signal?.aborted) {
+    abort();
+  } else {
+    signal?.addEventListener('abort', abort, { once: true });
+  }
   const timedOut = new Promise<never>((_resolve, reject) => {
     timeout = setTimeout(() => {
       const error = new AxAuthorizationDeniedError(
@@ -452,6 +456,9 @@ async function callAuthorizer(
       Object.freeze({ ...context, signal: controller.signal })
     )
   );
+  // Timeout/cancel drop this promise; swallow late reject so it cannot become
+  // an unhandledRejection after Promise.race settles.
+  void callback.catch(() => {});
   try {
     return await Promise.race([callback, aborted, timedOut]);
   } finally {
