@@ -28,8 +28,10 @@ type ArtifactCase = Readonly<{
   hostReceiptRecords?: readonly HostReceiptDescriptor[];
   query?: string;
   attributes?: Readonly<Record<string, string>>;
+  minConfidence?: number;
   expectedApplied: readonly string[];
   expectedFailure: string | null;
+  expectedCallbacks?: CallbackExpectation;
 }>;
 
 type LaterArtifact = Readonly<{
@@ -251,12 +253,13 @@ function hostContext(
   );
   const derivedReceipts = new Map<string, string>();
   for (const record of testCase.records) {
-    const latest = record.revisions.at(-1) as AxPreferenceEvidenceRevision;
-    for (const [purpose, receiptRef] of refs(latest)) {
-      derivedReceipts.set(
-        receiptRef,
-        receiptKey(requestFor(record, latest, purpose, receiptRef))
-      );
+    for (const revision of record.revisions) {
+      for (const [purpose, receiptRef] of refs(revision)) {
+        derivedReceipts.set(
+          receiptRef,
+          receiptKey(requestFor(record, revision, purpose, receiptRef))
+        );
+      }
     }
   }
   const descriptors = new Map(
@@ -278,6 +281,7 @@ function hostContext(
     query: testCase.query ?? artifact.defaultQuery,
     scope: artifact.scope,
     attributes: testCase.attributes ?? artifact.defaultAttributes,
+    minConfidence: testCase.minConfidence,
     now: artifact.evaluationTime,
     verifyStreamState: (request) => {
       trace.stream++;
@@ -308,17 +312,9 @@ function buildCases(artifact: LaterArtifact): readonly EvaluationCase[] {
     };
     const failure = testCase.expectedFailure
       ? artifact.expectedFailureDefinitions[testCase.expectedFailure]
-      : {
-          exclusions: [],
-          callbacks: {
-            stream: 0,
-            receipt: 0,
-            destructive: 0,
-            policy: 0,
-            receiptPurposes: [],
-          },
-        };
-    if (!failure) {
+      : undefined;
+    const expectedCallbacks = testCase.expectedCallbacks ?? failure?.callbacks;
+    if ((testCase.expectedFailure && !failure) || !expectedCallbacks) {
       throw new Error(`Missing expectation for case: ${testCase.name}`);
     }
     return {
@@ -327,8 +323,8 @@ function buildCases(artifact: LaterArtifact): readonly EvaluationCase[] {
       context: hostContext(artifact, testCase, trace),
       expected: testCase.expectedApplied,
       expectedFailure: testCase.expectedFailure,
-      expectedExclusions: failure.exclusions,
-      expectedCallbacks: failure.callbacks,
+      expectedExclusions: failure?.exclusions ?? [],
+      expectedCallbacks,
       trace,
     };
   });
@@ -351,7 +347,7 @@ export function evaluatePreferenceEvidenceExpectation(
   expected: Readonly<{
     applied: readonly string[];
     exclusions: readonly AxPreferenceEvidenceExclusion[];
-    callbacks?: CallbackExpectation;
+    callbacks: CallbackExpectation;
   }>
 ): Readonly<{
   applied: boolean;
@@ -366,9 +362,7 @@ export function evaluatePreferenceEvidenceExpectation(
     [...expected.applied].sort()
   );
   const exclusions = same(actual.exclusions, expected.exclusions);
-  const callbacks = expected.callbacks
-    ? same(actual.callbacks, expected.callbacks)
-    : true;
+  const callbacks = same(actual.callbacks, expected.callbacks);
   return {
     applied,
     exclusions,
@@ -557,9 +551,7 @@ export function runPreferenceEvidenceEvaluation(iterations = 1_000) {
       {
         applied: expected,
         exclusions: testCase.expectedExclusions,
-        callbacks: testCase.expectedFailure
-          ? testCase.expectedCallbacks
-          : undefined,
+        callbacks: testCase.expectedCallbacks,
       }
     );
     return {
@@ -569,9 +561,7 @@ export function runPreferenceEvidenceEvaluation(iterations = 1_000) {
       expectedFailure: testCase.expectedFailure,
       expectedExclusions: testCase.expectedExclusions,
       actualExclusions: selection.excluded,
-      expectedCallbacks: testCase.expectedFailure
-        ? testCase.expectedCallbacks
-        : null,
+      expectedCallbacks: testCase.expectedCallbacks,
       actualCallbacks,
       checks: expectation,
       passed: expectation.passed,
@@ -726,8 +716,7 @@ export function runPreferenceEvidenceEvaluation(iterations = 1_000) {
     negativeResults: {
       noBenefitControlExact: resultFor(unrelated.name).passed,
       uncertainInferenceExactRejection: resultFor(uncertain.name).passed,
-      uncertainInferenceFailurePreserved: !resultFor(uncertain.name).passed,
-      noisySmallDataFailurePreserved: !resultFor(noisy.name).passed,
+      noisyWeakContradictionResolved: resultFor(noisy.name).passed,
       preservedFailures,
     },
     failures,

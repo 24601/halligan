@@ -5,7 +5,7 @@ import {
 } from './evaluate-preference-evidence.js';
 
 describe('preference evidence evaluation', () => {
-  it('runs the digest-frozen post-baseline artifact and preserves failures', () => {
+  it('runs the digest-frozen post-baseline artifact with exact green expectations', () => {
     const result = runPreferenceEvidenceEvaluation(10);
 
     expect(result.artifact).toMatchObject({
@@ -31,10 +31,10 @@ describe('preference evidence evaluation', () => {
       missedPersonalizationCases: 1,
     });
     expect(result.evidenceAware).toEqual({
-      exactRetrieval: 16,
-      correctApplications: 2,
+      exactRetrieval: 17,
+      correctApplications: 3,
       falsePersonalizationCases: 0,
-      missedPersonalizationCases: 1,
+      missedPersonalizationCases: 0,
     });
     expect(result.retentionAndForgetting).toEqual({
       stablePreferenceRetained: true,
@@ -62,17 +62,16 @@ describe('preference evidence evaluation', () => {
     });
     expect(result.negativeResults).toMatchObject({
       noBenefitControlExact: true,
-      uncertainInferenceExactRejection: false,
-      uncertainInferenceFailurePreserved: true,
-      noisySmallDataFailurePreserved: true,
+      uncertainInferenceExactRejection: true,
+      noisyWeakContradictionResolved: true,
     });
-    expect(
-      result.negativeResults.preservedFailures.map((row) => row.name)
-    ).toEqual([
-      'uncertain inference remains below application threshold',
-      'noisy weak contradiction does not displace stronger evidence',
-    ]);
-    expect(result.reasonCoverage.exactCases).toBeGreaterThanOrEqual(13);
+    expect(result.negativeResults.preservedFailures).toEqual([]);
+    expect(result.failures).toEqual([]);
+    expect(result.reasonCoverage).toEqual({
+      exactCases: 17,
+      wrongReasonCases: 0,
+      uncheckedAppliedOnlyCases: 0,
+    });
     expect(result.resources.providerCalls).toBe(0);
     expect(result.resources.costUsd).toBe(0);
     expect(result.claimScope).toContain(

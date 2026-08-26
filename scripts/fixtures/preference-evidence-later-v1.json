@@ -241,7 +241,14 @@
         }
       ],
       "expectedApplied": ["rec-stable"],
-      "expectedFailure": null
+      "expectedFailure": null,
+      "expectedCallbacks": {
+        "stream": 1,
+        "receipt": 3,
+        "destructive": 0,
+        "policy": 1,
+        "receiptPurposes": ["source", "authority", "consent"]
+      }
     },
     {
       "name": "unresolved direct contradiction fails closed",
@@ -523,6 +530,7 @@
           ]
         }
       ],
+      "minConfidence": 0.5,
       "expectedApplied": [],
       "expectedFailure": "insufficient-confidence"
     },
@@ -666,7 +674,14 @@
         }
       ],
       "expectedApplied": ["rec-noisy"],
-      "expectedFailure": null
+      "expectedFailure": null,
+      "expectedCallbacks": {
+        "stream": 1,
+        "receipt": 3,
+        "destructive": 0,
+        "policy": 1,
+        "receiptPurposes": ["source", "authority", "consent"]
+      }
     },
     {
       "name": "wrong destructive authority operation class cannot erase",
@@ -822,7 +837,14 @@
         }
       ],
       "expectedApplied": ["rec-renew"],
-      "expectedFailure": null
+      "expectedFailure": null,
+      "expectedCallbacks": {
+        "stream": 1,
+        "receipt": 3,
+        "destructive": 0,
+        "policy": 1,
+        "receiptPurposes": ["source", "epoch-authority", "consent"]
+      }
     },
     {
       "name": "scope mismatch rejects a valid preference",

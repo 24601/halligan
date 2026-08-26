@@ -315,6 +315,29 @@ describe('axSelectPreferenceEvidence', () => {
     expect(JSON.stringify(erased)).not.toContain(original.revisions[0]?.value);
     expect(JSON.stringify(erased)).not.toContain('consent:lifecycle:1');
 
+    const widenedEvent = {
+      ...original.revisions[0],
+      eventId: 'event:lifecycle:widened-erase',
+      recordedAt: '2026-08-21T12:00:00.000Z',
+      sourceReceiptRef: 'source:lifecycle:widened-erase',
+      destructiveAuthorityReceiptRef: 'destructive:lifecycle:widened-erase',
+      secretPayload: 'ERASED SECRET',
+    };
+    const contentFree = axErasePreferenceEvidence(original, widenedEvent);
+    expect(contentFree.revisions[0]).toEqual({
+      operation: 'erase',
+      revision: 2,
+      epoch: 1,
+      eventId: 'event:lifecycle:widened-erase',
+      recordedAt: '2026-08-21T12:00:00.000Z',
+      sourceReceiptRef: 'source:lifecycle:widened-erase',
+      destructiveAuthorityReceiptRef: 'destructive:lifecycle:widened-erase',
+    });
+    expect(JSON.stringify(contentFree)).not.toContain('ERASED SECRET');
+    expect(JSON.stringify(contentFree)).not.toContain(
+      original.revisions[0]?.value
+    );
+
     expect(
       axSelectPreferenceEvidence([original], context([erased])).excluded
     ).toEqual([{ recordId: 'lifecycle', reason: 'stale-stream' }]);
@@ -511,6 +534,74 @@ describe('axSelectPreferenceEvidence', () => {
       )
     ).toThrow(/object width limit/);
     expect(verifyStreamState).not.toHaveBeenCalled();
+  });
+
+  it('excludes null records and revisions as malformed without denying valid records', () => {
+    const valid = record('valid-beside-null');
+    const withNullRecord = axSelectPreferenceEvidence(
+      [valid, null] as unknown as readonly AxPreferenceEvidenceRecord[],
+      context([valid])
+    );
+    expect(withNullRecord.applied.map((entry) => entry.recordId)).toEqual([
+      'valid-beside-null',
+    ]);
+    expect(withNullRecord.excluded).toEqual([
+      { recordId: '<unknown>', reason: 'malformed' },
+    ]);
+
+    const nullRevision = {
+      ...record('null-revision'),
+      revisions: [null],
+    } as unknown as AxPreferenceEvidenceRecord;
+    expect(
+      axSelectPreferenceEvidence([nullRevision], context([])).excluded
+    ).toEqual([{ recordId: 'null-revision', reason: 'malformed' }]);
+  });
+
+  it('keeps a stronger confirmed preference over a later weak self-contradicting inference', () => {
+    const strong = record('noisy', {
+      assertion: {
+        value: 'Keep planning responses concise.',
+        confidence: 0.99,
+        contradicts: ['noisy'],
+      },
+    });
+    const noisy = {
+      ...strong,
+      streamVersion: 2,
+      revisions: [
+        strong.revisions[0],
+        assertion('noisy', {
+          revision: 2,
+          eventId: 'event:noisy:2',
+          recordedAt: '2026-08-21T12:00:00.000Z',
+          kind: 'inference',
+          value: 'Possibly add extensive background.',
+          confidence: 0.22,
+          contradicts: ['noisy'],
+          authorityReceiptRef: undefined,
+          consentReceiptRef: undefined,
+        }),
+      ],
+    } as AxPreferenceEvidenceRecord;
+    const result = axSelectPreferenceEvidence(
+      [noisy],
+      context([noisy], {
+        verifyReceipt: () => true,
+        allowApplication: () => true,
+      })
+    );
+    expect(result.applied).toMatchObject([
+      {
+        recordId: 'noisy',
+        revision: {
+          revision: 1,
+          kind: 'confirmed-preference',
+          confidence: 0.99,
+        },
+      },
+    ]);
+    expect(result.excluded).toEqual([]);
   });
 
   it('enforces value, applicability, relation, revision, byte, and attribute limits', () => {

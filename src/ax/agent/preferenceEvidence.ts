@@ -222,10 +222,7 @@ function assertBoundedStructure(
   if (depth > AX_PREFERENCE_EVIDENCE_LIMITS.objectDepth) {
     throw new Error('Preference evidence exceeds the object depth limit.');
   }
-  if (value === undefined) return;
-  if (value === null) {
-    throw new Error('Preference evidence must not contain null entries.');
-  }
+  if (value === undefined || value === null) return;
   if (typeof value === 'string') return;
   if (typeof value === 'number' || typeof value === 'boolean') return;
   if (typeof value !== 'object') {
@@ -266,12 +263,11 @@ function deepFreeze<T>(value: T): T {
   return value;
 }
 
-function cloneRecord(
-  record: AxPreferenceEvidenceRecord
-): AxPreferenceEvidenceRecord {
-  return deepFreeze(
-    JSON.parse(JSON.stringify(record)) as AxPreferenceEvidenceRecord
-  );
+function cloneEvidence(value: unknown): unknown {
+  const serialized = JSON.stringify(value);
+  return serialized === undefined
+    ? value
+    : deepFreeze(JSON.parse(serialized) as unknown);
 }
 
 function validRef(value: unknown): value is string {
@@ -383,6 +379,7 @@ function validRecord(record: AxPreferenceEvidenceRecord): boolean {
   }
   const first = record.revisions[0] as AxPreferenceEvidenceRevision;
   if (
+    !validRevision(first) ||
     (first.revision === 1 &&
       (first.operation !== 'assert' || first.epoch !== 1)) ||
     (first.revision !== 1 && first.operation !== 'erase')
@@ -440,7 +437,50 @@ function applies(
 type Candidate = Readonly<{
   record: AxPreferenceEvidenceRecord;
   revision: AxPreferenceEvidenceClaim;
+  resolvedSelfContradiction: boolean;
 }>;
+
+function claimPriority(kind: AxPreferenceEvidenceKind): number {
+  if (kind === 'confirmed-preference') return 3;
+  if (kind === 'observation') return 2;
+  return 1;
+}
+
+function effectiveClaim(record: AxPreferenceEvidenceRecord): Readonly<{
+  revision: AxPreferenceEvidenceRevision;
+  resolvedSelfContradiction: boolean;
+}> {
+  const latest = record.revisions.at(-1) as AxPreferenceEvidenceRevision;
+  if (latest.operation === 'retract' || latest.operation === 'erase') {
+    return { revision: latest, resolvedSelfContradiction: false };
+  }
+  const claims = record.revisions.filter(
+    (revision): revision is AxPreferenceEvidenceClaim =>
+      revision.epoch === record.epoch &&
+      (revision.operation === 'assert' || revision.operation === 'renew')
+  );
+  if (!claims.some((claim) => claim.contradicts?.includes(record.id))) {
+    return { revision: latest, resolvedSelfContradiction: false };
+  }
+  const strongest = [...claims].sort(
+    (left, right) =>
+      claimPriority(right.kind) - claimPriority(left.kind) ||
+      right.confidence - left.confidence ||
+      right.revision - left.revision
+  );
+  const selected = strongest[0] as AxPreferenceEvidenceClaim;
+  const runnerUp = strongest[1];
+  const resolvedSelfContradiction = Boolean(
+    runnerUp &&
+      (claimPriority(selected.kind) > claimPriority(runnerUp.kind) ||
+        (claimPriority(selected.kind) === claimPriority(runnerUp.kind) &&
+          selected.confidence > runnerUp.confidence))
+  );
+  return {
+    revision: resolvedSelfContradiction ? selected : latest,
+    resolvedSelfContradiction,
+  };
+}
 
 function streamBinding(
   record: AxPreferenceEvidenceRecord,
@@ -572,9 +612,7 @@ function validateContext(context: AxPreferenceEvidenceContext): void {
   }
 }
 
-function boundedRecords(
-  records: readonly AxPreferenceEvidenceRecord[]
-): AxPreferenceEvidenceRecord[] {
+function boundedRecords(records: readonly unknown[]): unknown[] {
   if (records.length > AX_PREFERENCE_EVIDENCE_LIMITS.records) {
     throw new Error('Preference evidence exceeds the record count limit.');
   }
@@ -589,7 +627,7 @@ function boundedRecords(
     if (totalBytes > AX_PREFERENCE_EVIDENCE_LIMITS.totalBytes) {
       throw new Error('Preference evidence exceeds the total byte limit.');
     }
-    return cloneRecord(record);
+    return cloneEvidence(record);
   });
 }
 
@@ -605,22 +643,32 @@ export function axSelectPreferenceEvidence(
   const minConfidence = context.minConfidence ?? 0;
   const idCounts = new Map<string, number>();
   for (const record of records) {
-    idCounts.set(record.id, (idCounts.get(record.id) ?? 0) + 1);
+    if (isPlainObject(record) && nonEmpty(record.id)) {
+      idCounts.set(record.id, (idCounts.get(record.id) ?? 0) + 1);
+    }
   }
 
-  for (const record of records) {
-    if (!validRecord(record) || (idCounts.get(record.id) ?? 0) > 1) {
+  for (const candidate of records) {
+    if (
+      !validRecord(candidate as AxPreferenceEvidenceRecord) ||
+      (idCounts.get((candidate as AxPreferenceEvidenceRecord).id) ?? 0) > 1
+    ) {
       excluded.push({
-        recordId: nonEmpty(record.id) ? record.id : '<unknown>',
+        recordId:
+          isPlainObject(candidate) && nonEmpty(candidate.id)
+            ? candidate.id
+            : '<unknown>',
         reason: 'malformed',
       });
       continue;
     }
+    const record = candidate as AxPreferenceEvidenceRecord;
     if (record.principalId !== context.principalId) {
       excluded.push({ recordId: record.id, reason: 'principal-mismatch' });
       continue;
     }
-    const latest = record.revisions.at(-1) as AxPreferenceEvidenceRevision;
+    const effective = effectiveClaim(record);
+    const latest = effective.revision;
     const binding = streamBinding(record, latest);
     if (!verifyStream(context.verifyStreamState, binding, record)) {
       excluded.push({ recordId: record.id, reason: 'stale-stream' });
@@ -756,7 +804,11 @@ export function axSelectPreferenceEvidence(
         continue;
       }
     }
-    candidates.push({ record, revision: latest });
+    candidates.push({
+      record,
+      revision: latest,
+      resolvedSelfContradiction: effective.resolvedSelfContradiction,
+    });
   }
 
   const relationshipSources = candidates.filter(
@@ -787,8 +839,13 @@ export function axSelectPreferenceEvidence(
   }
   const candidateIds = new Set(candidates.map(({ record }) => record.id));
   const contradicted = new Set<string>();
-  for (const { record, revision } of relationshipSources) {
+  for (const {
+    record,
+    revision,
+    resolvedSelfContradiction,
+  } of relationshipSources) {
     for (const target of revision.contradicts ?? []) {
+      if (target === record.id && resolvedSelfContradiction) continue;
       if (
         candidateIds.has(target) &&
         !superseded.has(target) &&
@@ -876,7 +933,7 @@ function latestRevision(
 function publishLifecycleRecord(
   record: AxPreferenceEvidenceRecord
 ): AxPreferenceEvidenceRecord {
-  const published = boundedRecords([record])[0];
+  const published = boundedRecords([record])[0] as AxPreferenceEvidenceRecord;
   if (!published || !validRecord(published)) {
     throw new Error(
       'Lifecycle operation produced invalid preference evidence.'
@@ -962,10 +1019,13 @@ export function axErasePreferenceEvidence(
     epoch: record.epoch,
     revisions: [
       {
-        ...event,
         operation: 'erase',
         revision: record.streamVersion + 1,
         epoch: record.epoch,
+        eventId: event.eventId,
+        recordedAt: event.recordedAt,
+        sourceReceiptRef: event.sourceReceiptRef,
+        destructiveAuthorityReceiptRef: event.destructiveAuthorityReceiptRef,
       },
     ],
   });
