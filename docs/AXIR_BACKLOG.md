@@ -32,12 +32,26 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
   - TS paths: `src/ax/ai/index.ts`, `src/ax/ai/visual`
   - Impact: TypeScript hosts can apply revision-, freshness-, authority-, change-, and rolling-budget-aware selection to host-captured visual observations; generated language packages do not yet expose the AxVisualObservation or AxFrameSampler policy.
   - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+- `axir-2026-08-25-port-structured-native-tool-aware-react-module` [axgen] Port structured native-tool-aware ReAct module
+  - Status: open
+  - Source PR: #10
+  - Source commit: `0c03834d19ec0bce695bc4d5a1310370ee4984f4`
+  - TS paths: `src/ax/dsp/react.test.ts`, `src/ax/dsp/react.ts`, `src/ax/mcp/execution.ts`
+  - Impact: TypeScript now exposes react() with native/prompt tool protocols, typed terminal submit, canonical resumable history, bounded parallel execution and compaction; generated Python/Java/C++/Go/Rust packages do not yet expose equivalent semantics.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 - `axir-2026-08-26-port-gepa-built-in-maxexamples-0-optional-reflectiveexamples` [axoptimize] Port GEPA built-in maxExamples 0 optional reflectiveExamples
   - Status: open
   - Source PR: #53
   - Source commit: `4d030474326461ea03c6d081508dc3128d2f1a76`
   - TS paths: `src/ax/dsp/optimizers/gepaReflection.ts`, `src/ax/dsp/optimizers/gepaReflection.test.ts`
   - Impact: Built-in GEPA proposal policy now omits optional reflectiveExamples when maxExamples is 0 so the teacher still runs with zero real examples; generated backends still treat a required empty JSON array as missing and would abort the proposal.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+- `axir-2026-08-25-port-host-owned-executable-skill-compatibility-and-retirement-se` [axagent] Port host-owned executable skill compatibility and retirement selection
+  - Status: open
+  - Source PR: #13
+  - Source commit: `ca760294f5ea4f207052c39c2218e1195103bc2a`
+  - TS paths: `src/ax/agent/executableSkills.test.ts`, `src/ax/agent/executableSkills.ts`
+  - Impact: TypeScript hosts can gate reusable AxAgentFunction artifacts by admission, compatibility, authority, verifier receipts, and lifecycle before registration; generated Ax agent packages do not yet expose the same optional selector contract.
   - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 
 ## Done
