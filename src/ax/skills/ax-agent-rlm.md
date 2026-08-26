@@ -406,9 +406,9 @@ One five-repetition median run in the Ax development orb produced:
 
 | workload | disabled median | enabled median | disabled / enabled |
 |---|---:|---:|---:|
-| three independent 40 ms calls | 123.3 ms | 41.3 ms | 2.98x |
-| two dependent 30 ms calls | 62.4 ms | 61.4 ms | 1.02x |
-| twenty zero-delay alias misses | 27.1 ms | 27.9 ms | 0.97x |
+| three independent 40 ms calls | 123.3 ms | 41.6 ms | 2.97x |
+| two dependent 30 ms calls | 62.6 ms | 61.3 ms | 1.02x |
+| twenty zero-delay alias misses | 27.5 ms | 28.0 ms | 0.98x |
 
 The independent workload demonstrates latency overlap. The dependent chain shows essentially no speedup, and the parser-miss workload records small negative overhead. Accounting in the same run was: deterministic duplicates 2 physical / 2 logical when disabled versus 1 / 2 enabled; nondeterministic duplicates 2 / 2 in both modes; an unapproved side effect 2 / 2 in both modes and executed its write once; claimed failure 1 / 1 in both modes; claimed cancellation 1 / 1 and aborted; and an unreached pure call after `throw` launched 1 physical / 0 logical call versus 0 / 0 disabled, then aborted it. The source article separately reports only five author runs and roughly 1.0–1.2x on specific OOLONG/RLM/8xH100 setups; Ax does not generalize that evidence. These controlled fixtures do not establish model-quality improvement, cost reduction, or universal latency speedup.
 
