@@ -575,4 +575,38 @@ describe('Ax host authority boundary', () => {
     controller.abort('stop');
     await expect(pending).rejects.toMatchObject({ code: 'cancelled' });
   });
+
+  it('ignores a late authorizer rejection after timeout', async () => {
+    let lateReject!: (reason: unknown) => void;
+    const late = new Promise<never>((_resolve, reject) => {
+      lateReject = reject;
+    });
+    await expect(
+      axAuthorize(
+        authority({
+          authorizeTimeoutMs: 5,
+          authorize: (_operation, request) => {
+            request.signal?.addEventListener(
+              'abort',
+              () => lateReject(new Error('host stopped after timeout')),
+              { once: true }
+            );
+            return late;
+          },
+        }),
+        'document.read',
+        resource
+      )
+    ).rejects.toMatchObject({ code: 'timeout' });
+
+    const rejections: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      rejections.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    await Promise.resolve();
+    await Promise.resolve();
+    process.off('unhandledRejection', onUnhandled);
+    expect(rejections).toEqual([]);
+  });
 });

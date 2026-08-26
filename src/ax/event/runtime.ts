@@ -57,6 +57,8 @@ type InvocationResult = {
   invoked: boolean;
 };
 
+const DEFAULT_AUTHORITY_RESOLVE_TIMEOUT_MS = 30_000;
+
 class AxRuntimeEventContext implements AxEventContext {
   private readonly registrations: Array<{
     id: string;
@@ -323,7 +325,10 @@ export class AxEventRuntime {
       throw new Error(`Sink ${deadLetter.sinkId} is no longer configured`);
     }
     const controller = new AbortController();
-    const authority = await this.resolveAuthority(delivery.ingress);
+    const authority = await this.resolveAuthority(
+      delivery.ingress,
+      controller.signal
+    );
     const context = new AxRuntimeEventContext(
       this.id,
       run.id,
@@ -510,226 +515,250 @@ export class AxEventRuntime {
       const heartbeatController = new AbortController();
       this.activeRuns.set(runId, controller);
       const attempt = claimed.attempt + 1;
-      const authority = await this.resolveAuthority(claimed.ingress);
-      const eventContext = new AxRuntimeEventContext(
-        this.id,
-        runId,
-        claimed.id,
-        route.id,
-        targetId,
-        instanceKey,
-        claimed.ingress,
-        claimed.ingress.identity ?? {},
-        claimed.ingress.trust ?? 'untrusted',
-        attempt,
-        claimed.id,
-        controller.signal,
-        authority,
-        continuation,
-        claimed.fencingToken
-      );
-      let run: AxEventRun = {
-        id: runId,
-        deliveryId: claimed.id,
-        routeId: route.id,
-        ...(targetId ? { targetId } : {}),
-        instanceKey,
-        status: 'running',
-        attempt,
-        startedAt: this.clock.now(),
-        ...(claimed.fencingToken !== undefined
-          ? { fencingToken: claimed.fencingToken }
-          : {}),
-      };
-      await this.store.saveDelivery({
-        ...claimed,
-        status: 'running',
-        attempt,
-        runId,
-      });
-      await this.store.saveRun(run);
-      const heartbeat = this.heartbeatClaim(
-        claimed,
-        workerId,
-        controller,
-        heartbeatController.signal
-      );
-      let invoked = false;
+      let heartbeat: Promise<void> = Promise.resolve();
       try {
-        let result: InvocationResult = { waiting: false, invoked: false };
-        if (route.action === 'observe') {
-          await this.authorizeEventOperation(
-            eventContext,
-            'event.observe',
-            'event.route',
-            route.id
-          );
-          await route.observe?.(claimed.ingress, eventContext);
-        } else if (route.action === 'invalidate') {
-          await this.authorizeEventOperation(
-            eventContext,
-            'event.invalidate',
-            'event.route',
-            route.id
-          );
-          await route.invalidator!.invalidate(claimed.ingress, eventContext);
-        } else {
-          await this.authorizeEventOperation(
-            eventContext,
-            'event.target.invoke',
-            'event.target',
-            target!.id
-          );
-          result = await this.invokeTarget(
-            target!,
-            instanceKey,
-            claimed.ingress,
-            eventContext,
-            run,
-            async () => {
-              await this.store.saveDelivery({
-                ...claimed,
-                status: 'running',
-                attempt,
-                runId,
-                invocationStarted: true,
-              });
-              invoked = true;
-            }
-          );
-          invoked = invoked || result.invoked;
-          run = {
-            ...run,
-            ...(result.output !== undefined ? { output: result.output } : {}),
-            ...(result.chunks ? { chunks: result.chunks } : {}),
-          };
-        }
-
-        const registrations = eventContext.takeRegistrations();
-        const continuations: AxEventContinuation[] = [];
-        for (const registration of registrations) {
-          const value: AxEventContinuation = {
-            id: registration.id,
-            targetId: targetId ?? `route:${route.id}`,
-            routeId: route.id,
-            instanceKey,
-            identityScope: claimed.identityScope,
-            correlation: registration.value.correlation,
-            createdAt: this.clock.now(),
-            ...(registration.value.expiresAt !== undefined
-              ? { expiresAt: registration.value.expiresAt }
-              : {}),
-            ...(registration.value.metadata
-              ? { metadata: registration.value.metadata }
-              : {}),
-          };
-          await this.store.registerContinuation(value);
-          continuations.push(value);
-        }
-        const waiting = result.waiting || continuations.length > 0;
-        run = {
-          ...run,
-          status: waiting ? 'waiting_event' : 'succeeded',
-          finishedAt: this.clock.now(),
-          ...(continuations.length
-            ? { continuationIds: continuations.map((value) => value.id) }
+        const authority = await this.resolveAuthority(
+          claimed.ingress,
+          AbortSignal.any([controller.signal, this.workerController.signal])
+        );
+        const eventContext = new AxRuntimeEventContext(
+          this.id,
+          runId,
+          claimed.id,
+          route.id,
+          targetId,
+          instanceKey,
+          claimed.ingress,
+          claimed.ingress.identity ?? {},
+          claimed.ingress.trust ?? 'untrusted',
+          attempt,
+          claimed.id,
+          controller.signal,
+          authority,
+          continuation,
+          claimed.fencingToken
+        );
+        let run: AxEventRun = {
+          id: runId,
+          deliveryId: claimed.id,
+          routeId: route.id,
+          ...(targetId ? { targetId } : {}),
+          instanceKey,
+          status: 'running',
+          attempt,
+          startedAt: this.clock.now(),
+          ...(claimed.fencingToken !== undefined
+            ? { fencingToken: claimed.fencingToken }
             : {}),
         };
-        // Persist the complete output before any final sink dispatch.
-        await this.store.saveRun(run);
-        if (!waiting && target && run.output !== undefined) {
-          run = await this.dispatchFinalSinks(target, run, eventContext);
-          await this.store.saveRun(run);
-        }
         await this.store.saveDelivery({
           ...claimed,
-          status: waiting ? 'waiting_event' : 'succeeded',
+          status: 'running',
           attempt,
           runId,
         });
-        if (continuation)
-          await this.store.completeContinuation(continuation.id);
-      } catch (error) {
-        if (controller.signal.aborted) {
+        await this.store.saveRun(run);
+        heartbeat = this.heartbeatClaim(
+          claimed,
+          workerId,
+          controller,
+          heartbeatController.signal
+        );
+        let invoked = false;
+        try {
+          let result: InvocationResult = { waiting: false, invoked: false };
+          if (route.action === 'observe') {
+            await this.authorizeEventOperation(
+              eventContext,
+              'event.observe',
+              'event.route',
+              route.id
+            );
+            await route.observe?.(claimed.ingress, eventContext);
+          } else if (route.action === 'invalidate') {
+            await this.authorizeEventOperation(
+              eventContext,
+              'event.invalidate',
+              'event.route',
+              route.id
+            );
+            await route.invalidator!.invalidate(claimed.ingress, eventContext);
+          } else {
+            await this.authorizeEventOperation(
+              eventContext,
+              'event.target.invoke',
+              'event.target',
+              target!.id
+            );
+            result = await this.invokeTarget(
+              target!,
+              instanceKey,
+              claimed.ingress,
+              eventContext,
+              run,
+              async () => {
+                await this.store.saveDelivery({
+                  ...claimed,
+                  status: 'running',
+                  attempt,
+                  runId,
+                  invocationStarted: true,
+                });
+                invoked = true;
+              }
+            );
+            invoked = invoked || result.invoked;
+            run = {
+              ...run,
+              ...(result.output !== undefined ? { output: result.output } : {}),
+              ...(result.chunks ? { chunks: result.chunks } : {}),
+            };
+          }
+
+          const registrations = eventContext.takeRegistrations();
+          const continuations: AxEventContinuation[] = [];
+          for (const registration of registrations) {
+            const value: AxEventContinuation = {
+              id: registration.id,
+              targetId: targetId ?? `route:${route.id}`,
+              routeId: route.id,
+              instanceKey,
+              identityScope: claimed.identityScope,
+              correlation: registration.value.correlation,
+              createdAt: this.clock.now(),
+              ...(registration.value.expiresAt !== undefined
+                ? { expiresAt: registration.value.expiresAt }
+                : {}),
+              ...(registration.value.metadata
+                ? { metadata: registration.value.metadata }
+                : {}),
+            };
+            await this.store.registerContinuation(value);
+            continuations.push(value);
+          }
+          const waiting = result.waiting || continuations.length > 0;
           run = {
             ...run,
-            status: 'cancelled',
+            status: waiting ? 'waiting_event' : 'succeeded',
             finishedAt: this.clock.now(),
-            error: axEventErrorMessage(controller.signal.reason),
+            ...(continuations.length
+              ? { continuationIds: continuations.map((value) => value.id) }
+              : {}),
           };
+          // Persist the complete output before any final sink dispatch.
           await this.store.saveRun(run);
+          if (!waiting && target && run.output !== undefined) {
+            run = await this.dispatchFinalSinks(target, run, eventContext);
+            await this.store.saveRun(run);
+          }
           await this.store.saveDelivery({
             ...claimed,
-            status: 'cancelled',
+            status: waiting ? 'waiting_event' : 'succeeded',
             attempt,
             runId,
-            error: run.error,
           });
-          return;
-        }
-        if (axEventErrorMessage(error).includes('output_persistence_failed')) {
-          run = {
-            ...run,
-            output: undefined,
-            chunks: undefined,
-            status: 'output_persistence_failed',
-            finishedAt: this.clock.now(),
-            error: axEventErrorMessage(error),
-          };
-          await this.store.saveRun(run);
-          await this.store.saveDelivery({
-            ...claimed,
-            status: 'output_persistence_failed',
-            attempt,
-            runId,
-            error: run.error,
-          });
-          await this.store.addDeadLetter({
-            id: axEventId('dead-letter'),
-            kind: 'delivery',
-            deliveryId: claimed.id,
-            runId,
-            reason: run.error ?? 'output_persistence_failed',
-            createdAt: this.clock.now(),
-          });
-          return;
-        }
-        const unsafe =
-          error instanceof AxEventOutcomeUnknownError ||
-          (invoked && target?.retrySafety !== 'idempotent');
-        if (unsafe) {
-          run = {
-            ...run,
-            status: 'outcome_unknown',
-            finishedAt: this.clock.now(),
-            error: axEventErrorMessage(error),
-          };
-          await this.store.saveRun(run);
-          await this.store.saveDelivery({
-            ...claimed,
-            status: 'outcome_unknown',
-            attempt,
-            runId,
-            error: run.error,
-          });
-          await this.store.addDeadLetter({
-            id: axEventId('dead-letter'),
-            kind: 'delivery',
-            deliveryId: claimed.id,
-            runId,
-            reason: run.error ?? 'Event outcome is unknown',
-            createdAt: this.clock.now(),
-          });
-          return;
-        }
-        const nonRetryable =
-          error instanceof AxEventContinuationNotFoundError ||
-          error instanceof AxEventInputError;
-        if (!nonRetryable && attempt < (this.options.maxAttempts ?? 5)) {
-          const retryMs = Math.min(
-            this.options.retryMaxMs ?? 60_000,
-            (this.options.retryBaseMs ?? 1_000) * 2 ** (attempt - 1)
-          );
+          if (continuation)
+            await this.store.completeContinuation(continuation.id);
+        } catch (error) {
+          if (controller.signal.aborted) {
+            run = {
+              ...run,
+              status: 'cancelled',
+              finishedAt: this.clock.now(),
+              error: axEventErrorMessage(controller.signal.reason),
+            };
+            await this.store.saveRun(run);
+            await this.store.saveDelivery({
+              ...claimed,
+              status: 'cancelled',
+              attempt,
+              runId,
+              error: run.error,
+            });
+            return;
+          }
+          if (
+            axEventErrorMessage(error).includes('output_persistence_failed')
+          ) {
+            run = {
+              ...run,
+              output: undefined,
+              chunks: undefined,
+              status: 'output_persistence_failed',
+              finishedAt: this.clock.now(),
+              error: axEventErrorMessage(error),
+            };
+            await this.store.saveRun(run);
+            await this.store.saveDelivery({
+              ...claimed,
+              status: 'output_persistence_failed',
+              attempt,
+              runId,
+              error: run.error,
+            });
+            await this.store.addDeadLetter({
+              id: axEventId('dead-letter'),
+              kind: 'delivery',
+              deliveryId: claimed.id,
+              runId,
+              reason: run.error ?? 'output_persistence_failed',
+              createdAt: this.clock.now(),
+            });
+            return;
+          }
+          const unsafe =
+            error instanceof AxEventOutcomeUnknownError ||
+            (invoked && target?.retrySafety !== 'idempotent');
+          if (unsafe) {
+            run = {
+              ...run,
+              status: 'outcome_unknown',
+              finishedAt: this.clock.now(),
+              error: axEventErrorMessage(error),
+            };
+            await this.store.saveRun(run);
+            await this.store.saveDelivery({
+              ...claimed,
+              status: 'outcome_unknown',
+              attempt,
+              runId,
+              error: run.error,
+            });
+            await this.store.addDeadLetter({
+              id: axEventId('dead-letter'),
+              kind: 'delivery',
+              deliveryId: claimed.id,
+              runId,
+              reason: run.error ?? 'Event outcome is unknown',
+              createdAt: this.clock.now(),
+            });
+            return;
+          }
+          const nonRetryable =
+            error instanceof AxEventContinuationNotFoundError ||
+            error instanceof AxEventInputError;
+          if (!nonRetryable && attempt < (this.options.maxAttempts ?? 5)) {
+            const retryMs = Math.min(
+              this.options.retryMaxMs ?? 60_000,
+              (this.options.retryBaseMs ?? 1_000) * 2 ** (attempt - 1)
+            );
+            run = {
+              ...run,
+              status: 'failed',
+              finishedAt: this.clock.now(),
+              error: axEventErrorMessage(error),
+            };
+            await this.store.saveRun(run);
+            await this.store.saveDelivery({
+              ...claimed,
+              status: 'queued',
+              attempt,
+              availableAt: this.clock.now() + retryMs,
+              error: run.error,
+              runId,
+            });
+            return;
+          }
           run = {
             ...run,
             status: 'failed',
@@ -737,30 +766,20 @@ export class AxEventRuntime {
             error: axEventErrorMessage(error),
           };
           await this.store.saveRun(run);
-          await this.store.saveDelivery({
-            ...claimed,
-            status: 'queued',
-            attempt,
-            availableAt: this.clock.now() + retryMs,
-            error: run.error,
-            runId,
-          });
+          await this.deadLetterDelivery(
+            { ...claimed, attempt, runId },
+            run.error ?? 'Event delivery failed'
+          );
+        } finally {
+          heartbeatController.abort('Event delivery completed');
+          await heartbeat;
+        }
+      } catch (error) {
+        if (controller.signal.aborted || this.workerController.signal.aborted) {
           return;
         }
-        run = {
-          ...run,
-          status: 'failed',
-          finishedAt: this.clock.now(),
-          error: axEventErrorMessage(error),
-        };
-        await this.store.saveRun(run);
-        await this.deadLetterDelivery(
-          { ...claimed, attempt, runId },
-          run.error ?? 'Event delivery failed'
-        );
+        throw error;
       } finally {
-        heartbeatController.abort('Event delivery completed');
-        await heartbeat;
         this.activeRuns.delete(runId);
       }
     } catch (error) {
@@ -1127,13 +1146,48 @@ export class AxEventRuntime {
   }
 
   private async resolveAuthority(
-    ingress: Readonly<AxEventIngress>
+    ingress: Readonly<AxEventIngress>,
+    signal?: AbortSignal
   ): Promise<Readonly<AxAuthorityContext> | undefined> {
-    const authority =
-      typeof this.options.authority === 'function'
-        ? await this.options.authority(ingress)
-        : this.options.authority;
-    return authority ? axSnapshotAuthority(authority) : undefined;
+    const resolver = this.options.authority;
+    if (typeof resolver !== 'function') {
+      return resolver ? axSnapshotAuthority(resolver) : undefined;
+    }
+
+    const timeoutMs = DEFAULT_AUTHORITY_RESOLVE_TIMEOUT_MS;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let rejectAbort!: (reason: unknown) => void;
+    const aborted = new Promise<never>((_resolve, reject) => {
+      rejectAbort = reject;
+    });
+    const abort = () => {
+      rejectAbort(
+        signal?.reason ?? new Error('Authority resolution cancelled')
+      );
+    };
+    if (signal?.aborted) {
+      abort();
+    } else {
+      signal?.addEventListener('abort', abort, { once: true });
+    }
+    const timedOut = new Promise<never>((_resolve, reject) => {
+      timeout = setTimeout(() => {
+        reject(
+          new Error(`Host authority resolution timed out after ${timeoutMs}ms`)
+        );
+      }, timeoutMs);
+    });
+    const callback = Promise.resolve().then(() => resolver(ingress));
+    // Timeout/cancel drop this promise; swallow late reject so it cannot become
+    // an unhandledRejection after Promise.race settles.
+    void callback.catch(() => undefined);
+    try {
+      const authority = await Promise.race([callback, aborted, timedOut]);
+      return authority ? axSnapshotAuthority(authority) : undefined;
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
+      signal?.removeEventListener('abort', abort);
+    }
   }
 
   private async heartbeatClaim(

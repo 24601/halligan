@@ -12820,6 +12820,7 @@ describe('judgeOptions / optimize', () => {
 
   it('should default optimize target to ctx and task actors and auto-apply optimized programs', async () => {
     const studentAI = makeStudentAI();
+    const proposalPolicy = () => 'improved instruction';
 
     const compileSpy = vi
       .spyOn(AxGEPA.prototype, 'compile')
@@ -12843,6 +12844,10 @@ describe('judgeOptions / optimize', () => {
             componentKeys.every((key) => key.startsWith('root.actor::'))
           ).toBe(true);
           expect(compileOptions?.maxMetricCalls).toBeGreaterThan(0);
+          expect(compileOptions?.gepaProposal).toEqual({
+            additionalGuidance: 'Keep actor instructions concise.',
+            policy: proposalPolicy,
+          });
 
           return {
             demos: [],
@@ -12866,6 +12871,10 @@ describe('judgeOptions / optimize', () => {
 
     await testAgent.optimize([makeTask()], {
       metric: async () => 1,
+      gepaProposal: {
+        additionalGuidance: 'Keep actor instructions concise.',
+        policy: proposalPolicy,
+      },
     });
 
     expect(compileSpy).toHaveBeenCalledOnce();
