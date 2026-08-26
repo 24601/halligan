@@ -15,17 +15,18 @@ Use this skill to generate GEPA optimization code. Prefer the top-level `optimiz
 - Use a strong `teacherAI` and a cheaper `studentAI`.
 - Pass `validationExamples` when you have a holdout set.
 - Set `maxMetricCalls` to bound optimizer cost; `optimize(...)` defaults it to `100`.
-- Use scalar metrics for one objective and object metrics for Pareto optimization.
+- Use scalar metrics for one objective, object metrics for legacy Pareto optimization, or `AxMetricResult` when evaluation also has textual feedback.
 - Apply results with `program.applyOptimization(result.optimizedProgram!)`.
 - For tree-wide runs, expect `optimizedProgram.componentMap`.
 - Persist artifacts with `axSerializeOptimizedProgram(...)` and restore them with `axDeserializeOptimizedProgram(...)` so the same flow works in browsers and Node.
+- Opt in with `candidateLineage: true`, then inspect `result.optimizedProgram.candidateLineage` when optimization decisions must be audited or reproduced.
 - `optimize(...)` runs `AxBootstrapFewShot -> AxGEPA` for small starter sets by default, preserving the demos in `result.optimizedProgram.demos`.
 
 ## Critical Rules
 
 - `optimize(...)` and `AxGEPA.compile()` work for a single generator and for tree-aware roots such as flows or agents with registered optimizable descendants.
 - There is no separate flow-only GEPA optimizer. Use `AxGEPA` for flows too.
-- The metric may return either `number` or `Record<string, number>`.
+- The metric may return `number`, `Record<string, number>`, or a structured `AxMetricResult` with `score`, optional `feedback`, and optional named `scores`.
 - Keep metrics deterministic and cheap by default.
 - Avoid extra LLM calls inside the metric unless the user explicitly wants judge-based evaluation.
 - If the user needs LLM-as-judge scoring for a non-agent GEPA run, prefer a plain typed `AxGen` evaluator instead of writing a custom judge abstraction.
@@ -34,6 +35,93 @@ Use this skill to generate GEPA optimization code. Prefer the top-level `optimiz
 - Use held-out validation examples for selection. Do not reuse the training set as `validationExamples`.
 - `result.optimizedProgram` is the easy-to-apply best candidate. `result.paretoFront` is the full trade-off set for multi-objective runs.
 - Direct `AxGEPA` still has its own `bootstrap` option, but top-level `optimize(...)` composes the existing `AxBootstrapFewShot` optimizer before GEPA instead.
+- Structured metric feedback is evaluation data: it is bounded, added to reflection, and not persisted in optimized-program artifacts. Ax does not infer or autonomously rewrite evals from production data.
+
+## Proposal Policy and Optimization References
+
+Use `gepaProposal` when the reflection model needs trusted developer guidance or a custom way to propose component text:
+
+```typescript
+const result = await optimize(program, train, metric, {
+  studentAI,
+  teacherAI,
+  validationExamples: validation,
+  gepaProposal: {
+    references: [
+      {
+        name: 'support-policy',
+        description: 'General escalation rules',
+        content: policyMarkdown,
+      },
+    ],
+    additionalGuidance: 'Prefer short, testable rules.',
+    maxExamples: 6,
+    policy: async ({
+      ai,
+      target,
+      currentValue,
+      reflectiveExamples,
+      references,
+      additionalGuidance,
+      previousValidationError,
+      attempt,
+    }) => {
+      // Return a complete replacement, or undefined to keep currentValue.
+      return proposeWithYourPolicy({
+        ai,
+        target,
+        currentValue,
+        reflectiveExamples,
+        references,
+        additionalGuidance,
+        previousValidationError,
+        attempt,
+      });
+    },
+  },
+});
+```
+
+- `references` are ordered, in-memory, trusted inputs to proposal generation. They are not runtime agent skills, tools, filesystem paths, or persisted optimized-program data.
+- `additionalGuidance` augments the built-in proposal contract; it does not replace component constraints.
+- `maxExamples` bounds the ordered reflective examples passed to each proposal. It does not change the training or held-out evaluation sets. `maxExamples: 0` keeps an empty example list; the built-in policy still calls the teacher and omits the optional `reflectiveExamples` field instead of injecting a dummy example or failing required-input rendering.
+- A custom `policy` proposes text only. GEPA deterministically enforces component-owned `maxLength`, `preserve`, and `validate` before metric-based acceptance. `format` and natural-language `constraints` are proposal context, not deterministic checks unless the component's `validate` function enforces them.
+- Returning `undefined` keeps the current component value. Invalid proposals are retried with `previousValidationError`; exhausted retries also keep the current value.
+- The same `gepaProposal` option is available on `AxGEPA.compile(...)`, `optimize(...)`, and `agent.optimize(...)`.
+- The built-in policy diagnoses failures, derives general rules, preserves successful behavior and required literals, and explicitly rejects memorizing example entities, quantities, dates, phrases, or answers.
+
+### When References Help and Their Limits
+
+- References help when sparse reflective examples omit a stable domain-wide definition, procedure, output convention, or safety rule that should transfer to unseen inputs.
+- References add little when they repeat the current instruction or feedback, are unrelated to the selected component, or contain rules the metric cannot observe. Irrelevant or conflicting references can reduce proposal quality while increasing prompt tokens.
+- Treat references as trusted prompt content. Delimiters provide structure, not isolation: stale, contaminated, or prompt-injecting content can steer the proposer. Validate provenance, select the smallest relevant material, and do not include secrets merely because references are omitted from saved optimization artifacts.
+- Held-out evaluation limits example memorization only when the holdout is genuinely independent. Shared entities, leaked labels, or the same contaminated reference in both proposal and evaluation design can hide overfitting.
+
+### Reproducible Hill-Climb Evaluation
+
+Run the zero-cost controlled gate from the repository root:
+
+```bash
+node --import=tsx src/examples/gepa-proposal-policy-eval.ts
+```
+
+The deterministic teacher deliberately emits three candidates: a training-entity lookup, a reference-informed general rule, and a no-benefit rewrite. This validates optimizer mechanics and generalization gating, not real-model efficacy. The checked result is:
+
+| Run | Candidate behavior | Selected held-out score | Metric calls | Selection |
+| --- | --- | ---: | ---: | --- |
+| Baseline GEPA | Memorized candidate scores 1.00 train / 0.25 held-out | 0.75 | 16 / 16 | Train-local candidate accepted; held-out selection keeps baseline |
+| Reference-informed | General rule scores 1.00 train / 1.00 held-out | 1.00 | 16 / 16 | Candidate accepted and selected |
+| Irrelevant reference | Rewrite gives no train benefit | 0.75 | 12 / 12 | Candidate rejected; baseline retained |
+
+Measured controlled overhead: baseline and reference-informed runs each make two teacher calls, so references add no proposal calls or metric calls. The rendered reference block is 307 characters. The bounded informed proposal prompt is 3,763 characters versus 3,544 for the unbounded baseline prompt: a net 219-character increase even after `maxExamples: 1` removes three reflective examples. Character counts are a reproducible payload measure, not provider token or latency estimates.
+
+To sample actual proposer behavior with a current inexpensive model, opt in explicitly:
+
+```bash
+OPENAI_APIKEY=... node --import=tsx src/examples/gepa-proposal-policy-eval.ts --real
+```
+
+This command is not part of the zero-cost gate and should not be run unintentionally. It is bounded to two one-trial runs, at most six `gpt-5.4-mini` teacher calls including validation retries, and 32 deterministic metric calls. Use repeated seeds and representative private holdouts before making an efficacy claim.
 
 ## Causal Candidate Evidence
 
@@ -324,6 +412,8 @@ console.log(result.optimizedProgram?.componentMap);
 ## Metric Patterns
 
 ```typescript
+import type { AxMetricResult } from '@ax-llm/ax';
+
 // Scalar objective
 const scalarMetric = ({ prediction, example }) =>
   prediction.answer === example.answer ? 1 : 0;
@@ -337,9 +427,31 @@ const multiMetric = ({ prediction, example }) => ({
       ? 1
       : 0.2,
 });
+
+// Scalar acceptance + qualitative reflection + named Pareto objectives
+const qualitativeMetric = ({ prediction, example }): AxMetricResult<
+  'accuracy' | 'brevity'
+> => {
+  const correct = prediction.answer === example.answer;
+  return {
+    score: correct ? 1 : 0,
+    feedback: correct
+      ? 'The answer matches the reference.'
+      : `Expected ${example.answer}; ground the answer in the supplied context.`,
+    scores: {
+      accuracy: correct ? 1 : 0,
+      brevity: prediction.answer.length < 120 ? 1 : 0.25,
+    },
+  };
+};
 ```
 
-- Return plain numbers or plain object literals.
+- `AxMetricResult.score` controls scalar candidate acceptance, perfect-score checks, and bootstrap thresholds. Named `scores` feed the existing objective vectors and Pareto frontier; they are not averaged back into scalar acceptance. `result.bestScore` keeps Ax's existing convention of scalarizing the selected Pareto score vector.
+- If structured `scores` is absent or has no finite values, GEPA uses `{ score }` as the score vector.
+- `feedback` is optional. Whitespace-only or non-string feedback is ignored; accepted text is trimmed, stripped of unsafe control characters, and capped at 4,000 characters. No hidden model call is made.
+- Metric feedback remains aligned with each example's prediction, score vector, scalar, and captured trace. Rollout failures retain an aligned zero-score row without metric feedback.
+- `feedbackNotes`, per-example metric `feedback`, and `feedbackFn` are additive. Global notes are rendered first; within each example, the numeric score context is followed by metric feedback and then `feedbackFn` text.
+- Return plain numbers or plain object literals; use `AxMetricResult` only when its explicit scalar/feedback distinction is useful.
 - Keep objective names stable across calls.
 - Prefer normalized scores such as `0..1` so trade-offs are easy to reason about.
 
@@ -361,6 +473,128 @@ program.applyOptimization(loaded);
 - Single-target runs usually populate both `optimizedProgram.instruction` and `optimizedProgram.componentMap`.
 - Tree-wide runs rely on `componentMap`, keyed by full component key.
 - Pareto points expose candidate configs under `point.configuration.componentMap`.
+
+## Candidate Lineage and Decision Audit
+
+GEPA artifacts can include a versioned `optimizedProgram.candidateLineage`
+manifest. Lineage is default-off: omitted or `false` preserves legacy artifacts,
+logger events, progress history, and checkpoint behavior. Set it to `true` for
+defaults or pass an options object to enable and configure it. Only an own data
+property opts in; inherited properties and accessors are ignored at this
+boundary rather than invoked. Compile options are supported as ordinary
+objects, not JavaScript `Proxy` objects. Reflection on a `Proxy` necessarily can
+invoke its meta-object traps. GEPA normalizes a throwing
+`getOwnPropertyDescriptor` while inspecting the own `candidateLineage` or
+`abortSignal` property before candidate evaluation. Arbitrary Proxy traps are
+unsupported: other stateful or throwing traps can run or fail later, including
+after candidate evaluation has started.
+It records every retained seed, reflective mutation, and system merge with a
+stable run-local ID, parent IDs, round and strategy, component delta
+fingerprints, evaluation objectives and metric-call context, final decision and
+reason, Pareto/archive disposition, and fingerprinted validator/runtime failures
+when available. Rejected and budget-aborted proposals are retained; this does
+not change candidate selection or claim to improve model quality. It improves
+auditability and reproducibility of the optimization search.
+
+The default manifest is privacy-minimizing and bounded:
+
+- component values (including prompts) and failure messages are identified
+  with a SHA-256 digest truncated to 64 bits (`sha256-64:<hex>`), not stored.
+  That identifier is collision-resistant enough for lineage correlation and is
+  not a confidentiality control; raw values remain omitted unless explicitly
+  opted in;
+- examples, traces, predictions, references, demos, and credentials are never
+  copied into lineage records;
+- at most 1,000 records and 64 changed components per record are retained;
+- final UTF-8 serialized size is capped at 1 MB by default. Byte-bound
+  trimming keeps the seed, the newest retained record, and the selected
+  candidate when possible, dropping middle history first;
+- once `maxRecords` is reached, later records are counted in
+  `omittedRecordCount` rather than retained, preserving parent integrity among
+  retained records.
+
+Configure or disable it per compile:
+
+```typescript
+const result = await optimize(program, train, metric, {
+  studentAI,
+  teacherAI,
+  maxMetricCalls: 120,
+  candidateLineage: {
+    maxRecords: 500,
+    maxArtifactBytes: 500_000,
+    maxComponentsPerCandidate: 32,
+    // Explicit privacy opt-ins; leave false for production defaults.
+    includeComponentValues: false,
+    includeFailureMessages: false,
+  },
+});
+
+const manifest = result.optimizedProgram?.candidateLineage;
+```
+
+Omit `candidateLineage` or set it to `false` to disable all lineage collection
+and publication work. Opted-in values and messages remain bounded by
+`maxComponentValueChars` and `maxFailureMessageChars`. Finite numeric limits are
+clamped as follows: records 1–10,000; final artifact bytes 4,096–10,000,000;
+components per record 1–1,024; component value characters 1–10,000; failure
+message characters 1–2,000.
+Published manifests and their nested records are cloned and recursively frozen.
+The final manifest is available in both the artifact and the existing
+`OptimizationComplete.bestConfiguration.candidateLineage` logger callback; these
+are byte-for-byte equivalent after JSON serialization. This does not add a new
+logger event variant, so exhaustive consumers of `AxOptimizerLoggerData` remain
+source-compatible. GEPA emits that completion callback and a final checkpoint
+only when lineage is explicitly enabled; disabled runs retain legacy event and
+checkpoint count, order, payloads, and timing. Opted-in `RoundProgress` and
+periodic checkpoints retain all legacy fields and add candidate metadata. The
+executable differential check runs the same omitted/`false` fixture against the
+PR checkout and its `origin/main` merge base, including logger events,
+checkpoint payloads/history, selection, the complete serialized optimized
+artifact, and its public serialize → deserialize → reserialize round trip.
+
+Lineage also appears in checkpoint `optimizerState` as a **snapshot only** with
+`checkpointSemantics: 'snapshot_only'` and `stoppedReason: 'in_progress'`.
+`AxGEPA` does not reconstruct candidates, archive state, counters, or RNG state
+from that snapshot, so this feature does not provide checkpoint resume. Older
+artifacts and checkpoints without the optional field continue to load unchanged.
+
+`termination` records where a completed run stopped, including loop-boundary and
+parent-evaluation budget/abort paths that occur before a proposal exists. Such
+paths do not synthesize fake candidate records. An abort already active before
+the seed evaluation rejects compilation and therefore produces no artifact.
+`AxCompileOptions.abortSignal` is GEPA-scoped; other optimizers do not implement
+or promise this cancellation behavior.
+When byte/record retention omits the selected candidate, the manifest keeps its
+ID and sets `selectedCandidateRetained: false`; retained Pareto IDs only name
+retained records.
+
+The reproducible stress/fault benchmark checks exact agreement between the final
+logger callback and artifact across accepted, rejected, merged, runtime-faulted,
+abort-signal, and budget-exhausted candidates. It also checks loop-boundary and
+parent-evaluation termination, parent integrity, deterministic same-seed rerun
+serialization, runtime freezing, default redaction, exact final UTF-8 byte
+truncation with Unicode/escaping and 81 generated decisions, and selected-record
+omission. Its no-selection-change claim is scoped to the deterministic synthetic
+fixture. Because its no-op baseline intentionally magnifies fixed serialization
+cost, it compares enabled lineage to the default omitted, legacy-compatible
+path. It reports an initial 10-run cold pair, then warms each mode for 50 runs
+and measures nine paired samples of 500 runs. Each sample alternates mode order
+in ten-run chunks so scheduler/JIT drift does not consistently favor the tiny
+baseline while timer overhead remains amortized. Always-on CI runs the completeness, integrity, privacy, and size
+invariants only. The p75 paired runtime overhead gate (at most 3.5× its
+paired baseline and at most 0.5 ms per fixture run) is opt-in via
+`AX_GEPA_LINEAGE_TIMING=1` or `AX_PRINT_METRICS=1` so shared CI cannot flake
+on wall-time jitter. Output includes the cold pair and full warm
+baseline/lineage ranges so variance remains visible:
+
+```bash
+npm run benchmark:gepa-lineage
+npx vitest run scripts/gepa-lineage-benchmark.test.ts
+npm run test:gepa-upstream-compatibility
+```
+
+Set `GEPA_COMPAT_BASE=<commit-or-ref>` to compare another authoritative base.
 
 ## Useful Options
 
@@ -395,6 +629,24 @@ const optimizer = new AxGEPA({
 - For expensive trees, start with `auto: 'light'` or fewer `numTrials`, then scale up.
 - GEPA selects among exposed components using measured accept/reject history, not LLM-generated numeric scores. The LLM proposes component text; metrics decide whether to keep it.
 - Function/tool trace reflection is keyed by stable component IDs where available, so function renames do not break saved candidate maps.
+
+## Qualitative Feedback Evaluation
+
+Run the deterministic end-to-end comparison with:
+
+```bash
+npx vitest run src/ax/dsp/optimizers/gepaQualitativeEvaluation.test.ts
+```
+
+The test holds train and held-out examples constant between a numeric-only metric and a structured metric. A deterministic zero-cost proposer reads only the reflective training rows: useful feedback changes the proposal and raises held-out accuracy from `0.5` to `1.0`; empty feedback matches the numeric baseline; misleading feedback proposes a worse rule that metric acceptance rejects; and an already-perfect program skips reflection. It also asserts the optimizer stays within `maxMetricCalls` and that held-out questions never enter the reflective dataset. This is reproducible evidence for the feedback transport/selection mechanism, not evidence that an arbitrary real teacher model will improve quality.
+
+An optional paid smoke comparison uses `gpt-5.4-mini`, one trial per arm, at most 8 optimizer metric rollouts per arm, four final held-out rollouts, and at most four reflection calls across both arms (at most 24 model calls total):
+
+```bash
+AX_RUN_LIVE_QUALITATIVE_GEPA_EVAL=1 npm run tsx src/examples/gepa-qualitative-feedback-live-eval.ts
+```
+
+Do not run it in normal CI. The explicit environment gate prevents accidental paid execution. Qualitative feedback helps only when it contains generalizable information the proposer can act on and the scored train/held-out gate rewards the resulting behavior. Empty feedback supplies no proposal signal; misleading feedback can waste proposal budget; sparse or contaminated evals can select non-generalizing changes; and named objectives still require stable, meaningful scales.
 
 ## Troubleshooting
 

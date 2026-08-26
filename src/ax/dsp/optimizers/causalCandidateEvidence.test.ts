@@ -15,6 +15,7 @@ import {
   axCreateCausalCandidateEvidenceManifest,
   axFingerprintCausalEvidence,
 } from './causalCandidateEvidence.js';
+import type { AxGEPACandidateLineageManifest } from './gepaLineage.js';
 
 const componentId = 'answerer::instruction';
 const digest = (character: string) => `sha256:${character.repeat(64)}`;
@@ -138,11 +139,52 @@ function chain(length: number): AxCausalCandidateEvidenceRecord[] {
   );
 }
 
-function artifact(value = 'new') {
+function lineage(id: string): AxGEPACandidateLineageManifest {
+  return {
+    version: 1,
+    records: [
+      {
+        id,
+        parentIds: [],
+        round: 0,
+        strategy: 'seed',
+        componentDelta: [],
+        omittedComponentCount: 0,
+        evaluations: [],
+        metricCallsAtDecision: 1,
+        metricCallBudget: 10,
+        decision: 'accepted',
+        reason: 'seed candidate',
+        disposition: 'selected',
+      },
+    ],
+    maxRecords: 100,
+    maxArtifactBytes: 4096,
+    omittedRecordCount: 0,
+    selectedCandidateId: id,
+    selectedCandidateRetained: true,
+    paretoCandidateIds: [id],
+    metricCallsUsed: 1,
+    metricCallBudget: 10,
+    stoppedReason: 'completed',
+    termination: { phase: 'complete', round: 1, metricCallsUsed: 1 },
+    checkpointSemantics: 'snapshot_only',
+    privacy: {
+      componentValues: 'fingerprints',
+      failureMessages: 'fingerprints',
+    },
+  };
+}
+
+function artifact(
+  value = 'new',
+  candidateLineage?: AxGEPACandidateLineageManifest
+) {
   return new AxOptimizedProgramImpl({
     bestScore: 0.7,
     stats: {} as any,
     componentMap: { [componentId]: value },
+    candidateLineage,
     optimizerType: 'test',
     optimizationTime: 1,
     totalRounds: 1,
@@ -527,6 +569,47 @@ describe('causal candidate evidence', () => {
         causalEvidenceVerifier: receipts.verify,
       })
     ).toThrow(/authority verification failed/);
+  });
+
+  it('preserves lineage and causal evidence across artifact boundaries', () => {
+    const receipts = hostReceiptRegistry();
+    const attached = axAttachCausalCandidateEvidence(
+      artifact('candidate', lineage('candidate-lineage')),
+      [record()],
+      receipts.options('receipt-combined')
+    );
+
+    expect(attached.candidateLineage?.selectedCandidateId).toBe(
+      'candidate-lineage'
+    );
+    expect(Object.isFrozen(attached.candidateLineage)).toBe(true);
+    expect(Object.isFrozen(attached.causalCandidateEvidence)).toBe(true);
+
+    const replayed = axDeserializeOptimizedProgram(
+      axSerializeOptimizedProgram(attached),
+      { causalEvidenceVerifier: receipts.verify }
+    );
+    expect(replayed.candidateLineage).toEqual(attached.candidateLineage);
+    expect(replayed.causalCandidateEvidence).toEqual(
+      attached.causalCandidateEvidence
+    );
+    expect(Object.isFrozen(replayed.candidateLineage)).toBe(true);
+    expect(Object.isFrozen(replayed.causalCandidateEvidence)).toBe(true);
+
+    const replaced = axReplaceOptimizedProgramSnapshot(
+      replayed,
+      artifact('replacement', lineage('replacement-lineage')),
+      receipts.verify
+    );
+    expect(replaced.componentMap).toEqual({ [componentId]: 'replacement' });
+    expect(replaced.candidateLineage?.selectedCandidateId).toBe(
+      'replacement-lineage'
+    );
+    expect(replaced.causalCandidateEvidence).toEqual(
+      replayed.causalCandidateEvidence
+    );
+    expect(Object.isFrozen(replaced.candidateLineage)).toBe(true);
+    expect(Object.isFrozen(replaced.causalCandidateEvidence)).toBe(true);
   });
 
   it('preserves legacy artifacts without requiring an evidence verifier', () => {
