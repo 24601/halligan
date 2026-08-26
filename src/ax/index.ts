@@ -800,6 +800,10 @@ import type {
   AxGEPAEvaluationState,
 } from './dsp/optimizers/gepaEvaluation.js';
 import type {
+  AxGEPAOptimizationReference,
+  AxGEPAProposalOptions,
+  AxGEPAProposalPolicy,
+  AxGEPAProposalPolicyArgs,
   AxGEPAReflectiveTuple,
   AxGEPATraceSummary,
   AxGEPATraceSummaryCall,
@@ -2127,7 +2131,11 @@ export type { AxGEPAComponentBanditState };
 export type { AxGEPAComponentTarget };
 export type { AxGEPAEvaluationBatch };
 export type { AxGEPAEvaluationState };
+export type { AxGEPAOptimizationReference };
 export type { AxGEPAOptimizationReport };
+export type { AxGEPAProposalOptions };
+export type { AxGEPAProposalPolicy };
+export type { AxGEPAProposalPolicyArgs };
 export type { AxGEPAReflectiveTuple };
 export type { AxGEPATraceSummary };
 export type { AxGEPATraceSummaryCall };
