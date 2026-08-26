@@ -653,52 +653,89 @@ const deepFreeze = <T>(value: T): Readonly<T> => {
   return Object.freeze(value);
 };
 
-const cloneDataOnlyJson = (
+type JsonClonePlan =
+  | Readonly<{ kind: 'primitive'; value: null | boolean | number | string }>
+  | Readonly<{ kind: 'array'; items: readonly JsonClonePlan[] }>
+  | Readonly<{
+      kind: 'object';
+      entries: readonly (readonly [string, JsonClonePlan])[];
+    }>;
+
+const planDataOnlyJson = (
   value: unknown,
   path: string,
   depth = 0,
   ancestors = new WeakSet<object>()
-): unknown => {
-  if (typeof value !== 'object' || value === null) return value;
+): JsonClonePlan => {
+  if (
+    value === null ||
+    typeof value === 'string' ||
+    typeof value === 'boolean' ||
+    (typeof value === 'number' && Number.isFinite(value))
+  ) {
+    return { kind: 'primitive', value };
+  }
+  if (typeof value !== 'object') {
+    fail(`${path} must contain only plain JSON values`);
+  }
+  const objectValue = value as object;
   if (depth >= MAX_JSON_DEPTH) {
     fail(`${path} must not exceed ${MAX_JSON_DEPTH} levels`);
   }
-  if (ancestors.has(value)) fail(`${path} must not contain cycles`);
-  ancestors.add(value);
+  if (ancestors.has(objectValue)) fail(`${path} must not contain cycles`);
+  ancestors.add(objectValue);
   try {
-    const descriptors = Object.getOwnPropertyDescriptors(value);
-    if (Array.isArray(value)) {
+    const descriptors = Object.getOwnPropertyDescriptors(objectValue);
+    if (Array.isArray(objectValue)) {
       const length = descriptors.length?.value;
       if (!Number.isSafeInteger(length) || length < 0) {
         fail(`${path} must contain only plain JSON values`);
       }
-      const cloned: unknown[] = [];
+      let indexedDescriptors = 0;
       for (const key of Reflect.ownKeys(descriptors)) {
-        const numericKey = typeof key === 'string' ? Number(key) : -1;
-        if (
-          key === 'length' ||
-          (typeof key === 'string' &&
-            Number.isInteger(numericKey) &&
-            numericKey >= 0 &&
-            numericKey < 4_294_967_295 &&
-            String(numericKey) === key)
-        ) {
-          continue;
-        }
         const descriptor = Reflect.get(descriptors, key) as
           | PropertyDescriptor
           | undefined;
+        if (typeof key === 'symbol') {
+          fail(`${path} must not contain symbol properties`);
+        }
+        if (key === 'length') continue;
+        const numericKey = typeof key === 'string' ? Number(key) : -1;
+        const isArrayIndex =
+          Number.isInteger(numericKey) &&
+          numericKey >= 0 &&
+          numericKey < 4_294_967_295 &&
+          String(numericKey) === key;
+        if (isArrayIndex) {
+          if (!descriptor || !('value' in descriptor)) {
+            fail(`${path}[${numericKey}] must not use accessors`);
+          }
+          indexedDescriptors++;
+          continue;
+        }
         if (descriptor?.enumerable) {
           fail(`${path} must not contain enumerable non-index properties`);
         }
-      }
-      for (let index = 0; index < length; index++) {
-        const descriptor = descriptors[String(index)];
-        if (!descriptor || !('value' in descriptor)) {
-          fail(`${path}[${index}] must not use accessors or sparse entries`);
+        if (descriptor && !('value' in descriptor)) {
+          fail(`${path}.${String(key)} must not use accessors`);
         }
-        cloned.push(
-          cloneDataOnlyJson(
+        fail(`${path} must not contain non-index properties`);
+      }
+      if (indexedDescriptors !== length) {
+        for (let index = 0; index < length; index++) {
+          if (!Object.hasOwn(descriptors, String(index))) {
+            fail(`${path}[${index}] must not contain sparse entries`);
+          }
+        }
+        fail(`${path} must not contain sparse entries`);
+      }
+      const items: JsonClonePlan[] = [];
+      for (let index = 0; index < length; index++) {
+        const descriptor = descriptors[String(index)] as PropertyDescriptor & {
+          value: unknown;
+        };
+        items.push(
+          planDataOnlyJson(
             descriptor.value,
             `${path}[${index}]`,
             depth + 1,
@@ -706,38 +743,70 @@ const cloneDataOnlyJson = (
           )
         );
       }
-      return Object.freeze(cloned);
+      return { kind: 'array', items };
     }
-    const prototype = Object.getPrototypeOf(value);
+    const prototype = Object.getPrototypeOf(objectValue);
     if (prototype !== Object.prototype && prototype !== null) {
       fail(`${path} must contain only plain JSON values`);
     }
-    const cloned = Object.create(null) as Record<string, unknown>;
-    for (const [key, descriptor] of Object.entries(descriptors)) {
-      if (!descriptor.enumerable) continue;
+    const keys: string[] = [];
+    for (const key of Reflect.ownKeys(descriptors)) {
+      if (typeof key === 'symbol') {
+        fail(`${path} must not contain symbol properties`);
+      }
+      const stringKey = key as string;
+      const descriptor = descriptors[stringKey];
       if (!('value' in descriptor)) {
-        fail(`${path}.${key} must not use accessors`);
+        fail(`${path}.${stringKey} must not use accessors`);
+      }
+      if (!descriptor.enumerable) {
+        fail(`${path}.${stringKey} must not be non-enumerable`);
       }
       if (descriptor.value === undefined) {
-        fail(`${path}.${key} must not be undefined`);
+        fail(`${path}.${stringKey} must not be undefined`);
       }
-      Object.defineProperty(cloned, key, {
-        value: cloneDataOnlyJson(
+      keys.push(stringKey);
+    }
+    const entries: Array<readonly [string, JsonClonePlan]> = [];
+    for (const key of keys) {
+      const descriptor = descriptors[key] as PropertyDescriptor & {
+        value: unknown;
+      };
+      entries.push([
+        key,
+        planDataOnlyJson(
           descriptor.value,
           `${path}.${key}`,
           depth + 1,
           ancestors
         ),
-        enumerable: true,
-        configurable: true,
-        writable: true,
-      });
+      ]);
     }
-    return Object.freeze(cloned);
+    return { kind: 'object', entries };
   } finally {
-    ancestors.delete(value);
+    ancestors.delete(objectValue);
   }
 };
+
+const clonePlannedJson = (plan: JsonClonePlan): unknown => {
+  if (plan.kind === 'primitive') return plan.value;
+  if (plan.kind === 'array') {
+    return Object.freeze(plan.items.map(clonePlannedJson));
+  }
+  const cloned = Object.create(null) as Record<string, unknown>;
+  for (const [key, item] of plan.entries) {
+    Object.defineProperty(cloned, key, {
+      value: clonePlannedJson(item),
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+  }
+  return Object.freeze(cloned);
+};
+
+const cloneDataOnlyJson = (value: unknown, path: string): unknown =>
+  clonePlannedJson(planDataOnlyJson(value, path));
 
 const cloneEnvelope = (
   envelope: Readonly<AxTemporalEnvelope>

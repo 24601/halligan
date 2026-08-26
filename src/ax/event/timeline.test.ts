@@ -773,6 +773,87 @@ describe('AxInteractionTimeline', () => {
       ).toThrow('must not contain enumerable non-index properties');
     }
     expect(getterReads).toBe(0);
+
+    const symbolIds = ['parent'];
+    Object.defineProperty(symbolIds, Symbol('authority'), {
+      enumerable: false,
+      value: 'hidden authority',
+    });
+    expect(() =>
+      append(
+        timeline,
+        envelope({ causalParentIds: symbolIds as readonly string[] })
+      )
+    ).toThrow('must not contain symbol properties');
+
+    const hiddenDataIds = ['parent'];
+    Object.defineProperty(hiddenDataIds, 'hiddenAuthority', {
+      enumerable: false,
+      value: 'hidden authority',
+    });
+    expect(() =>
+      append(
+        timeline,
+        envelope({ causalParentIds: hiddenDataIds as readonly string[] })
+      )
+    ).toThrow('must not contain non-index properties');
+
+    const hiddenAccessorIds = ['parent'];
+    Object.defineProperty(hiddenAccessorIds, 'hiddenAuthority', {
+      enumerable: false,
+      get: () => {
+        getterReads++;
+        return 'hidden authority';
+      },
+    });
+    expect(() =>
+      append(
+        timeline,
+        envelope({
+          causalParentIds: hiddenAccessorIds as readonly string[],
+        })
+      )
+    ).toThrow(
+      'envelope.causalParentIds.hiddenAuthority must not use accessors'
+    );
+    expect(getterReads).toBe(0);
+
+    let earlierValueTraversal = 0;
+    const traversalProbe = new Proxy(
+      {},
+      {
+        ownKeys: () => {
+          earlierValueTraversal++;
+          return [];
+        },
+      }
+    );
+    const sparseIds = [traversalProbe] as unknown[];
+    sparseIds.length = 2;
+    expect(() =>
+      append(
+        timeline,
+        envelope({ causalParentIds: sparseIds as readonly string[] })
+      )
+    ).toThrow('envelope.causalParentIds[1] must not contain sparse entries');
+    expect(earlierValueTraversal).toBe(0);
+
+    const accessorIds = [traversalProbe, 'later'] as unknown[];
+    Object.defineProperty(accessorIds, '1', {
+      enumerable: true,
+      get: () => {
+        getterReads++;
+        return 'later';
+      },
+    });
+    expect(() =>
+      append(
+        timeline,
+        envelope({ causalParentIds: accessorIds as readonly string[] })
+      )
+    ).toThrow('envelope.causalParentIds[1] must not use accessors');
+    expect(earlierValueTraversal).toBe(0);
+    expect(getterReads).toBe(0);
   });
 
   it('does not read inherited envelope authority', () => {
