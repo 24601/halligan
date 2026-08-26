@@ -524,11 +524,11 @@ function materializeDetached(
       throw new MetadataLimitError('array metadata exceeds limit');
     const keys = Reflect.ownKeys(value);
     if (
-      keys.some(
-        (key) =>
-          typeof key !== 'string' ||
-          (key !== 'length' && !/^(0|[1-9]\d*)$/.test(key))
-      )
+      keys.some((key) => {
+        if (key === 'length') return false;
+        if (typeof key !== 'string' || !/^(0|[1-9]\d*)$/.test(key)) return true;
+        return Number(key) >= length;
+      })
     )
       throw new TypeError('unsupported array metadata');
     const copy: unknown[] = [];
@@ -554,7 +554,7 @@ function materializeDetached(
   const prototype = Object.getPrototypeOf(value);
   if (prototype !== Object.prototype && prototype !== null)
     throw new TypeError('non-plain metadata object');
-  const copy: Record<string, unknown> = Object.create(prototype);
+  const copy: Record<string, unknown> = Object.create(null);
   copies.set(objectValue, copy);
   for (const key of Reflect.ownKeys(objectValue)) {
     if (typeof key !== 'string')
@@ -664,7 +664,7 @@ function snapshotFunction(
     )
       return undefined;
     const handler = funcDescriptor.value as AxAgentFunction['func'];
-    const metadata: Record<string, unknown> = {};
+    const metadata: Record<string, unknown> = Object.create(null);
     const copies = new WeakMap<object, unknown>([[root, metadata]]);
     const visiting = new WeakSet<object>([root]);
     for (const key of Reflect.ownKeys(root)) {
@@ -678,13 +678,14 @@ function snapshotFunction(
       });
     }
     visiting.delete(root);
-    if (!isBoundedString(metadata.name)) return undefined;
+    const nameDescriptor = Object.getOwnPropertyDescriptor(metadata, 'name');
+    if (!nameDescriptor || !isBoundedString(nameDescriptor.value))
+      return undefined;
     const boundHandler: AxAgentFunction['func'] = (args, extra) =>
       handler(args, extra);
-    const snapshot = {
-      ...metadata,
+    const snapshot = Object.assign(Object.create(null), metadata, {
       func: boundHandler,
-    } as unknown as AxAgentFunction;
+    }) as AxAgentFunction;
     return Object.freeze(snapshot);
   } catch {
     return undefined;

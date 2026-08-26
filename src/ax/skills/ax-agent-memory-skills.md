@@ -487,12 +487,16 @@ objects. Ingress and registry metadata must use own data properties; accessors
 are rejected without invocation, so one context, option, catalog, or registry
 getter cannot rewrite a fact that has not yet been detached. Supported metadata
 is limited to finite JSON-like primitives, dense arrays, and plain or
-null-prototype records. Callables, symbols, bigints, custom-prototype objects such
-as `Date`, and cyclic values fail closed. The trusted context resolver is the
-ingress exception. A selected function must be a plain or null-prototype record
-with an own data-property `func` whose value is callable. Its metadata is copied
-from own data properties without executing accessors or rereading `func`; the
-whole selected batch returns no artifacts if any selected root fails snapshot.
+null-prototype records. Arrays reject accessors, sparse entries, and keys outside
+their declared length. Detached records and selected functions are normalized to
+a null prototype so inherited or later-added `Object.prototype` values cannot
+establish authority or alter function metadata. Callables, symbols, bigints,
+custom-prototype objects such as `Date`, and cyclic values fail closed. The
+trusted context resolver is the ingress exception. A selected function must be a
+plain or null-prototype record with an own data-property `func` whose value is
+callable and an own valid `name`. Its metadata is copied from own data properties
+without executing accessors or rereading `func`; the whole selected batch returns
+no artifacts if any selected root fails snapshot.
 Inherited handlers, class instances, callable aliases, missing function names,
 and accessor handlers or metadata fail closed; descriptions remain optional.
 JavaScript proxies cannot be identified portably in the same realm and are

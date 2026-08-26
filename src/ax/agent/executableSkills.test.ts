@@ -15,6 +15,21 @@ const NOW = '2026-08-25T00:00:00.000Z';
 const PRINCIPAL = 'principal:alice';
 const AUDIENCE = 'agent:checkout';
 
+function temporarilyDefineObjectPrototype(
+  key: string,
+  descriptor: PropertyDescriptor
+): () => void {
+  const previous = Object.getOwnPropertyDescriptor(Object.prototype, key);
+  Object.defineProperty(Object.prototype, key, {
+    ...descriptor,
+    configurable: true,
+  });
+  return () => {
+    if (previous) Object.defineProperty(Object.prototype, key, previous);
+    else delete (Object.prototype as Record<string, unknown>)[key];
+  };
+}
+
 const authority: AxExecutableSkillAuthority = {
   issuer: 'auth.example',
   audience: AUDIENCE,
@@ -703,6 +718,73 @@ describe('axSelectExecutableSkills', () => {
     expect(optionalDescription.artifacts).toHaveLength(1);
   });
 
+  it('ignores inherited context capabilities from Object.prototype', () => {
+    const target = artifact({
+      requirements: { capabilities: ['admin'] },
+    });
+    const hostileContext = context(target);
+    delete hostileContext.capabilities;
+    const restore = temporarilyDefineObjectPrototype('capabilities', {
+      value: ['admin'],
+    });
+
+    try {
+      const result = axSelectExecutableSkills([target], hostileContext);
+      expect(result.artifacts).toEqual([]);
+      expect(result.inspection[0]?.reasons).toContain('missing_capability');
+    } finally {
+      restore();
+    }
+  });
+
+  it('does not read an inherited function name getter', () => {
+    const target = artifact();
+    let reads = 0;
+    const restore = temporarilyDefineObjectPrototype('name', {
+      get: () => {
+        reads++;
+        return 'inherited_attacker';
+      },
+    });
+
+    try {
+      const result = axSelectExecutableSkills(
+        [target],
+        context(target, {
+          resolveFunction: () =>
+            ({ func: () => 'ATTACKER' }) as AxAgentFunction,
+        })
+      );
+      expect(reads).toBe(0);
+      expect(result.artifacts).toEqual([]);
+      expect(result.inspection[0]?.reasons).toEqual(['unresolved_function']);
+    } finally {
+      restore();
+    }
+  });
+
+  it('keeps selected functions isolated from later prototype pollution', () => {
+    const target = artifact();
+    const selected = axSelectExecutableSkills([target], context(target))
+      .artifacts[0]!;
+    const restoreAlwaysInclude = temporarilyDefineObjectPrototype(
+      '_alwaysInclude',
+      { value: true }
+    );
+    const restoreKind = temporarilyDefineObjectPrototype('_kind', {
+      value: 'internal',
+    });
+
+    try {
+      expect(Object.getPrototypeOf(selected.function)).toBe(null);
+      expect(selected.function._alwaysInclude).toBeUndefined();
+      expect(selected.function._kind).toBeUndefined();
+    } finally {
+      restoreKind();
+      restoreAlwaysInclude();
+    }
+  });
+
   it('detaches shared catalog and context data in one ingress session', () => {
     const target = artifact();
     const sharedAuthority = {
@@ -765,6 +847,28 @@ describe('axSelectExecutableSkills', () => {
 
     expect(reads).toBe(0);
     expect(target.functionRef).toBe('functions/checkout/2');
+    expect(result.artifacts).toEqual([]);
+    expect(result.inspection[0]?.reasons).toEqual(['invalid_context']);
+  });
+
+  it('rejects array keys outside the declared length without invoking them', () => {
+    const target = artifact();
+    const capabilities = ['browser'];
+    let reads = 0;
+    Object.defineProperty(capabilities, '4294967295', {
+      enumerable: true,
+      get: () => {
+        reads++;
+        return 'admin';
+      },
+    });
+
+    const result = axSelectExecutableSkills(
+      [target],
+      context(target, { capabilities })
+    );
+
+    expect(reads).toBe(0);
     expect(result.artifacts).toEqual([]);
     expect(result.inspection[0]?.reasons).toEqual(['invalid_context']);
   });
