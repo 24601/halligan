@@ -12,6 +12,7 @@ import type {
   AxCostTrackerOptions,
   AxExample,
   AxMetricFn,
+  AxMetricResult,
   AxMultiMetricFn,
   AxOptimizationCheckpoint,
   AxOptimizationProgress,
@@ -22,6 +23,10 @@ import type {
 import { AxGen } from './generate.js';
 import { axGlobals } from './globals.js';
 import { axDefaultOptimizerLogger } from './optimizerLogging.js';
+import {
+  type AxGEPACandidateLineageManifest,
+  cloneAndFreezeGEPACandidateLineageManifest,
+} from './optimizers/gepaLineage.js';
 import type { AxGEPAComponentBanditState } from './optimizers/gepaSelection.js';
 import type { AxOptimizerLoggerFunction } from './optimizerTypes.js';
 import type { AxGenOut, AxProgramDemos } from './types.js';
@@ -32,6 +37,36 @@ import type { AxGenOut, AxProgramDemos } from './types.js';
 // Logger utilities are now exported from ./loggers.js
 
 // Multi-objective metric function for Pareto optimization
+
+const metricObjectiveScores = (
+  result: Record<string, number> | AxMetricResult
+): Record<string, number> => {
+  const structured =
+    typeof result.score === 'number' &&
+    (typeof result.feedback === 'string' ||
+      (result.scores !== null && typeof result.scores === 'object'));
+  if (structured) {
+    const scores: Record<string, number> = {};
+    if (result.scores && typeof result.scores === 'object') {
+      for (const [key, value] of Object.entries(result.scores)) {
+        if (typeof value === 'number' && Number.isFinite(value)) {
+          scores[key] = value;
+        }
+      }
+    }
+    if (Object.keys(scores).length === 0 && Number.isFinite(result.score)) {
+      scores.score = result.score;
+    }
+    return scores;
+  }
+  const scores: Record<string, number> = {};
+  for (const [key, value] of Object.entries(result)) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      scores[key] = value;
+    }
+  }
+  return scores;
+};
 
 // Common types moved to ./common_types.ts
 
@@ -820,6 +855,7 @@ export interface AxOptimizedProgram<OUT = any> {
    */
   componentMap?: Record<string, string>;
   selectorState?: Record<string, AxGEPAComponentBanditState>;
+  candidateLineage?: AxGEPACandidateLineageManifest;
   demos?: AxProgramDemos<any, OUT>[];
 
   // Model configuration
@@ -863,6 +899,7 @@ export class AxOptimizedProgramImpl<OUT = any>
   public readonly stats: AxOptimizationStats;
   public readonly componentMap?: Record<string, string>;
   public readonly selectorState?: Record<string, AxGEPAComponentBanditState>;
+  public declare readonly candidateLineage?: AxGEPACandidateLineageManifest;
   public readonly demos?: AxProgramDemos<any, OUT>[];
   public readonly examples?: AxExample[];
   public readonly modelConfig?: {
@@ -889,6 +926,7 @@ export class AxOptimizedProgramImpl<OUT = any>
     stats: AxOptimizationStats;
     componentMap?: Record<string, string>;
     selectorState?: Record<string, AxGEPAComponentBanditState>;
+    candidateLineage?: AxGEPACandidateLineageManifest;
     demos?: AxProgramDemos<any, OUT>[];
     examples?: AxExample[];
     modelConfig?: AxOptimizedProgram<OUT>['modelConfig'];
@@ -905,6 +943,11 @@ export class AxOptimizedProgramImpl<OUT = any>
     this.stats = config.stats;
     this.componentMap = config.componentMap;
     this.selectorState = config.selectorState;
+    if (config.candidateLineage) {
+      this.candidateLineage = cloneAndFreezeGEPACandidateLineageManifest(
+        config.candidateLineage
+      );
+    }
     this.demos = config.demos;
     this.examples = config.examples;
     this.modelConfig = config.modelConfig;
@@ -1804,10 +1847,12 @@ export abstract class AxBaseOptimizer implements AxOptimizer {
       this.getAIService(false, options),
       sampleExample as any
     );
-    const sampleScores = await metricFn({
-      prediction: samplePrediction,
-      example: sampleExample,
-    });
+    const sampleScores = metricObjectiveScores(
+      await metricFn({
+        prediction: samplePrediction,
+        example: sampleExample,
+      })
+    );
     const objectives = Object.keys(sampleScores);
 
     // if (options?.verbose) {
@@ -1832,7 +1877,9 @@ export abstract class AxBaseOptimizer implements AxOptimizer {
 
       // Create a weighted single-objective metric
       const weightedMetric: AxMetricFn = async ({ prediction, example }) => {
-        const scores = await metricFn({ prediction, example });
+        const scores = metricObjectiveScores(
+          await metricFn({ prediction, example })
+        );
         let weightedScore = 0;
         for (const [objective, score] of Object.entries(scores)) {
           weightedScore += score * (weights[objective] || 0);
@@ -1907,10 +1954,12 @@ export abstract class AxBaseOptimizer implements AxOptimizer {
       this.getAIService(false, options),
       sampleExample as any
     );
-    const sampleScores = await metricFn({
-      prediction: samplePrediction,
-      example: sampleExample,
-    });
+    const sampleScores = metricObjectiveScores(
+      await metricFn({
+        prediction: samplePrediction,
+        example: sampleExample,
+      })
+    );
     const objectives = Object.keys(sampleScores);
 
     // For each objective, optimize it while constraining others
@@ -1924,7 +1973,9 @@ export abstract class AxBaseOptimizer implements AxOptimizer {
 
       // Create a constraint-based metric
       const constraintMetric: AxMetricFn = async ({ prediction, example }) => {
-        const scores = await metricFn({ prediction, example });
+        const scores = metricObjectiveScores(
+          await metricFn({ prediction, example })
+        );
 
         // Primary objective score
         const primaryScore = scores[primaryObjective] || 0;
@@ -2064,7 +2115,9 @@ export abstract class AxBaseOptimizer implements AxOptimizer {
           this.studentAI,
           example as IN
         );
-        const scores = await metricFn({ prediction, example });
+        const scores = metricObjectiveScores(
+          await metricFn({ prediction, example })
+        );
 
         // Collect scores for each objective
         for (const [objective, score] of Object.entries(scores)) {

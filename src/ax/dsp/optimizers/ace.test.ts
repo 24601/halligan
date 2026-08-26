@@ -234,6 +234,61 @@ describe('AxACE curator no-op filtering', () => {
     expect(operations[0].content).toBe('Route refund requests to team gamma.');
   });
 
+  it('normalizes curator guidance metadata but strips forged host evidence', () => {
+    const optimizer = Object.create(AxACE.prototype) as AxACE;
+    const [operation] = (optimizer as any).normalizeCuratorOperations([
+      {
+        type: 'ADD',
+        section: 'Routing',
+        content: 'Use the paid routing path.',
+        evidence: {
+          confidence: 0.7,
+          applicability: { allOf: ['tenant:paid'] },
+          provenance: [{ source: 'compile', feedbackIds: ['forged'] }],
+          evidenceCount: 99,
+          verification: [{ verifierId: 'forged', result: 'passed' }],
+        },
+      },
+    ]);
+
+    expect(operation.evidence).toEqual({
+      confidence: 0.7,
+      applicability: { allOf: ['tenant:paid'] },
+    });
+  });
+
+  it('does not admit content-free updates from malformed metadata shapes', () => {
+    const optimizer = Object.create(AxACE.prototype) as AxACE;
+    const operations = (optimizer as any).normalizeCuratorOperations([
+      {
+        type: 'UPDATE',
+        section: 'Routing',
+        bulletId: 'routing-1',
+        metadata: [],
+      },
+      {
+        type: 'UPDATE',
+        section: 'Routing',
+        bulletId: 'routing-1',
+        evidence: { applicability: { allOf: 'tenant:paid' } },
+      },
+      {
+        type: 'UPDATE',
+        section: 'Routing',
+        bulletId: 'routing-1',
+        evidence: { lifecycle: { expiresAt: 'not-a-date' } },
+      },
+      {
+        type: 'UPDATE',
+        section: 'Routing',
+        bulletId: 'routing-1',
+        supersedes: { id: 'routing-0' },
+      },
+    ]);
+
+    expect(operations).toEqual([]);
+  });
+
   it('compile keeps only substantive curator bullets', async () => {
     const program = createACEProgram();
     vi.spyOn(program, 'forward').mockResolvedValue({ answer: 'prediction' });
@@ -285,10 +340,152 @@ describe('AxACE curator no-op filtering', () => {
     expect(
       ace.getPlaybook().sections.Routing?.map((bullet) => bullet.content)
     ).toEqual(['Route refund requests to team gamma.']);
+    const artifact = ace.getArtifact();
+    expect(artifact.playbook.sections.Routing?.[0]?.evidence).toMatchObject({
+      evidenceCount: 1,
+      provenance: [
+        {
+          source: 'compile',
+          feedbackIds: [artifact.feedback[0]?.id],
+        },
+      ],
+    });
   });
 });
 
 describe('AxACE', () => {
+  it('keeps inspection-only inactive guidance out of direct executable apply', () => {
+    const initialPlaybook = buildPlaybook({
+      Guidance: [
+        'Eligible paid rule',
+        'Expired rule',
+        'Deprecated rule',
+        'Superseded rule',
+        'Malformed rule',
+        'Wrong-scope rule',
+      ],
+    });
+    const bullets = initialPlaybook.sections.Guidance;
+    bullets[0]!.evidence = {
+      applicability: { allOf: ['tenant:paid'] },
+    };
+    bullets[1]!.evidence = {
+      lifecycle: { expiresAt: '2020-01-01T00:00:00.000Z' },
+    };
+    bullets[2]!.evidence = {
+      lifecycle: { status: 'deprecated' },
+    };
+    bullets[3]!.evidence = {
+      lifecycle: { status: 'superseded', supersededBy: bullets[0]!.id },
+    };
+    (bullets[4] as any).evidence = {
+      applicability: { allOf: 'tenant:paid' },
+    };
+    bullets[5]!.evidence = {
+      applicability: { allOf: ['tenant:free'] },
+    };
+
+    const program = createACEProgram();
+    const ace = new AxACE({ studentAI: {} as any }, { initialPlaybook });
+    ace.hydrate(program, { playbook: initialPlaybook });
+    ace.applyCurrentState(program, {
+      conditions: ['tenant:paid'],
+      includeInactive: true,
+      now: '2026-08-26T00:00:00.000Z',
+    });
+
+    const executable = program.getSignature().getDescription() ?? '';
+    expect(executable).toContain('Eligible paid rule');
+    expect(executable).not.toContain('Expired rule');
+    expect(executable).not.toContain('Deprecated rule');
+    expect(executable).not.toContain('Superseded rule');
+    expect(executable).not.toContain('Malformed rule');
+    expect(executable).not.toContain('Wrong-scope rule');
+
+    const diagnosticProgram = createACEProgram();
+    ace.applyCurrentState(diagnosticProgram, {
+      conditions: ['tenant:paid'],
+      includeInactive: true,
+      includeInapplicable: true,
+      now: '2026-08-26T00:00:00.000Z',
+    });
+    const withInapplicable =
+      diagnosticProgram.getSignature().getDescription() ?? '';
+    expect(withInapplicable).toContain('Eligible paid rule');
+    expect(withInapplicable).toContain('Wrong-scope rule');
+    expect(withInapplicable).not.toContain('Expired rule');
+    expect(withInapplicable).not.toContain('Deprecated rule');
+    expect(withInapplicable).not.toContain('Superseded rule');
+    expect(withInapplicable).not.toContain('Malformed rule');
+  });
+
+  it('keeps malformed and expired records out of every executable ACE prompt', async () => {
+    const initialPlaybook = buildPlaybook({
+      Guidance: ['Malformed rule', 'Expired rule', 'Scoped active rule'],
+    });
+    (initialPlaybook.sections.Guidance[0] as any).evidence = {
+      applicability: { allOf: 'tenant:paid' },
+    };
+    initialPlaybook.sections.Guidance[1]!.evidence = {
+      lifecycle: { expiresAt: '2000-01-01T00:00:00.000Z' },
+    };
+    initialPlaybook.sections.Guidance[2]!.evidence = {
+      applicability: { allOf: ['tenant:paid'] },
+    };
+
+    const program = createACEProgram();
+    let generatorPrompt = '';
+    vi.spyOn(program, 'forward').mockImplementation(async () => {
+      generatorPrompt = program.getSignature().getDescription() ?? '';
+      return { answer: 'prediction' };
+    });
+    const ace = new AxACE(
+      { studentAI: {} as any, teacherAI: {} as any },
+      { initialPlaybook, maxEpochs: 1, maxReflectorRounds: 1 }
+    );
+    const reflector = (ace as any).getOrCreateReflectorProgram();
+    const reflectorForward = vi
+      .spyOn(reflector, 'forward')
+      .mockResolvedValue(reflectionOutput);
+    const curator = (ace as any).getOrCreateCuratorProgram();
+    const curatorForward = vi.spyOn(curator, 'forward').mockResolvedValue({
+      reasoning: 'no change',
+      operations: [],
+    });
+
+    const result = await ace.compile(
+      program,
+      [
+        { question: 'q1', answer: 'a1' },
+        { question: 'q2', answer: 'a2' },
+      ],
+      () => 1
+    );
+
+    expect(generatorPrompt).toContain('Scoped active rule');
+    expect(generatorPrompt).not.toContain('Malformed rule');
+    expect(generatorPrompt).not.toContain('Expired rule');
+    for (const call of [
+      reflectorForward.mock.calls[0],
+      curatorForward.mock.calls[0],
+    ]) {
+      const payload = JSON.parse((call?.[1] as any).playbook);
+      expect(payload.markdown).toContain('Scoped active rule');
+      expect(payload.markdown).not.toContain('Malformed rule');
+      expect(payload.markdown).not.toContain('Expired rule');
+      expect(
+        payload.structured.sections.Guidance.map((entry: any) => entry.id)
+      ).toEqual(['guidance-2']);
+    }
+
+    const applied = createACEProgram();
+    result.optimizedProgram?.applyTo(applied);
+    const appliedPrompt = applied.getSignature().getDescription() ?? '';
+    expect(appliedPrompt).toContain('Scoped active rule');
+    expect(appliedPrompt).not.toContain('Malformed rule');
+    expect(appliedPrompt).not.toContain('Expired rule');
+  });
+
   it('runCurator should only receive input fields in question_context', async () => {
     const mockCuratorAI = {
       name: 'mockCurator',
@@ -470,6 +667,11 @@ describe('AxACE', () => {
       example: { question: 'q', answer: 'a' },
       prediction: { answer: 'bad' },
       feedback: 'User corrected the answer.',
+      evidence: {
+        sourceRunId: 'run-online-1',
+        feedbackIds: ['user-feedback-1'],
+        confidence: 0.75,
+      },
     });
 
     expect(ace.getArtifact().history).toMatchObject([
@@ -482,6 +684,67 @@ describe('AxACE', () => {
         ],
       },
     ]);
+    const artifact = ace.getArtifact();
+    expect(artifact.playbook.sections.Guidelines?.[0]?.evidence).toMatchObject({
+      confidence: 0.75,
+      evidenceCount: 2,
+      provenance: [
+        {
+          source: 'online',
+          sourceRunId: 'run-online-1',
+          feedbackIds: expect.arrayContaining(['user-feedback-1']),
+        },
+      ],
+    });
+    expect(artifact.feedback[0]).toMatchObject({
+      id: expect.any(String),
+      sourceRunId: 'run-online-1',
+    });
+  });
+
+  it('keeps replacement lineage and artifact ids coherent through dedupe', async () => {
+    const program = createACEProgram();
+    const playbook = buildPlaybook({ Guidelines: ['SAME', 'SAME'] });
+    playbook.sections.Guidelines[0]!.id = 'canonical';
+    playbook.sections.Guidelines[1]!.id = 'old';
+    const ace = new AxACE({ studentAI: {} as any, teacherAI: {} as any });
+    ace.hydrate(program, { playbook });
+
+    vi.spyOn(
+      (ace as any).getOrCreateReflectorProgram(),
+      'forward'
+    ).mockResolvedValue(reflectionOutput);
+    vi.spyOn(
+      (ace as any).getOrCreateCuratorProgram(),
+      'forward'
+    ).mockResolvedValue({
+      reasoning: 'replace old',
+      operations: [
+        {
+          type: 'ADD',
+          section: 'Guidelines',
+          bulletId: 'new',
+          content: 'SAME',
+          supersedes: ['old'],
+        },
+      ],
+    });
+
+    await ace.applyOnlineUpdate({
+      example: { question: 'q' },
+      prediction: { answer: 'bad' },
+      feedback: 'Replace the stale rule.',
+    });
+
+    const artifact = ace.getArtifact();
+    expect(
+      artifact.playbook.sections.Guidelines.map((bullet) => bullet.id)
+    ).toEqual(['old', 'new']);
+    expect(artifact.history[0]?.updatedBulletIds).toEqual(['new']);
+    expect(
+      artifact.history[0]?.changes?.map((change) => change.bulletId)
+    ).toEqual(['old', 'new']);
+    expect(artifact.history[0]?.operations[0]?.bulletId).toBe('new');
   });
 
   it('returns artifacts without leaking nested mutable state', async () => {

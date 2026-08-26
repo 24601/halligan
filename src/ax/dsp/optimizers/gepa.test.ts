@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { AxAIService } from '../../ai/types.js';
-import { axSerializeOptimizedProgram } from '../optimizer.js';
+import {
+  axDeserializeOptimizedProgram,
+  axSerializeOptimizedProgram,
+} from '../optimizer.js';
 import { ax } from '../template.js';
 import { AxGEPA } from './gepa.js';
 
@@ -22,7 +25,7 @@ const createSingleRootProgram = (
     },
     getSignature: () => ({
       getDescription: () => baseInstruction,
-      toString: () => `\"${baseInstruction}\" question:string -> answer:string`,
+      toString: () => `"${baseInstruction}" question:string -> answer:string`,
     }),
     namedProgramInstances: () => [{ id, program }],
     getOptimizableComponents: () => [
@@ -62,7 +65,7 @@ const createInstructionNode = (id: string, description: string) => {
     },
     getSignature: () => ({
       getDescription: () => description,
-      toString: () => `\"${description}\" input:string -> output:string`,
+      toString: () => `"${description}" input:string -> output:string`,
     }),
     getOptimizableComponents: () => [
       {
@@ -138,6 +141,130 @@ describe('AxGEPA Optimizer', () => {
       expect(result.optimizedProgram?.componentMap).toEqual({
         'root::instruction': 'task',
       });
+    });
+
+    it('uses structured scalar acceptance while retaining named Pareto objectives', async () => {
+      const optimizer = new AxGEPA({
+        studentAI: {} as AxAIService,
+        teacherAI: {} as AxAIService,
+        numTrials: 0,
+      });
+      const program = createSingleRootProgram('task', async () => ({
+        answer: 'a',
+      }));
+
+      const result = await optimizer.compile(
+        program as any,
+        [{ question: 'q1' }, { question: 'q2' }],
+        async () => ({
+          score: 0.9,
+          feedback: 'This feedback is evaluation-time data only.',
+          scores: { accuracy: 1, brevity: 0 },
+        }),
+        { maxMetricCalls: 2 }
+      );
+
+      // bestScore follows the existing Pareto-vector averaging convention;
+      // the explicit 0.9 scalar is used for rollout acceptance decisions.
+      expect(result.bestScore).toBe(0.5);
+      expect(result.paretoFront[0]?.scores).toEqual({
+        accuracy: 1,
+        brevity: 0,
+      });
+      expect(JSON.stringify(result.optimizedProgram)).not.toContain(
+        'evaluation-time data only'
+      );
+      expect(JSON.parse(JSON.stringify(result.optimizedProgram))).toMatchObject(
+        {
+          bestScore: 0.5,
+          componentMap: { 'root::instruction': 'task' },
+        }
+      );
+    });
+
+    it('skips reflection when the explicit structured scalar is already perfect', async () => {
+      let reflections = 0;
+      const optimizer = new AxGEPA({
+        studentAI: {
+          chat: async () => {
+            reflections += 1;
+            throw new Error('teacher should not run');
+          },
+        } as any,
+        teacherAI: {
+          chat: async () => {
+            reflections += 1;
+            throw new Error('teacher should not run');
+          },
+        } as any,
+        numTrials: 1,
+      });
+      const program = createSingleRootProgram('task', async () => ({
+        answer: 'a',
+      }));
+
+      const result = await optimizer.compile(
+        program as any,
+        [{ question: 'q1' }, { question: 'q2' }],
+        async () => ({
+          score: 0.4,
+          feedback: 'wrong format',
+          scores: { accuracy: 1, brevity: 1 },
+        }),
+        {
+          maxMetricCalls: 8,
+          skipPerfectScore: true,
+          perfectScore: 0.4,
+          gepaAdapter: {
+            evaluate: async (batch: readonly unknown[]) => ({
+              outputs: batch.map(() => ({ answer: 'a' })),
+              scores: batch.map(() => 0.4),
+              scoreVectors: batch.map(() => ({ accuracy: 1, brevity: 1 })),
+              feedback: batch.map(() => 'wrong format'),
+            }),
+            make_reflective_dataset: () => ({}),
+          },
+        }
+      );
+
+      expect(result.bestScore).toBe(1);
+      expect(reflections).toBe(0);
+    });
+
+    it('carries evaluated metric feedback into component reflection tuples', async () => {
+      const optimizer = new AxGEPA({
+        studentAI: {} as AxAIService,
+        teacherAI: {} as AxAIService,
+        numTrials: 1,
+        minibatchSize: 1,
+        seed: 1,
+      });
+      const program = createSingleRootProgram('task', async () => ({
+        answer: 'a',
+      }));
+      let reflectedTuples: any[] = [];
+      (optimizer as any).reflectTargetInstruction = async (...args: any[]) => {
+        reflectedTuples = args[8];
+        return args[1];
+      };
+
+      await optimizer.compile(
+        program as any,
+        [{ question: 'q1' }, { question: 'q2' }],
+        async ({ example }) => ({
+          score: 0.4,
+          feedback: `Use evidence for ${example.question}.`,
+        }),
+        { maxMetricCalls: 10, skipPerfectScore: false }
+      );
+
+      expect(reflectedTuples).toMatchObject([
+        {
+          input: { question: expect.any(String) },
+          score: 0.4,
+          feedback: expect.stringMatching(/^Use evidence for q[12]\.$/),
+        },
+      ]);
     });
 
     it('treats forward failures as zero-score rows instead of aborting the optimization', async () => {
@@ -301,13 +428,525 @@ describe('AxGEPA Optimizer', () => {
         program as any,
         [{ question: 'q1' }, { question: 'q2' }],
         async ({ prediction }) => prediction.score,
-        { maxMetricCalls: 20 }
+        { maxMetricCalls: 20, candidateLineage: true }
       );
 
       expect(result.bestScore).toBe(0);
       expect(result.optimizedProgram?.componentMap).toEqual({
         'root::instruction': 'task',
       });
+      const records = result.optimizedProgram?.candidateLineage?.records ?? [];
+      expect(
+        records.map(({ id, parentIds, strategy, decision }) => ({
+          id,
+          parentIds,
+          strategy,
+          decision,
+        }))
+      ).toEqual([
+        {
+          id: 'c0',
+          parentIds: [],
+          strategy: 'seed',
+          decision: 'accepted',
+        },
+        {
+          id: 'c1',
+          parentIds: ['c0'],
+          strategy: 'reflective_mutation',
+          decision: 'rejected',
+        },
+      ]);
+      expect(records[1]?.reason).toBe('insufficient_minibatch_improvement');
+    });
+
+    it('records the explicit structured scalar that drives acceptance', async () => {
+      const optimizer = new AxGEPA({
+        studentAI: {} as AxAIService,
+        teacherAI: {} as AxAIService,
+        numTrials: 1,
+        minibatch: false,
+        mergeMax: 0,
+        minImprovementThreshold: 0,
+      });
+      const program = createSingleRootProgram('task', async (instruction) => ({
+        score: instruction === 'better' ? 0.9 : 0.1,
+      }));
+      (optimizer as any).reflectTargetInstruction = async () => 'better';
+
+      const result = await optimizer.compile(
+        program as any,
+        [{ question: 'q1' }, { question: 'q2' }],
+        async ({ prediction }) => ({
+          score: prediction.score,
+          scores: { quality: 0 },
+        }),
+        {
+          maxMetricCalls: 20,
+          skipPerfectScore: false,
+          candidateLineage: true,
+        }
+      );
+
+      expect(result.optimizedProgram?.componentMap).toEqual({
+        'root::instruction': 'better',
+      });
+      const records = result.optimizedProgram?.candidateLineage?.records ?? [];
+      expect(records).toHaveLength(2);
+      expect(records[0]?.evaluations).toEqual([
+        expect.objectContaining({
+          objectives: { quality: 0 },
+          scalarScore: 0.1,
+        }),
+      ]);
+      expect(records[1]).toMatchObject({
+        decision: 'accepted',
+        reason: 'improved_minibatch_score',
+      });
+      expect(records[1]?.evaluations).not.toHaveLength(0);
+      for (const evaluation of records[1]?.evaluations ?? []) {
+        expect(evaluation).toMatchObject({
+          objectives: { quality: 0 },
+          scalarScore: 0.9,
+        });
+      }
+    });
+
+    it('preserves legacy events and checkpoints when lineage is omitted or false', async () => {
+      const run = async (candidateLineage?: boolean) => {
+        let instruction = 'base';
+        const events: any[] = [];
+        const checkpoints: any[] = [];
+        const program = {
+          ...createSingleRootProgram('base', async () => ({ score: 0 })),
+          getOptimizableComponents: () => [
+            { key: 'instruction', kind: 'instruction', current: instruction },
+          ],
+          applyOptimizedComponents: (
+            updates: Readonly<Record<string, string>>
+          ) => {
+            instruction = updates.instruction ?? instruction;
+          },
+          forward: async () => ({ score: instruction === 'better' ? 1 : 0 }),
+        };
+        const optimizer = new AxGEPA({
+          studentAI: {} as AxAIService,
+          teacherAI: {} as AxAIService,
+          numTrials: 1,
+          minibatch: false,
+          mergeMax: 0,
+          checkpointInterval: 1,
+          checkpointSave: async (checkpoint) => {
+            checkpoints.push(checkpoint);
+            return `checkpoint-${checkpoints.length}`;
+          },
+          debugOptimizer: true,
+          optimizerLogger: (event) => events.push(event),
+        });
+        (optimizer as any).reflectTargetInstruction = async () => 'better';
+        const compileOptions = {
+          maxMetricCalls: 20,
+          skipPerfectScore: false,
+          ...(candidateLineage === undefined ? {} : { candidateLineage }),
+        };
+        const result = await optimizer.compile(
+          program as any,
+          [{ question: 'q1' }, { question: 'q2' }],
+          async ({ prediction }) => prediction.score,
+          compileOptions
+        );
+        return { events, checkpoints, result };
+      };
+
+      const expectedConfiguration = {
+        instructionLen: 6,
+        target: 'instruction',
+        parent: 0,
+        totalRounds: 1,
+      };
+      for (const mode of [undefined, false] as const) {
+        const { events, checkpoints, result } = await run(mode);
+        expect(events).toEqual([
+          {
+            name: 'OptimizationStart',
+            value: {
+              optimizerType: 'GEPA',
+              exampleCount: 2,
+              validationCount: 2,
+              config: {
+                numTrials: 1,
+                minibatch: false,
+                mergeMax: 0,
+                tunableCount: 1,
+              },
+            },
+          },
+          {
+            name: 'RoundProgress',
+            value: {
+              round: 1,
+              totalRounds: 0,
+              currentScore: 2,
+              bestScore: 2,
+              configuration: expectedConfiguration,
+            },
+          },
+        ]);
+        expect(checkpoints).toHaveLength(1);
+        const {
+          timestamp: _timestamp,
+          stats: _stats,
+          ...stableCheckpoint
+        } = checkpoints[0];
+        expect(stableCheckpoint).toEqual({
+          version: '1.0.0',
+          optimizerType: 'GEPA',
+          optimizerConfig: {
+            strategy: 'reflective_mutation',
+            paretoSetSize: 2,
+            tunableCount: 1,
+          },
+          currentRound: 1,
+          totalRounds: 0,
+          bestScore: 2,
+          bestConfiguration: { instructionLen: 4, idx: 0 },
+          scoreHistory: [2],
+          configurationHistory: [expectedConfiguration],
+          optimizerState: {
+            maxMetricCalls: 20,
+            skipPerfectScore: false,
+            ...(mode === false ? { candidateLineage: false } : {}),
+            maxIterations: 1,
+          },
+          examples: [],
+        });
+        expect(result.optimizedProgram?.candidateLineage).toBeUndefined();
+      }
+
+      const optedIn = await run(true);
+      expect(optedIn.events.map((event) => event.name)).toEqual([
+        'OptimizationStart',
+        'RoundProgress',
+        'OptimizationComplete',
+      ]);
+      expect(optedIn.events[1].value).toMatchObject({
+        totalRounds: 0,
+        configuration: {
+          ...expectedConfiguration,
+          candidateId: 'c1',
+          parentIds: ['c0'],
+          strategy: 'reflective_mutation',
+          decision: 'accepted',
+        },
+      });
+      expect(optedIn.checkpoints).toHaveLength(2);
+      expect(optedIn.checkpoints[0]).toMatchObject({
+        bestConfiguration: { instructionLen: 4, idx: 0, candidateId: 'c0' },
+        configurationHistory: [
+          {
+            ...expectedConfiguration,
+            candidateId: 'c1',
+            parentIds: ['c0'],
+            strategy: 'reflective_mutation',
+            decision: 'accepted',
+          },
+        ],
+        optimizerState: {
+          maxMetricCalls: 20,
+          skipPerfectScore: false,
+          maxIterations: 1,
+          candidateLineage: { checkpointSemantics: 'snapshot_only' },
+        },
+      });
+    });
+
+    it('does not read candidate-lineage or abort accessors at the opt-in boundary', async () => {
+      let reads = 0;
+      const inheritedOptions = Object.create({
+        get candidateLineage() {
+          reads += 1;
+          throw new Error('inherited candidateLineage was read');
+        },
+        get abortSignal() {
+          reads += 1;
+          throw new Error('inherited abortSignal was read');
+        },
+      });
+      Object.defineProperty(inheritedOptions, 'maxMetricCalls', {
+        enumerable: true,
+        value: 2,
+      });
+      const accessorOptions = {};
+      Object.defineProperties(accessorOptions, {
+        candidateLineage: {
+          enumerable: true,
+          get() {
+            reads += 1;
+            throw new Error('candidateLineage accessor was read');
+          },
+        },
+        abortSignal: {
+          enumerable: true,
+          get() {
+            reads += 1;
+            throw new Error('abortSignal accessor was read');
+          },
+        },
+        maxMetricCalls: { enumerable: true, value: 2 },
+      });
+
+      for (const compileOptions of [inheritedOptions, accessorOptions]) {
+        const optimizer = new AxGEPA({
+          studentAI: {} as AxAIService,
+          teacherAI: {} as AxAIService,
+          numTrials: 0,
+        });
+        const result = await optimizer.compile(
+          createSingleRootProgram('task', async () => ({ score: 0 })) as any,
+          [{ question: 'q1' }, { question: 'q2' }],
+          async ({ prediction }) => prediction.score,
+          compileOptions
+        );
+        expect(result.optimizedProgram?.candidateLineage).toBeUndefined();
+      }
+      expect(reads).toBe(0);
+    });
+
+    it('normalizes a throwing own-option descriptor trap before candidate evaluation', async () => {
+      let descriptorCalls = 0;
+      let forwardCalls = 0;
+      const compileOptions = new Proxy(
+        { maxMetricCalls: 2, candidateLineage: false },
+        {
+          getOwnPropertyDescriptor() {
+            descriptorCalls += 1;
+            throw new Error('untrusted descriptor trap');
+          },
+        }
+      );
+      const optimizer = new AxGEPA({
+        studentAI: {} as AxAIService,
+        teacherAI: {} as AxAIService,
+        numTrials: 0,
+      });
+
+      await expect(
+        optimizer.compile(
+          createSingleRootProgram('task', async () => {
+            forwardCalls += 1;
+            return { score: 0 };
+          }) as any,
+          [{ question: 'q1' }, { question: 'q2' }],
+          async ({ prediction }) => prediction.score,
+          compileOptions
+        )
+      ).rejects.toThrow(
+        'AxGEPA: throwing getOwnPropertyDescriptor while inspecting own candidateLineage is unsupported'
+      );
+      expect(descriptorCalls).toBe(1);
+      expect(forwardCalls).toBe(0);
+    });
+
+    it('does not claim non-invocation for a stateful non-throwing Proxy trap', async () => {
+      let descriptorCalls = 0;
+      const target = { maxMetricCalls: 2, candidateLineage: false };
+      const compileOptions = new Proxy(target, {
+        getOwnPropertyDescriptor(object, key) {
+          descriptorCalls += 1;
+          return Reflect.getOwnPropertyDescriptor(object, key);
+        },
+      });
+      const optimizer = new AxGEPA({
+        studentAI: {} as AxAIService,
+        teacherAI: {} as AxAIService,
+        numTrials: 0,
+      });
+      const result = await optimizer.compile(
+        createSingleRootProgram('task', async () => ({ score: 0 })) as any,
+        [{ question: 'q1' }, { question: 'q2' }],
+        async ({ prediction }) => prediction.score,
+        compileOptions
+      );
+
+      expect(descriptorCalls).toBe(2);
+      expect(result.optimizedProgram?.candidateLineage).toBeUndefined();
+    });
+
+    it('records budget-aborted candidates and saves lineage in artifacts and checkpoints', async () => {
+      const checkpoints: any[] = [];
+      const optimizer = new AxGEPA({
+        studentAI: {} as AxAIService,
+        teacherAI: {} as AxAIService,
+        numTrials: 1,
+        minibatch: false,
+        minImprovementThreshold: 0,
+        checkpointSave: async (checkpoint) => {
+          checkpoints.push(checkpoint);
+          return `checkpoint-${checkpoints.length}`;
+        },
+      });
+      (optimizer as any).reflectTargetInstruction = async () => 'better';
+      const program = createSingleRootProgram(
+        'private base prompt',
+        async (instruction) => ({ score: instruction === 'better' ? 1 : 0 })
+      );
+
+      const result = await optimizer.compile(
+        program as any,
+        [{ question: 'q1' }, { question: 'q2' }],
+        async ({ prediction }) => prediction.score,
+        {
+          maxMetricCalls: 6,
+          skipPerfectScore: false,
+          saveCheckpointOnComplete: true,
+          candidateLineage: true,
+        }
+      );
+
+      const manifest = result.optimizedProgram?.candidateLineage;
+      expect(manifest?.stoppedReason).toBe('budget_exhausted');
+      expect(manifest?.checkpointSemantics).toBe('snapshot_only');
+      expect(Object.isFrozen(manifest)).toBe(true);
+      expect(Object.isFrozen(manifest?.records)).toBe(true);
+      expect(manifest?.records[1]).toMatchObject({
+        id: 'c1',
+        parentIds: ['c0'],
+        decision: 'aborted',
+        reason: 'validation_budget_exhausted',
+        disposition: 'aborted',
+      });
+      expect(manifest?.records[1]?.failures).toContainEqual({ kind: 'budget' });
+      expect(JSON.stringify(manifest)).not.toContain('private base prompt');
+
+      expect(checkpoints).toHaveLength(1);
+      expect(checkpoints[0].optimizerState.candidateLineage).toEqual(manifest);
+
+      const serialized = axSerializeOptimizedProgram(result.optimizedProgram!);
+      const restored = axDeserializeOptimizedProgram(serialized);
+      expect(restored.candidateLineage).toEqual(manifest);
+      expect(JSON.stringify(restored.candidateLineage)).toBe(
+        JSON.stringify(manifest)
+      );
+      expect(
+        axDeserializeOptimizedProgram({
+          ...serialized,
+          candidateLineage: undefined,
+        }).candidateLineage
+      ).toBeUndefined();
+    });
+
+    it('marks periodic checkpoint lineage as snapshot-only and in progress', async () => {
+      const checkpoints: any[] = [];
+      const optimizer = new AxGEPA({
+        studentAI: {} as AxAIService,
+        teacherAI: {} as AxAIService,
+        numTrials: 1,
+        minibatch: false,
+        checkpointInterval: 1,
+        checkpointSave: async (checkpoint) => {
+          checkpoints.push(checkpoint);
+          return `checkpoint-${checkpoints.length}`;
+        },
+      });
+      (optimizer as any).reflectTargetInstruction = async () => 'unchanged';
+
+      await optimizer.compile(
+        createSingleRootProgram('task', async () => ({ score: 0 })) as any,
+        [{ question: 'q1' }, { question: 'q2' }],
+        async ({ prediction }) => prediction.score,
+        {
+          maxMetricCalls: 20,
+          skipPerfectScore: false,
+          candidateLineage: true,
+        }
+      );
+
+      expect(checkpoints[0].optimizerState.candidateLineage).toMatchObject({
+        stoppedReason: 'in_progress',
+        checkpointSemantics: 'snapshot_only',
+        termination: { phase: 'checkpoint_snapshot', round: 1 },
+      });
+      expect(checkpoints.at(-1).optimizerState.candidateLineage).toMatchObject({
+        stoppedReason: 'completed',
+        checkpointSemantics: 'snapshot_only',
+      });
+    });
+
+    it('bounds retained records without dangling retained parents', async () => {
+      const optimizer = new AxGEPA({
+        studentAI: {} as AxAIService,
+        teacherAI: {} as AxAIService,
+        numTrials: 3,
+        minibatch: false,
+        earlyStoppingTrials: 10,
+      });
+      (optimizer as any).reflectTargetInstruction = async () => 'unchanged';
+      const result = await optimizer.compile(
+        createSingleRootProgram('task', async () => ({ score: 0 })) as any,
+        [{ question: 'q1' }, { question: 'q2' }],
+        async ({ prediction }) => prediction.score,
+        {
+          maxMetricCalls: 20,
+          skipPerfectScore: false,
+          candidateLineage: { maxRecords: 2 },
+        }
+      );
+      const manifest = result.optimizedProgram?.candidateLineage!;
+      expect(manifest.records).toHaveLength(2);
+      expect(manifest.omittedRecordCount).toBe(2);
+      const retained = new Set(manifest.records.map((record) => record.id));
+      for (const record of manifest.records) {
+        for (const parentId of record.parentIds) {
+          expect(retained.has(parentId)).toBe(true);
+        }
+      }
+    });
+
+    it('drops middle lineage records before newest or selected when byte-capped', async () => {
+      let instruction = 'seed-value';
+      const optimizer = new AxGEPA({
+        studentAI: {} as AxAIService,
+        teacherAI: {} as AxAIService,
+        numTrials: 8,
+        minibatch: false,
+        earlyStoppingTrials: 20,
+      });
+      (optimizer as any).reflectTargetInstruction = async () => {
+        instruction = `${instruction}-next`;
+        return instruction;
+      };
+      const result = await optimizer.compile(
+        createSingleRootProgram('task', async () => ({ score: 0 })) as any,
+        [{ question: 'q1' }, { question: 'q2' }],
+        async ({ prediction }) => prediction.score,
+        {
+          maxMetricCalls: 40,
+          skipPerfectScore: false,
+          candidateLineage: {
+            maxArtifactBytes: 4096,
+            includeComponentValues: true,
+            maxComponentValueChars: 400,
+          },
+        }
+      );
+      const manifest = result.optimizedProgram?.candidateLineage!;
+      expect(manifest.omittedRecordCount).toBeGreaterThan(0);
+      expect(manifest.records[0]?.id).toBe('c0');
+      const last = manifest.records.at(-1);
+      expect(last).toBeDefined();
+      const retained = new Set(manifest.records.map((record) => record.id));
+      for (const record of manifest.records) {
+        for (const parentId of record.parentIds) {
+          expect(retained.has(parentId)).toBe(true);
+        }
+      }
+      if (manifest.selectedCandidateId) {
+        expect(
+          manifest.records.some(
+            (record) => record.id === manifest.selectedCandidateId
+          ) || manifest.selectedCandidateRetained === false
+        ).toBe(true);
+      }
     });
 
     it('plumbs custom proposal policies without persisting their references', async () => {
@@ -581,16 +1220,32 @@ describe('AxGEPA Optimizer', () => {
         'current instruction',
         program,
         [{ question: 'q1', extra: { nested: ['value'] } }],
-        async () => 0.25,
+        async () => ({
+          score: 0.25,
+          feedback: 'Metric feedback: preserve the nested evidence.',
+        }),
         {
+          feedbackNotes: ['Global note: keep the output concise.'],
           feedbackFn: ({ componentId }: { componentId?: string }) =>
-            componentId ? `component=${componentId}` : undefined,
+            componentId
+              ? `Explicit feedback: component=${componentId}`
+              : undefined,
         }
       );
 
       expect(capturedPrompt).toContain('"taskDigest": "branch-a"');
       expect(capturedPrompt).toContain('"nested": [');
-      expect(capturedPrompt).toContain('component=root');
+      expect(capturedPrompt).toContain(
+        'Metric feedback: preserve the nested evidence.'
+      );
+      expect(capturedPrompt).toContain('Explicit feedback: component=root');
+      expect(capturedPrompt).toContain('Global note: keep the output concise.');
+      expect(
+        capturedPrompt.indexOf('This trajectory got a score')
+      ).toBeLessThan(capturedPrompt.indexOf('Metric feedback:'));
+      expect(capturedPrompt.indexOf('Metric feedback:')).toBeLessThan(
+        capturedPrompt.indexOf('Explicit feedback:')
+      );
       expect(capturedPrompt).not.toContain('[object Object]');
     });
   });

@@ -90,7 +90,11 @@ export type AxAgentPlaybookEvolveOptions = {
   /** Scores runs via the built-in judge. Resolution mirrors `optimize()`. */
   judgeAI?: Readonly<AxAIService>;
   judgeOptions?: AxAgentJudgeOptions;
-  /** Optional deterministic scorer replacing the LLM judge. */
+  /**
+   * Optional deterministic scorer replacing the LLM judge. Structured metric
+   * results use their scalar score; playbook evolution does not consume their
+   * feedback or named objectives.
+   */
   metric?: AxMetricFn;
   /** Maximum weaknesses mined / proposals evaluated. Default 4. */
   maxProposals?: number;
