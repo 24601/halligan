@@ -1164,6 +1164,7 @@
       "verification": "TS-derived native-image routing fixture; five-language AxIR dev verifier; npm run axir:check-packages; go test ./internal/axir; focused TypeScript router tests"
     },
     {
+<<<<<<< HEAD
       "id": "axir-2026-08-25-port-advisory-demand-evidence-and-disposition-proposals",
       "status": "open",
       "title": "Port advisory demand evidence and disposition proposals",
@@ -1173,6 +1174,17 @@
       "tsPaths": ["src/ax/event/demand.ts"],
       "portableSurface": "runtime",
       "impact": "TypeScript exposes a provider-neutral advisory demand boundary with retained observations, calibration/provenance, explicit no-demand and uncertainty, cursor/dedupe, grant references, and observe-route integration; generated packages do not yet expose this policy/store surface.",
+=======
+      "id": "axir-2026-08-25-port-provider-neutral-visual-observation-sampling-policy",
+      "status": "open",
+      "title": "Port provider-neutral visual observation sampling policy",
+      "createdAt": "2026-08-25",
+      "sourcePR": 18,
+      "sourceCommit": "ca760294f5ea4f207052c39c2218e1195103bc2a",
+      "tsPaths": ["src/ax/ai/index.ts", "src/ax/ai/visual"],
+      "portableSurface": "axai",
+      "impact": "TypeScript hosts can apply revision-, freshness-, authority-, change-, and rolling-budget-aware selection to host-captured visual observations; generated language packages do not yet expose the AxVisualObservation or AxFrameSampler policy.",
+>>>>>>> origin/main
       "suggestedAxirWork": [
         "Add or update the TS-derived conformance fixture.",
         "Update AxIR/Core or descriptor data to match the portable TS behavior.",

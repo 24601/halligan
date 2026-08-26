@@ -18,11 +18,20 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
 
 ## Open
 
+<<<<<<< HEAD
 - `axir-2026-08-25-port-advisory-demand-evidence-and-disposition-proposals` [runtime] Port advisory demand evidence and disposition proposals
   - Status: open
   - Source commit: `ca760294f5ea4f207052c39c2218e1195103bc2a`
   - TS paths: `src/ax/event/demand.ts`
   - Impact: TypeScript exposes a provider-neutral advisory demand boundary with retained observations, calibration/provenance, explicit no-demand and uncertainty, cursor/dedupe, grant references, and observe-route integration; generated packages do not yet expose this policy/store surface.
+=======
+- `axir-2026-08-25-port-provider-neutral-visual-observation-sampling-policy` [axai] Port provider-neutral visual observation sampling policy
+  - Status: open
+  - Source PR: #18
+  - Source commit: `ca760294f5ea4f207052c39c2218e1195103bc2a`
+  - TS paths: `src/ax/ai/index.ts`, `src/ax/ai/visual`
+  - Impact: TypeScript hosts can apply revision-, freshness-, authority-, change-, and rolling-budget-aware selection to host-captured visual observations; generated language packages do not yet expose the AxVisualObservation or AxFrameSampler policy.
+>>>>>>> origin/main
   - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 
 ## Done
