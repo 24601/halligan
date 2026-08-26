@@ -46,6 +46,8 @@ export type AxJSRuntimeOutputMode = 'return' | 'stdout';
 const immutableRuntimeFieldNames = [
   'language',
   'capabilities',
+  'createSession',
+  'getUsageInstructions',
   'timeout',
   'permissions',
   'allowUnsafeNodeHostAccess',
@@ -183,8 +185,20 @@ export class AxJSRuntime implements AxCodeRuntime {
       allowDenoRemoteImport?: boolean;
     }>
   ) {
-    this.createSession = this.createSession.bind(this);
-    this.getUsageInstructions = this.getUsageInstructions.bind(this);
+    Object.defineProperties(this, {
+      createSession: {
+        value: axJSRuntimeCreateSession.bind(this),
+        enumerable: true,
+        writable: false,
+        configurable: false,
+      },
+      getUsageInstructions: {
+        value: axJSRuntimeGetUsageInstructions.bind(this),
+        enumerable: true,
+        writable: false,
+        configurable: false,
+      },
+    });
     this.timeout = options?.timeout ?? 900_000;
     this.permissions = Object.freeze([...(options?.permissions ?? [])]);
     this.allowUnsafeNodeHostAccess =
@@ -1101,6 +1115,10 @@ export class AxJSRuntime implements AxCodeRuntime {
     };
   }
 }
+
+const axJSRuntimeCreateSession = AxJSRuntime.prototype.createSession;
+const axJSRuntimeGetUsageInstructions =
+  AxJSRuntime.prototype.getUsageInstructions;
 
 /**
  * Factory function for creating an AxJSRuntime.

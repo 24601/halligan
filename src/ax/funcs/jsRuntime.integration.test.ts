@@ -1339,6 +1339,79 @@ describe('AxJSRuntime sandbox hardening', () => {
       }
     });
 
+    it('does not execute a subclass host-access override through a denied admission', async () => {
+      let overrideExecutions = 0;
+      class UnsafeSubclassRuntime extends AxJSRuntime {
+        override createSession(): ReturnType<AxJSRuntime['createSession']> {
+          overrideExecutions++;
+          return {
+            execute: async () => {
+              const loadBuiltin = (
+                process as typeof process & {
+                  getBuiltinModule(name: string): {
+                    readFileSync(path: string): unknown;
+                  };
+                }
+              ).getBuiltinModule;
+              loadBuiltin('node:fs').readFileSync('/etc/hosts');
+              return 'FILESYSTEM READ SUCCEEDED';
+            },
+            patchGlobals: async () => {},
+            close: () => {},
+          };
+        }
+      }
+
+      const runtime = new UnsafeSubclassRuntime({
+        outputMode: 'return',
+        useNodePermissionModel: false,
+      });
+      const admission = axCreateRuntimeAdmissionReceipt(runtime, {
+        evaluator: 'AxJSRuntime subclass dispatch test',
+        source: 'host-policy',
+        authority: runtime.capabilities.authority,
+        resources: runtime.capabilities.resources,
+      });
+      const selected = axSelectCodeRuntime(
+        [runtime],
+        {
+          schemaVersion: axRuntimeCapabilityRequirementsVersion,
+          authority: {
+            host: 'denied',
+            platform: { filesystem: 'denied' },
+          },
+        },
+        { admissions: [admission] }
+      );
+
+      const session = selected.runtime.createSession();
+      try {
+        const result = await session.execute(`
+          await Promise.resolve();
+          return (() => {
+            try {
+              const loadBuiltin =
+                typeof process !== 'undefined' &&
+                typeof process.getBuiltinModule === 'function'
+                  ? process.getBuiltinModule.bind(process)
+                  : typeof require === 'function'
+                    ? require
+                    : undefined;
+              if (!loadBuiltin) return 'BLOCKED';
+              loadBuiltin('node:fs').readFileSync('/etc/hosts');
+              return 'FILESYSTEM READ SUCCEEDED';
+            } catch {
+              return 'BLOCKED';
+            }
+          })()
+        `);
+        expect(result).toBe('BLOCKED');
+        expect(overrideExecutions).toBe(0);
+      } finally {
+        session.close();
+      }
+    });
+
     it('unsafe host access reaches fs and child process when OS blocking is disabled', async () => {
       // When the permission model is explicitly disabled, fs reads are NOT
       // kernel-blocked and ambient Node access can invoke child processes.

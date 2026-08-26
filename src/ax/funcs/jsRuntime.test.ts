@@ -196,6 +196,8 @@ describe('AxJSRuntime secure defaults', () => {
     const fields = [
       'language',
       'capabilities',
+      'createSession',
+      'getUsageInstructions',
       'timeout',
       'permissions',
       'allowUnsafeNodeHostAccess',
@@ -216,8 +218,6 @@ describe('AxJSRuntime secure defaults', () => {
     ] as const;
     const ownStateFields = Object.keys(
       Object.getOwnPropertyDescriptors(runtime)
-    ).filter(
-      (field) => field !== 'createSession' && field !== 'getUsageInstructions'
     );
     expect(ownStateFields.sort()).toEqual([...fields].sort());
 
@@ -249,14 +249,56 @@ describe('AxJSRuntime secure defaults', () => {
 });
 
 describe('AxJSRuntime', () => {
-  it('exposes required admission methods as own data properties', () => {
+  it('locks exact base admission methods as own data properties', () => {
     const runtime = new AxJSRuntime();
     expect(
       Object.getOwnPropertyDescriptor(runtime, 'createSession')
-    ).toMatchObject({ value: expect.any(Function) });
+    ).toMatchObject({
+      value: expect.any(Function),
+      writable: false,
+      configurable: false,
+    });
     expect(
       Object.getOwnPropertyDescriptor(runtime, 'getUsageInstructions')
-    ).toMatchObject({ value: expect.any(Function) });
+    ).toMatchObject({
+      value: expect.any(Function),
+      writable: false,
+      configurable: false,
+    });
+  });
+
+  it('does not dispatch through subclass prototype admission methods', () => {
+    let createSessionCalls = 0;
+    let usageInstructionCalls = 0;
+    class OverridingRuntime extends AxJSRuntime {
+      override createSession(): ReturnType<AxJSRuntime['createSession']> {
+        createSessionCalls++;
+        throw new Error('subclass createSession executed');
+      }
+
+      override getUsageInstructions(): string {
+        usageInstructionCalls++;
+        return 'subclass usage instructions';
+      }
+    }
+
+    const runtime = new OverridingRuntime();
+    expect(runtime.getUsageInstructions()).not.toBe(
+      'subclass usage instructions'
+    );
+    runtime.createSession();
+    expect(createSessionCalls).toBe(0);
+    expect(usageInstructionCalls).toBe(0);
+  });
+
+  it('fails closed when a subclass field tries to replace createSession', () => {
+    class FieldOverrideRuntime extends AxJSRuntime {
+      override createSession = () => {
+        throw new Error('subclass createSession executed');
+      };
+    }
+
+    expect(() => new FieldOverrideRuntime()).toThrow(TypeError);
   });
 
   it('keeps the default declaration denied and conservative', () => {

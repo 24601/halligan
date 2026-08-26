@@ -325,7 +325,9 @@ Options quick reference:
 
 Security-relevant options and the capability declaration are immutable after
 `AxJSRuntime` construction; create a new runtime instead of reconfiguring an
-admitted instance.
+admitted instance. Its exact base `createSession` and `getUsageInstructions`
+implementations are also locked as own methods; implement `AxCodeRuntime`
+directly rather than deriving from `AxJSRuntime` to override either method.
 
 Recipes:
 

@@ -79,6 +79,13 @@ construction. Reconfiguration requires a new runtime; post-admission property
 replacement cannot change worker initialization, Node permission arguments,
 pool security posture, timeout, or resource limits.
 
+The built-in runtime also installs the exact base `createSession` and
+`getUsageInstructions` implementations as non-replaceable own methods. It does
+not dispatch through subclass prototype overrides while constructing its
+declaration or admitted executable; a derived class field that tries to replace
+either method fails closed. Implement `AxCodeRuntime` directly instead of
+deriving from `AxJSRuntime` to change either admission-visible method.
+
 Node `worker_threads.resourceLimits` constrain selected V8 areas only and
 explicitly exclude external data such as `ArrayBuffer`s. They are therefore
 not projected into `AxJSRuntime.capabilities.resources.memoryMb`. A host may
@@ -90,10 +97,10 @@ Admission additionally requires `createSession` and `getUsageInstructions` to
 be own data methods on the runtime. Optional `language`,
 `getPrimitiveOverrides`, and `formatCallable` metadata is admitted only when
 present as an own data property. The built-in JavaScript runtime exposes its
-required methods this way; custom class runtimes can bind their prototype
-methods onto the instance before requesting admission. Runtime accessors and
-inherited executable metadata are never invoked or promoted into the admitted
-facade.
+required base implementations this way; custom class runtimes can bind their
+prototype methods onto the instance before requesting admission. Runtime
+accessors and inherited executable metadata are never invoked or promoted into
+the admitted facade.
 
 Inspect/snapshot/patch/abort, language, platform, protocol, and persistence may
 be matched against the immutable declaration snapshot. Authority and resource
