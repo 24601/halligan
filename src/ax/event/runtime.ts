@@ -264,7 +264,17 @@ export class AxEventRuntime {
   constructor(options: Readonly<AxEventRuntimeOptions>) {
     this.options = options;
     this.id = options.id ?? axEventId('event-runtime');
-    this.clock = options.clock ?? new AxSystemEventClock();
+    if (
+      options.clock &&
+      options.store?.clock &&
+      options.clock !== options.store.clock
+    ) {
+      throw new Error(
+        'AxEventRuntime and AxEventStore must use the same AxEventClock instance'
+      );
+    }
+    this.clock =
+      options.clock ?? options.store?.clock ?? new AxSystemEventClock();
     this.store =
       options.store ?? new AxInMemoryEventStore({ clock: this.clock });
     this.stateStore =
@@ -469,7 +479,9 @@ export class AxEventRuntime {
     return this.store.getRun(runId);
   }
 
-  getEffects(deliveryId: string): Promise<readonly Readonly<AxEventEffect>[]> {
+  async getEffects(
+    deliveryId: string
+  ): Promise<readonly Readonly<AxEventEffect>[]> {
     if (!isEffectStore(this.store)) {
       throw new Error('AxEventStore does not support the effect ledger');
     }
@@ -763,7 +775,8 @@ export class AxEventRuntime {
     if (
       claimed.recoveredFromExpiredLease &&
       claimed.invocationStarted &&
-      claimed.retrySafety === 'unknown' &&
+      claimed.retrySafety !== 'idempotent' &&
+      claimed.retrySafety !== 'effect-aware' &&
       previousRun?.status !== 'succeeded'
     ) {
       await this.parkOutcomeUnknownEffects(claimed);
@@ -1140,7 +1153,9 @@ export class AxEventRuntime {
         }
         const unsafe =
           error instanceof AxEventOutcomeUnknownError ||
-          (invoked && (target?.retrySafety ?? 'unknown') === 'unknown');
+          (invoked &&
+            target?.retrySafety !== 'idempotent' &&
+            target?.retrySafety !== 'effect-aware');
         if (unsafe) {
           await this.parkOutcomeUnknownEffects({
             ...claimed,
@@ -1247,7 +1262,7 @@ export class AxEventRuntime {
         error.phase === 'recovery'
       ) {
         // The persisted succeeded run and admitted continuation remain the
-        // source of truth. Leave the active delivery nonterminal so an expired
+        // source of truth. Leave the active delivery non-terminal so an expired
         // lease can retry only atomic completion/sink recovery.
         return;
       }
@@ -1855,13 +1870,50 @@ export class AxEventRuntime {
         continue;
       }
       if (this.options.effectResolver) {
-        let resolution: Readonly<AxEventEffectResolution>;
         try {
-          resolution = await this.resolveEffect(effect, delivery, abortSignal);
+          const resolution = await this.resolveEffect(
+            effect,
+            delivery,
+            abortSignal
+          );
+          this.assertRunActive(abortSignal);
+          if (
+            resolution.status === 'succeeded' ||
+            resolution.status === 'failed'
+          ) {
+            effect = await store.transitionEffect(
+              effect.id,
+              effect.version,
+              {
+                type: 'settled',
+                at: this.clock.now(),
+                settlement: resolution,
+              },
+              fence
+            );
+          } else if (resolution.status === 'not_dispatched') {
+            effect = await store.transitionEffect(
+              effect.id,
+              effect.version,
+              { type: 'not_dispatched', at: this.clock.now() },
+              fence
+            );
+          } else if (resolution.status === 'parked') {
+            effect = await store.transitionEffect(
+              effect.id,
+              effect.version,
+              {
+                type: 'parked',
+                at: this.clock.now(),
+                reason: resolution.reason,
+              },
+              fence
+            );
+          }
         } catch (error) {
           if (this.storeShutdownStarted) throw error;
           const reason = this.effectReason(
-            `Effect resolver failed for ${effect.operation}: ${axEventErrorMessage(error)}`
+            `Effect resolver failed or returned an invalid outcome for ${effect.operation}: ${axEventErrorMessage(error)}`
           );
           effect = await store.transitionEffect(
             effect.id,
@@ -1873,40 +1925,6 @@ export class AxEventRuntime {
             effect.parkedReason ?? `Event effect ${effect.operation} is parked`
           );
           continue;
-        }
-        this.assertRunActive(abortSignal);
-        if (
-          resolution.status === 'succeeded' ||
-          resolution.status === 'failed'
-        ) {
-          effect = await store.transitionEffect(
-            effect.id,
-            effect.version,
-            {
-              type: 'settled',
-              at: this.clock.now(),
-              settlement: resolution,
-            },
-            fence
-          );
-        } else if (resolution.status === 'not_dispatched') {
-          effect = await store.transitionEffect(
-            effect.id,
-            effect.version,
-            { type: 'not_dispatched', at: this.clock.now() },
-            fence
-          );
-        } else if (resolution.status === 'parked') {
-          effect = await store.transitionEffect(
-            effect.id,
-            effect.version,
-            {
-              type: 'parked',
-              at: this.clock.now(),
-              reason: resolution.reason,
-            },
-            fence
-          );
         }
       }
       if (effect.status === 'parked') {

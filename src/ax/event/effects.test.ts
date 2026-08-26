@@ -102,7 +102,7 @@ describe('AxEventRuntime effects', () => {
     expect((await backing.getDelivery(receipt.deliveryIds[0]!))?.status).toBe(
       'succeeded'
     );
-    expect(() => runtime.getEffects(receipt.deliveryIds[0]!)).toThrow(
+    await expect(runtime.getEffects(receipt.deliveryIds[0]!)).rejects.toThrow(
       'does not support the effect ledger'
     );
     await runtime.close();
@@ -400,6 +400,14 @@ describe('AxEventRuntime effects', () => {
           throw new Error('crash after dispatch');
         }
         if (effect.status === 'intent') {
+          if (test.resolution.status === 'not_dispatched') {
+            expect(effect).toEqual(
+              expect.objectContaining({
+                dispatchedAt: undefined,
+                dispatchCount: 0,
+              })
+            );
+          }
           effect = await context.markEffectDispatched(
             effect.id,
             effect.version
@@ -426,6 +434,41 @@ describe('AxEventRuntime effects', () => {
     await runtime.close();
   });
 
+  it('parks a resolver outcome that fails transition validation', async () => {
+    const store = new AxInMemoryEventStore();
+    let calls = 0;
+    const runtime = runtimeFor(
+      store,
+      async (context) => {
+        calls++;
+        const effect = await context.declareEffect({
+          operation: 'domain.invalid-resolution',
+          idempotencyKey: 'invalid-resolution-42',
+        });
+        await context.markEffectDispatched(effect.id, effect.version);
+        throw new Error('crash after dispatch');
+      },
+      {
+        effectResolver: () => ({ status: 'parked', reason: '' }),
+      }
+    );
+    await runtime.start();
+    const receipt = await runtime.publish(ingress('invalid-resolver-outcome'));
+    await runtime.waitForIdle();
+
+    expect(calls).toBe(1);
+    expect(await store.getDelivery(receipt.deliveryIds[0]!)).toEqual(
+      expect.objectContaining({ status: 'parked' })
+    );
+    expect((await runtime.getEffects(receipt.deliveryIds[0]!))[0]).toEqual(
+      expect.objectContaining({
+        status: 'parked',
+        parkedReason: expect.stringContaining('invalid outcome'),
+      })
+    );
+    await runtime.close();
+  });
+
   it('rejects stale effect revisions and accepts identical settlement replay', async () => {
     const store = new AxInMemoryEventStore();
     const runtime = runtimeFor(store, async (context) => {
@@ -443,7 +486,10 @@ describe('AxEventRuntime effects', () => {
       ).rejects.toThrow('Stale event effect version');
       const settlement = {
         status: 'succeeded' as const,
-        receipt: { providerId: 'message-cas-42' },
+        receipt: {
+          providerId: 'message-cas-42',
+          details: { amount: 42, currency: 'USD' },
+        },
       };
       const settled = await context.settleEffect(
         intent.id,
@@ -452,6 +498,15 @@ describe('AxEventRuntime effects', () => {
       );
       await expect(
         context.settleEffect(intent.id, dispatched.version, settlement)
+      ).resolves.toEqual(settled);
+      await expect(
+        context.settleEffect(intent.id, settled.version, {
+          status: 'succeeded',
+          receipt: {
+            details: { currency: 'USD', amount: 42 },
+            providerId: 'message-cas-42',
+          },
+        })
       ).resolves.toEqual(settled);
       await expect(
         context.settleEffect(intent.id, settled.version, {
@@ -466,6 +521,44 @@ describe('AxEventRuntime effects', () => {
     await runtime.waitForIdle();
     expect((await store.getDelivery(receipt.deliveryIds[0]!))?.status).toBe(
       'succeeded'
+    );
+    await runtime.close();
+  });
+
+  it('keeps newline-bearing in-memory effect identities distinct', async () => {
+    const store = new AxInMemoryEventStore();
+    const runtime = runtimeFor(store, async (context) => {
+      const first = await context.declareEffect({
+        operation: 'pay\nfoo',
+        idempotencyKey: 'bar',
+      });
+      const second = await context.declareEffect({
+        operation: 'pay',
+        idempotencyKey: 'foo\nbar',
+      });
+      expect(second.id).not.toBe(first.id);
+      await context.settleEffect(first.id, first.version, {
+        status: 'succeeded',
+        receipt: { providerId: 'first' },
+      });
+      await context.settleEffect(second.id, second.version, {
+        status: 'failed',
+        receipt: { providerId: 'second' },
+      });
+      return { handled: true };
+    });
+    await runtime.start();
+    const receipt = await runtime.publish(ingress('newline-effect-identities'));
+    await runtime.waitForIdle();
+
+    expect(await runtime.getEffects(receipt.deliveryIds[0]!)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          operation: 'pay\nfoo',
+          status: 'succeeded',
+        }),
+        expect.objectContaining({ operation: 'pay', status: 'failed' }),
+      ])
     );
     await runtime.close();
   });
@@ -830,6 +923,58 @@ describe('AxEventRuntime effects', () => {
     await expect(
       store.saveDelivery({ ...first, status: 'succeeded' })
     ).rejects.toThrow('Stale or expired event claim');
+  });
+
+  it('fails closed when expired-lease recovery finds unknown retry safety', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const store = new AxInMemoryEventStore({ clock });
+    const receipt = await store.enqueue({
+      ingress: ingress('unknown-recovered-retry-safety'),
+      deliveries: [
+        {
+          routeId: 'effect-route',
+          action: 'wake',
+          targetId: 'effect-target',
+          instanceKey: 'unknown-recovered-retry-safety',
+          sizeBytes: 1,
+          retrySafety: 'idempotent',
+          ordering: 'strict',
+        },
+      ],
+      acceptedAt: clock.now(),
+      publishTimeoutMs: 100,
+    });
+    const claimed = (await store.claim('worker-a', clock.now(), 100))!;
+    await store.saveDelivery({
+      ...claimed,
+      status: 'running',
+      invocationStarted: true,
+      retrySafety: 'future-policy' as never,
+    });
+    clock.advanceBy(101);
+    const forward = vi.fn(() => ({ handled: true }));
+    const runtime = runtimeFor(
+      store,
+      forward,
+      { clock, leaseMs: 100, heartbeatMs: 25 },
+      'idempotent'
+    );
+    await runtime.start();
+    for (let index = 0; index < 50; index++) {
+      if (
+        (await store.getDelivery(receipt.deliveryIds[0]!))?.status ===
+        'outcome_unknown'
+      ) {
+        break;
+      }
+      await Promise.resolve();
+    }
+
+    expect(forward).not.toHaveBeenCalled();
+    expect(await store.getDelivery(receipt.deliveryIds[0]!)).toEqual(
+      expect.objectContaining({ status: 'outcome_unknown' })
+    );
+    await runtime.close();
   });
 
   it('wakes a waiting runtime when an in-memory claim lease expires', async () => {

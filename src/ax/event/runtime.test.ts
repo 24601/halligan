@@ -1038,7 +1038,7 @@ describe('AxEventRuntime', () => {
     await runtime.close({ drain: false });
   });
 
-  it('atomically terminalizes a resume delivery with continuation consumption', async () => {
+  it('atomically completes a resume delivery with continuation consumption', async () => {
     const clock = new AxManualEventClock(1_000);
     const backing = new AxInMemoryEventStore({ clock });
     const continuation: AxEventContinuation = {
@@ -1607,6 +1607,56 @@ describe('AxEventRuntime', () => {
     await expect(runtime.start()).rejects.toThrow(
       'conforming persistent store'
     );
+  });
+
+  it('uses one clock domain for runtime and store lease authority', async () => {
+    const storeClock = new AxManualEventClock(1_000);
+    const store = new AxInMemoryEventStore({ clock: storeClock });
+    const forward = vi.fn(() => ({ handled: true }));
+    const runtime = new AxEventRuntime({
+      store,
+      routes: [
+        eventRoute({
+          id: 'shared-clock-route',
+          match: { types: ['shared.clock'] },
+          action: 'wake',
+          target: eventTarget({
+            id: 'shared-clock-target',
+            ai,
+            program: program(forward),
+            mapInput: () => ({}),
+            retrySafety: 'idempotent',
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    const receipt = await runtime.publish(
+      ingress('shared-clock-1', 'shared.clock')
+    );
+    for (let index = 0; index < 50; index++) {
+      if (
+        (await store.getDelivery(receipt.deliveryIds[0]!))?.status ===
+        'succeeded'
+      ) {
+        break;
+      }
+      await Promise.resolve();
+    }
+    expect(forward).toHaveBeenCalledOnce();
+    expect(await store.getDelivery(receipt.deliveryIds[0]!)).toEqual(
+      expect.objectContaining({ status: 'succeeded' })
+    );
+    await runtime.close();
+
+    expect(
+      () =>
+        new AxEventRuntime({
+          clock: new AxManualEventClock(1_000),
+          store,
+          routes: [],
+        })
+    ).toThrow('must use the same AxEventClock instance');
   });
 
   it('uses the injected clock for deterministic backpressure timeouts', async () => {

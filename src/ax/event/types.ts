@@ -647,6 +647,12 @@ export interface AxEventEnqueueRequest {
 
 export interface AxEventStore {
   readonly capabilities: Readonly<AxEventStoreCapabilities>;
+  /**
+   * Clock used for lease validation when the store owns that policy. Runtimes
+   * adopt this clock unless one is explicitly supplied, in which case both
+   * must be the same instance.
+   */
+  readonly clock?: AxEventClock;
   enqueue(
     request: Readonly<AxEventEnqueueRequest>,
     signal?: AbortSignal

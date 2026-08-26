@@ -355,10 +355,16 @@ async function recover(
     ],
   });
   await runtime.start();
-  await runtime.waitForIdle();
+  for (let index = 0; index < 1_000; index++) {
+    const status = (await store.getDelivery(deliveryId))?.status;
+    if (status !== 'queued' && status !== 'claimed' && status !== 'running') {
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
   const status = (await store.getDelivery(deliveryId))?.status ?? 'missing';
   const effects = await store.listEffects(deliveryId);
-  await runtime.close();
+  await runtime.close({ drain: false });
   return {
     classification: classify(before[0]?.status),
     status,

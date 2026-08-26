@@ -121,7 +121,10 @@ await source.publish({ event, identity, trust: 'authenticated' });
   rejection; a permanently hung worker cannot prevent the attempt.
 - The in-memory store is volatile and single-process.
   Waiting runtimes schedule claimed/running lease expiry and reclaim with a new
-  safe fencing token instead of wedging expired work.
+  safe fencing token instead of wedging expired work. Pass the same clock
+  instance to runtime and store; the runtime adopts an exposed store clock when
+  omitted and rejects different explicit clocks so lease authority stays in one
+  time domain.
 - For cooperating Node processes on one local disk, use
   `AxSQLiteEventStore` from `@ax-llm/ax-tools/event/sqlite` with explicit
   retention and `coordination: 'multi-worker'`. Never recommend SQLite on a

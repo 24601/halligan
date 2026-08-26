@@ -388,9 +388,12 @@ unobserved callback.
 
 ## Deterministic Tests
 
-Pass `AxManualEventClock` to the runtime and in-memory store. Retry delay,
-debounce, continuation expiry, and backpressure then advance only when the test
-calls `advanceBy`, avoiding wall-clock flakes.
+Pass the same `AxManualEventClock` instance to the runtime and store. A runtime
+adopts an exposed store clock when its own clock is omitted and rejects
+different explicit runtime/store clocks so lease issuance and validation cannot
+use different time domains. Retry delay, debounce, continuation expiry, and
+backpressure then advance only when the test calls `advanceBy`, avoiding
+wall-clock flakes.
 
 Persistent and multi-worker guarantees are capability-gated. The Node-only
 `AxSQLiteEventStore` is the first conforming implementation:

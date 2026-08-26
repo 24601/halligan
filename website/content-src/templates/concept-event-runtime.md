@@ -136,7 +136,9 @@ persistence, and recovery for cooperating processes sharing one local SQLite
 file. A **lease** gives one worker temporary ownership of a delivery. A
 monotonically increasing **fencing token** prevents an older, stalled worker
 from writing after a newer worker takes over. Do not place this store on a
-network filesystem. Any other persistent or multi-worker store must pass the
+network filesystem. Runtime and store lease checks must use one clock domain:
+the runtime adopts an exposed store clock when omitted and rejects a different
+explicit clock. Any other persistent or multi-worker store must pass the
 event-store conformance kit before advertising those capabilities.
 
 Oversized output uses an explicit staged-payload ownership protocol. SQLite

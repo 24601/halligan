@@ -273,9 +273,11 @@ export function axApplyEventEffectTransition(
     if (effect.status === 'succeeded' || effect.status === 'failed') {
       const same =
         effect.status === settlement.status &&
-        JSON.stringify(effect.receipt) === JSON.stringify(settlement.receipt) &&
-        effect.error ===
-          (settlement.status === 'failed' ? settlement.error : undefined);
+        canonicalJson(effect.receipt) === canonicalJson(settlement.receipt) &&
+        (effect.error || undefined) ===
+          (settlement.status === 'failed'
+            ? settlement.error || undefined
+            : undefined);
       if (same) return structuredClone(effect);
       throw new Error(
         `Event effect ${effect.id} already settled as ${effect.status}`
@@ -341,6 +343,8 @@ export function axApplyEventEffectTransition(
   return {
     ...effect,
     status: 'intent',
+    dispatchedAt: undefined,
+    dispatchCount: 0,
     parkedReason: undefined,
     updatedAt: transition.at,
     version: effect.version + 1,

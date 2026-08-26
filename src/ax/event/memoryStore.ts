@@ -51,7 +51,7 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
     effectLedger: true,
   } as const;
 
-  private readonly clock: AxEventClock;
+  readonly clock: AxEventClock;
   private readonly maxPendingDeliveries: number;
   private readonly maxPendingBytes: number;
   private readonly maxEventBytes: number;
@@ -875,7 +875,7 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
     operation: string,
     idempotencyKey: string
   ): string {
-    return `${deliveryId}\n${operation}\n${idempotencyKey}`;
+    return JSON.stringify([deliveryId, operation, idempotencyKey]);
   }
 }
 

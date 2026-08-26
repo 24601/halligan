@@ -1187,7 +1187,12 @@ describe('AxSQLiteEventStore', () => {
       ],
     });
     await runtime.start();
-    await runtime.waitForIdle();
+    for (let index = 0; index < 1_000; index++) {
+      if ((await restarted.getDelivery(claimed.id))?.status === 'succeeded') {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
     expect(targetCalls).toBe(0);
     expect(sinkCalls).toBe(1);
     expect(await restarted.getDelivery(claimed.id)).toEqual(
@@ -1483,7 +1488,7 @@ describe('AxSQLiteEventStore', () => {
     ]);
   });
 
-  it('rolls back resume terminalization when atomic continuation completion fails', async () => {
+  it('rolls back resume completion when atomic continuation completion fails', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
     directories.push(directory);
     const filename = join(directory, 'atomic-resume-completion.sqlite');

@@ -208,7 +208,7 @@ export class AxSQLiteEventStore
   } as const;
 
   private readonly db: Database.Database;
-  private readonly clock: AxEventClock;
+  readonly clock: AxEventClock;
   private readonly maxPendingDeliveries: number;
   private readonly maxPendingBytes: number;
   private readonly maxEventBytes: number;
