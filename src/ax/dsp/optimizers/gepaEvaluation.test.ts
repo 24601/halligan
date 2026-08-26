@@ -341,4 +341,92 @@ describe('evaluateGEPABatch', () => {
       });
     }
   );
+
+  it('turns candidate bind errors into aligned failure rows', async () => {
+    const state = {
+      totalCalls: 0,
+      observedScoreKeys: new Set<string>(['quality']),
+    };
+    let forwards = 0;
+    const result = await evaluateGEPABatch({
+      program: {
+        forward: async () => {
+          forwards += 1;
+          return { value: 'stale' };
+        },
+      } as any,
+      ai: {} as AxAIService,
+      metricFn: async () => ({ quality: 1 }),
+      cfg: { 'root::program-source': '{broken' },
+      set: [{ id: '1' }, { id: '2' }] as any,
+      phase: 'invalid candidate',
+      sampleCount: 1,
+      maxMetricCalls: 10,
+      state,
+      applyConfig: () => {
+        throw new Error('must not apply an invalid source');
+      },
+      validateConfig: () => {
+        throw new Error('Invalid program source JSON');
+      },
+      scalarize: (scores) => scalarizeGEPAScores(scores),
+      captureTraces: true,
+    });
+
+    expect(forwards).toBe(0);
+    expect(state.totalCalls).toBe(2);
+    expect(result?.scalars).toEqual([0, 0]);
+    expect(result?.rows.map((row) => row.prediction)).toEqual([
+      { error: 'Invalid program source JSON' },
+      { error: 'Invalid program source JSON' },
+    ]);
+    expect(result?.trajectories).toEqual([
+      { calls: [], error: 'Invalid program source JSON' },
+      { calls: [], error: 'Invalid program source JSON' },
+    ]);
+  });
+
+  it('preserves ordinary GEPA config-error semantics by default', async () => {
+    await expect(
+      evaluateGEPABatch({
+        program: {} as any,
+        ai: {} as AxAIService,
+        metricFn: async () => 1,
+        cfg: { 'root::instruction': 'candidate' },
+        set: [{ id: '1' }] as any,
+        phase: 'ordinary candidate',
+        sampleCount: 1,
+        maxMetricCalls: 10,
+        state: { totalCalls: 0, observedScoreKeys: new Set<string>() },
+        applyConfig: () => {
+          throw new Error('ordinary config error');
+        },
+        scalarize: (scores) => scalarizeGEPAScores(scores),
+      })
+    ).rejects.toThrow('ordinary config error');
+  });
+
+  it('preserves ordinary config errors in a mixed program-source tree', async () => {
+    await expect(
+      evaluateGEPABatch({
+        program: {} as any,
+        ai: {} as AxAIService,
+        metricFn: async () => 1,
+        cfg: {
+          'root::program-source': '{valid}',
+          'root.child::instruction': 'candidate',
+        },
+        set: [{ id: '1' }] as any,
+        phase: 'mixed candidate',
+        sampleCount: 1,
+        maxMetricCalls: 10,
+        state: { totalCalls: 0, observedScoreKeys: new Set<string>() },
+        validateConfig: () => {},
+        applyConfig: () => {
+          throw new Error('ordinary mixed config error');
+        },
+        scalarize: (scores) => scalarizeGEPAScores(scores),
+      })
+    ).rejects.toThrow('ordinary mixed config error');
+  });
 });

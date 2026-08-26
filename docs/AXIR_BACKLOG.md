@@ -24,6 +24,13 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
   - TS paths: `src/ax/agent/agentInternal/runtimeGlobals.ts`, `src/ax/agent/agentInternal/runtimeGlobals.authority.test.ts`, `src/ax/agent/agentInternal/runtimeExecutionLlmQuery.ts`, `src/ax/agent/agentInternal/runtimeExecutionLlmQuery.test.ts`, `src/ax/agent/agent.test.ts`
   - Impact: TypeScript AxAgent external functions and llmQuery can opt into bounded, cancellable speculative execution inside AxJSRuntime with exact-path purity policies, stable deterministic/nondeterministic matching, and fail-closed parsing; generated Python, Java, C++, Go, and Rust agent runtimes do not expose equivalent semantics.
   - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+- `axir-2026-08-25-port-experimental-program-source-optimization` [axoptimize] Port experimental program-source optimization
+  - Status: open
+  - Source PR: #12
+  - Source commit: `329c7f7b0aa614904ea11fb253b4bdb4cfdeadd3`
+  - TS paths: `src/ax/dsp/programSource.ts`, `src/ax/dsp/programSource.test.ts`, `src/ax/dsp/programSourceEvaluation.ts`, `src/ax/dsp/programSourceEvaluation.test.ts`, `src/ax/dsp/optimizers/gepa.ts`, `src/ax/dsp/optimizers/gepaEvaluation.ts`, `src/ax/dsp/optimizers/gepaEvaluation.test.ts`
+  - Impact: TypeScript exposes programSource(), a validated ax-program-source/v1 control-flow AST with explicit predictor/tool capabilities, default locked-down worker interpretation and Node resource ceilings, strict typed outputs, accessor-free immutable snapshots of declared inputs and complete predictor requests plus selected host tool schemas, revocable execution epochs, explicit custom-runtime language/protocol compatibility, per-example call/iteration budgets, state serialization, and component-specific GEPA alignment for program-source bind failures without changing ordinary config-error semantics in mixed trees. Generated Python, Java, C++, Go, and Rust packages do not expose this program-source component, interpreted grammar, or runtime bridge contract.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 - `axir-2026-08-25-port-event-verifier-gated-continuation-policy` [axprogram] Port event verifier-gated continuation policy
   - Status: open
   - Source PR: #7
@@ -34,7 +41,7 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
 - `axir-2026-08-25-port-causal-candidate-evidence-artifacts` [axoptimize] Port causal candidate evidence artifacts
   - Status: open
   - Source PR: #15
-  - Source commit: `ca760294f5ea4f207052c39c2218e1195103bc2a`
+  - Source commit: `b70c396a54ad385a5a5bb8453e33dfb93e41368a`
   - TS paths: `src/ax/dsp/optimize.ts`, `src/ax/dsp/optimizer.ts`, `src/ax/dsp/optimizers/causalCandidateEvidence.test-d.ts`, `src/ax/dsp/optimizers/causalCandidateEvidence.test.ts`, `src/ax/dsp/optimizers/causalCandidateEvidence.ts`
   - Impact: TypeScript optimized-program artifacts can carry bounded immutable host-verified causal evidence linking well-formed canonical SHA-256 evidence identities, hypotheses, affected components, predictions, held-in and held-out outcomes, chronological decisions and settlements, and optional comparable ablations; detached replay prevents post-verification mutation, per-batch authority receipts remain chained across append, and snapshot rollback preserves append-only history. Generated runtimes do not expose this manifest or attachment and rollback helpers.
   - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
