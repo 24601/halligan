@@ -115,9 +115,10 @@ Defaults are deliberately finite:
 | `reorderWindowUs` | 250,000 | Maximum frontier lag classified as `reordered` |
 
 `append()` returns a new frozen timeline and leaves the previous timeline
-unchanged. Retention evicts oldest retained positions until both event and byte
-bounds hold. Stream frontiers survive envelope eviction and count against
-`maxStreams` for the lifetime of the timeline.
+unchanged. Retention evicts the oldest retained positions other than the
+envelope accepted by that append until both event and byte bounds hold. Stream
+frontiers survive envelope eviction and count against `maxStreams` for the
+lifetime of the timeline.
 
 `project()` can filter by stream, participant, event kind, and the half-open
 session interval `[startSessionTimeUs, endSessionTimeUs)`. It sorts by

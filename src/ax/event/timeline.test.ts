@@ -640,6 +640,9 @@ describe('AxInteractionTimeline', () => {
     expect(() =>
       append(timeline, envelope({ wallTime: '2026-08-25T00:00:00' }))
     ).toThrow('wallTime must be an RFC 3339 timestamp');
+    expect(() =>
+      append(timeline, envelope({ wallTime: '2026-02-30T00:00:00Z' }))
+    ).toThrow('wallTime must be an RFC 3339 timestamp');
     const cyclic = envelope() as AxTemporalEnvelope & {
       cycle?: unknown;
     };
@@ -706,5 +709,99 @@ describe('AxInteractionTimeline', () => {
         maxEvents: AxInteractionTimelineDefaults.maxEvents + 1,
       }).options.maxEvents
     ).toBe(AxInteractionTimelineDefaults.maxEvents + 1);
+    expect(() =>
+      AxInteractionTimeline.deserialize(' '.repeat(2_000_000))
+    ).toThrow('serialized timeline exceeds its deserialization byte limit');
+  });
+
+  it('round-trips maximal default snapshots with escaped IDs', () => {
+    const escapedId = (prefix: string, index: number) => {
+      const suffix = `${prefix}${index.toString(36)}`;
+      return `${'\0'.repeat(256 - suffix.length)}${suffix}`;
+    };
+    const sessionId = '\0'.repeat(256);
+    let timeline = AxInteractionTimeline.create({ sessionId });
+    for (
+      let index = 0;
+      index < AxInteractionTimelineDefaults.maxStreams;
+      index++
+    ) {
+      const result = timeline.append(
+        envelope({
+          eventId: escapedId('e', index),
+          streamId: escapedId('s', index),
+          sessionId,
+          sourceId: 'source',
+          participantId: 'participant',
+          sessionTimeUs: index,
+          event: { kind: 'text', text: '' },
+        })
+      );
+      expect(result.accepted).toBe(true);
+      timeline = result.timeline;
+    }
+    const fillerLength =
+      AxInteractionTimelineDefaults.maxBytes - timeline.retainedBytes - 10_000;
+    const revised = timeline.append(
+      envelope({
+        eventId: escapedId('e', 0),
+        streamId: escapedId('s', 0),
+        sessionId,
+        sourceId: 'source',
+        participantId: 'participant',
+        revision: 1,
+        event: { kind: 'text', text: 'x'.repeat(fillerLength) },
+      })
+    );
+    expect(revised.accepted).toBe(true);
+    expect(revised.timeline.retainedEventCount).toBe(
+      AxInteractionTimelineDefaults.maxStreams
+    );
+
+    const serialized = revised.timeline.serialize();
+    expect(new TextEncoder().encode(serialized).byteLength).toBeGreaterThan(
+      1_349_632
+    );
+    expect(AxInteractionTimeline.deserialize(serialized).serialize()).toBe(
+      serialized
+    );
+  });
+
+  it('accounts for projection bytes with one serialization per event', () => {
+    let timeline = AxInteractionTimeline.create({ sessionId: 'session-1' });
+    for (
+      let index = 0;
+      index < AxInteractionTimelineDefaults.maxEvents;
+      index++
+    ) {
+      timeline = timeline.append(
+        envelope({
+          eventId: `event-${index}`,
+          sequence: index,
+          sessionTimeUs: index,
+        })
+      ).timeline;
+    }
+
+    const stringify = JSON.stringify;
+    let stringifyCalls = 0;
+    JSON.stringify = ((...args: Parameters<typeof JSON.stringify>) => {
+      stringifyCalls++;
+      return stringify(...args);
+    }) as typeof JSON.stringify;
+    let projection: ReturnType<AxInteractionTimeline['project']>;
+    try {
+      projection = timeline.project();
+    } finally {
+      JSON.stringify = stringify;
+    }
+
+    expect(projection.events).toHaveLength(
+      AxInteractionTimelineDefaults.maxEvents
+    );
+    expect(stringifyCalls).toBe(AxInteractionTimelineDefaults.maxEvents);
+    expect(projection.bytes).toBe(
+      new TextEncoder().encode(JSON.stringify(projection.events)).byteLength
+    );
   });
 });

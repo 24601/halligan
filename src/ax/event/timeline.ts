@@ -206,6 +206,7 @@ const textEncoder = new TextEncoder();
 const MAX_ID_LENGTH = 256;
 const MAX_LINKS = 64;
 const MAX_JSON_DEPTH = 128;
+const MAX_JSON_STRING_BYTES_PER_CODE_UNIT = 6;
 
 const jsonBytes = (value: unknown): number =>
   textEncoder.encode(JSON.stringify(value)).byteLength;
@@ -394,6 +395,48 @@ const assertOptionalRange = (
   if (value !== undefined) assertRange(value, name, timebase);
 };
 
+const isRfc3339 = (value: string): boolean => {
+  const match =
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|([+-])(\d{2}):(\d{2}))$/.exec(
+      value
+    );
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const offsetHour = Number(match[8] ?? 0);
+  const offsetMinute = Number(match[9] ?? 0);
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [
+    31,
+    leapYear ? 29 : 28,
+    31,
+    30,
+    31,
+    30,
+    31,
+    31,
+    30,
+    31,
+    30,
+    31,
+  ];
+  return (
+    month >= 1 &&
+    month <= 12 &&
+    day >= 1 &&
+    day <= daysInMonth[month - 1]! &&
+    hour <= 23 &&
+    minute <= 59 &&
+    second <= 59 &&
+    offsetHour <= 23 &&
+    offsetMinute <= 59
+  );
+};
+
 function assertEvent(value: unknown): asserts value is AxInteractionEvent {
   assertRecord(value, 'event must be an interaction event object');
   if (typeof value.kind !== 'string') {
@@ -526,9 +569,7 @@ function assertEnvelope(value: unknown): asserts value is AxTemporalEnvelope {
   assertInteger(value.sessionTimeUs, 'sessionTimeUs');
   if (
     value.wallTime !== undefined &&
-    (typeof value.wallTime !== 'string' ||
-      !/^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:\d{2})$/.test(value.wallTime) ||
-      !Number.isFinite(Date.parse(value.wallTime)))
+    (typeof value.wallTime !== 'string' || !isRfc3339(value.wallTime))
   ) {
     fail('wallTime must be an RFC 3339 timestamp with a timezone');
   }
@@ -738,8 +779,9 @@ export class AxInteractionTimeline {
     assertInteger(maxStreams, 'deserialization maxStreams', 1);
     const snapshotOverheadBytes =
       maxEvents +
-      maxStreams * (MAX_ID_LENGTH * 8 + 256) +
-      MAX_ID_LENGTH * 4 +
+      maxStreams *
+        (MAX_ID_LENGTH * MAX_JSON_STRING_BYTES_PER_CODE_UNIT * 2 + 512) +
+      MAX_ID_LENGTH * MAX_JSON_STRING_BYTES_PER_CODE_UNIT +
       4_096;
     const serializedBytes = textEncoder.encode(serialized).byteLength;
     if (
@@ -1111,11 +1153,14 @@ export class AxInteractionTimeline {
       )
       .sort(compareTemporal);
     const selected: Readonly<AxTemporalEnvelope>[] = [];
+    let selectedBytes = 2;
     for (const event of filtered) {
       if (selected.length >= maxEvents) break;
-      const candidate = [...selected, event];
-      if (jsonBytes(candidate) > maxBytes) break;
+      const candidateBytes =
+        selectedBytes + jsonBytes(event) + (selected.length === 0 ? 0 : 1);
+      if (candidateBytes > maxBytes) break;
       selected.push(event);
+      selectedBytes = candidateBytes;
     }
     const events = Object.freeze(selected);
     return Object.freeze({
@@ -1124,7 +1169,7 @@ export class AxInteractionTimeline {
       sessionId: this.sessionId,
       events,
       omittedEventCount: filtered.length - events.length,
-      bytes: jsonBytes(events),
+      bytes: selectedBytes,
     });
   }
 
