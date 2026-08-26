@@ -151,6 +151,9 @@ function applyCuratorOperationsInPlace(
           continue;
         }
 
+        const id = op.bulletId ?? generateBulletId(op.section);
+        assertSupersessionTargets(playbook, op.supersedes, id);
+
         if (section.length >= maxSectionSize) {
           if (!enableAutoPrune) {
             continue;
@@ -173,7 +176,7 @@ function applyCuratorOperationsInPlace(
           });
         }
 
-        const id = op.bulletId ?? generateBulletId(op.section);
+        const supersedes = normalizeSupersedes(op.supersedes);
         const bullet: AxACEBullet = {
           id,
           section: op.section,
@@ -184,14 +187,12 @@ function applyCuratorOperationsInPlace(
           updatedAt: now,
           metadata: op.metadata ? { ...op.metadata } : undefined,
           revision: 1,
-          lineage: normalizeSupersedes(op.supersedes).length
-            ? { supersedes: normalizeSupersedes(op.supersedes) }
-            : undefined,
+          lineage: supersedes.length ? { supersedes } : undefined,
           evidence: mergeBulletEvidence(undefined, op.evidence, hostEvidence),
         };
         section.push(bullet);
         updatedBullets.push(id);
-        applySupersession(playbook, op.supersedes, id, now, changes);
+        applySupersession(playbook, supersedes, id, now, changes);
         changes.push({ bulletId: id, after: cloneBullet(bullet) });
         break;
       }
@@ -200,6 +201,8 @@ function applyCuratorOperationsInPlace(
         if (!bullet) {
           continue;
         }
+        const supersedes = normalizeSupersedes(op.supersedes);
+        assertSupersessionTargets(playbook, supersedes, bullet.id);
         const before = cloneBullet(bullet);
         if (typeof op.content === 'string') {
           bullet.content = op.content;
@@ -213,9 +216,6 @@ function applyCuratorOperationsInPlace(
         }
         const previousRevision = bullet.revision ?? 1;
         bullet.revision = previousRevision + 1;
-        const supersedes = normalizeSupersedes(op.supersedes).filter(
-          (id) => id !== bullet.id
-        );
         bullet.lineage = {
           ...(bullet.lineage ?? {}),
           previousRevision,
@@ -714,6 +714,54 @@ export function dedupePlaybookByContent(
   updatedBulletIds?: string[]
 ): void {
   const survivingIds = new Map<string, string>();
+  const updatedIds = new Set(updatedBulletIds ?? []);
+  const bulletsById = new Map<string, AxACEBullet>();
+  for (const bullets of Object.values(playbook.sections)) {
+    for (const bullet of bullets) bulletsById.set(bullet.id, bullet);
+  }
+  const replacementIds = new Set<string>();
+  for (const bullet of bulletsById.values()) {
+    if (!updatedIds.has(bullet.id)) continue;
+    for (const supersededId of bullet.lineage?.supersedes ?? []) {
+      const superseded = bulletsById.get(supersededId);
+      if (
+        superseded?.evidence?.lifecycle?.status === 'superseded' &&
+        superseded.evidence.lifecycle.supersededBy === bullet.id
+      ) {
+        replacementIds.add(superseded.id);
+        replacementIds.add(bullet.id);
+      }
+    }
+  }
+
+  const mergeDuplicate = (survivor: AxACEBullet, duplicate: AxACEBullet) => {
+    const replacementLifecycle = replacementIds.has(survivor.id)
+      ? survivor.evidence?.lifecycle
+      : undefined;
+    survivor.helpfulCount += duplicate.helpfulCount;
+    survivor.harmfulCount += duplicate.harmfulCount;
+    if (Date.parse(duplicate.updatedAt) > Date.parse(survivor.updatedAt)) {
+      survivor.updatedAt = duplicate.updatedAt;
+    }
+    survivor.evidence = mergeStoredEvidence(
+      survivor.evidence,
+      duplicate.evidence
+    );
+    if (replacementLifecycle && survivor.evidence) {
+      survivor.evidence.lifecycle = replacementLifecycle;
+    }
+    const supersedes = normalizeSupersedes([
+      ...(survivor.lineage?.supersedes ?? []),
+      ...(duplicate.lineage?.supersedes ?? []),
+    ]);
+    if (supersedes.length) {
+      survivor.lineage = {
+        ...(survivor.lineage ?? {}),
+        supersedes,
+      };
+    }
+  };
+
   for (const [sectionName, bullets] of Object.entries(playbook.sections)) {
     const seen = new Map<string, AxACEBullet>();
     const unique: AxACEBullet[] = [];
@@ -722,11 +770,9 @@ export function dedupePlaybookByContent(
       const key = bullet.content.trim().toLowerCase();
       const existing = seen.get(key);
       if (existing) {
-        const isExplicitReplacement =
-          existing.evidence?.lifecycle?.status === 'superseded' &&
-          existing.evidence.lifecycle.supersededBy === bullet.id &&
-          bullet.lineage?.supersedes?.includes(existing.id);
-        if (isExplicitReplacement) {
+        const existingIsReplacement = replacementIds.has(existing.id);
+        const bulletIsReplacement = replacementIds.has(bullet.id);
+        if (existingIsReplacement && bulletIsReplacement) {
           // Exact-content replacement is still a lifecycle transition. Keep
           // both records so the new id remains executable and every lineage,
           // history, and receipt reference continues to resolve.
@@ -734,25 +780,16 @@ export function dedupePlaybookByContent(
           seen.set(key, bullet);
           continue;
         }
-        survivingIds.set(bullet.id, existing.id);
-        // Merge counters if they are near-identical
-        existing.helpfulCount += bullet.helpfulCount;
-        existing.harmfulCount += bullet.harmfulCount;
-        existing.updatedAt = bullet.updatedAt;
-        existing.evidence = mergeStoredEvidence(
-          existing.evidence,
-          bullet.evidence
-        );
-        const supersedes = normalizeSupersedes([
-          ...(existing.lineage?.supersedes ?? []),
-          ...(bullet.lineage?.supersedes ?? []),
-        ]);
-        if (supersedes.length) {
-          existing.lineage = {
-            ...(existing.lineage ?? {}),
-            supersedes,
-          };
+        if (!existingIsReplacement && bulletIsReplacement) {
+          const index = unique.indexOf(existing);
+          unique[index] = bullet;
+          seen.set(key, bullet);
+          survivingIds.set(existing.id, bullet.id);
+          mergeDuplicate(bullet, existing);
+          continue;
         }
+        survivingIds.set(bullet.id, existing.id);
+        mergeDuplicate(existing, bullet);
       } else {
         seen.set(key, bullet);
         unique.push(bullet);
@@ -762,10 +799,47 @@ export function dedupePlaybookByContent(
     playbook.sections[sectionName] = unique;
   }
 
+  const resolveSurvivor = (id: string): string => {
+    const visited = new Set<string>();
+    let current = id;
+    while (survivingIds.has(current) && !visited.has(current)) {
+      visited.add(current);
+      current = survivingIds.get(current)!;
+    }
+    return current;
+  };
+
   if (updatedBulletIds) {
-    for (let index = 0; index < updatedBulletIds.length; index++) {
-      const current = updatedBulletIds[index]!;
-      updatedBulletIds[index] = survivingIds.get(current) ?? current;
+    const liveIds = new Set(
+      Object.values(playbook.sections).flatMap((bullets) =>
+        bullets.map((bullet) => bullet.id)
+      )
+    );
+    const resolved = updatedBulletIds
+      .map(resolveSurvivor)
+      .filter((id, index, ids) => liveIds.has(id) && ids.indexOf(id) === index);
+    updatedBulletIds.splice(0, updatedBulletIds.length, ...resolved);
+  }
+
+  const liveIds = new Set(
+    Object.values(playbook.sections).flatMap((bullets) =>
+      bullets.map((bullet) => bullet.id)
+    )
+  );
+  for (const bullets of Object.values(playbook.sections)) {
+    for (const bullet of bullets) {
+      const supersededBy = bullet.evidence?.lifecycle?.supersededBy;
+      if (supersededBy && survivingIds.has(supersededBy)) {
+        bullet.evidence!.lifecycle!.supersededBy =
+          resolveSurvivor(supersededBy);
+      }
+      if (bullet.lineage?.supersedes) {
+        bullet.lineage.supersedes = normalizeSupersedes(
+          bullet.lineage.supersedes
+            .map(resolveSurvivor)
+            .filter((id) => id !== bullet.id && liveIds.has(id))
+        );
+      }
     }
   }
 
@@ -1009,6 +1083,25 @@ function applySupersession(
       });
       break;
     }
+  }
+}
+
+function assertSupersessionTargets(
+  playbook: Readonly<AxACEPlaybook>,
+  supersedes: readonly string[] | undefined,
+  bulletId: string
+): void {
+  const targets = normalizeSupersedes(supersedes);
+  if (targets.length === 0) return;
+  const existingIds = new Set(
+    Object.values(playbook.sections).flatMap((bullets) =>
+      bullets.map((bullet) => bullet.id)
+    )
+  );
+  if (targets.some((id) => id === bulletId || !existingIds.has(id))) {
+    throw new TypeError(
+      'AxACE: supersedes must reference existing other bullets'
+    );
   }
 }
 

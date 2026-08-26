@@ -68,6 +68,14 @@ export type AxPlaybookEvolveOptions = {
   auto?: 'light' | 'medium' | 'heavy';
 };
 
+function executableRenderOptions(
+  options: Readonly<AxACEPlaybookRenderOptions> | undefined
+): Readonly<AxACEPlaybookRenderOptions> | undefined {
+  if (!options) return undefined;
+  const { includeInactive: _inspectionOnly, ...executable } = options;
+  return executable;
+}
+
 /**
  * A live, evolving context playbook bound to a program.
  *
@@ -162,13 +170,14 @@ export class AxPlaybook<IN = any, OUT extends AxGenOut = AxGenOut> {
     program?: Readonly<AxGen<IN, OUT>>,
     renderOptions?: Readonly<AxACEPlaybookRenderOptions>
   ): void {
+    const safeOptions = executableRenderOptions(renderOptions);
     if (program && program !== this.program) {
-      this.engine.applyCurrentState(program as AxGen<IN, OUT>, renderOptions);
+      this.engine.applyCurrentState(program as AxGen<IN, OUT>, safeOptions);
       return;
     }
     if (renderOptions) {
-      this.lastRenderOptions = renderOptions;
-      const rendered = this.render(renderOptions);
+      this.lastRenderOptions = safeOptions;
+      const rendered = this.render(safeOptions);
       if (this.applyHook) {
         this.applyHook(rendered);
       } else {

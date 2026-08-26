@@ -82,6 +82,28 @@ describe('agent.playbook', () => {
     expect(actorPrompt(ag)).toContain('MARKER_PAID');
   });
 
+  it('does not apply inspection-only inactive guidance to a live agent stage', () => {
+    const ag = makeAgent();
+    const pb = buildPlaybook('Strategy', 'MARKER_ACTIVE scoped response');
+    pb.sections.Strategy[0]!.evidence = {
+      applicability: { allOf: ['tenant:paid'] },
+    };
+    pb.sections.Strategy.push({
+      ...pb.sections.Strategy[0]!,
+      id: 'deprecated',
+      content: 'MARKER_DEPRECATED unsafe response',
+      evidence: { lifecycle: { status: 'deprecated' } },
+    });
+    const handle = ag.playbook({ target: 'actor' }).load(snapshot(pb));
+
+    handle.applyTo({
+      conditions: ['tenant:paid'],
+      includeInactive: true,
+    });
+    expect(actorPrompt(ag)).toContain('MARKER_ACTIVE');
+    expect(actorPrompt(ag)).not.toContain('MARKER_DEPRECATED');
+  });
+
   it('does not touch the live prompt when apply is false', () => {
     const ag = makeAgent();
     const pb = buildPlaybook('Strategy', 'MARKER_GAMMA hidden');

@@ -218,6 +218,74 @@ describe('playbook handle', () => {
     );
   });
 
+  it('keeps inspection-only inactive guidance out of executable injection', async () => {
+    const program = createProgram();
+    const content = buildPlaybook({
+      Guidelines: [
+        'Eligible paid guidance',
+        'Expired guidance',
+        'Deprecated guidance',
+        'Malformed guidance',
+        'Wrong-scope guidance',
+      ],
+    });
+    content.sections.Guidelines[0]!.evidence = {
+      applicability: { allOf: ['tenant:paid'] },
+    };
+    content.sections.Guidelines[1]!.evidence = {
+      lifecycle: { expiresAt: '2020-01-01T00:00:00.000Z' },
+    };
+    content.sections.Guidelines[2]!.evidence = {
+      lifecycle: { status: 'deprecated' },
+    };
+    (content.sections.Guidelines[3] as any).evidence = {
+      applicability: { allOf: 'tenant:paid' },
+    };
+    content.sections.Guidelines[4]!.evidence = {
+      applicability: { allOf: ['tenant:free'] },
+    };
+    const pb = playbook(program, { studentAI: mockAI }).load({
+      playbook: content,
+      artifact: emptyArtifact(content),
+    });
+
+    pb.applyTo(undefined, {
+      conditions: ['tenant:paid'],
+      includeInactive: true,
+      now: '2026-08-26T00:00:00.000Z',
+    });
+    const expected = program.getSignature().getDescription() ?? '';
+    expect(expected).toContain('Eligible paid guidance');
+    expect(expected).not.toContain('Expired guidance');
+    expect(expected).not.toContain('Deprecated guidance');
+    expect(expected).not.toContain('Malformed guidance');
+    expect(expected).not.toContain('Wrong-scope guidance');
+    expect(pb._getRenderOptions()).not.toHaveProperty('includeInactive');
+
+    // Remove the intentionally malformed persisted record so trusted evidence
+    // can be recorded; subsequent automatic injections must retain only the
+    // executable-safe options rather than reviving the caller's inspection flag.
+    (pb as any).engine.playbook.sections.Guidelines.splice(3, 1);
+    const eligibleId = content.sections.Guidelines[0]!.id;
+    pb.recordEvidence([eligibleId], {
+      source: 'manual',
+      feedbackIds: ['safe-refresh'],
+    });
+    const afterEvidence = program.getSignature().getDescription() ?? '';
+    expect(afterEvidence).toContain('Eligible paid guidance');
+    expect(afterEvidence).not.toContain('Expired guidance');
+    expect(afterEvidence).not.toContain('Deprecated guidance');
+    expect(afterEvidence).not.toContain('Wrong-scope guidance');
+
+    (pb as any).engine.applyOnlineUpdate = vi.fn().mockResolvedValue(undefined);
+    await pb.update({ example: {}, prediction: {} });
+    const afterUpdate = program.getSignature().getDescription() ?? '';
+    expect(afterUpdate).toContain('Eligible paid guidance');
+    expect(afterUpdate).not.toContain('Expired guidance');
+    expect(afterUpdate).not.toContain('Deprecated guidance');
+    expect(afterUpdate).not.toContain('Wrong-scope guidance');
+  });
+
   it('redirects injection through the apply hook (agent seam)', () => {
     const program = createProgram();
     const pb = playbook(program, { studentAI: mockAI });

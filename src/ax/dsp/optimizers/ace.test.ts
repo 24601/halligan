@@ -637,6 +637,51 @@ describe('AxACE', () => {
     });
   });
 
+  it('keeps replacement lineage and artifact ids coherent through dedupe', async () => {
+    const program = createACEProgram();
+    const playbook = buildPlaybook({ Guidelines: ['SAME', 'SAME'] });
+    playbook.sections.Guidelines[0]!.id = 'canonical';
+    playbook.sections.Guidelines[1]!.id = 'old';
+    const ace = new AxACE({ studentAI: {} as any, teacherAI: {} as any });
+    ace.hydrate(program, { playbook });
+
+    vi.spyOn(
+      (ace as any).getOrCreateReflectorProgram(),
+      'forward'
+    ).mockResolvedValue(reflectionOutput);
+    vi.spyOn(
+      (ace as any).getOrCreateCuratorProgram(),
+      'forward'
+    ).mockResolvedValue({
+      reasoning: 'replace old',
+      operations: [
+        {
+          type: 'ADD',
+          section: 'Guidelines',
+          bulletId: 'new',
+          content: 'SAME',
+          supersedes: ['old'],
+        },
+      ],
+    });
+
+    await ace.applyOnlineUpdate({
+      example: { question: 'q' },
+      prediction: { answer: 'bad' },
+      feedback: 'Replace the stale rule.',
+    });
+
+    const artifact = ace.getArtifact();
+    expect(
+      artifact.playbook.sections.Guidelines.map((bullet) => bullet.id)
+    ).toEqual(['old', 'new']);
+    expect(artifact.history[0]?.updatedBulletIds).toEqual(['new']);
+    expect(
+      artifact.history[0]?.changes?.map((change) => change.bulletId)
+    ).toEqual(['old', 'new']);
+    expect(artifact.history[0]?.operations[0]?.bulletId).toBe('new');
+  });
+
   it('returns artifacts without leaking nested mutable state', async () => {
     const program = createACEProgram();
     const ace = new AxACE({

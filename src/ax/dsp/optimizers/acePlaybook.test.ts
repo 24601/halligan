@@ -391,8 +391,12 @@ describe('applyCuratorOperations', () => {
 
   it('keeps an exact-content superseding replacement live and referentially intact', () => {
     const playbook = makePlaybookWithSection('Guidelines', [
+      { id: 'canonical', content: 'Validate before applying.' },
       { id: 'old', content: 'Validate before applying.' },
     ]);
+    playbook.sections.Guidelines[0]!.evidence = {
+      lifecycle: { status: 'active' },
+    };
     const result = applyCuratorOperations(playbook, [
       {
         type: 'ADD',
@@ -406,6 +410,10 @@ describe('applyCuratorOperations', () => {
 
     expect(result.updatedBulletIds).toEqual(['new']);
     expect(playbook.sections.Guidelines.map((bullet) => bullet.id)).toEqual([
+      'old',
+      'new',
+    ]);
+    expect(result.changes.map((change) => change.bulletId)).toEqual([
       'old',
       'new',
     ]);
@@ -431,8 +439,31 @@ describe('applyCuratorOperations', () => {
     }
   });
 
+  it('rejects self and missing supersession targets without mutation', () => {
+    const playbook = makePlaybookWithSection('Guidelines', [
+      { id: 'existing', content: 'Existing guidance' },
+    ]);
+    const before = JSON.stringify(playbook);
+
+    expect(() =>
+      applyCuratorOperations(playbook, [
+        {
+          type: 'ADD',
+          section: 'Guidelines',
+          bulletId: 'new',
+          content: 'New guidance',
+          supersedes: ['new', 'missing'],
+        },
+      ])
+    ).toThrow(/supersedes must reference existing other bullets/);
+    expect(JSON.stringify(playbook)).toBe(before);
+  });
+
   it('serializes normalized evidence deterministically', () => {
-    const playbook = createEmptyPlaybook();
+    const playbook = makePlaybookWithSection('Legacy', [
+      { id: 'old-a', content: 'Old A' },
+      { id: 'old-z', content: 'Old Z' },
+    ]);
     applyCuratorOperations(
       playbook,
       [
