@@ -345,6 +345,84 @@ describe('proposals', () => {
       );
     }
   });
+
+  it('restores exactly once when post-update state readback fails', async () => {
+    const proposal = buildProposal(weakness);
+    const before: {
+      value: string;
+      artifact: { history: { updatedBulletIds: string[] }[] };
+    } = { value: 'before', artifact: { history: [] } };
+    let state = structuredClone(before);
+    const readbackError = new Error('post-update state readback failed');
+    const getState = vi
+      .fn()
+      .mockImplementationOnce(() => structuredClone(state))
+      .mockImplementationOnce(() => {
+        throw readbackError;
+      });
+    const load = vi.fn((snapshot: typeof before) => {
+      state = structuredClone(snapshot);
+    });
+    const handle = {
+      getState,
+      update: async () => {
+        state = {
+          value: 'after',
+          artifact: { history: [{ updatedBulletIds: ['candidate-1'] }] },
+        };
+      },
+      load,
+    };
+
+    await expect(
+      applyProposal({ proposal, playbookHandle: handle })
+    ).rejects.toBe(readbackError);
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(load).toHaveBeenCalledWith(before);
+    expect(state).toEqual(before);
+  });
+
+  it('surfaces post-update readback and restoration failures without retry', async () => {
+    const proposal = buildProposal(weakness);
+    const before: {
+      value: string;
+      artifact: { history: { updatedBulletIds: string[] }[] };
+    } = { value: 'before', artifact: { history: [] } };
+    let state = structuredClone(before);
+    const readbackError = new Error('post-update state readback failed');
+    const rollbackError = new Error('snapshot restoration failed');
+    const getState = vi
+      .fn()
+      .mockImplementationOnce(() => structuredClone(state))
+      .mockImplementationOnce(() => {
+        throw readbackError;
+      });
+    const load = vi.fn(() => {
+      throw rollbackError;
+    });
+    const handle = {
+      getState,
+      update: async () => {
+        state = {
+          value: 'after',
+          artifact: { history: [{ updatedBulletIds: ['candidate-1'] }] },
+        };
+      },
+      load,
+    };
+
+    try {
+      await applyProposal({ proposal, playbookHandle: handle });
+      throw new Error('expected applyProposal to reject');
+    } catch (error) {
+      expect(error).toBeInstanceOf(AggregateError);
+      expect((error as AggregateError).errors).toEqual([
+        readbackError,
+        rollbackError,
+      ]);
+    }
+    expect(load).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('evalHarness runsPerTask', () => {

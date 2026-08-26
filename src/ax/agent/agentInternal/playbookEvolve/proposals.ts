@@ -85,12 +85,26 @@ export async function applyProposal(args: {
         feedbackIds: [proposal.weaknessId],
       },
     });
-  } catch (updateError) {
+    const updated = handle.getState();
+    const bulletIds: string[] = updated.artifact.history
+      .slice(snapshot.artifact.history.length)
+      .flatMap(
+        (entry: { updatedBulletIds?: string[] }): string[] =>
+          entry.updatedBulletIds ?? []
+      );
+    return {
+      proposal,
+      bulletIds: [...new Set(bulletIds)].sort(),
+      rollback: () => {
+        handle.load(snapshot);
+      },
+    };
+  } catch (applicationError) {
     try {
       handle.load(snapshot);
     } catch (rollbackError) {
       const restorationError = new AggregateError(
-        [updateError, rollbackError],
+        [applicationError, rollbackError],
         'AxAgent.playbook().evolve(): proposal update failed and exact rollback also failed.'
       );
       Object.defineProperty(restorationError, RESTORATION_FAILURE, {
@@ -98,20 +112,6 @@ export async function applyProposal(args: {
       });
       throw restorationError;
     }
-    throw updateError;
+    throw applicationError;
   }
-  const updated = handle.getState();
-  const bulletIds: string[] = updated.artifact.history
-    .slice(snapshot.artifact.history.length)
-    .flatMap(
-      (entry: { updatedBulletIds?: string[] }): string[] =>
-        entry.updatedBulletIds ?? []
-    );
-  return {
-    proposal,
-    bulletIds: [...new Set(bulletIds)].sort(),
-    rollback: () => {
-      handle.load(snapshot);
-    },
-  };
 }

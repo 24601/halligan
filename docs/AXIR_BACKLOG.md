@@ -95,7 +95,7 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
   - Status: open
   - Source PR: #14
   - Source commit: `eff209d0ae41d1bcafc630cd9fbe22c069b75135`
-  - TS paths: `src/ax/agent/agent.test-d.ts`
+  - TS paths: `src/ax/agent/agent.test-d.ts`, `src/ax/agent/agentInternal/playbookEvolve/evalHarness.ts`, `src/ax/agent/agentInternal/playbookEvolve/playbookEvolve.test.ts`, `src/ax/agent/agentInternal/playbookEvolve/playbookEvolve.ts`, `src/ax/agent/agentInternal/playbookEvolve/playbookEvolveTypes.ts`, `src/ax/agent/agentInternal/playbookEvolve/playbookEvolveUnits.test.ts`, `src/ax/agent/agentInternal/playbookEvolve/proposals.ts`, `src/ax/index.ts`
   - Impact: TypeScript agent playbook evolution can gate candidates against named/versioned historical anchors with explicit stability/plasticity thresholds and per-slice receipts, including exact restoration when candidate application fails after mutation; generated Python, Java, C++, Go, and Rust agent evolution does not yet expose or enforce that optional policy.
   - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 - `axir-2026-08-26-port-post-registration-event-continuation-callbacks` [axprogram] Port post-registration event continuation callbacks
