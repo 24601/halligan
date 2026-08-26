@@ -336,3 +336,5 @@ scaleway
 siliconflow
 togethre
 vllm
+dhash
+luma
