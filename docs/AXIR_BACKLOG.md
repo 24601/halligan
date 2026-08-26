@@ -39,6 +39,13 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
   - TS paths: `src/ax/dsp/optimizers/aceTypes.ts`, `src/ax/dsp/optimizers/acePlaybook.ts`, `src/ax/dsp/optimizers/ace.ts`, `src/ax/dsp/playbook.ts`, `src/ax/agent/agentInternal/agentPlaybook.ts`, `src/ax/agent/agentInternal/playbookEvolve/proposals.ts`, `src/ax/agent/agentInternal/playbookEvolve/playbookEvolve.ts`, `src/ax/agent/agentInternal/playbookEvolve/playbookEvolve.test.ts`, `src/ax/agent/agentPlaybook.test.ts`, `src/ax/agent/playbookConfig.ts`, `src/ax/dsp/optimizers/ace.test.ts`, `src/ax/dsp/optimizers/aceEvidenceEval.test.ts`, `src/ax/dsp/optimizers/acePlaybook.test.ts`, `src/ax/dsp/playbook.test.ts`
   - Impact: TypeScript ACE bullets now support optional provenance, confidence/evidence counts, declarative applicability, host-owned verifier receipts, lifecycle/supersession, revision lineage, auditable before/after deltas, condition-aware rendering, and verified-agent receipts. Legacy artifacts remain valid. Generated runtimes do not yet expose this schema, host evidence boundary, or inactive-entry filtering.
   - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+- `axir-2026-08-26-port-gepa-built-in-maxexamples-0-optional-reflectiveexamples` [axoptimize] Port GEPA built-in maxExamples 0 optional reflectiveExamples
+  - Status: open
+  - Source PR: #53
+  - Source commit: `4d030474326461ea03c6d081508dc3128d2f1a76`
+  - TS paths: `src/ax/dsp/optimizers/gepaReflection.ts`, `src/ax/dsp/optimizers/gepaReflection.test.ts`
+  - Impact: Built-in GEPA proposal policy now omits optional reflectiveExamples when maxExamples is 0 so the teacher still runs with zero real examples; generated backends still treat a required empty JSON array as missing and would abort the proposal.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 
 ## Done
 
