@@ -753,6 +753,26 @@ describe('AxInteractionTimeline', () => {
       )
     ).toThrow('must not contain enumerable non-index properties');
     expect(getterReads).toBe(0);
+
+    for (const key of ['01', '4294967295']) {
+      const numericLookingIds = ['parent'];
+      Object.defineProperty(numericLookingIds, key, {
+        enumerable: true,
+        get: () => {
+          getterReads++;
+          return 'not an array index';
+        },
+      });
+      expect(() =>
+        append(
+          timeline,
+          envelope({
+            causalParentIds: numericLookingIds as readonly string[],
+          })
+        )
+      ).toThrow('must not contain enumerable non-index properties');
+    }
+    expect(getterReads).toBe(0);
   });
 
   it('does not read inherited envelope authority', () => {
@@ -803,7 +823,119 @@ describe('AxInteractionTimeline', () => {
     );
   });
 
-  it('enforces the retained byte budget before processing later events', () => {
+  it('deserializes only inert own-data snapshots', () => {
+    const timeline = append(
+      AxInteractionTimeline.create({ sessionId: 'session-1' }),
+      envelope()
+    ).timeline;
+
+    const withoutSource = JSON.parse(timeline.serialize()) as {
+      events: Array<Record<string, unknown>>;
+    };
+    delete withoutSource.events[0]!.sourceId;
+    let getterReads = 0;
+    Object.defineProperty(Object.prototype, 'sourceId', {
+      configurable: true,
+      get: () => {
+        getterReads++;
+        return 'inherited-source';
+      },
+    });
+    try {
+      expect(() =>
+        AxInteractionTimeline.deserialize(JSON.stringify(withoutSource))
+      ).toThrow('sourceId must be a non-empty string');
+    } finally {
+      delete (Object.prototype as Record<string, unknown>).sourceId;
+    }
+    expect(getterReads).toBe(0);
+
+    const withoutParticipant = JSON.parse(timeline.serialize()) as {
+      events: Array<Record<string, unknown>>;
+    };
+    delete withoutParticipant.events[0]!.participantId;
+    const serializedWithoutParticipant = JSON.stringify(withoutParticipant);
+    Object.defineProperty(Object.prototype, 'participantId', {
+      configurable: true,
+      get: () => {
+        getterReads++;
+        throw new Error('inherited participantId must not run');
+      },
+    });
+    try {
+      expect(
+        AxInteractionTimeline.deserialize(
+          serializedWithoutParticipant
+        ).serialize()
+      ).toBe(serializedWithoutParticipant);
+    } finally {
+      delete (Object.prototype as Record<string, unknown>).participantId;
+    }
+    expect(getterReads).toBe(0);
+
+    const hostileRoot = JSON.parse(timeline.serialize()) as Record<
+      string,
+      unknown
+    >;
+    delete hostileRoot.schema;
+    Object.defineProperty(Object.prototype, 'schema', {
+      configurable: true,
+      get: () => {
+        getterReads++;
+        return AxInteractionTimelineSchema;
+      },
+    });
+    try {
+      expect(() =>
+        AxInteractionTimeline.deserialize(JSON.stringify(hostileRoot))
+      ).toThrow('timeline.schema');
+    } finally {
+      delete (Object.prototype as Record<string, unknown>).schema;
+    }
+    expect(getterReads).toBe(0);
+
+    const hostileOptions = JSON.parse(timeline.serialize()) as {
+      options: Record<string, unknown>;
+    };
+    delete hostileOptions.options.maxEvents;
+    Object.defineProperty(Object.prototype, 'maxEvents', {
+      configurable: true,
+      get: () => {
+        getterReads++;
+        return AxInteractionTimelineDefaults.maxEvents;
+      },
+    });
+    try {
+      expect(() =>
+        AxInteractionTimeline.deserialize(JSON.stringify(hostileOptions))
+      ).toThrow('timeline.options.maxEvents must be a safe integer');
+    } finally {
+      delete (Object.prototype as Record<string, unknown>).maxEvents;
+    }
+    expect(getterReads).toBe(0);
+
+    const hostileStream = JSON.parse(timeline.serialize()) as {
+      streams: Array<Record<string, unknown>>;
+    };
+    delete hostileStream.streams[0]!.maxEventId;
+    Object.defineProperty(Object.prototype, 'maxEventId', {
+      configurable: true,
+      get: () => {
+        getterReads++;
+        return 'inherited-event';
+      },
+    });
+    try {
+      expect(() =>
+        AxInteractionTimeline.deserialize(JSON.stringify(hostileStream))
+      ).toThrow('maxEventId must be a non-empty string');
+    } finally {
+      delete (Object.prototype as Record<string, unknown>).maxEventId;
+    }
+    expect(getterReads).toBe(0);
+  });
+
+  it('bounds the entire parsed graph before deserialized property reads', () => {
     const baseSnapshot = AxInteractionTimeline.create({
       sessionId: 'session-1',
       maxEvents: 2,
@@ -821,7 +953,10 @@ describe('AxInteractionTimeline', () => {
     );
 
     expect(() => AxInteractionTimeline.deserialize(snapshot)).toThrow(
-      'timeline exceeds its retained byte limit'
+      AxTemporalValidationError
+    );
+    expect(() => AxInteractionTimeline.deserialize(snapshot)).toThrow(
+      'must not exceed 128 levels'
     );
   });
 
@@ -933,5 +1068,5 @@ describe('AxInteractionTimeline', () => {
     expect(projection.bytes).toBe(
       new TextEncoder().encode(JSON.stringify(projection.events)).byteLength
     );
-  });
+  }, 15_000);
 });

@@ -674,9 +674,14 @@ const cloneDataOnlyJson = (
       }
       const cloned: unknown[] = [];
       for (const key of Reflect.ownKeys(descriptors)) {
+        const numericKey = typeof key === 'string' ? Number(key) : -1;
         if (
           key === 'length' ||
-          (typeof key === 'string' && /^\d+$/.test(key))
+          (typeof key === 'string' &&
+            Number.isInteger(numericKey) &&
+            numericKey >= 0 &&
+            numericKey < 4_294_967_295 &&
+            String(numericKey) === key)
         ) {
           continue;
         }
@@ -703,7 +708,8 @@ const cloneDataOnlyJson = (
       }
       return Object.freeze(cloned);
     }
-    if (Object.getPrototypeOf(value) !== Object.prototype) {
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
       fail(`${path} must contain only plain JSON values`);
     }
     const cloned = Object.create(null) as Record<string, unknown>;
@@ -914,11 +920,14 @@ export class AxInteractionTimeline {
       >
     > = {}
   ): AxInteractionTimeline {
+    const inertLimits = cloneDataOnlyJson(limits, 'deserialization limits');
+    assertRecord(inertLimits, 'deserialization limits must be an object');
     const maxEvents =
-      limits.maxEvents ?? AxInteractionTimelineDefaults.maxEvents;
-    const maxBytes = limits.maxBytes ?? AxInteractionTimelineDefaults.maxBytes;
+      inertLimits.maxEvents ?? AxInteractionTimelineDefaults.maxEvents;
+    const maxBytes =
+      inertLimits.maxBytes ?? AxInteractionTimelineDefaults.maxBytes;
     const maxStreams =
-      limits.maxStreams ?? AxInteractionTimelineDefaults.maxStreams;
+      inertLimits.maxStreams ?? AxInteractionTimelineDefaults.maxStreams;
     assertInteger(maxEvents, 'deserialization maxEvents', 1);
     assertInteger(maxBytes, 'deserialization maxBytes', 2);
     assertInteger(maxStreams, 'deserialization maxStreams', 1);
@@ -935,14 +944,15 @@ export class AxInteractionTimeline {
     ) {
       fail('serialized timeline exceeds its deserialization byte limit');
     }
-    let value: unknown;
+    let parsed: unknown;
     try {
-      value = JSON.parse(serialized);
+      parsed = JSON.parse(serialized);
     } catch (error) {
       throw new AxTemporalValidationError(
         `timeline must be valid JSON: ${error instanceof Error ? error.message : String(error)}`
       );
     }
+    const value = cloneDataOnlyJson(parsed, 'timeline');
     assertRecord(value, 'timeline must be an object');
     if (value.schema !== AxInteractionTimelineSchema) {
       fail(`timeline.schema must be ${AxInteractionTimelineSchema}`);
@@ -954,12 +964,19 @@ export class AxInteractionTimeline {
     }
     assertId(value.sessionId, 'timeline.sessionId');
     assertRecord(value.options, 'timeline.options must be an object');
+    assertInteger(value.options.maxEvents, 'timeline.options.maxEvents', 1);
+    assertInteger(value.options.maxBytes, 'timeline.options.maxBytes', 2);
+    assertInteger(value.options.maxStreams, 'timeline.options.maxStreams', 1);
+    assertInteger(
+      value.options.reorderWindowUs,
+      'timeline.options.reorderWindowUs'
+    );
     const base = AxInteractionTimeline.create({
       sessionId: value.sessionId,
-      maxEvents: value.options.maxEvents as number,
-      maxBytes: value.options.maxBytes as number,
-      maxStreams: value.options.maxStreams as number,
-      reorderWindowUs: value.options.reorderWindowUs as number,
+      maxEvents: value.options.maxEvents,
+      maxBytes: value.options.maxBytes,
+      maxStreams: value.options.maxStreams,
+      reorderWindowUs: value.options.reorderWindowUs,
     });
     if (base.options.maxEvents > maxEvents) {
       fail('timeline options exceed the deserialization event limit');

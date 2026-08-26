@@ -241,6 +241,9 @@ semantic alignment, or real-world synchronization.
 - Live envelopes passed to `append()` must be data-only JSON objects. Enumerable
   accessors are rejected from property descriptors without invoking them; the
   inert snapshot that is validated is also the snapshot retained.
+- `deserialize()` converts its bounded parsed graph to own-data, null-prototype
+  snapshots before validation or metadata reads, so inherited prototype values
+  cannot supply timeline authority.
 - Duplicate identity and causal-cycle memory is limited to retained envelopes.
   Stream epoch/sequence/session-time frontiers survive eviction, but an evicted
   event body or causal edge cannot be reconstructed.
