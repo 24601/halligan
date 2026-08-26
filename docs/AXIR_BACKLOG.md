@@ -25,6 +25,15 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
   - Impact: TypeScript exposes programSource(), a validated ax-program-source/v1 control-flow AST with explicit predictor/tool capabilities, default locked-down worker interpretation and Node resource ceilings, strict typed outputs, accessor-free immutable snapshots and bounds for complete predictor requests plus selected host tool schemas, revocable execution epochs, explicit custom-runtime language/protocol compatibility, per-example call/iteration budgets, state serialization, and GEPA-aligned bind/runtime failures. Generated Python, Java, C++, Go, and Rust packages do not expose this program-source component, interpreted grammar, or runtime bridge contract.
   - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 
+- `axir-2026-08-25-port-provider-neutral-visual-observation-sampling-policy` [axai] Port provider-neutral visual observation sampling policy
+  - Status: open
+  - Source PR: #18
+  - Source commit: `ca760294f5ea4f207052c39c2218e1195103bc2a`
+  - TS paths: `src/ax/ai/index.ts`, `src/ax/ai/visual`
+  - Impact: TypeScript hosts can apply revision-, freshness-, authority-, change-, and rolling-budget-aware selection to host-captured visual observations; generated language packages do not yet expose the AxVisualObservation or AxFrameSampler policy.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+
+
 ## Done
 
 - `axir-2026-06-07-port-mcp-client-and-transports` [axmcp] Port MCP client and transports
