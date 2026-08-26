@@ -59,6 +59,8 @@ export async function runAgentEvalBatch<
   budget: AxAgentEvalBudget;
   /** Runs per task; scores average into one record. Default 1. */
   runsPerTask?: number;
+  /** Clone agent and metric inputs per run to preserve an internal corpus. */
+  isolateTaskInputs?: boolean;
   abortSignal?: AbortSignal;
 }): Promise<AxAgentEvalBatchResult<IN, OUT>> {
   const records: AxAgentPlaybookEvolveRunRecord<IN, OUT>[] = [];
@@ -102,17 +104,22 @@ export async function runAgentEvalBatch<
       executedRuns++;
 
       try {
+        const agentTask = args.isolateTaskInputs ? structuredClone(task) : task;
         const prediction = await args.agent._forwardForEvaluation(
           args.ai,
-          task,
+          agentTask,
           {
             ...(args.abortSignal ? { abortSignal: args.abortSignal } : {}),
           }
         );
         throwIfAborted(args.abortSignal);
+        const metricTask = args.isolateTaskInputs
+          ? structuredClone(task)
+          : task;
         const score = await args.metric({
           prediction: prediction as Record<string, unknown>,
-          example: task as unknown as Parameters<AxMetricFn>[0]['example'],
+          example:
+            metricTask as unknown as Parameters<AxMetricFn>[0]['example'],
         });
         throwIfAborted(args.abortSignal);
         const validScore = typeof score === 'number' && Number.isFinite(score);

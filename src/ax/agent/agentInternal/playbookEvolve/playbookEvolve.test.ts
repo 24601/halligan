@@ -917,6 +917,114 @@ describe('agent.playbook().evolve()', () => {
       expect(digests?.[0]).not.toBe(digests?.[4]);
     });
 
+    it('isolates the canonical corpus from evaluator mutation', async () => {
+      const sourceDate = new Date('2026-08-26T00:00:00.000Z');
+      const sourceMap = new Map([['original', 1]]);
+      const sourceSet = new Set(['original']);
+      const sourceBytes = new Uint8Array([1, 2]);
+      const observations: unknown[] = [];
+      const { ag } = makeAgent();
+
+      await ag.playbook().evolve(TASKS, {
+        metric: async ({ example, prediction }: any) => {
+          const fixed = prediction?.output?.answer === 'ok-fixed';
+          if (example.id === 'history-mutable') {
+            const input = example.input;
+            observations.push({
+              date: input.date.toISOString(),
+              map: [...input.map.entries()],
+              set: [...input.set],
+              bytes: [...input.bytes],
+            });
+            input.date.setUTCFullYear(2030);
+            input.map.set('mutated', 2);
+            input.set.add('mutated');
+            input.bytes[0] = 9;
+            return 1;
+          }
+          return fixed ? 1 : 0.2;
+        },
+        maxProposals: 1,
+        retentionPolicy: {
+          ...retentionPolicy(0),
+          slices: [
+            {
+              name: 'mutable-evidence',
+              version: '1',
+              tasks: [
+                {
+                  input: {
+                    question: 'historical',
+                    date: sourceDate,
+                    map: sourceMap,
+                    set: sourceSet,
+                    bytes: sourceBytes,
+                  },
+                  criteria: 'preserves evidence',
+                  id: 'history-mutable',
+                },
+              ],
+            },
+          ],
+        },
+      });
+
+      expect(observations).toEqual([
+        {
+          date: '2026-08-26T00:00:00.000Z',
+          map: [['original', 1]],
+          set: ['original'],
+          bytes: [1, 2],
+        },
+        {
+          date: '2026-08-26T00:00:00.000Z',
+          map: [['original', 1]],
+          set: ['original'],
+          bytes: [1, 2],
+        },
+      ]);
+      expect(sourceDate.toISOString()).toBe('2026-08-26T00:00:00.000Z');
+      expect([...sourceMap.entries()]).toEqual([['original', 1]]);
+      expect([...sourceSet]).toEqual(['original']);
+      expect([...sourceBytes]).toEqual([1, 2]);
+    });
+
+    it('distinguishes sparse arrays and enumerable array properties', async () => {
+      const empty: unknown[] = [];
+      const sparse = Array(1);
+      const explicitUndefined = [undefined];
+      const extra = [] as unknown[] & { evidence?: string };
+      extra.evidence = 'present';
+      const task = (array: unknown[]) => ({
+        input: { question: 'historical', array },
+        criteria: 'preserves evidence',
+        id: 'history-array',
+      });
+      const { ag } = makeAgent();
+      const result = await ag.playbook().evolve(TASKS, {
+        metric: retentionMetric({}),
+        maxProposals: 1,
+        retentionPolicy: {
+          ...retentionPolicy(1),
+          slices: [
+            { name: 'empty', version: '1', tasks: [task(empty)] },
+            { name: 'sparse', version: '1', tasks: [task(sparse)] },
+            {
+              name: 'explicit-undefined',
+              version: '1',
+              tasks: [task(explicitUndefined)],
+            },
+            { name: 'extra-property', version: '1', tasks: [task(extra)] },
+          ],
+        },
+      });
+      const digests = result.retentionAnchors?.map(
+        (anchor) => anchor.taskSetDigest
+      );
+
+      expect(new Set(digests).size).toBe(4);
+    });
+
     it('keeps separator-containing slice identities distinct', async () => {
       const { ag } = makeAgent();
       const result = await ag.playbook().evolve(TASKS, {

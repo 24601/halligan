@@ -113,9 +113,16 @@ function canonicalSerialize(
       );
     }
     seen.add(value);
-    const serialized = `array:[${value
-      .map((item) => canonicalSerialize(item, seen))
-      .join(',')}]`;
+    const serialized = `array:length:${value.length}:{${Object.keys(value)
+      .sort()
+      .map(
+        (key) =>
+          `${JSON.stringify(key)}:${canonicalSerialize(
+            (value as unknown as Record<string, unknown>)[key],
+            seen
+          )}`
+      )
+      .join(',')}}`;
     seen.delete(value);
     return serialized;
   }
@@ -443,6 +450,7 @@ export async function evolveAgentPlaybook<
     scoreThreshold,
     budget,
     runsPerTask,
+    ...(retentionPolicy ? { isolateTaskInputs: true } : {}),
     ...(options?.abortSignal ? { abortSignal: options.abortSignal } : {}),
   };
 

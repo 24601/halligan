@@ -128,10 +128,12 @@ policy digest, and deterministic evaluation sequence numbers. Digests cover
 the cloned task fields—including weights—and thresholds. Canonical values are
 type-tagged: object keys are sorted, dates use ISO timestamps, Map entries and
 Set elements are sorted by their complete canonical encoding, and typed arrays
-include their view type and bytes. Structurally equal Map keys or Set elements
-retain multiplicity, so ordering cannot merge distinct evidence. Digests use
-`fnv1a64`, a deterministic non-cryptographic identity/checksum, not proof of
-authenticity; retain the referenced evaluator and corpus versions externally.
+include their view type and bytes. Arrays encode length and every enumerable
+own key, preserving holes and extra properties. Structurally equal Map keys or
+Set elements retain multiplicity, so ordering cannot merge distinct evidence.
+Digests use `fnv1a64`, a deterministic non-cryptographic identity/checksum, not
+proof of authenticity; retain the referenced evaluator and corpus versions
+externally.
 Sequence numbers cover baseline and candidate current-task, held-out, and
 historical-slice evaluations plus the final decision. Receipts and anchors are
 recursively frozen at runtime.
