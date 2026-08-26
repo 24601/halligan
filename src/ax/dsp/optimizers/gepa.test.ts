@@ -25,7 +25,7 @@ const createSingleRootProgram = (
     },
     getSignature: () => ({
       getDescription: () => baseInstruction,
-      toString: () => `\"${baseInstruction}\" question:string -> answer:string`,
+      toString: () => `"${baseInstruction}" question:string -> answer:string`,
     }),
     namedProgramInstances: () => [{ id, program }],
     getOptimizableComponents: () => [
@@ -65,7 +65,7 @@ const createInstructionNode = (id: string, description: string) => {
     },
     getSignature: () => ({
       getDescription: () => description,
-      toString: () => `\"${description}\" input:string -> output:string`,
+      toString: () => `"${description}" input:string -> output:string`,
     }),
     getOptimizableComponents: () => [
       {
@@ -141,6 +141,130 @@ describe('AxGEPA Optimizer', () => {
       expect(result.optimizedProgram?.componentMap).toEqual({
         'root::instruction': 'task',
       });
+    });
+
+    it('uses structured scalar acceptance while retaining named Pareto objectives', async () => {
+      const optimizer = new AxGEPA({
+        studentAI: {} as AxAIService,
+        teacherAI: {} as AxAIService,
+        numTrials: 0,
+      });
+      const program = createSingleRootProgram('task', async () => ({
+        answer: 'a',
+      }));
+
+      const result = await optimizer.compile(
+        program as any,
+        [{ question: 'q1' }, { question: 'q2' }],
+        async () => ({
+          score: 0.9,
+          feedback: 'This feedback is evaluation-time data only.',
+          scores: { accuracy: 1, brevity: 0 },
+        }),
+        { maxMetricCalls: 2 }
+      );
+
+      // bestScore follows the existing Pareto-vector averaging convention;
+      // the explicit 0.9 scalar is used for rollout acceptance decisions.
+      expect(result.bestScore).toBe(0.5);
+      expect(result.paretoFront[0]?.scores).toEqual({
+        accuracy: 1,
+        brevity: 0,
+      });
+      expect(JSON.stringify(result.optimizedProgram)).not.toContain(
+        'evaluation-time data only'
+      );
+      expect(JSON.parse(JSON.stringify(result.optimizedProgram))).toMatchObject(
+        {
+          bestScore: 0.5,
+          componentMap: { 'root::instruction': 'task' },
+        }
+      );
+    });
+
+    it('skips reflection when the explicit structured scalar is already perfect', async () => {
+      let reflections = 0;
+      const optimizer = new AxGEPA({
+        studentAI: {
+          chat: async () => {
+            reflections += 1;
+            throw new Error('teacher should not run');
+          },
+        } as any,
+        teacherAI: {
+          chat: async () => {
+            reflections += 1;
+            throw new Error('teacher should not run');
+          },
+        } as any,
+        numTrials: 1,
+      });
+      const program = createSingleRootProgram('task', async () => ({
+        answer: 'a',
+      }));
+
+      const result = await optimizer.compile(
+        program as any,
+        [{ question: 'q1' }, { question: 'q2' }],
+        async () => ({
+          score: 0.4,
+          feedback: 'wrong format',
+          scores: { accuracy: 1, brevity: 1 },
+        }),
+        {
+          maxMetricCalls: 8,
+          skipPerfectScore: true,
+          perfectScore: 0.4,
+          gepaAdapter: {
+            evaluate: async (batch: readonly unknown[]) => ({
+              outputs: batch.map(() => ({ answer: 'a' })),
+              scores: batch.map(() => 0.4),
+              scoreVectors: batch.map(() => ({ accuracy: 1, brevity: 1 })),
+              feedback: batch.map(() => 'wrong format'),
+            }),
+            make_reflective_dataset: () => ({}),
+          },
+        }
+      );
+
+      expect(result.bestScore).toBe(1);
+      expect(reflections).toBe(0);
+    });
+
+    it('carries evaluated metric feedback into component reflection tuples', async () => {
+      const optimizer = new AxGEPA({
+        studentAI: {} as AxAIService,
+        teacherAI: {} as AxAIService,
+        numTrials: 1,
+        minibatchSize: 1,
+        seed: 1,
+      });
+      const program = createSingleRootProgram('task', async () => ({
+        answer: 'a',
+      }));
+      let reflectedTuples: any[] = [];
+      (optimizer as any).reflectTargetInstruction = async (...args: any[]) => {
+        reflectedTuples = args[8];
+        return args[1];
+      };
+
+      await optimizer.compile(
+        program as any,
+        [{ question: 'q1' }, { question: 'q2' }],
+        async ({ example }) => ({
+          score: 0.4,
+          feedback: `Use evidence for ${example.question}.`,
+        }),
+        { maxMetricCalls: 10, skipPerfectScore: false }
+      );
+
+      expect(reflectedTuples).toMatchObject([
+        {
+          input: { question: expect.any(String) },
+          score: 0.4,
+          feedback: expect.stringMatching(/^Use evidence for q[12]\.$/),
+        },
+      ]);
     });
 
     it('treats forward failures as zero-score rows instead of aborting the optimization', async () => {
@@ -767,6 +891,56 @@ describe('AxGEPA Optimizer', () => {
       }
     });
 
+    it('plumbs custom proposal policies without persisting their references', async () => {
+      const secretReference = 'private proposal guidance, not an artifact';
+      const seen: Array<{ reference: string; currentValue: string }> = [];
+      const optimizer = new AxGEPA({
+        studentAI: {} as AxAIService,
+        teacherAI: {} as AxAIService,
+        numTrials: 1,
+        minibatch: false,
+        earlyStoppingTrials: 5,
+        minImprovementThreshold: 0,
+        seed: 1,
+      });
+      const program = createSingleRootProgram('task', async (instruction) => ({
+        score: instruction === 'better' ? 1 : 0,
+      }));
+
+      const result = await optimizer.compile(
+        program as any,
+        [{ question: 'q1' }, { question: 'q2' }],
+        async ({ prediction }) => prediction.score,
+        {
+          maxMetricCalls: 20,
+          skipPerfectScore: false,
+          gepaProposal: {
+            references: [{ name: 'private-guide', content: secretReference }],
+            additionalGuidance: 'Prefer the smallest general rule.',
+            policy: ({ currentValue, references }) => {
+              seen.push({
+                currentValue,
+                reference: references[0]?.content ?? '',
+              });
+              return 'better';
+            },
+          },
+        }
+      );
+
+      expect(seen).toEqual([
+        { currentValue: 'task', reference: secretReference },
+      ]);
+      expect(result.optimizedProgram?.componentMap).toEqual({
+        'root::instruction': 'better',
+      });
+      const serialized = JSON.stringify(
+        axSerializeOptimizedProgram(result.optimizedProgram!)
+      );
+      expect(serialized).not.toContain(secretReference);
+      expect(serialized).not.toContain('Prefer the smallest general rule.');
+    });
+
     it('returns the accepted evolved component when it ties the seed on the Pareto set', async () => {
       // Regression: an accepted evolution that ties the seed on validation
       // should still surface in componentMap.
@@ -988,16 +1162,32 @@ describe('AxGEPA Optimizer', () => {
         'current instruction',
         program,
         [{ question: 'q1', extra: { nested: ['value'] } }],
-        async () => 0.25,
+        async () => ({
+          score: 0.25,
+          feedback: 'Metric feedback: preserve the nested evidence.',
+        }),
         {
+          feedbackNotes: ['Global note: keep the output concise.'],
           feedbackFn: ({ componentId }: { componentId?: string }) =>
-            componentId ? `component=${componentId}` : undefined,
+            componentId
+              ? `Explicit feedback: component=${componentId}`
+              : undefined,
         }
       );
 
       expect(capturedPrompt).toContain('"taskDigest": "branch-a"');
       expect(capturedPrompt).toContain('"nested": [');
-      expect(capturedPrompt).toContain('component=root');
+      expect(capturedPrompt).toContain(
+        'Metric feedback: preserve the nested evidence.'
+      );
+      expect(capturedPrompt).toContain('Explicit feedback: component=root');
+      expect(capturedPrompt).toContain('Global note: keep the output concise.');
+      expect(
+        capturedPrompt.indexOf('This trajectory got a score')
+      ).toBeLessThan(capturedPrompt.indexOf('Metric feedback:'));
+      expect(capturedPrompt.indexOf('Metric feedback:')).toBeLessThan(
+        capturedPrompt.indexOf('Explicit feedback:')
+      );
       expect(capturedPrompt).not.toContain('[object Object]');
     });
   });

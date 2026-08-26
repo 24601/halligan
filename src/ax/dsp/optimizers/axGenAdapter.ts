@@ -1,11 +1,20 @@
 import type { AxAIService } from '../../ai/types.js';
-import type { AxExample, AxMetricFn } from '../common_types.js';
+import type {
+  AxExample,
+  AxMetricFn,
+  AxMultiMetricFn,
+} from '../common_types.js';
 import type {
   AxFunctionCallTrace,
   AxGenOut,
   AxProgrammable,
 } from '../types.js';
 import type { AxGEPAAdapter, AxGEPAEvaluationBatch } from './gepaAdapter.js';
+import {
+  normalizeGEPABatchScoreVectors,
+  normalizeGEPAMetricResult,
+  scalarizeGEPAScores,
+} from './gepaEvaluation.js';
 
 export type AxRolloutTrace<Out = unknown> = {
   calls: AxFunctionCallTrace[];
@@ -16,7 +25,7 @@ export type AxRolloutTrace<Out = unknown> = {
 type AxGenAdapterOptions<IN, OUT extends AxGenOut> = {
   program: AxProgrammable<IN, OUT>;
   ai: AxAIService;
-  metricFn: AxMetricFn;
+  metricFn: AxMetricFn | AxMultiMetricFn;
   sampleCount: number;
 };
 
@@ -57,9 +66,11 @@ export function createAxGenAdapter<IN, OUT extends AxGenOut>({
       const outputs: Array<OUT | { error: string }> = [];
       const scores: number[] = [];
       const scoreVectors: Record<string, number>[] = [];
+      const feedback: Array<string | undefined> = [];
       const trajectories: AxRolloutTrace<OUT>[] = [];
+      const failedRows = new Set<number>();
 
-      for (const datum of batch) {
+      for (const [index, datum] of batch.entries()) {
         const calls: AxFunctionCallTrace[] = [];
         try {
           const output = await program.forward(ai, datum, {
@@ -71,19 +82,24 @@ export function createAxGenAdapter<IN, OUT extends AxGenOut>({
               : undefined,
           } as any);
           outputs.push(output);
-          const rawScore = await metricFn({
-            prediction: output,
-            example: datum as AxExample,
-          });
-          const score = typeof rawScore === 'number' ? rawScore : 0;
+          const metricResult = await normalizeGEPAMetricResult(
+            metricFn,
+            output,
+            datum as AxExample
+          );
+          const score =
+            metricResult.scalar ?? scalarizeGEPAScores(metricResult.scores);
           scores.push(score);
-          scoreVectors.push({ score });
+          scoreVectors.push(metricResult.scores);
+          feedback.push(metricResult.feedback);
           if (captureTraces) trajectories.push({ calls, output });
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           outputs.push({ error: message });
           scores.push(0);
           scoreVectors.push({ score: 0 });
+          failedRows.add(index);
+          feedback.push(undefined);
           if (captureTraces) trajectories.push({ calls, error: message });
         }
       }
@@ -91,7 +107,8 @@ export function createAxGenAdapter<IN, OUT extends AxGenOut>({
       return {
         outputs,
         scores,
-        scoreVectors,
+        scoreVectors: normalizeGEPABatchScoreVectors(scoreVectors, failedRows),
+        feedback,
         trajectories: captureTraces ? trajectories : undefined,
       } satisfies AxGEPAEvaluationBatch<
         AxRolloutTrace<OUT>,
@@ -108,13 +125,15 @@ export function createAxGenAdapter<IN, OUT extends AxGenOut>({
           .map((trace, index) => ({
             trace,
             score: Number(evalBatch.scores[index] ?? 0),
+            feedback: evalBatch.feedback?.[index],
           }))
           .filter(({ trace, score }) => {
             if (!functionId) return true;
             return traceMentionsFunction(trace, functionId) || score === 0;
           });
-        out[key] = relevant.map(({ trace, score }) => ({
+        out[key] = relevant.map(({ trace, score, feedback }) => ({
           score,
+          feedback,
           calls: trace.calls,
           output: trace.output,
           error: trace.error,
