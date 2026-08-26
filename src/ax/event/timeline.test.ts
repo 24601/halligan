@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   type AxInteractionEvent,
   AxInteractionTimeline,
+  AxInteractionTimelineDefaults,
   AxInteractionTimelineSchema,
   AxInteractionTimelineVersion,
   type AxTemporalEnvelope,
@@ -646,6 +647,20 @@ describe('AxInteractionTimeline', () => {
     expect(() => append(timeline, cyclic)).toThrow(
       'envelope.cycle must not contain cycles'
     );
+    let nested: Record<string, unknown> = {};
+    for (let index = 0; index < 129; index++) nested = { nested };
+    expect(() =>
+      append(
+        timeline,
+        envelope({
+          event: {
+            kind: 'control',
+            signal: 'start',
+            nested,
+          } as unknown as AxInteractionEvent,
+        })
+      )
+    ).toThrow('must not exceed 128 levels');
 
     const snapshot = timeline.toJSON() as unknown as Record<string, unknown>;
     expect(() =>
@@ -661,16 +676,35 @@ describe('AxInteractionTimeline', () => {
       maxEvents: 2,
       maxBytes: 300,
     }).toJSON();
-    const snapshot = {
+    const oversizedEvent = envelope({
+      event: { kind: 'text', text: 'x'.repeat(300) },
+    });
+    const snapshot = JSON.stringify({
       ...baseSnapshot,
-      events: [
-        envelope({ event: { kind: 'text', text: 'x'.repeat(300) } }),
-        { schema: 'invalid' },
-      ],
-    };
+      events: [],
+    }).replace(
+      '"events":[]',
+      `"events":[${JSON.stringify(oversizedEvent)},${'{"nested":'.repeat(20_000)}null${'}'.repeat(20_000)}]`
+    );
 
-    expect(() =>
-      AxInteractionTimeline.deserialize(JSON.stringify(snapshot))
-    ).toThrow('timeline exceeds its retained byte limit');
+    expect(() => AxInteractionTimeline.deserialize(snapshot)).toThrow(
+      'timeline exceeds its retained byte limit'
+    );
+  });
+
+  it('keeps snapshot-declared limits within host deserialization limits', () => {
+    const snapshot = AxInteractionTimeline.create({
+      sessionId: 'session-1',
+      maxEvents: AxInteractionTimelineDefaults.maxEvents + 1,
+    }).serialize();
+
+    expect(() => AxInteractionTimeline.deserialize(snapshot)).toThrow(
+      'timeline options exceed the deserialization event limit'
+    );
+    expect(
+      AxInteractionTimeline.deserialize(snapshot, {
+        maxEvents: AxInteractionTimelineDefaults.maxEvents + 1,
+      }).options.maxEvents
+    ).toBe(AxInteractionTimelineDefaults.maxEvents + 1);
   });
 });

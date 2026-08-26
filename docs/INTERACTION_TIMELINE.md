@@ -131,6 +131,14 @@ counts the sum of individual envelope JSON sizes. Projection counts the entire
 JSON array. A serialized snapshot also includes schema, options, and stream
 frontiers.
 
+`deserialize()` treats its optional second argument as the host's authority for
+maximum events, retained bytes, and streams. Those limits default to the finite
+timeline defaults above; snapshot-declared options cannot raise them. Pass
+larger limits explicitly when restoring a timeline intentionally configured
+above the defaults. The host limits also bound serialized input before parsing,
+and retained-envelope bytes are accumulated before cloning or processing later
+entries.
+
 ## Example
 
 ```ts

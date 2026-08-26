@@ -205,6 +205,7 @@ export class AxTemporalValidationError extends Error {
 const textEncoder = new TextEncoder();
 const MAX_ID_LENGTH = 256;
 const MAX_LINKS = 64;
+const MAX_JSON_DEPTH = 128;
 
 const jsonBytes = (value: unknown): number =>
   textEncoder.encode(JSON.stringify(value)).byteLength;
@@ -304,42 +305,69 @@ const assertIdList = (value: unknown, name: string): void => {
   }
 };
 
-const assertJsonValue = (
-  value: unknown,
-  path = 'value',
-  ancestors = new WeakSet<object>()
-): void => {
-  if (
-    value === null ||
-    typeof value === 'string' ||
-    typeof value === 'boolean'
-  ) {
-    return;
-  }
-  if (typeof value === 'number') {
-    if (!Number.isFinite(value)) fail(`${path} must contain finite numbers`);
-    return;
-  }
-  if (Array.isArray(value)) {
-    if (ancestors.has(value)) fail(`${path} must not contain cycles`);
-    ancestors.add(value);
-    for (let index = 0; index < value.length; index++) {
-      assertJsonValue(value[index], `${path}[${index}]`, ancestors);
+const assertJsonValue = (value: unknown, path = 'value'): void => {
+  const ancestors = new WeakSet<object>();
+  const pending: Array<
+    | Readonly<{ item: unknown; itemPath: string; depth: number }>
+    | Readonly<{ completed: object }>
+  > = [{ item: value, itemPath: path, depth: 0 }];
+  while (pending.length > 0) {
+    const entry = pending.pop()!;
+    if ('completed' in entry) {
+      ancestors.delete(entry.completed);
+      continue;
     }
-    ancestors.delete(value);
-    return;
+    const { item, itemPath, depth } = entry;
+    if (
+      item === null ||
+      typeof item === 'string' ||
+      typeof item === 'boolean'
+    ) {
+      continue;
+    }
+    if (typeof item === 'number') {
+      if (!Number.isFinite(item)) {
+        fail(`${itemPath} must contain finite numbers`);
+      }
+      continue;
+    }
+    if (Array.isArray(item)) {
+      if (depth >= MAX_JSON_DEPTH) {
+        fail(`${itemPath} must not exceed ${MAX_JSON_DEPTH} levels`);
+      }
+      if (ancestors.has(item)) fail(`${itemPath} must not contain cycles`);
+      ancestors.add(item);
+      pending.push({ completed: item });
+      for (let index = item.length - 1; index >= 0; index--) {
+        pending.push({
+          item: item[index],
+          itemPath: `${itemPath}[${index}]`,
+          depth: depth + 1,
+        });
+      }
+      continue;
+    }
+    assertRecord(item, `${itemPath} must contain only plain JSON values`);
+    if (depth >= MAX_JSON_DEPTH) {
+      fail(`${itemPath} must not exceed ${MAX_JSON_DEPTH} levels`);
+    }
+    if (Object.getPrototypeOf(item) !== Object.prototype) {
+      fail(`${itemPath} must contain only plain JSON values`);
+    }
+    if (ancestors.has(item)) fail(`${itemPath} must not contain cycles`);
+    ancestors.add(item);
+    pending.push({ completed: item });
+    const entries = Object.entries(item);
+    for (let index = entries.length - 1; index >= 0; index--) {
+      const [key, child] = entries[index]!;
+      if (child === undefined) fail(`${itemPath}.${key} must not be undefined`);
+      pending.push({
+        item: child,
+        itemPath: `${itemPath}.${key}`,
+        depth: depth + 1,
+      });
+    }
   }
-  assertRecord(value, `${path} must contain only plain JSON values`);
-  if (Object.getPrototypeOf(value) !== Object.prototype) {
-    fail(`${path} must contain only plain JSON values`);
-  }
-  if (ancestors.has(value)) fail(`${path} must not contain cycles`);
-  ancestors.add(value);
-  for (const [key, item] of Object.entries(value)) {
-    if (item === undefined) fail(`${path}.${key} must not be undefined`);
-    assertJsonValue(item, `${path}.${key}`, ancestors);
-  }
-  ancestors.delete(value);
 };
 
 const assertRange = (
@@ -689,7 +717,37 @@ export class AxInteractionTimeline {
     );
   }
 
-  static deserialize(serialized: string): AxInteractionTimeline {
+  static deserialize(
+    serialized: string,
+    limits: Readonly<
+      Partial<
+        Pick<
+          AxInteractionTimelineResolvedOptions,
+          'maxEvents' | 'maxBytes' | 'maxStreams'
+        >
+      >
+    > = {}
+  ): AxInteractionTimeline {
+    const maxEvents =
+      limits.maxEvents ?? AxInteractionTimelineDefaults.maxEvents;
+    const maxBytes = limits.maxBytes ?? AxInteractionTimelineDefaults.maxBytes;
+    const maxStreams =
+      limits.maxStreams ?? AxInteractionTimelineDefaults.maxStreams;
+    assertInteger(maxEvents, 'deserialization maxEvents', 1);
+    assertInteger(maxBytes, 'deserialization maxBytes', 2);
+    assertInteger(maxStreams, 'deserialization maxStreams', 1);
+    const snapshotOverheadBytes =
+      maxEvents +
+      maxStreams * (MAX_ID_LENGTH * 8 + 256) +
+      MAX_ID_LENGTH * 4 +
+      4_096;
+    const serializedBytes = textEncoder.encode(serialized).byteLength;
+    if (
+      serializedBytes > maxBytes &&
+      serializedBytes - maxBytes > snapshotOverheadBytes
+    ) {
+      fail('serialized timeline exceeds its deserialization byte limit');
+    }
     let value: unknown;
     try {
       value = JSON.parse(serialized);
@@ -698,7 +756,6 @@ export class AxInteractionTimeline {
         `timeline must be valid JSON: ${error instanceof Error ? error.message : String(error)}`
       );
     }
-    assertJsonValue(value, 'timeline');
     assertRecord(value, 'timeline must be an object');
     if (value.schema !== AxInteractionTimelineSchema) {
       fail(`timeline.schema must be ${AxInteractionTimelineSchema}`);
@@ -717,6 +774,15 @@ export class AxInteractionTimeline {
       maxStreams: value.options.maxStreams as number,
       reorderWindowUs: value.options.reorderWindowUs as number,
     });
+    if (base.options.maxEvents > maxEvents) {
+      fail('timeline options exceed the deserialization event limit');
+    }
+    if (base.options.maxBytes > maxBytes) {
+      fail('timeline options exceed the deserialization byte limit');
+    }
+    if (base.options.maxStreams > maxStreams) {
+      fail('timeline options exceed the deserialization stream limit');
+    }
     assertArray(value.events, 'timeline events must be an array');
     assertArray(value.streams, 'timeline streams must be an array');
     if (value.events.length > base.options.maxEvents) {
@@ -752,31 +818,42 @@ export class AxInteractionTimeline {
       streamPositions.add(streamPosition);
       return cloneEnvelope(event);
     });
-    if (
-      events.some((event, index) =>
-        hasTemporalConflict(event, events.slice(0, index))
-      )
-    ) {
-      fail('timeline contains a temporal conflict');
+    const eventsByStream = new Map<string, Readonly<AxTemporalEnvelope>[]>();
+    for (const event of events) {
+      const streamEvents = eventsByStream.get(event.streamId) ?? [];
+      streamEvents.push(event);
+      eventsByStream.set(event.streamId, streamEvents);
     }
-    if (
-      events.some((event, index) =>
-        events
-          .slice(index + 1)
-          .some(
-            (other) =>
-              event.streamId === other.streamId &&
-              ((event.epoch < other.epoch &&
-                event.sessionTimeUs > other.sessionTimeUs) ||
-                (event.epoch > other.epoch &&
-                  event.sessionTimeUs < other.sessionTimeUs))
-          )
-      )
-    ) {
-      fail('timeline contains an epoch time regression');
+    for (const streamEvents of eventsByStream.values()) {
+      streamEvents.sort(
+        (left, right) =>
+          left.epoch - right.epoch || left.sequence - right.sequence
+      );
+      let maxSessionTimeUs = -1;
+      let mediaEpoch = -1;
+      let maxMediaStartUs = -1;
+      for (const event of streamEvents) {
+        if (event.sessionTimeUs < maxSessionTimeUs) {
+          fail('timeline contains a temporal conflict');
+        }
+        maxSessionTimeUs = event.sessionTimeUs;
+        if (event.epoch !== mediaEpoch) {
+          mediaEpoch = event.epoch;
+          maxMediaStartUs = -1;
+        }
+        const range = mediaRange(event.event);
+        if (range && range.startUs < maxMediaStartUs) {
+          fail('timeline contains a temporal conflict');
+        }
+        if (range) maxMediaStartUs = range.startUs;
+      }
     }
     if (hasCausalCycle(events)) fail('timeline contains a causal cycle');
     const streamIds = new Set<string>();
+    const streamsById = new Map<
+      string,
+      Readonly<AxInteractionTimelineStreamState>
+    >();
     const streams = value.streams.map((stream, index) => {
       assertRecord(stream, `timeline.streams[${index}] must be an object`);
       assertId(stream.streamId, `timeline.streams[${index}].streamId`);
@@ -793,17 +870,19 @@ export class AxInteractionTimeline {
       if (streamIds.has(stream.streamId))
         fail('timeline stream IDs must be unique');
       streamIds.add(stream.streamId);
-      return Object.freeze({
+      const normalized = Object.freeze({
         streamId: stream.streamId,
         epoch: stream.epoch,
         maxSequence: stream.maxSequence,
         maxEventId: stream.maxEventId,
         maxSessionTimeUs: stream.maxSessionTimeUs,
       });
+      streamsById.set(normalized.streamId, normalized);
+      return normalized;
     });
     for (const event of events) {
       const stream =
-        streams.find((item) => item.streamId === event.streamId) ??
+        streamsById.get(event.streamId) ??
         fail(`timeline stream frontier does not cover event ${event.eventId}`);
       if (
         event.epoch > stream.epoch ||
