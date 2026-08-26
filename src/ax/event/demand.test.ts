@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   AxDemandBoundary,
   type AxDemandDetection,
+  type AxDemandDetector,
   type AxDemandObservation,
+  type AxDemandStore,
   AxInMemoryDemandStore,
   axDemandEventObserver,
 } from './demand.js';
@@ -185,6 +187,29 @@ describe('AxDemandBoundary', () => {
       disposition: 'annotate',
       standingGrantState: 'unknown',
     });
+  });
+
+  it('invokes a captured standing-grant callback without boundary binding', async () => {
+    const policyGrantFor = ['act'] as const;
+    const validateStandingGrant = vi.fn(function (this: unknown) {
+      expect(this).toBeUndefined();
+      return 'valid' as const;
+    });
+    const { value } = boundary(
+      detection({
+        confidence: 1,
+        requestedDisposition: 'act',
+        standingGrantRef: 'opaque-grant',
+      }),
+      {
+        validateStandingGrant,
+        policy: { requireStandingGrantFor: policyGrantFor },
+      }
+    );
+    expect(
+      (await value.observe(observation('unbound-grant'))).record.proposal
+        .disposition
+    ).toBe('act');
   });
 
   it('retains a valid act proposal without executing or authorizing it', async () => {
@@ -514,6 +539,64 @@ describe('AxDemandBoundary', () => {
     controller.abort('cancelled by host');
     await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
     expect((await cancellable.list()).records).toHaveLength(0);
+
+    const cancelBeforeAppend = new AbortController();
+    const immediatelyCancelled = new AxDemandBoundary({
+      detector: {
+        id: 'cancel-before-append',
+        version: '1',
+        detect: () => {
+          cancelBeforeAppend.abort('cancelled before append');
+          return detection();
+        },
+      },
+      now: () => now,
+    });
+    await expect(
+      immediatelyCancelled.observe(observation('cancel-before-append'), {
+        signal: cancelBeforeAppend.signal,
+      })
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    expect((await immediatelyCancelled.list()).records).toHaveLength(0);
+  });
+
+  it('maps abort-listener rejection to the triggering timeout or cancellation', async () => {
+    const abortingDetector = vi.fn(
+      (
+        _observation: Readonly<AxDemandObservation>,
+        context: { signal: AbortSignal }
+      ) =>
+        new Promise<AxDemandDetection>((_resolve, reject) => {
+          context.signal.addEventListener(
+            'abort',
+            () => reject(new Error('detector observed abort')),
+            { once: true }
+          );
+        })
+    );
+    const timed = new AxDemandBoundary({
+      detector: { id: 'abort-mapping', version: '1', detect: abortingDetector },
+      now: () => now,
+      policy: { callbackTimeoutMs: 5 },
+    });
+    expect(
+      (await timed.observe(observation('abort-mapped-timeout'))).record
+        .detection.reasonCode
+    ).toBe('detector_timeout');
+
+    const cancellable = new AxDemandBoundary({
+      detector: { id: 'abort-mapping', version: '1', detect: abortingDetector },
+      now: () => now,
+      policy: { callbackTimeoutMs: 1_000 },
+    });
+    const controller = new AbortController();
+    const cancelled = cancellable.observe(observation('abort-mapped-cancel'), {
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => expect(abortingDetector).toHaveBeenCalledTimes(2));
+    controller.abort('host cancellation');
+    await expect(cancelled).rejects.toMatchObject({ name: 'AbortError' });
+    expect((await cancellable.list()).records).toHaveLength(0);
   });
 
   it('keeps timed-out callback work charged until the underlying promise settles', async () => {
@@ -703,12 +786,12 @@ describe('AxDemandBoundary', () => {
       hostile.observe(observation('thenable-blocked'))
     ).rejects.toThrow('callback capacity was exhausted');
     lateResolve?.(detection());
-    lateResolve?.(detection({ confidence: 0 }));
     await new Promise((resolve) => setTimeout(resolve, 0));
-    await expect(
-      hostile.observe(observation('thenable-restored'))
-    ).resolves.toMatchObject({
-      record: { detection: { outcome: 'uncertain' } },
+    const hostileRestored = hostile.observe(observation('thenable-restored'));
+    await vi.waitFor(() => expect(thenCalls).toBe(2));
+    lateResolve?.(detection());
+    await expect(hostileRestored).resolves.toMatchObject({
+      record: { detection: { outcome: 'demand' } },
     });
   });
 
@@ -738,6 +821,35 @@ describe('AxDemandBoundary', () => {
     expect(record.proposal.authority).toBe('advisory');
   });
 
+  it('keeps untrusted detector reason codes out of policy reason codes', async () => {
+    const { value } = boundary(
+      detection({
+        outcome: 'demand',
+        confidence: 1,
+        requestedDisposition: 'notify',
+        reasonCode: 'explicit_no_demand',
+      })
+    );
+    const record = (await value.observe(observation('reason-code-confusion')))
+      .record;
+    expect(record.detection.reasonCode).toBe('explicit_no_demand');
+    expect(record.proposal.reasonCodes).not.toContain('explicit_no_demand');
+    expect(record.proposal.disposition).toBe('notify');
+  });
+
+  it.each([
+    ['standingGrantRef', { standingGrantRef: {} as string }],
+    ['empty standingGrantRef', { standingGrantRef: '' }],
+    ['reason', { reason: {} as string }],
+    ['empty reason', { reason: '' }],
+  ])('fails closed on malformed detector %s', async (_label, malformed) => {
+    const { value } = boundary(detection(malformed));
+    const record = (await value.observe(observation(`malformed-${_label}`)))
+      .record;
+    expect(record.detection.reasonCode).toBe('detector_invalid');
+    expect(record.proposal.disposition).toBe('annotate');
+  });
+
   it('deduplicates detector calls and restores retained cursor/backlog', async () => {
     const first = boundary(detection());
     const original = await first.value.observe(observation('duplicate'));
@@ -765,6 +877,48 @@ describe('AxDemandBoundary', () => {
     expect(pageTwo.records.map((record) => record.observation.id)).toEqual([
       'after-restart',
     ]);
+  });
+
+  it('marks a duplicate discovered atomically by the store as historical', async () => {
+    const original = await boundary(detection()).value.observe(
+      observation('store-race-original')
+    );
+    const store: AxDemandStore = {
+      getByDedupeKey: async () => undefined,
+      append: async () => ({ record: original.record, duplicate: true }),
+      list: async () => ({ records: [original.record] }),
+    };
+    const raced = await boundary(detection(), { store }).value.observe(
+      observation('store-race-original')
+    );
+    expect(raced).toMatchObject({ duplicate: true, historical: true });
+    expect(raced.record.cursor).toBe(original.record.cursor);
+  });
+
+  it('paginates restored seed records in cursor order', async () => {
+    const source = boundary(detection());
+    await source.value.observe(observation('cursor-one'));
+    await source.value.observe(observation('cursor-two'));
+    const seed = (source.value.store as AxInMemoryDemandStore).snapshot();
+    const restored = new AxInMemoryDemandStore({
+      seed: [seed[1]!, seed[0]!],
+      now: () => now,
+    });
+    const first = await restored.list({ limit: 1 });
+    const second = await restored.list({ after: first.next, limit: 1 });
+    expect(first.records.map((record) => record.observation.id)).toEqual([
+      'cursor-one',
+    ]);
+    expect(second.records.map((record) => record.observation.id)).toEqual([
+      'cursor-two',
+    ]);
+    expect(
+      () =>
+        new AxInMemoryDemandStore({
+          seed: [seed[0]!, { ...seed[1]!, cursor: seed[0]!.cursor }],
+          now: () => now,
+        })
+    ).toThrow('seed cursors must be unique');
   });
 
   it('treats a host dedupe key as immutable after proposal expiry', async () => {
@@ -1120,6 +1274,40 @@ describe('AxDemandBoundary', () => {
           policy: { allowedDispositions: ['notify'] },
         })
     ).toThrow('must include ignore or annotate');
+
+    const grantPolicy = ['act'] as AxDemandDetection['requestedDisposition'][];
+    const snapshotted = boundary(
+      detection({
+        confidence: 1,
+        requestedDisposition: 'act',
+        standingGrantRef: 'grant',
+      }),
+      {
+        policy: { requireStandingGrantFor: grantPolicy },
+        validateStandingGrant: () => 'valid',
+      }
+    ).value;
+    grantPolicy.length = 0;
+    expect(
+      (await snapshotted.observe(observation('snapshotted-grant-policy')))
+        .record.proposal.standingGrantState
+    ).toBe('valid');
+
+    expect(
+      () =>
+        boundary(detection(), {
+          policy: {
+            requireStandingGrantFor: ['invalid' as 'act'],
+          },
+        }).value
+    ).toThrow('AxDemandPolicy bounds are invalid');
+
+    expect(
+      () =>
+        boundary(detection(), {
+          policy: { callbackTimeoutMs: 2_147_483_648 },
+        }).value
+    ).toThrow('AxDemandPolicy bounds are invalid');
   });
 
   it('integrates through observe routes without targets, sinks, or effects', async () => {

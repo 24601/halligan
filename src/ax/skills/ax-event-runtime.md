@@ -65,9 +65,10 @@ await source.publish({ event, identity, trust: 'authenticated' });
   `axDemandEventObserver(...)` on an `observe` route. Treat every disposition,
   including `act`, as an advisory proposal. Host authorization and effect
   settlement remain separate and mandatory.
-- Keep detector free text non-authoritative. Retain explicit `no_demand` and
-  `uncertain` records; downgrade stale, conflicting, low-confidence, malformed,
-  or revoked-grant evidence instead of silently dropping it.
+- Keep detector free text and reason codes non-authoritative. Proposal reason
+  codes are boundary-owned policy classifications. Retain explicit `no_demand`
+  and `uncertain` records; downgrade stale, conflicting, low-confidence,
+  malformed, or revoked-grant evidence instead of silently dropping it.
 - Detector confidence estimates demand probability; it is not authority. Require
   `ignore` or `annotate` in host disposition allowlists so fallback remains
   fail-closed.
@@ -83,6 +84,9 @@ await source.publish({ event, identity, trust: 'authenticated' });
   single-flights a scoped key with per-waiter cancellation and bounded pending
   keys/bytes; distributed hosts need reservations for callback-level
   exactly-once behavior.
+- Bind stateful host methods before passing them as standing-grant callbacks;
+  the boundary snapshots and invokes the callback without using itself as the
+  receiver. Policy disposition arrays are copied at construction.
 - Timed-out or cancelled callback promises retain count and evidence-byte
   reservations until they settle. Transient keyed work and unsettled callbacks
   use separate per-class `maxInFlight`/`maxInFlightBytes` ceilings. Use a
@@ -95,7 +99,8 @@ await source.publish({ event, identity, trust: 'authenticated' });
   treat capped samples as exact durations.
 - Use a host `AxDemandStore` for durable/distributed cursor and dedupe
   guarantees. `AxInMemoryDemandStore` is volatile; its snapshots are suitable
-  for deterministic restart tests, not a durable service.
+  for deterministic restart tests, not a durable service. Seed cursors are
+  numerically ordered for pagination and must be unique.
 - Bound retention explicitly. In-memory defaults are 10,000 records, 64 MiB,
   1,000 scopes, 1,000 records per scope, and seven days; eviction removes the
   corresponding dedupe key.

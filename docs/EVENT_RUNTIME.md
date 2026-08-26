@@ -115,10 +115,13 @@ created. Revocation after creation is therefore another reason the host must
 authorize again at review time.
 
 Detector output is untrusted structured evidence. Free-text reasons are stored
-but never parsed as policy, and detectors cannot select dedupe keys. Invalid
-detector output becomes an explicit `uncertain` record with a fail-closed
-fallback. Explicit no-demand and stale evidence prefer `ignore`; low-confidence
-or conflicting evidence prefers `annotate`. None disappears silently.
+but never parsed as policy, detector reason codes remain only on the detection,
+and detectors cannot select dedupe keys. Proposal `reasonCodes` contain only
+boundary-owned policy classifications. Invalid detector output, including a
+non-string reason or standing-grant reference, becomes an explicit `uncertain`
+record with a fail-closed fallback. Explicit no-demand and stale evidence prefer
+`ignore`; low-confidence or conflicting evidence prefers `annotate`. None
+disappears silently.
 Observations default to 1 MiB and detections to 64 KiB; hosts can lower both
 limits. Map only consented, necessary fields, redact before this boundary, and
 set an application retention policy: cursor retention is not permission to
@@ -148,9 +151,11 @@ stays within that allowlist.
 Observation, provenance, and expiry times must be non-negative safe integer
 timestamps. Evidence beyond the configured future-skew allowance (five minutes
 by default) is ignored. Detector and grant callbacks are abortable and bounded
-to 30 seconds by default. A timeout is retained as fail-closed uncertainty;
-caller or runtime cancellation rejects the observation and is never converted
-into successful evidence. Timeout or cancellation does not release the
+to 30 seconds by default; configured timeouts cannot exceed the portable timer
+maximum of 2,147,483,647 milliseconds. A timeout is retained as fail-closed
+uncertainty, including when a callback's abort listener rejects first; caller or
+runtime cancellation rejects the observation and is never converted into
+successful evidence. Timeout or cancellation does not release the
 underlying callback reservation: an abort-ignoring promise remains charged
 against both `maxInFlight` and `maxInFlightBytes` until it actually settles.
 Reservations count the serialized observation and scope retained by detector
@@ -171,6 +176,8 @@ for the same scoped key. Each waiter owns its cancellation independently; work
 is aborted only when no waiters remain. Pending work is bounded to 1,000 keys
 and 64 MiB by default. Separate processes or boundary instances still need a
 host reservation protocol if callback-level exactly-once behavior is required.
+Restored seed records are ordered by numeric cursor before pagination, and
+duplicate seed cursors are rejected.
 
 `maxInFlight` and `maxInFlightBytes` are applied as separate per-class ceilings:
 once to transient keyed work and once to unsettled detector/grant callback

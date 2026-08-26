@@ -62,8 +62,9 @@ These names describe proposals, not effects. Every record says
 `authority: 'advisory'` and `requiresHostReview: true`; the boundary has no
 target, tool, sink, notification, or effect callback. The host must authorize
 again and settle any effect separately. Detector prose is retained but never
-becomes policy or authority, malformed output becomes explicit uncertainty,
-and only the host-owned observation can choose dedupe identity.
+becomes policy or authority, detector reason codes remain separate from
+boundary-owned proposal policy codes, malformed output becomes explicit
+uncertainty, and only the host-owned observation can choose dedupe identity.
 
 Confidence estimates demand probability; it is not an action score. Host
 disposition allowlists must retain `ignore` or `annotate` as a fail-closed

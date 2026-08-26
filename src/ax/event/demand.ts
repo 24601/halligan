@@ -188,6 +188,7 @@ const defaultMinimumConfidence: Readonly<Record<AxDemandDisposition, number>> =
     act: 0.95,
   };
 
+const maxTimerDelayMs = 2_147_483_647;
 const encoder = new TextEncoder();
 
 function bytes(value: unknown): number {
@@ -218,8 +219,10 @@ function finiteProbability(value: number, label: string): number {
   return value;
 }
 
-function nonEmpty(value: string, label: string): string {
-  if (!value.trim()) throw new Error(`${label} must be non-empty`);
+function nonEmpty(value: unknown, label: string): string {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new Error(`${label} must be a non-empty string`);
+  }
   return value;
 }
 
@@ -420,6 +423,12 @@ function validateDetection(detection: Readonly<AxDemandDetection>): void {
     throw new Error('detection.requestedDisposition is invalid');
   }
   nonEmpty(detection.reasonCode, 'detection.reasonCode');
+  if (detection.reason !== undefined) {
+    nonEmpty(detection.reason, 'detection.reason');
+  }
+  if (detection.standingGrantRef !== undefined) {
+    nonEmpty(detection.standingGrantRef, 'detection.standingGrantRef');
+  }
   validateProvenance(detection.evidence, 'detection.evidence');
   if (detection.expiresAt !== undefined) {
     finiteTimestamp(detection.expiresAt, 'detection.expiresAt');
@@ -488,21 +497,27 @@ async function runBoundedCallback<T>(
   if (signal?.aborted) throw new AxDemandCancelledError(signal.reason);
   const release = reserve(reservationBytes);
   const controller = new AbortController();
+  let terminalError:
+    | AxDemandCancelledError
+    | AxDemandCallbackTimeoutError
+    | undefined;
   let timeout: ReturnType<typeof setTimeout> | undefined;
   let onAbort: (() => void) | undefined;
   const cancellation = new Promise<never>((_, reject) => {
     onAbort = () => {
       const error = new AxDemandCancelledError(signal?.reason);
-      controller.abort(error);
+      terminalError = error;
       reject(error);
+      controller.abort(error);
     };
     signal?.addEventListener('abort', onAbort, { once: true });
   });
   const deadline = new Promise<never>((_, reject) => {
     timeout = setTimeout(() => {
       const error = new AxDemandCallbackTimeoutError();
-      controller.abort(error);
+      terminalError = error;
       reject(error);
+      controller.abort(error);
     }, timeoutMs);
   });
   const operation = Promise.resolve()
@@ -514,7 +529,7 @@ async function runBoundedCallback<T>(
       },
       (error) => {
         release();
-        throw error;
+        throw terminalError ?? error;
       }
     );
   try {
@@ -608,6 +623,17 @@ export class AxInMemoryDemandStore implements AxDemandStore {
           ? Number.POSITIVE_INFINITY
           : cursor + 1;
       this.nextCursor = Math.max(this.nextCursor, following);
+    }
+    this.records.sort(
+      (left, right) => Number(left.record.cursor) - Number(right.record.cursor)
+    );
+    for (let index = 1; index < this.records.length; index++) {
+      if (
+        this.records[index - 1]!.record.cursor ===
+        this.records[index]!.record.cursor
+      ) {
+        throw new Error('AxInMemoryDemandStore seed cursors must be unique');
+      }
     }
     this.enforceBounds();
   }
@@ -838,8 +864,8 @@ export class AxDemandBoundary {
       callbackTimeoutMs: options.policy?.callbackTimeoutMs ?? 30_000,
       maxInFlight: options.policy?.maxInFlight ?? 1_000,
       maxInFlightBytes: options.policy?.maxInFlightBytes ?? 64 * 1024 * 1024,
-      requireStandingGrantFor: options.policy?.requireStandingGrantFor ?? [
-        'act',
+      requireStandingGrantFor: [
+        ...(options.policy?.requireStandingGrantFor ?? ['act']),
       ],
       maxScopeBytes: options.policy?.maxScopeBytes ?? 16 * 1024,
       maxObservationBytes: options.policy?.maxObservationBytes ?? 1024 * 1024,
@@ -854,6 +880,7 @@ export class AxDemandBoundary {
       this.policy.proposalTtlMs <= 0 ||
       !Number.isSafeInteger(this.policy.callbackTimeoutMs) ||
       this.policy.callbackTimeoutMs <= 0 ||
+      this.policy.callbackTimeoutMs > maxTimerDelayMs ||
       !Number.isSafeInteger(this.policy.maxInFlight) ||
       this.policy.maxInFlight < 1 ||
       !Number.isSafeInteger(this.policy.maxInFlightBytes) ||
@@ -863,7 +890,10 @@ export class AxDemandBoundary {
       !Number.isSafeInteger(this.policy.maxObservationBytes) ||
       this.policy.maxObservationBytes < 1 ||
       !Number.isSafeInteger(this.policy.maxDetectionBytes) ||
-      this.policy.maxDetectionBytes < 1
+      this.policy.maxDetectionBytes < 1 ||
+      this.policy.requireStandingGrantFor.some(
+        (value) => !dispositions.includes(value)
+      )
     ) {
       throw new Error('AxDemandPolicy bounds are invalid');
     }
@@ -1064,7 +1094,7 @@ export class AxDemandBoundary {
     callbackBaseBytes: number
   ): Promise<Readonly<AxDemandProposal>> {
     const now = finiteTimestamp(this.now(), 'AxDemandBoundary.now()');
-    const reasonCodes = [detection.reasonCode];
+    const reasonCodes: string[] = [];
     let disposition = detection.requestedDisposition;
     let standingGrantState: AxDemandGrantState | undefined;
     const safeDisposition = (preferred: 'ignore' | 'annotate') =>
@@ -1130,17 +1160,19 @@ export class AxDemandBoundary {
       if (!detection.standingGrantRef || !this.validateStandingGrant) {
         standingGrantState = 'unknown';
       } else {
+        const validateStandingGrant = this.validateStandingGrant;
         try {
           standingGrantState = await runBoundedCallback(
             (callbackSignal) =>
-              this.validateStandingGrant?.(
+              validateStandingGrant.call(
+                undefined,
                 Object.freeze({
                   reference: detection.standingGrantRef!,
                   observation: frozenClone(observation),
                   scope: frozenClone(scope),
                   signal: callbackSignal,
                 })
-              ) ?? 'unknown',
+              ),
             signal,
             this.policy.callbackTimeoutMs,
             (size) => this.reserveCallback(size),
