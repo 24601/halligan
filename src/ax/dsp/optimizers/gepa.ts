@@ -771,7 +771,9 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
           )) as Record<string, string> | undefined;
           if (proposedMap) {
             for (const groupTarget of targetGroup) {
-              const proposed = proposedMap[groupTarget.id]?.trim();
+              const raw = proposedMap[groupTarget.id];
+              if (typeof raw !== 'string') continue;
+              const proposed = raw.trim();
               if (
                 proposed &&
                 validateGEPAComponentValue(groupTarget, proposed) === true

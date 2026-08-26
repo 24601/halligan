@@ -195,4 +195,88 @@ describe('GEPA reflection helpers', () => {
     expect(proposed).toBeUndefined();
     expect(calls).toBe(1);
   });
+
+  it('retries the default policy after an empty teacher value', async () => {
+    let calls = 0;
+    const ai = new AxMockAIService({
+      chatResponse: async () => {
+        calls++;
+        return {
+          results: [
+            {
+              index: 0,
+              content: calls === 1 ? 'New Value:   ' : 'New Value: retry_ok',
+              finishReason: 'stop',
+            },
+          ],
+        };
+      },
+    });
+
+    const proposed = await proposeGEPAComponentValue({
+      ai,
+      target: {
+        id: 'root::instruction',
+        kind: 'instruction',
+        current: 'Keep this',
+      },
+      currentValue: 'Keep this',
+      tuples: [],
+      maxAttempts: 2,
+    });
+
+    expect(proposed).toBe('retry_ok');
+    expect(calls).toBe(2);
+  });
+
+  it('passes an empty example list through when maxExamples is 0', async () => {
+    let seenExamples: number | undefined;
+    const proposed = await proposeGEPAComponentValue({
+      ai: {} as AxMockAIService,
+      target: {
+        id: 'root::instruction',
+        kind: 'instruction',
+        current: 'Keep this',
+      },
+      currentValue: 'Keep this',
+      tuples: [{ input: { value: 'one' }, prediction: {}, score: 0 }],
+      proposal: {
+        maxExamples: 0,
+        policy: (args) => {
+          seenExamples = args.reflectiveExamples.length;
+          return 'from references only';
+        },
+      },
+    });
+
+    expect(proposed).toBe('from references only');
+    expect(seenExamples).toBe(0);
+  });
+
+  it('records custom-policy exceptions and retries instead of declining', async () => {
+    const errors: Array<string | undefined> = [];
+    const proposed = await proposeGEPAComponentValue({
+      ai: {} as AxMockAIService,
+      target: {
+        id: 'root::instruction',
+        kind: 'instruction',
+        current: 'Keep this',
+      },
+      currentValue: 'Keep this',
+      tuples: [],
+      maxAttempts: 2,
+      proposal: {
+        policy: (args) => {
+          errors.push(args.previousValidationError);
+          if (args.attempt === 1) {
+            throw new Error('proposer unavailable');
+          }
+          return 'recovered proposal';
+        },
+      },
+    });
+
+    expect(proposed).toBe('recovered proposal');
+    expect(errors).toEqual([undefined, 'proposer unavailable']);
+  });
 });

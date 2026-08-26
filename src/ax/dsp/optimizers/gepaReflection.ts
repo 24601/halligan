@@ -193,13 +193,12 @@ const defaultGEPAProposalPolicy: AxGEPAProposalPolicy = async (args) => {
     additionalGuidance: args.additionalGuidance,
     feedbackSummary: args.feedbackSummary,
     previousValidationError: args.previousValidationError,
-    reflectiveExamples:
-      args.reflectiveExamples.length > 0
-        ? args.reflectiveExamples
-        : [{ input: {}, prediction: {}, score: 0 }],
+    reflectiveExamples: args.reflectiveExamples,
     traceDataset: args.traceDataset,
   } as any)) as any;
-  return (out?.newValue as string | undefined)?.trim() || undefined;
+  const proposed =
+    typeof out?.newValue === 'string' ? out.newValue.trim() : undefined;
+  return proposed === undefined ? undefined : proposed;
 };
 
 export async function proposeGEPAComponentValue(args: {
@@ -220,28 +219,52 @@ export async function proposeGEPAComponentValue(args: {
       ? args.tuples.length
       : Math.max(0, Math.floor(args.proposal.maxExamples));
   const reflectiveExamples = args.tuples.slice(0, maxExamples);
-  const policy = args.proposal?.policy ?? defaultGEPAProposalPolicy;
+  const customPolicy = args.proposal?.policy;
+  const policy = customPolicy ?? defaultGEPAProposalPolicy;
   for (let attempt = 0; attempt < attempts; attempt++) {
+    let proposed: string | undefined;
     try {
-      const candidate = (
-        await policy({
-          ai: args.ai,
-          target: args.target,
-          currentValue: args.currentValue,
-          reflectiveExamples,
-          feedbackSummary: args.feedbackSummary,
-          traceDataset,
-          references: args.proposal?.references ?? [],
-          additionalGuidance: args.proposal?.additionalGuidance,
-          previousValidationError,
-          attempt: attempt + 1,
-        })
-      )?.trim();
-      if (!candidate) return undefined;
-      const validation = validateGEPAComponentValue(args.target, candidate);
-      if (validation === true) return candidate;
-      previousValidationError = validation;
-    } catch {}
+      const raw = await policy({
+        ai: args.ai,
+        target: args.target,
+        currentValue: args.currentValue,
+        reflectiveExamples,
+        feedbackSummary: args.feedbackSummary,
+        traceDataset,
+        references: args.proposal?.references ?? [],
+        additionalGuidance: args.proposal?.additionalGuidance,
+        previousValidationError,
+        attempt: attempt + 1,
+      });
+      if (raw === undefined) {
+        if (customPolicy) return undefined;
+        previousValidationError = 'must be non-empty';
+        continue;
+      }
+      proposed = typeof raw === 'string' ? raw.trim() : undefined;
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+      previousValidationError =
+        error instanceof Error ? error.message : String(error);
+      continue;
+    }
+    if (!proposed) {
+      previousValidationError = 'must be non-empty';
+      continue;
+    }
+    const validation = validateGEPAComponentValue(args.target, proposed);
+    if (validation === true) return proposed;
+    previousValidationError = validation;
   }
   return undefined;
+}
+
+function isAbortError(error: unknown): boolean {
+  return (
+    (error instanceof Error && error.name === 'AbortError') ||
+    (typeof error === 'object' &&
+      error !== null &&
+      'name' in error &&
+      (error as { name?: unknown }).name === 'AbortError')
+  );
 }
