@@ -654,9 +654,10 @@ function hasPotentialCall(statement: readonly Token[]): boolean {
     const qualified = parseQualifiedPath(statement, index);
     const next = qualified ? statement[qualified.next] : undefined;
     if (next?.value === '(' || next?.kind === 'string') return true;
+    const suffix = statement[index + 1];
     if (
       (statement[index]?.value === ')' || statement[index]?.value === ']') &&
-      statement[index + 1]?.value === '('
+      (suffix?.value === '(' || suffix?.kind === 'string')
     ) {
       return true;
     }

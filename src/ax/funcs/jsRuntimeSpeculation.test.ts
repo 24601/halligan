@@ -690,6 +690,44 @@ describe('AxJSRuntime speculative programmatic tool calling', () => {
     });
   });
 
+  it.each([
+    ['parenthesized', '(tools.write)`new`'],
+    ['computed', 'tools["write"]`new`'],
+  ])(
+    'does not speculate across an earlier %s tagged host call',
+    async (_shape, writeCall) => {
+      const events: AxJSRuntimeSpeculationEvent[] = [];
+      const calls: string[] = [];
+      let value = 'old';
+      const write = async (strings: readonly string[]) => {
+        value = strings[0] ?? '';
+        calls.push(`write:${value}`);
+      };
+      const read = createTestCallable(async () => {
+        calls.push(`read:${value}`);
+        return value;
+      });
+
+      await expect(
+        run(
+          `${writeCall}; const result = await tools.read({}); return result;`,
+          { tools: { write, read } },
+          speculation(events, { 'tools.read': pure(true) })
+        )
+      ).resolves.toBe('new');
+      expect(calls).toEqual(['write:new', 'read:new']);
+      expect(events.some((event) => event.kind === 'dispatch')).toBe(false);
+      expect(events.some((event) => event.kind === 'hit')).toBe(false);
+      expect(events).toContainEqual({
+        kind: 'blocked',
+        tool: 'tools.read',
+        callIndex: 0,
+        deterministic: true,
+        reason: 'unsafe-dependency',
+      });
+    }
+  );
+
   it('executes calls inside branches and loops only in the worker', async () => {
     const events: AxJSRuntimeSpeculationEvent[] = [];
     const calls: string[] = [];
