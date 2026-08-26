@@ -258,6 +258,61 @@ describe('AxEventRuntime effects', () => {
     await runtime.close();
   });
 
+  it('continues reconciling later effects after an earlier parked record', async () => {
+    const store = new AxInMemoryEventStore();
+    const resolved = vi.fn();
+    const withResolver = new AxEventRuntime({
+      retryBaseMs: 1,
+      retryMaxMs: 1,
+      maxAttempts: 3,
+      store,
+      effectResolver: async (effect) => {
+        if (effect.operation === 'ledger.post') {
+          resolved();
+          return { status: 'succeeded', receipt: { posted: true } };
+        }
+        return { status: 'parked', reason: 'operator review required' };
+      },
+      routes: [
+        eventRoute({
+          id: 'effect-route',
+          match: { types: ['effect.requested'] },
+          action: 'wake',
+          target: eventTarget({
+            id: 'effect-target',
+            ai,
+            program: effectProgram(async (context) => {
+              const parked = await context.declareEffect({
+                operation: 'email.send',
+                idempotencyKey: 'email-first',
+              });
+              await context.markEffectDispatched(parked.id, parked.version);
+              const later = await context.declareEffect({
+                operation: 'ledger.post',
+                idempotencyKey: 'ledger-second',
+                replaySafety: 'idempotent',
+              });
+              await context.markEffectDispatched(later.id, later.version);
+              throw new Error('connection lost after first dispatch');
+            }),
+            mapInput: () => ({}),
+            retrySafety: 'effect-aware',
+          }),
+        }),
+      ],
+    });
+    await withResolver.start();
+    const receipt = await withResolver.publish(ingress('multi-effect'));
+    await withResolver.waitForIdle();
+    const effects = await withResolver.getEffects(receipt.deliveryIds[0]!);
+    expect(effects.map((effect) => effect.status).sort()).toEqual([
+      'parked',
+      'succeeded',
+    ]);
+    expect(resolved).toHaveBeenCalledOnce();
+    await withResolver.close();
+  });
+
   it('preserves unknown target behavior while parking its effect evidence', async () => {
     const store = new AxInMemoryEventStore();
     const forward = vi.fn(async (context: Readonly<AxEventContext>) => {

@@ -2474,7 +2474,12 @@ export class AxSQLiteEventStore
       this.db
         .prepare(
           `DELETE FROM event_effects
-           WHERE settled_at IS NOT NULL AND settled_at < ?`
+           WHERE settled_at IS NOT NULL AND settled_at < ?
+             AND NOT EXISTS (
+               SELECT 1 FROM event_deliveries d
+               WHERE d.id=event_effects.delivery_id
+                 AND d.status NOT IN (${TERMINAL.map(() => '?').join(',')})
+             )`
         )
         .run(
           now -
@@ -2482,7 +2487,8 @@ export class AxSQLiteEventStore
               retention.eventAndResultMs,
               retention.settledEffectsMs ??
                 retention.runMetadataAndDeadLettersMs
-            )
+            ),
+          ...TERMINAL
         );
       this.db
         .prepare('DELETE FROM event_dedupe WHERE created_at < ?')

@@ -1845,6 +1845,7 @@ export class AxEventRuntime {
     const fence = this.effectFence(delivery);
     const effects = await store.listEffects(delivery.id);
     this.assertRunActive(abortSignal);
+    const parkedReasons: string[] = [];
     for (let effect of effects) {
       if (
         effect.status === 'intent' ||
@@ -1868,7 +1869,10 @@ export class AxEventRuntime {
             { type: 'parked', at: this.clock.now(), reason },
             fence
           );
-          return effect.parkedReason;
+          parkedReasons.push(
+            effect.parkedReason ?? `Event effect ${effect.operation} is parked`
+          );
+          continue;
         }
         this.assertRunActive(abortSignal);
         if (
@@ -1906,9 +1910,10 @@ export class AxEventRuntime {
         }
       }
       if (effect.status === 'parked') {
-        return (
+        parkedReasons.push(
           effect.parkedReason ?? `Event effect ${effect.operation} is parked`
         );
+        continue;
       }
       if (
         effect.status === 'dispatched' &&
@@ -1923,10 +1928,12 @@ export class AxEventRuntime {
           { type: 'parked', at: this.clock.now(), reason },
           fence
         );
-        return effect.parkedReason;
+        parkedReasons.push(
+          effect.parkedReason ?? `Event effect ${effect.operation} is parked`
+        );
       }
     }
-    return;
+    return parkedReasons[0];
   }
 
   private async resolveEffect(

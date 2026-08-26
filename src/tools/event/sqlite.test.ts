@@ -197,6 +197,59 @@ describe('AxSQLiteEventStore', () => {
     await expired.close();
   });
 
+  it('does not prune settled effects while their delivery is still in flight', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const filename = join(directory, 'in-flight-settled.sqlite');
+    const clock = new AxManualEventClock(1_000);
+    const retention = {
+      eventAndResultMs: 100,
+      runMetadataAndDeadLettersMs: 1_000,
+      completedContinuationsMs: 1_000,
+      settledEffectsMs: 50,
+    };
+    const first = new AxSQLiteEventStore({ filename, clock, retention });
+    const receipt = await first.enqueue(storeRequest('in-flight', clock.now()));
+    const delivery = await first.claim('worker', clock.now(), 100);
+    const fence = {
+      deliveryId: delivery!.id,
+      fencingToken: delivery!.fencingToken!,
+    };
+    const effect = await first.declareEffect(
+      {
+        id: 'in-flight-settled-effect',
+        deliveryId: delivery!.id,
+        runId: 'in-flight-run',
+        identityScope: delivery!.identityScope,
+        operation: 'effect.in-flight',
+        idempotencyKey: 'in-flight-key',
+        createdAt: clock.now(),
+      },
+      fence
+    );
+    await first.transitionEffect(
+      effect.id,
+      effect.version,
+      {
+        type: 'settled',
+        at: clock.now(),
+        settlement: { status: 'succeeded' },
+      },
+      fence
+    );
+    await first.close();
+
+    clock.advanceBy(51);
+    const restarted = new AxSQLiteEventStore({ filename, clock, retention });
+    expect(await restarted.listEffects(receipt.deliveryIds[0]!)).toEqual([
+      expect.objectContaining({ status: 'succeeded' }),
+    ]);
+    expect(await restarted.getDelivery(receipt.deliveryIds[0]!)).toEqual(
+      expect.objectContaining({ status: 'claimed' })
+    );
+    await restarted.close();
+  });
+
   it('migrates schema-v1 databases and legacy retention objects', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
     directories.push(directory);
