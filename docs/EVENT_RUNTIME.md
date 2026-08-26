@@ -394,8 +394,10 @@ cleanup; because its external outcome is unknown, the manager does not report
 that component as disposed. A component with any failed or otherwise unsettled
 effect cannot be activated or replaced: both transitions preserve the failed
 inspection evidence and reject before candidate setup can acquire another
-resource. A failed activation remains retryable only when rollback settled and
-all registered effects are terminally disposed.
+resource. Replacement applies the same preflight to every non-active external
+dependency in its staged graph before any dependency or candidate setup runs. A
+failed activation remains retryable only when rollback settled and all
+registered effects are terminally disposed.
 
 `replace()` stages a new-version candidate and every active transitive dependent
 while the prior graph remains live. Staged dependency lookup prefers the staged

@@ -759,6 +759,70 @@ describe('AxEventComponentManager', () => {
     }
   );
 
+  it.each(['throwing', 'timed-out'] as const)(
+    'fences active replacement before activating a %s uncertain dependency',
+    async (failureMode) => {
+      let acquisitions = 0;
+      let disposerAttempts = 0;
+      const candidateSetup = vi.fn();
+      const manager = new AxEventComponentManager();
+      await manager.define({
+        id: 'uncertain-dependency',
+        version: '1',
+        activate: (context) =>
+          context.acquire('socket', () => {
+            acquisitions++;
+            return {
+              value: acquisitions,
+              dispose: () => {
+                disposerAttempts++;
+                if (failureMode === 'throwing') {
+                  throw new Error('socket close failed');
+                }
+                return new Promise<void>(() => undefined);
+              },
+            };
+          }),
+      });
+      await manager.define({
+        id: 'target',
+        version: '1',
+        activate: () => 'v1',
+      });
+      await manager.activate();
+      await expect(
+        manager.deactivate(
+          'uncertain-dependency',
+          failureMode === 'timed-out' ? { timeoutMs: 10 } : {}
+        )
+      ).rejects.toThrow('Failed to deactivate');
+      const failed = manager.inspect('uncertain-dependency');
+
+      await expect(
+        manager.replace({
+          id: 'target',
+          version: '2',
+          dependencies: ['uncertain-dependency'],
+          activate: (context) => {
+            candidateSetup();
+            return `v2:${context.dependency<number>('uncertain-dependency')}`;
+          },
+        })
+      ).rejects.toThrow('prior effect ownership is unsettled: socket');
+
+      expect(acquisitions).toBe(1);
+      expect(disposerAttempts).toBe(1);
+      expect(candidateSetup).not.toHaveBeenCalled();
+      expect(manager.inspect('uncertain-dependency')).toEqual(failed);
+      expect(manager.inspect('target')).toMatchObject({
+        version: '1',
+        dependencies: [],
+        state: 'active',
+      });
+      expect(manager.get('target')).toBe('v1');
+    }
+  );
+
   it('disposes an acquisition that completes after abort without publishing it', async () => {
     const setup = deferred();
     const dispose = vi.fn();

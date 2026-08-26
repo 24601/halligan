@@ -138,7 +138,8 @@ total cleanup wait; timeout records `disposer-timeout`, leaves state failed and
 uncertain, and continues later cleanup. Late disposer registration is diagnosed
 and rejected without invoking an untracked callback. Failed or otherwise
 unsettled effect ownership fences both activation and replacement before new
-setup runs; a failed activation is retryable only when rollback terminally
+setup runs, including non-active external dependencies introduced by active
+replacement. A failed activation is retryable only when rollback terminally
 disposed every registered effect.
 
 Runtime close fences source startup before aborting in-flight activation. A

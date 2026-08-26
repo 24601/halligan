@@ -606,6 +606,11 @@ export class AxEventComponentManager {
         }
       }
       const dependencyOrder = this.activationOrder([...externalDependencies]);
+      for (const dependency of dependencyOrder) {
+        if (dependency.state !== 'active') {
+          this.assertSettledForTransition(dependency, 'replace');
+        }
+      }
       const stagedOrder = stagedTopologicalOrder(staged);
       const activatedDependencies: ComponentRecord[] = [];
       const activatedStaged: ComponentRecord[] = [];

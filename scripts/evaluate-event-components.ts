@@ -513,6 +513,7 @@ async function uncertainEffectOwnershipBoundary() {
     let acquisitions = 0;
     let disposerAttempts = 0;
     let replacementActivations = 0;
+    let activeReplacementSetups = 0;
     const manager = new AxEventComponentManager();
     await manager.define({
       id: `boundary-${failureMode}-ownership`,
@@ -547,13 +548,43 @@ async function uncertainEffectOwnershipBoundary() {
         },
       }),
     ]);
+    await manager.define({
+      id: `boundary-${failureMode}-target`,
+      version: '1',
+      activate: () => 'v1',
+    });
+    await manager.activate(`boundary-${failureMode}-target`);
+    const activeReplacement = await manager
+      .replace({
+        id: `boundary-${failureMode}-target`,
+        version: '2',
+        dependencies: [`boundary-${failureMode}-ownership`],
+        activate: () => {
+          activeReplacementSetups++;
+          return 'v2';
+        },
+      })
+      .then(
+        () => 'fulfilled' as const,
+        () => 'rejected' as const
+      );
     const failedAfterTransitions = manager.inspect()[0];
+    const targetAfterReplacement = manager.inspect(
+      `boundary-${failureMode}-target`
+    );
     return {
       activationRejected: activation.status === 'rejected',
       replacementRejected: replacement.status === 'rejected',
+      activeDependencyReplacementRejected: activeReplacement === 'rejected',
       noSecondAcquisition: acquisitions === 1,
       disposerInvokedOnce: disposerAttempts === 1,
       replacementNotActivated: replacementActivations === 0,
+      activeReplacementNotSetUp: activeReplacementSetups === 0,
+      priorActiveTargetPreserved:
+        targetAfterReplacement?.state === 'active' &&
+        targetAfterReplacement.version === '1' &&
+        targetAfterReplacement.dependencies.length === 0 &&
+        manager.get(`boundary-${failureMode}-target`) === 'v1',
       failedEvidencePreserved:
         failedBeforeTransitions?.state === 'failed' &&
         failedBeforeTransitions.effects[0]?.state === 'failed' &&
@@ -1099,9 +1130,12 @@ function assertManagedResults(result: typeof results): void {
     ...Object.values(boundaries.uncertainEffectOwnership).flatMap((value) => [
       value.activationRejected !== true,
       value.replacementRejected !== true,
+      value.activeDependencyReplacementRejected !== true,
       value.noSecondAcquisition !== true,
       value.disposerInvokedOnce !== true,
       value.replacementNotActivated !== true,
+      value.activeReplacementNotSetUp !== true,
+      value.priorActiveTargetPreserved !== true,
       value.failedEvidencePreserved !== true,
     ]),
     boundaries.inactiveReplacement.definedCandidateActivations !== 0,
