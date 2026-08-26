@@ -158,6 +158,9 @@ and partial disposal includes the transitive dependent definition closure.
 `AxEventRuntime` uses it internally for source handles and fences overlapping
 startup/close. Cleanup keeps reverse order but can be bounded; timeout is
 reported as failed and uncertain while later cleanup and runtime close proceed.
+Failed or otherwise unsettled effect ownership fences reactivation and
+replacement before another external resource can be acquired; retry remains
+available after a failed activation only when rollback fully settled.
 Caller-created protocol clients remain caller-owned.
 
 This is not a durable plugin loader or a general transaction system. It does

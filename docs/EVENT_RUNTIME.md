@@ -375,9 +375,10 @@ transitive dependent definition closure, including inactive dependents, so it
 cannot leave a defined component with a permanently disposed dependency.
 
 ```text
-defined / failed -> activating -> active -> deactivating -> defined
-                         |                              |
-                         +-- rollback -> failed        +-- dispose -> disposed
+defined / failed (cleanup settled) -> activating -> active -> deactivating -> defined
+                                           |                              |
+                                           +-- rollback -> failed        +-- dispose -> disposed
+failed (effect ownership unsettled) -> inspect only; activate/replace are fenced
 ```
 
 All graph-changing calls share one serialized transition queue, so conflicting
@@ -390,7 +391,11 @@ each registered disposer once in reverse order. Pass `timeoutMs` to a lifecycle
 transition to bound the total cleanup wait. A timed-out disposer is left
 `failed`, emits a `disposer-timeout` diagnostic, and does not block later
 cleanup; because its external outcome is unknown, the manager does not report
-that component as disposed.
+that component as disposed. A component with any failed or otherwise unsettled
+effect cannot be activated or replaced: both transitions preserve the failed
+inspection evidence and reject before candidate setup can acquire another
+resource. A failed activation remains retryable only when rollback settled and
+all registered effects are terminally disposed.
 
 `replace()` stages a new-version candidate and every active transitive dependent
 while the prior graph remains live. Staged dependency lookup prefers the staged
@@ -404,8 +409,10 @@ after retirement began.
 
 Replacement does not implicitly activate an inactive component. Replacing a
 `defined` component swaps its definition and leaves it `defined`; replacing a
-`failed` component installs a fresh `defined` version. Call `activate()`
-explicitly afterward. A `disposed` component cannot be replaced.
+`failed` component installs a fresh `defined` version only when every prior
+effect is terminally disposed. Call `activate()` explicitly afterward. A
+`failed` component with unsettled effect ownership and a `disposed` component
+cannot be replaced.
 
 Use `context.acquire(label, setup)` for resources: setup must return both the
 value and its disposer. A missing disposer fails activation with an

@@ -101,6 +101,36 @@ describe('AxEventComponentManager', () => {
     });
   });
 
+  it('retries failed activation after rollback fully settles', async () => {
+    let attempts = 0;
+    const dispose = vi.fn();
+    const manager = new AxEventComponentManager();
+    await manager.define({
+      id: 'recoverable',
+      version: '1',
+      activate: (context) => {
+        attempts++;
+        context.addDisposer('socket', dispose);
+        if (attempts === 1) throw new Error('activation failed');
+        return 'ready';
+      },
+    });
+
+    await expect(manager.activate()).rejects.toThrow(
+      'activation transaction failed'
+    );
+    expect(manager.inspect('recoverable')).toMatchObject({
+      state: 'failed',
+      effects: [{ label: 'socket', state: 'disposed' }],
+    });
+
+    await manager.activate();
+
+    expect(attempts).toBe(2);
+    expect(dispose).toHaveBeenCalledOnce();
+    expect(manager.get('recoverable')).toBe('ready');
+  });
+
   it('disposes effects in reverse registration order and continues after errors', async () => {
     const lifecycle: string[] = [];
     const manager = new AxEventComponentManager();
@@ -129,7 +159,7 @@ describe('AxEventComponentManager', () => {
     });
   });
 
-  it('rejects late teardown registration without starting untracked cleanup', async () => {
+  it('rejects late teardown registration and fences reacquisition', async () => {
     const lifecycle: string[] = [];
     let activations = 0;
     let lateDisposals = 0;
@@ -167,17 +197,13 @@ describe('AxEventComponentManager', () => {
     ]);
 
     expect(deactivationResult.status).toBe('rejected');
-    expect(reactivationResult.status).toBe('fulfilled');
-    expect(lifecycle).toEqual([
-      'activate:1',
-      'teardown:start',
-      'teardown:end',
-      'activate:2',
-    ]);
+    expect(reactivationResult.status).toBe('rejected');
+    expect(lifecycle).toEqual(['activate:1', 'teardown:start', 'teardown:end']);
     expect(lateDisposals).toBe(0);
     expect(overlapped).toBe(false);
     expect(manager.inspect('late-registration')).toMatchObject({
-      state: 'active',
+      state: 'failed',
+      effects: [expect.objectContaining({ state: 'failed' })],
       diagnostics: expect.arrayContaining([
         expect.objectContaining({ code: 'late-disposer' }),
       ]),
@@ -672,6 +698,66 @@ describe('AxEventComponentManager', () => {
       ],
     });
   });
+
+  it.each(['throwing', 'timed-out'] as const)(
+    'fences activation and replacement after %s cleanup leaves ownership unsettled',
+    async (failureMode) => {
+      let acquisitions = 0;
+      let disposerAttempts = 0;
+      const replacementActivation = vi.fn();
+      const manager = new AxEventComponentManager();
+      await manager.define({
+        id: 'owned-resource',
+        version: '1',
+        activate: (context) =>
+          context.acquire('socket', () => {
+            acquisitions++;
+            return {
+              value: acquisitions,
+              dispose: () => {
+                disposerAttempts++;
+                if (failureMode === 'throwing') {
+                  throw new Error('socket close failed');
+                }
+                return new Promise<void>(() => undefined);
+              },
+            };
+          }),
+      });
+      await manager.activate();
+      await expect(
+        manager.dispose(
+          'owned-resource',
+          failureMode === 'timed-out' ? { timeoutMs: 10 } : {}
+        )
+      ).rejects.toThrow('Failed to dispose');
+
+      const failed = manager.inspect('owned-resource');
+      expect(failed).toMatchObject({
+        version: '1',
+        state: 'failed',
+        effects: [{ label: 'socket', state: 'failed' }],
+      });
+      expect(acquisitions).toBe(1);
+      expect(disposerAttempts).toBe(1);
+
+      await expect(manager.activate('owned-resource')).rejects.toThrow(
+        'prior effect ownership is unsettled: socket'
+      );
+      await expect(
+        manager.replace({
+          id: 'owned-resource',
+          version: '2',
+          activate: replacementActivation,
+        })
+      ).rejects.toThrow('prior effect ownership is unsettled: socket');
+
+      expect(acquisitions).toBe(1);
+      expect(disposerAttempts).toBe(1);
+      expect(replacementActivation).not.toHaveBeenCalled();
+      expect(manager.inspect('owned-resource')).toEqual(failed);
+    }
+  );
 
   it('disposes an acquisition that completes after abort without publishing it', async () => {
     const setup = deferred();

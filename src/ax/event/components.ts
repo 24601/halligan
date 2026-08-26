@@ -456,6 +456,11 @@ export class AxEventComponentManager {
       throwIfAborted(options.signal);
       const cleanupDeadline = transitionDeadline(options.timeoutMs);
       const order = this.activationOrder(this.normalizeTargets(ids, false));
+      for (const record of order) {
+        if (record.state !== 'active') {
+          this.assertSettledForTransition(record, 'activate');
+        }
+      }
       const activated: ComponentRecord[] = [];
       try {
         for (const record of order) {
@@ -556,6 +561,9 @@ export class AxEventComponentManager {
         throw new Error(
           `Replacement for event component ${normalized.id} must use a new version`
         );
+      }
+      if (previous.state !== 'active') {
+        this.assertSettledForTransition(previous, 'replace');
       }
       this.assertLiveDependencies(normalized);
       this.assertReplacementAcyclic(normalized);
@@ -964,6 +972,19 @@ export class AxEventComponentManager {
       );
     }
     return errors;
+  }
+
+  private assertSettledForTransition(
+    record: ComponentRecord,
+    transition: 'activate' | 'replace'
+  ): void {
+    const unsettled = record.effects.filter(
+      (effect) => effect.state !== 'disposed'
+    );
+    if (unsettled.length === 0) return;
+    throw new Error(
+      `Cannot ${transition} event component ${record.definition.id} while prior effect ownership is unsettled: ${unsettled.map((effect) => effect.label).join(', ')}`
+    );
   }
 
   private assertLiveDependencies(

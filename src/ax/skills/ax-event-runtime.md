@@ -136,7 +136,10 @@ definition closure. Abort is cooperative and detached after activation commits;
 teardown invokes all registered cleanup in reverse order. `timeoutMs` bounds the
 total cleanup wait; timeout records `disposer-timeout`, leaves state failed and
 uncertain, and continues later cleanup. Late disposer registration is diagnosed
-and rejected without invoking an untracked callback.
+and rejected without invoking an untracked callback. Failed or otherwise
+unsettled effect ownership fences both activation and replacement before new
+setup runs; a failed activation is retryable only when rollback terminally
+disposed every registered effect.
 
 Runtime close fences source startup before aborting in-flight activation. A
 source handle returned after that abort is closed transactionally, and no later
