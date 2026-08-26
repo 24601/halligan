@@ -10,6 +10,7 @@
  */
 
 import type { AxAIService } from '../ai/types.js';
+import { isBulletApplicable } from '../dsp/optimizers/acePlaybook.js';
 import type { AxACEPlaybook } from '../dsp/optimizers/aceTypes.js';
 import type { AxPlaybookOptions, AxPlaybookSnapshot } from '../dsp/playbook.js';
 import type { AxAgentFailureSignal } from './agentInternal/failureReport.js';
@@ -156,7 +157,7 @@ export function collectCoveredFailureSignatures(
   const liveBulletIds = new Set<string>();
   for (const bullets of Object.values(snapshot.playbook?.sections ?? {})) {
     for (const bullet of bullets ?? []) {
-      liveBulletIds.add(bullet.id);
+      if (isBulletApplicable(bullet)) liveBulletIds.add(bullet.id);
     }
   }
   const history = snapshot.artifact?.history ?? [];

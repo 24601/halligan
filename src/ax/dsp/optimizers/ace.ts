@@ -325,7 +325,7 @@ export class AxACEOptimizedProgram<
     const combinedInstruction = [
       originalDescription.trim(),
       '',
-      renderPlaybook(this.playbook),
+      renderPlaybook(this.playbook, { includeInactive: true }),
     ]
       .filter((block) => block && block.trim().length > 0)
       .join('\n\n');
@@ -514,7 +514,8 @@ export class AxACE extends AxBaseOptimizer {
           // Compose prompt with current playbook
           const composedInstruction = this.composeInstruction(
             baseInstruction ?? originalDescription,
-            this.playbook
+            this.playbook,
+            { includeInactive: true }
           );
           (program as any).setDescription?.(composedInstruction);
 
@@ -613,7 +614,8 @@ export class AxACE extends AxBaseOptimizer {
           if (resolvedOperations.length > 0 && appliedDeltaIds.length > 0) {
             dedupePlaybookByContent(
               this.playbook,
-              this.aceConfig.similarityThreshold
+              this.aceConfig.similarityThreshold,
+              appliedDeltaIds
             );
           }
 
@@ -803,7 +805,8 @@ export class AxACE extends AxBaseOptimizer {
       }
       dedupePlaybookByContent(
         this.playbook,
-        this.aceConfig.similarityThreshold
+        this.aceConfig.similarityThreshold,
+        appliedDeltaIds
       );
     }
 
@@ -1250,7 +1253,9 @@ export class AxACE extends AxBaseOptimizer {
         const content = typeof contentRaw === 'string' ? contentRaw.trim() : '';
 
         const hasMetadataUpdate =
-          'metadata' in entry || 'evidence' in entry || 'supersedes' in entry;
+          entry.metadata != null ||
+          entry.evidence != null ||
+          entry.supersedes != null;
         if (
           (type === 'ADD' && content.length === 0) ||
           (type === 'UPDATE' && content.length === 0 && !hasMetadataUpdate)
@@ -1473,7 +1478,7 @@ export class AxACE extends AxBaseOptimizer {
         generator_answer: this.stringifyBounded(generatorOutput.answer),
         generator_reasoning: generatorOutput.reasoning,
         playbook: JSON.stringify({
-          markdown: renderPlaybook(this.playbook),
+          markdown: renderPlaybook(this.playbook, { includeInactive: true }),
           structured: this.playbook,
         }),
         expected_answer:
@@ -1524,7 +1529,7 @@ export class AxACE extends AxBaseOptimizer {
     try {
       const outputRaw = await curator.forward(curatorAI, {
         playbook: JSON.stringify({
-          markdown: renderPlaybook(playbook),
+          markdown: renderPlaybook(playbook, { includeInactive: true }),
           structured: playbook,
         }),
         reflection: JSON.stringify(reflection),

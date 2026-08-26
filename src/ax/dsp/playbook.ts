@@ -83,6 +83,7 @@ export class AxPlaybook<IN = any, OUT extends AxGenOut = AxGenOut> {
   private readonly baseInstruction: string | undefined;
   private started = false;
   private applyHook?: (rendered: string) => void;
+  private lastRenderOptions?: Readonly<AxACEPlaybookRenderOptions>;
 
   constructor(
     program: Readonly<AxGen<IN, OUT>>,
@@ -166,6 +167,7 @@ export class AxPlaybook<IN = any, OUT extends AxGenOut = AxGenOut> {
       return;
     }
     if (renderOptions) {
+      this.lastRenderOptions = renderOptions;
       const rendered = this.render(renderOptions);
       if (this.applyHook) {
         this.applyHook(rendered);
@@ -244,10 +246,13 @@ export class AxPlaybook<IN = any, OUT extends AxGenOut = AxGenOut> {
 
   private inject(): void {
     if (this.applyHook) {
-      this.applyHook(this.render());
+      this.applyHook(this.render(this.lastRenderOptions));
       return;
     }
-    this.engine.applyCurrentState(this.program as AxGen<IN, OUT>);
+    this.engine.applyCurrentState(
+      this.program as AxGen<IN, OUT>,
+      this.lastRenderOptions
+    );
   }
 }
 

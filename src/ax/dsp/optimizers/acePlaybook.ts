@@ -474,8 +474,10 @@ function pruneSectionForAddition(
  */
 export function dedupePlaybookByContent(
   playbook: AxACEPlaybook,
-  _similarityThreshold = 0.95
+  _similarityThreshold = 0.95,
+  updatedBulletIds?: string[]
 ): void {
+  const survivingIds = new Map<string, string>();
   for (const [sectionName, bullets] of Object.entries(playbook.sections)) {
     const seen = new Map<string, AxACEBullet>();
     const unique: AxACEBullet[] = [];
@@ -484,6 +486,7 @@ export function dedupePlaybookByContent(
       const key = bullet.content.trim().toLowerCase();
       const existing = seen.get(key);
       if (existing) {
+        survivingIds.set(bullet.id, existing.id);
         // Merge counters if they are near-identical
         existing.helpfulCount += bullet.helpfulCount;
         existing.harmfulCount += bullet.harmfulCount;
@@ -509,6 +512,13 @@ export function dedupePlaybookByContent(
     }
 
     playbook.sections[sectionName] = unique;
+  }
+
+  if (updatedBulletIds) {
+    for (let index = 0; index < updatedBulletIds.length; index++) {
+      const current = updatedBulletIds[index]!;
+      updatedBulletIds[index] = survivingIds.get(current) ?? current;
+    }
   }
 
   recomputePlaybookStats(playbook);
@@ -657,9 +667,9 @@ function mergeBulletEvidence(
   const confidence = normalizeConfidence(
     host?.confidence ?? curator?.confidence
   );
-  const applicability = normalizeApplicability(
-    curator?.applicability ?? existing?.applicability
-  );
+  const nextApplicability = normalizeApplicability(curator?.applicability);
+  const applicability =
+    nextApplicability ?? normalizeApplicability(existing?.applicability);
   const lifecycle = curator?.lifecycle
     ? {
         ...(existing?.lifecycle ?? {}),
