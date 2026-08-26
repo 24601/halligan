@@ -1447,6 +1447,10 @@ export class AxAgentSessionHost {
   private readonly onEvent?: AxAgentSessionHostOptions['onEvent'];
   private readonly liveAgents = new Map<string, LiveAgent>();
   private readonly controllers = new Map<string, AbortController>();
+  private readonly rootAbortListeners = new Map<
+    string,
+    { signal: AbortSignal; listener: () => void }
+  >();
   private readonly ownedEpochs = new Map<string, number>();
   private detachScheduler?: () => void;
   private closed = false;
@@ -1546,14 +1550,20 @@ export class AxAgentSessionHost {
       saved.root.epoch
     );
     if (options.abortSignal) {
-      const cancel = () => {
-        void client.cancel().catch(() => {
+      const signal = options.abortSignal;
+      const listener = () => {
+        this.rootAbortListeners.delete(saved.root.id);
+        void this.cancelRoot(saved.root.id).catch(() => {
           // A host that was already closed owns no further cancellation work.
         });
       };
-      if (options.abortSignal.aborted) await client.cancel();
-      else
-        options.abortSignal.addEventListener('abort', cancel, { once: true });
+      this.rootAbortListeners.set(saved.root.id, { signal, listener });
+      signal.addEventListener('abort', listener, { once: true });
+      if (signal.aborted) {
+        signal.removeEventListener('abort', listener);
+        this.rootAbortListeners.delete(saved.root.id);
+        await this.cancelRoot(saved.root.id);
+      }
     }
     return client;
   }
@@ -1629,6 +1639,10 @@ export class AxAgentSessionHost {
     if (this.closed) return;
     this.closed = true;
     this.detachScheduler?.();
+    for (const { signal, listener } of this.rootAbortListeners.values()) {
+      signal.removeEventListener('abort', listener);
+    }
+    this.rootAbortListeners.clear();
     if (options.abort) {
       for (const controller of this.controllers.values()) {
         controller.abort('Retained agent session host closed');
@@ -1650,6 +1664,23 @@ export class AxAgentSessionHost {
     parentEpoch: number,
     registrationKey: string,
     input: unknown
+  ): Promise<AxAgentSessionHandle> {
+    return this.spawnAdmitted(
+      parentId,
+      parentCapability,
+      parentEpoch,
+      registrationKey,
+      input
+    );
+  }
+
+  private async spawnAdmitted(
+    parentId: string,
+    parentCapability: string,
+    parentEpoch: number,
+    registrationKey: string,
+    input: unknown,
+    onAdmitted?: (handle: Readonly<AxAgentSessionHandle>) => void
   ): Promise<AxAgentSessionHandle> {
     this.assertOpen();
     const clonedInput = cloneStructured(input);
@@ -1732,6 +1763,7 @@ export class AxAgentSessionHost {
         };
       }
     );
+    onAdmitted?.(admitted.handle);
     await this.enqueueSafely(admitted.record, admitted.message);
     await this.emit('queued', admitted.record, admitted.message.id);
     return cloneStructured(admitted.handle);
@@ -1778,6 +1810,25 @@ export class AxAgentSessionHost {
     handle: Readonly<AxAgentSessionHandle>,
     input: unknown,
     mode: AxAgentSessionMessageMode
+  ): Promise<AxAgentSessionSendReceipt> {
+    return this.sendAdmitted(
+      parentId,
+      parentCapability,
+      parentEpoch,
+      handle,
+      input,
+      mode
+    );
+  }
+
+  private async sendAdmitted(
+    parentId: string,
+    parentCapability: string,
+    parentEpoch: number,
+    handle: Readonly<AxAgentSessionHandle>,
+    input: unknown,
+    mode: AxAgentSessionMessageMode,
+    onAdmitted?: () => void
   ): Promise<AxAgentSessionSendReceipt> {
     this.assertOpen();
     if (mode !== 'steer' && mode !== 'follow-up') {
@@ -1839,6 +1890,7 @@ export class AxAgentSessionHost {
       };
     });
 
+    onAdmitted?.();
     let interruptAccepted: boolean | undefined;
     if (result.activeJobId) {
       interruptAccepted = await this.cancelScheduledJob(
@@ -1865,33 +1917,29 @@ export class AxAgentSessionHost {
     this.assertOpen();
     const root = await this.rootForSession(sessionId);
     const outcome = await this.mutate(root.root.id, (snapshot) => {
-      const jobs: string[] = [];
-      const affected: AxAgentSessionRecord[] = [];
       this.assertParent(snapshot, sessionId, capability, epoch);
       const targetId = handle
         ? this.assertHandle(snapshot, sessionId, handle).handle.id
         : sessionId;
-      const ids = this.descendants(snapshot, targetId, true);
-      if (targetId === snapshot.root.id) snapshot.root.status = 'cancelled';
-      for (const id of ids) {
-        const record = snapshot.sessions[id];
-        if (!record) continue;
-        for (const message of record.mailbox) {
-          if (message.status === 'pending') {
-            message.status = 'cancelled';
-            message.completedAt = this.now();
-            jobs.push(message.jobId);
-          } else if (message.status === 'running') {
-            message.cancelRequested = true;
-            jobs.push(message.jobId);
-          }
-        }
-        record.status = record.activeMessageId ? 'cancelling' : 'cancelled';
-        record.updatedAt = this.now();
-        if (!record.activeMessageId) affected.push(cloneStructured(record));
-      }
-      return { jobs, affected };
+      return this.cancelInSnapshot(snapshot, targetId);
     });
+    await this.finishCancellation(outcome);
+  }
+
+  private async cancelRoot(rootId: string): Promise<void> {
+    this.assertOpen();
+    const outcome = await this.mutate(rootId, (snapshot) =>
+      this.cancelInSnapshot(snapshot, snapshot.root.id)
+    );
+    await this.finishCancellation(outcome);
+  }
+
+  private async finishCancellation(
+    outcome: Readonly<{
+      jobs: readonly string[];
+      affected: readonly AxAgentSessionRecord[];
+    }>
+  ): Promise<void> {
     for (const job of outcome.jobs) {
       await this.cancelScheduledJob(job, 'Retained agent session cancelled');
     }
@@ -2042,9 +2090,14 @@ export class AxAgentSessionHost {
         },
         returns: handleSchema,
         func: async (args, extra) => {
-          const handle = await client.spawn(args.agent, args.input);
-          registerContinuation(extra, handle);
-          return handle;
+          return this.spawnAdmitted(
+            sessionId,
+            capability,
+            epoch,
+            args.agent,
+            args.input,
+            (handle) => registerContinuation(extra, handle)
+          );
         },
       },
       {
@@ -2097,9 +2150,15 @@ export class AxAgentSessionHost {
         },
         returns: objectSchema,
         func: async (args, extra) => {
-          const receipt = await client.send(args.handle, args.input, args.mode);
-          registerContinuation(extra, args.handle);
-          return receipt;
+          return this.sendAdmitted(
+            sessionId,
+            capability,
+            epoch,
+            args.handle,
+            args.input,
+            args.mode,
+            () => registerContinuation(extra, args.handle)
+          );
         },
       },
       {
@@ -2134,6 +2193,22 @@ export class AxAgentSessionHost {
   private async dispatch(job: Readonly<AxAgentSessionJob>): Promise<void> {
     if (this.closed) return;
     if (this.ownedEpochs.get(job.rootId) !== job.epoch) return;
+    if (this.controllers.has(job.id)) return;
+    const controller = new AbortController();
+    this.controllers.set(job.id, controller);
+    try {
+      await this.dispatchControlled(job, controller);
+    } finally {
+      if (this.controllers.get(job.id) === controller) {
+        this.controllers.delete(job.id);
+      }
+    }
+  }
+
+  private async dispatchControlled(
+    job: Readonly<AxAgentSessionJob>,
+    controller: AbortController
+  ): Promise<void> {
     const attemptId = randomUUID();
     const claimed = await this.mutateAtEpoch(
       job.rootId,
@@ -2179,8 +2254,6 @@ export class AxAgentSessionHost {
     if (!claimed) return;
     await this.emit('running', claimed.record, claimed.message.id);
 
-    const controller = new AbortController();
-    this.controllers.set(job.id, controller);
     let live: LiveAgent | undefined;
     let result: unknown;
     let failure: unknown;
@@ -2189,7 +2262,13 @@ export class AxAgentSessionHost {
     let nextArtifacts: unknown;
     let snapshotErrorMessage: string | undefined;
     try {
+      if (controller.signal.aborted) {
+        throw new DOMException('Aborted', 'AbortError');
+      }
       live = await this.liveAgent(claimed.record);
+      if (controller.signal.aborted) {
+        throw new DOMException('Aborted', 'AbortError');
+      }
       live.agent.resetUsage();
       const ai = live.registration.ai ?? this.ai;
       if (!ai) {
@@ -2263,7 +2342,6 @@ export class AxAgentSessionHost {
         usage = normalizeUsage(live.agent.getUsage());
         if (!this.usesLiveAgentCache()) this.stopAgent(live.agent);
       }
-      this.controllers.delete(job.id);
     }
 
     const completion = await this.mutateAtEpoch(
@@ -2333,7 +2411,7 @@ export class AxAgentSessionHost {
         }
         record.updatedAt = this.now();
         if (
-          this.committedTokens(snapshot) +
+          this.durableTokens(snapshot) +
             snapshot.root.limits.maxTokensPerMessage >
           snapshot.root.limits.maxTokens
         ) {
@@ -2374,7 +2452,7 @@ export class AxAgentSessionHost {
       }
     );
 
-    if (completion?.rollback) {
+    if (completion?.rollback || snapshotErrorMessage) {
       const current = this.liveAgents.get(job.sessionId);
       if (current && current === live) {
         this.stopLiveAgent(job.sessionId);
@@ -2523,6 +2601,34 @@ export class AxAgentSessionHost {
       );
       return false;
     }
+  }
+
+  private cancelInSnapshot(
+    snapshot: AxAgentSessionRegistrySnapshot,
+    targetId: string
+  ): { jobs: string[]; affected: AxAgentSessionRecord[] } {
+    const jobs: string[] = [];
+    const affected: AxAgentSessionRecord[] = [];
+    const ids = this.descendants(snapshot, targetId, true);
+    if (targetId === snapshot.root.id) snapshot.root.status = 'cancelled';
+    for (const id of ids) {
+      const record = snapshot.sessions[id];
+      if (!record) continue;
+      for (const message of record.mailbox) {
+        if (message.status === 'pending') {
+          message.status = 'cancelled';
+          message.completedAt = this.now();
+          jobs.push(message.jobId);
+        } else if (message.status === 'running') {
+          message.cancelRequested = true;
+          jobs.push(message.jobId);
+        }
+      }
+      record.status = record.activeMessageId ? 'cancelling' : 'cancelled';
+      record.updatedAt = this.now();
+      if (!record.activeMessageId) affected.push(cloneStructured(record));
+    }
+    return { jobs, affected };
   }
 
   private async cancelScheduledJob(

@@ -180,6 +180,50 @@ class EagerMutationAgent implements AxRetainedAgent<WorkInput, WorkOutput> {
   stop(): void {}
 }
 
+class SnapshotFailOnceAgent implements AxRetainedAgent<WorkInput, WorkOutput> {
+  static created = 0;
+  static stopped = 0;
+  private history: string[] = [];
+
+  constructor() {
+    SnapshotFailOnceAgent.created++;
+  }
+
+  async forward(
+    _ai: Readonly<AxAIService>,
+    input: WorkInput
+  ): Promise<WorkOutput> {
+    this.history.push(input.value);
+    return {
+      value: input.value,
+      count: this.history.length,
+      history: [...this.history],
+    };
+  }
+
+  getState(): AxAgentState {
+    if (this.history.includes('first')) throw new Error('snapshot failed');
+    return state(this.history);
+  }
+
+  setState(value?: AxAgentState): void {
+    const history = value?.runtimeBindings.history;
+    this.history = Array.isArray(history)
+      ? history.filter((item): item is string => typeof item === 'string')
+      : [];
+  }
+
+  getUsage(): AxAgentUsage {
+    return { actor: [], responder: [] };
+  }
+
+  resetUsage(): void {}
+
+  stop(): void {
+    SnapshotFailOnceAgent.stopped++;
+  }
+}
+
 class ArtifactAgent implements AxRetainedAgent<WorkInput, WorkOutput> {
   private artifact = 'empty';
 
@@ -749,6 +793,71 @@ describe('retained child agent sessions', () => {
     await expect(
       root.send(handle, { value: 'denied' }, 'follow-up')
     ).rejects.toMatchObject({ limit: 'maxTokens' });
+  });
+
+  it('keeps admitted queued work while other attempts hold token reservations', async () => {
+    const sessions = host();
+    const root = await sessions.createRoot({
+      authorizedChildren: ['worker'],
+    });
+    const first = await root.spawn('worker', {
+      value: 'first',
+      delayMs: 300,
+      tokens: 1,
+    });
+    const others = await Promise.all(
+      ['second', 'third', 'fourth'].map((value) =>
+        root.spawn('worker', { value, delayMs: 1_000, tokens: 1 })
+      )
+    );
+    await Promise.all(
+      [first, ...others].map((handle) =>
+        waitFor(
+          () => root.inspect(handle),
+          (view) => view.status === 'running'
+        )
+      )
+    );
+    await root.send(
+      first,
+      { value: 'admitted-follow-up', tokens: 1 },
+      'follow-up'
+    );
+
+    const afterFirst = await waitFor(
+      () => root.inspect(first),
+      (view) => view.mailbox[0]?.status === 'completed'
+    );
+    expect(afterFirst.mailbox[1]?.status).toBe('pending');
+    expect((await root.inspectRoot()).budgetExceeded).toBeUndefined();
+    await root.cancel();
+  });
+
+  it('rebuilds cached live state after a successful turn cannot be snapshotted', async () => {
+    SnapshotFailOnceAgent.created = 0;
+    SnapshotFailOnceAgent.stopped = 0;
+    const sessions = new AxAgentSessionHost({
+      ai: unusedAI,
+      registrations: [
+        { key: 'snapshot-failure', create: () => new SnapshotFailOnceAgent() },
+      ],
+    });
+    const root = await sessions.createRoot({
+      authorizedChildren: ['snapshot-failure'],
+    });
+    const handle = await root.spawn('snapshot-failure', { value: 'first' });
+    const first = await completed(root, handle);
+    expect(first.latestResult).toMatchObject({ history: ['first'] });
+    expect(first.lastError).toBe('snapshot failed');
+
+    await root.send(handle, { value: 'second' }, 'follow-up');
+    const second = await waitFor(
+      () => root.inspect(handle),
+      (view) => view.mailbox.length === 2 && view.status === 'completed'
+    );
+    expect(second.latestResult).toMatchObject({ history: ['second'] });
+    expect(SnapshotFailOnceAgent.created).toBe(2);
+    expect(SnapshotFailOnceAgent.stopped).toBe(1);
   });
 
   it('enforces depth and explicit per-parent registration authorization', async () => {
@@ -1441,6 +1550,55 @@ describe('retained child agent sessions', () => {
     });
   });
 
+  it('does not begin forwarding when cancellation lands during running publication', async () => {
+    let forwardCalls = 0;
+    let running!: () => void;
+    let release!: () => void;
+    const runningPublished = new Promise<void>((resolve) => {
+      running = resolve;
+    });
+    const publicationRelease = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const sessions = new AxAgentSessionHost({
+      ai: unusedAI,
+      registrations: [
+        {
+          key: 'effect-counter',
+          create: () => ({
+            async forward() {
+              forwardCalls++;
+              return { value: 'unexpected' };
+            },
+            getState: () => undefined,
+            setState: () => {},
+            getUsage: () => ({ actor: [], responder: [] }),
+            resetUsage: () => {},
+            stop: () => {},
+          }),
+        },
+      ],
+      onEvent: async (event) => {
+        if (event.type !== 'running') return;
+        running();
+        await publicationRelease;
+      },
+    });
+    const root = await sessions.createRoot({
+      authorizedChildren: ['effect-counter'],
+    });
+    const handle = await root.spawn('effect-counter', { value: 'cancelled' });
+    await runningPublished;
+    await root.cancel(handle);
+    release();
+
+    await waitFor(
+      () => root.inspect(handle),
+      (view) => view.status === 'cancelled'
+    );
+    expect(forwardCalls).toBe(0);
+  });
+
   it('makes root cancellation terminal for new admissions and messages', async () => {
     const sessions = host();
     const root = await sessions.createRoot({
@@ -1471,6 +1629,26 @@ describe('retained child agent sessions', () => {
     await expect(
       root.spawn('worker', { value: 'denied' })
     ).rejects.toBeInstanceOf(AxAgentSessionAuthorizationError);
+  });
+
+  it('closes the abort check-before-listen race during root creation', async () => {
+    const controller = new AbortController();
+    const signal = controller.signal;
+    const addEventListener = signal.addEventListener.bind(signal);
+    Object.defineProperty(signal, 'addEventListener', {
+      configurable: true,
+      value: ((...args: Parameters<AbortSignal['addEventListener']>) => {
+        controller.abort('abort while listener is being installed');
+        return addEventListener(...args);
+      }) as AbortSignal['addEventListener'],
+    });
+    const sessions = host();
+    const root = await sessions.createRoot({
+      authorizedChildren: ['worker'],
+      abortSignal: signal,
+    });
+
+    expect((await root.inspectRoot()).status).toBe('cancelled');
   });
 
   it('rejects forged and disposed handles without resurrecting sessions', async () => {
@@ -1617,7 +1795,86 @@ class ManualScheduler implements AxAgentSessionScheduler {
   }
 }
 
+class InlineScheduler implements AxAgentSessionScheduler {
+  readonly capabilities = {
+    durability: 'volatile',
+    coordination: 'single-worker',
+  } as const;
+  private handler?: (job: Readonly<AxAgentSessionJob>) => Promise<void>;
+
+  attach(handler: (job: Readonly<AxAgentSessionJob>) => Promise<void>) {
+    this.handler = handler;
+    return () => {
+      if (this.handler === handler) this.handler = undefined;
+    };
+  }
+
+  async enqueue(job: Readonly<AxAgentSessionJob>): Promise<void> {
+    await this.handler?.(structuredClone(job));
+  }
+
+  async cancel(): Promise<boolean> {
+    return false;
+  }
+}
+
 describe('retained session crash recovery adapters', () => {
+  it('registers continuations before inline dispatch can publish terminal events', async () => {
+    const order: string[] = [];
+    const sessions = new AxAgentSessionHost({
+      ai: unusedAI,
+      registrations: registrations(),
+      scheduler: new InlineScheduler(),
+      onEvent: (event) => {
+        if (event.type === 'completed') order.push('terminal');
+      },
+    });
+    const root = await sessions.createRoot({
+      authorizedChildren: ['worker'],
+    });
+    const functions = root.functions({ eventContinuations: true });
+    const extra = {
+      eventContext: {
+        registerContinuation() {
+          order.push('continuation');
+          return 'continuation';
+        },
+      } as never,
+    };
+    const spawn = functions.find((fn) => fn.name === 'spawn')!;
+    const handle = await spawn.func(
+      { agent: 'worker', input: { value: 'first' } },
+      extra
+    );
+    expect(order).toEqual(['continuation', 'terminal']);
+
+    order.length = 0;
+    const send = functions.find((fn) => fn.name === 'send')!;
+    await send.func(
+      { handle, mode: 'follow-up', input: { value: 'second' } },
+      extra
+    );
+    expect(order).toEqual(['continuation', 'terminal']);
+  });
+
+  it('cancels the recovered durable root when its creation signal aborts', async () => {
+    const controller = new AbortController();
+    const store = new DurableMemoryStore();
+    const sessions = host({ store, scheduler: new ManualScheduler() });
+    const root = await sessions.createRoot({
+      authorizedChildren: ['worker'],
+      abortSignal: controller.signal,
+    });
+    await sessions.recover(root.sessionId);
+    controller.abort('parent stopped after recovery');
+
+    const cancelled = await waitFor(
+      async () => (await sessions.restoreRoot(root.sessionId)).inspectRoot(),
+      (view) => view.status === 'cancelled'
+    );
+    expect(cancelled.status).toBe('cancelled');
+  });
+
   it('runs a queued steer before earlier pending follow-ups', async () => {
     const scheduler = new ManualScheduler();
     const sessions = host({ scheduler });
