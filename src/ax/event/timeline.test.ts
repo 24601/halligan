@@ -643,6 +643,37 @@ describe('AxInteractionTimeline', () => {
     expect(() =>
       append(timeline, envelope({ wallTime: '2026-02-30T00:00:00Z' }))
     ).toThrow('wallTime must be an RFC 3339 timestamp');
+    expect(
+      append(timeline, envelope({ wallTime: '2016-12-31T23:59:60Z' })).accepted
+    ).toBe(true);
+    expect(
+      append(
+        timeline,
+        envelope({
+          eventId: 'leap-second-offset',
+          sequence: 1,
+          sessionTimeUs: 1,
+          wallTime: '2017-01-01T00:59:60+01:00',
+        })
+      ).accepted
+    ).toBe(true);
+    expect(
+      append(
+        timeline,
+        envelope({
+          eventId: 'leap-second-negative-offset',
+          sequence: 2,
+          sessionTimeUs: 2,
+          wallTime: '2016-12-31T18:59:60-05:00',
+        })
+      ).accepted
+    ).toBe(true);
+    expect(() =>
+      append(timeline, envelope({ wallTime: '2016-12-30T23:59:60Z' }))
+    ).toThrow('wallTime must be an RFC 3339 timestamp');
+    expect(() =>
+      append(timeline, envelope({ wallTime: '2017-12-31T23:59:60Z' }))
+    ).toThrow('wallTime must be an RFC 3339 timestamp');
     const cyclic = envelope() as AxTemporalEnvelope & {
       cycle?: unknown;
     };
@@ -671,6 +702,30 @@ describe('AxInteractionTimeline', () => {
         JSON.stringify({ ...snapshot, version: 2 })
       )
     ).toThrow('unsupported interaction timeline version');
+  });
+
+  it('rejects accessor-backed envelopes without reading accessors', () => {
+    const timeline = AxInteractionTimeline.create({ sessionId: 'session-1' });
+    let getterReads = 0;
+    const event = {
+      signal: 'start',
+      mediaRange: { timebase: 'media', startUs: 0, endUs: 1 },
+    } as Record<string, unknown>;
+    Object.defineProperty(event, 'kind', {
+      enumerable: true,
+      get: () => {
+        getterReads++;
+        return getterReads < 6 ? 'control' : 'audio_frame';
+      },
+    });
+
+    expect(() =>
+      append(
+        timeline,
+        envelope({ event: event as unknown as AxInteractionEvent })
+      )
+    ).toThrow('envelope.event.kind must not use accessors');
+    expect(getterReads).toBe(0);
   });
 
   it('enforces the retained byte budget before processing later events', () => {

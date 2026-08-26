@@ -207,6 +207,35 @@ const MAX_ID_LENGTH = 256;
 const MAX_LINKS = 64;
 const MAX_JSON_DEPTH = 128;
 const MAX_JSON_STRING_BYTES_PER_CODE_UNIT = 6;
+const UTC_LEAP_SECOND_DATES = [
+  '1972-06-30',
+  '1972-12-31',
+  '1973-12-31',
+  '1974-12-31',
+  '1975-12-31',
+  '1976-12-31',
+  '1977-12-31',
+  '1978-12-31',
+  '1979-12-31',
+  '1981-06-30',
+  '1982-06-30',
+  '1983-06-30',
+  '1985-06-30',
+  '1987-12-31',
+  '1989-12-31',
+  '1990-12-31',
+  '1992-06-30',
+  '1993-06-30',
+  '1994-06-30',
+  '1995-12-31',
+  '1997-06-30',
+  '1998-12-31',
+  '2005-12-31',
+  '2008-12-31',
+  '2012-06-30',
+  '2015-06-30',
+  '2016-12-31',
+] as const;
 
 const jsonBytes = (value: unknown): number =>
   textEncoder.encode(JSON.stringify(value)).byteLength;
@@ -395,6 +424,33 @@ const assertOptionalRange = (
   if (value !== undefined) assertRange(value, name, timebase);
 };
 
+// Proleptic-Gregorian civil-date conversion, offset to the Unix epoch. Inputs
+// have already passed strict calendar validation.
+const daysFromCivil = (year: number, month: number, day: number): number => {
+  const adjustedYear = year - (month <= 2 ? 1 : 0);
+  const era = Math.floor(adjustedYear / 400);
+  const yearOfEra = adjustedYear - era * 400;
+  const adjustedMonth = month + (month > 2 ? -3 : 9);
+  const dayOfYear = Math.floor((153 * adjustedMonth + 2) / 5) + day - 1;
+  const dayOfEra =
+    yearOfEra * 365 +
+    Math.floor(yearOfEra / 4) -
+    Math.floor(yearOfEra / 100) +
+    dayOfYear;
+  return era * 146_097 + dayOfEra - 719_468;
+};
+
+const UTC_LEAP_SECOND_MINUTES = new Set(
+  UTC_LEAP_SECOND_DATES.map((date) => {
+    const [year, month, day] = date.split('-').map(Number) as [
+      number,
+      number,
+      number,
+    ];
+    return daysFromCivil(year, month, day) * 1_440 + 23 * 60 + 59;
+  })
+);
+
 const isRfc3339 = (value: string): boolean => {
   const match =
     /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|([+-])(\d{2}):(\d{2}))$/.exec(
@@ -424,17 +480,26 @@ const isRfc3339 = (value: string): boolean => {
     30,
     31,
   ];
-  return (
+  const validCalendarTime =
     month >= 1 &&
     month <= 12 &&
     day >= 1 &&
     day <= daysInMonth[month - 1]! &&
     hour <= 23 &&
     minute <= 59 &&
-    second <= 59 &&
+    second <= 60 &&
     offsetHour <= 23 &&
-    offsetMinute <= 59
-  );
+    offsetMinute <= 59;
+  if (!validCalendarTime || second < 60) return validCalendarTime;
+
+  const offsetSign = match[7] === '-' ? -1 : 1;
+  const offsetMinutes = offsetSign * (offsetHour * 60 + offsetMinute);
+  const utcMinute =
+    daysFromCivil(year, month, day) * 1_440 +
+    hour * 60 +
+    minute -
+    offsetMinutes;
+  return UTC_LEAP_SECOND_MINUTES.has(utcMinute);
 };
 
 function assertEvent(value: unknown): asserts value is AxInteractionEvent {
@@ -586,12 +651,76 @@ const deepFreeze = <T>(value: T): Readonly<T> => {
   return Object.freeze(value);
 };
 
+const cloneDataOnlyJson = (
+  value: unknown,
+  path: string,
+  depth = 0,
+  ancestors = new WeakSet<object>()
+): unknown => {
+  if (typeof value !== 'object' || value === null) return value;
+  if (depth >= MAX_JSON_DEPTH) {
+    fail(`${path} must not exceed ${MAX_JSON_DEPTH} levels`);
+  }
+  if (ancestors.has(value)) fail(`${path} must not contain cycles`);
+  ancestors.add(value);
+  try {
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    if (Array.isArray(value)) {
+      const length = descriptors.length?.value;
+      if (!Number.isSafeInteger(length) || length < 0) {
+        fail(`${path} must contain only plain JSON values`);
+      }
+      const cloned: unknown[] = [];
+      for (let index = 0; index < length; index++) {
+        const descriptor = descriptors[String(index)];
+        if (!descriptor || !('value' in descriptor)) {
+          fail(`${path}[${index}] must not use accessors or sparse entries`);
+        }
+        cloned.push(
+          cloneDataOnlyJson(
+            descriptor.value,
+            `${path}[${index}]`,
+            depth + 1,
+            ancestors
+          )
+        );
+      }
+      return Object.freeze(cloned);
+    }
+    if (Object.getPrototypeOf(value) !== Object.prototype) {
+      fail(`${path} must contain only plain JSON values`);
+    }
+    const cloned: Record<string, unknown> = {};
+    for (const [key, descriptor] of Object.entries(descriptors)) {
+      if (!descriptor.enumerable) continue;
+      if (!('value' in descriptor)) {
+        fail(`${path}.${key} must not use accessors`);
+      }
+      if (descriptor.value === undefined) {
+        fail(`${path}.${key} must not be undefined`);
+      }
+      Object.defineProperty(cloned, key, {
+        value: cloneDataOnlyJson(
+          descriptor.value,
+          `${path}.${key}`,
+          depth + 1,
+          ancestors
+        ),
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+    }
+    return Object.freeze(cloned);
+  } finally {
+    ancestors.delete(value);
+  }
+};
+
 const cloneEnvelope = (
   envelope: Readonly<AxTemporalEnvelope>
 ): Readonly<AxTemporalEnvelope> =>
-  deepFreeze(
-    JSON.parse(JSON.stringify(envelope)) as Readonly<AxTemporalEnvelope>
-  );
+  cloneDataOnlyJson(envelope, 'envelope') as Readonly<AxTemporalEnvelope>;
 
 const normalizeOptions = (
   options: Readonly<AxInteractionTimelineOptions>
@@ -953,7 +1082,8 @@ export class AxInteractionTimeline {
   append(
     candidate: Readonly<AxTemporalEnvelope>
   ): AxInteractionTimelineAppendResult {
-    assertEnvelope(candidate);
+    const envelope = cloneEnvelope(candidate);
+    assertEnvelope(envelope);
     const reject = (
       classification: AxTemporalClassification
     ): AxInteractionTimelineAppendResult =>
@@ -964,69 +1094,68 @@ export class AxInteractionTimeline {
         sequenceGap: 0,
         evictedEventIds: Object.freeze([]),
       });
-    if (candidate.sessionId !== this.sessionId) {
+    if (envelope.sessionId !== this.sessionId) {
       return reject('identity_conflict');
     }
-    const eventBytes = jsonBytes(candidate);
+    const eventBytes = jsonBytes(envelope);
     if (eventBytes > this.options.maxBytes) return reject('oversize');
 
     const current = this.retainedEvents.find(
-      (event) => event.eventId === candidate.eventId
+      (event) => event.eventId === envelope.eventId
     );
-    if (current?.revision === candidate.revision) {
+    if (current?.revision === envelope.revision) {
       return reject(
-        jsonEqual(current, candidate) ? 'duplicate' : 'identity_conflict'
+        jsonEqual(current, envelope) ? 'duplicate' : 'identity_conflict'
       );
     }
-    if (current && current.revision > candidate.revision) {
+    if (current && current.revision > envelope.revision) {
       return reject('stale_revision');
     }
     if (
       current &&
-      (current.sessionId !== candidate.sessionId ||
-        current.streamId !== candidate.streamId ||
-        current.sourceId !== candidate.sourceId ||
-        current.participantId !== candidate.participantId ||
-        current.epoch !== candidate.epoch ||
-        current.sequence !== candidate.sequence ||
-        current.sessionTimeUs !== candidate.sessionTimeUs)
+      (current.sessionId !== envelope.sessionId ||
+        current.streamId !== envelope.streamId ||
+        current.sourceId !== envelope.sourceId ||
+        current.participantId !== envelope.participantId ||
+        current.epoch !== envelope.epoch ||
+        current.sequence !== envelope.sequence ||
+        current.sessionTimeUs !== envelope.sessionTimeUs)
     ) {
       return reject('identity_conflict');
     }
 
     const stream = this.streamStates.find(
-      (state) => state.streamId === candidate.streamId
+      (state) => state.streamId === envelope.streamId
     );
     if (!stream && this.streamStates.length >= this.options.maxStreams) {
       return reject('stream_limit');
     }
-    if (stream && candidate.epoch < stream.epoch) {
+    if (stream && envelope.epoch < stream.epoch) {
       return reject('stale_epoch');
     }
     if (
       !current &&
       stream &&
-      candidate.epoch === stream.epoch &&
-      candidate.sequence === stream.maxSequence
+      envelope.epoch === stream.epoch &&
+      envelope.sequence === stream.maxSequence
     ) {
       return reject('sequence_conflict');
     }
     const samePosition = this.retainedEvents.find(
       (event) =>
-        event.eventId !== candidate.eventId &&
-        event.streamId === candidate.streamId &&
-        event.epoch === candidate.epoch &&
-        event.sequence === candidate.sequence
+        event.eventId !== envelope.eventId &&
+        event.streamId === envelope.streamId &&
+        event.epoch === envelope.epoch &&
+        event.sequence === envelope.sequence
     );
     if (samePosition) return reject('sequence_conflict');
 
     const withoutCurrent = current
       ? this.retainedEvents.filter((event) => event.eventId !== current.eventId)
       : [...this.retainedEvents];
-    if (hasTemporalConflict(candidate, withoutCurrent, stream)) {
+    if (hasTemporalConflict(envelope, withoutCurrent, stream)) {
       return reject('temporal_conflict');
     }
-    const envelope = cloneEnvelope(candidate);
     if (hasCausalCycle([...withoutCurrent, envelope])) {
       return reject('causal_cycle');
     }
@@ -1037,16 +1166,16 @@ export class AxInteractionTimeline {
       classification = 'revision';
     } else if (!stream) {
       classification = 'in_order';
-      sequenceGap = candidate.sequence;
-    } else if (candidate.epoch > stream.epoch) {
+      sequenceGap = envelope.sequence;
+    } else if (envelope.epoch > stream.epoch) {
       classification = 'new_epoch';
-      sequenceGap = candidate.sequence;
-    } else if (candidate.sequence > stream.maxSequence) {
+      sequenceGap = envelope.sequence;
+    } else if (envelope.sequence > stream.maxSequence) {
       classification = 'in_order';
-      sequenceGap = candidate.sequence - stream.maxSequence - 1;
+      sequenceGap = envelope.sequence - stream.maxSequence - 1;
     } else {
       classification =
-        stream.maxSessionTimeUs - candidate.sessionTimeUs <=
+        stream.maxSessionTimeUs - envelope.sessionTimeUs <=
         this.options.reorderWindowUs
           ? 'reordered'
           : 'late';
@@ -1080,24 +1209,24 @@ export class AxInteractionTimeline {
     if (!stream) {
       streams.push(
         Object.freeze({
-          streamId: candidate.streamId,
-          epoch: candidate.epoch,
-          maxSequence: candidate.sequence,
-          maxEventId: candidate.eventId,
-          maxSessionTimeUs: candidate.sessionTimeUs,
+          streamId: envelope.streamId,
+          epoch: envelope.epoch,
+          maxSequence: envelope.sequence,
+          maxEventId: envelope.eventId,
+          maxSessionTimeUs: envelope.sessionTimeUs,
         })
       );
     } else if (
-      candidate.epoch > stream.epoch ||
-      (candidate.epoch === stream.epoch &&
-        candidate.sequence > stream.maxSequence)
+      envelope.epoch > stream.epoch ||
+      (envelope.epoch === stream.epoch &&
+        envelope.sequence > stream.maxSequence)
     ) {
       const next = Object.freeze({
-        streamId: candidate.streamId,
-        epoch: candidate.epoch,
-        maxSequence: candidate.sequence,
-        maxEventId: candidate.eventId,
-        maxSessionTimeUs: candidate.sessionTimeUs,
+        streamId: envelope.streamId,
+        epoch: envelope.epoch,
+        maxSequence: envelope.sequence,
+        maxEventId: envelope.eventId,
+        maxSessionTimeUs: envelope.sessionTimeUs,
       });
       streams[streams.indexOf(stream)] = next;
     }

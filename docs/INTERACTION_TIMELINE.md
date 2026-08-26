@@ -30,7 +30,9 @@ Every numeric time is a non-negative safe integer in microseconds.
   event kind has one.
 - Ranges are half-open, `[startUs, endUs)`. Equal endpoints are allowed for a
   point or empty-duration observation.
-- `wallTime` is optional RFC 3339 diagnostic context. It is never used for
+- `wallTime` is optional RFC 3339 diagnostic context. Calendar fields and
+  published UTC leap seconds are validated, including timezone-offset
+  representations of the same leap-second instant. It is never used for
   ordering, lateness, retention, or causal validation.
 
 The host owns clock selection, monotonicity, and any mapping from device or
@@ -236,6 +238,9 @@ semantic alignment, or real-world synchronization.
 
 ## Limits, Privacy, And Cardinality
 
+- Live envelopes passed to `append()` must be data-only JSON objects. Enumerable
+  accessors are rejected from property descriptors without invoking them; the
+  inert snapshot that is validated is also the snapshot retained.
 - Duplicate identity and causal-cycle memory is limited to retained envelopes.
   Stream epoch/sequence/session-time frontiers survive eviction, but an evicted
   event body or causal edge cannot be reconstructed.
