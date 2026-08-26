@@ -516,11 +516,30 @@ function runStressChecks() {
     shapeSelection.informational.length === 0 &&
     JSON.stringify(shapeSelection.excluded) ===
       JSON.stringify([{ recordId: 'stress-seed', reason: 'malformed' }]);
+  const manyMalformed = Array.from({ length: 32 }, (_, index) => {
+    const record = evidence(
+      `stress-malformed-${index}`
+    ) as AxPreferenceEvidenceRecord & { nested?: unknown };
+    record.nested = record;
+    return record;
+  });
+  const manyMalformedSelection = axSelectPreferenceEvidence(
+    manyMalformed,
+    baseContext
+  );
+  const manyShapesIsolated =
+    manyMalformedSelection.applied.length === 0 &&
+    manyMalformedSelection.informational.length === 0 &&
+    manyMalformedSelection.excluded.length === manyMalformed.length &&
+    manyMalformedSelection.excluded.every(
+      ({ reason }) => reason === 'malformed'
+    );
   return Object.freeze({
     countBound,
     queryBound,
     totalByteBound,
     shapeIsolated,
+    manyShapesIsolated,
     callbacksBeforeRejection: callbacks,
   });
 }

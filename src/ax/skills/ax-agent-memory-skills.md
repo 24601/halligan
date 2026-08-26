@@ -318,7 +318,9 @@ query characters, 256 scope/ID characters, 512 receipt-reference characters,
 32 context attributes, 16 applicability entries, 32 relation references,
 object depth 8, object/array width 64, and `topK` 20. Corpus and structural
 limits are checked before host callbacks or ranking. The values are exported as
-`axPreferenceEvidenceLimits`.
+`axPreferenceEvidenceLimits`. Count, query, and total-byte overflow reject the
+batch. Structural and per-record byte violations exclude only the malformed
+record and do not consume the valid corpus's total-byte budget.
 
 All verification and policy callbacks are synchronous and invoked inline.
 Selector limits bound Ax-owned validation and ranking work, but do not bound
@@ -362,7 +364,7 @@ forged consent/provenance and destructive authority, retraction, erasure and
 stale replay, explicit epoch renewal, uncertain inference, unseen
 harmful/sycophantic paraphrases, equal-time ambiguity, no-benefit, and noisy
 small-data. Separate stress probes exercise count, query, total-byte, and
-cyclic-shape isolation before callbacks.
+single and repeated cyclic-shape isolation before callbacks.
 
 On the 17-case artifact, static/no personalization scores 14/17 exact with
 three missed-personalization cases; naive latest-value scores 16/17 with two

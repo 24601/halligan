@@ -642,10 +642,6 @@ function boundedRecords(records: readonly unknown[]): BoundedRecord[] {
       assertBoundedStructure(record);
       serialized = JSON.stringify(record);
     } catch {
-      totalBytes += AX_PREFERENCE_EVIDENCE_LIMITS.recordBytes + 1;
-      if (totalBytes > AX_PREFERENCE_EVIDENCE_LIMITS.totalBytes) {
-        throw new Error('Preference evidence exceeds the total byte limit.');
-      }
       return {
         value: undefined,
         recordId: recordIdOrUnknown(record),
@@ -661,7 +657,11 @@ function boundedRecords(records: readonly unknown[]): BoundedRecord[] {
     }
     const bytes = textEncoder.encode(serialized).byteLength;
     if (bytes > AX_PREFERENCE_EVIDENCE_LIMITS.recordBytes) {
-      throw new Error('Preference evidence exceeds the per-record byte limit.');
+      return {
+        value: undefined,
+        recordId: recordIdOrUnknown(record),
+        malformedStructure: true,
+      };
     }
     totalBytes += bytes;
     if (totalBytes > AX_PREFERENCE_EVIDENCE_LIMITS.totalBytes) {

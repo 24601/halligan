@@ -556,6 +556,36 @@ describe('axSelectPreferenceEvidence', () => {
     expect(verifyStreamState).toHaveBeenCalledTimes(1);
   });
 
+  it('isolates many malformed structures without consuming the valid corpus byte budget', () => {
+    const valid = record('valid-beside-many-malformed');
+    const malformed = Array.from({ length: 32 }, (_, index) => {
+      const poisoned = record(
+        `cyclic-${index}`
+      ) as AxPreferenceEvidenceRecord & {
+        nested?: unknown;
+      };
+      poisoned.nested = poisoned;
+      return poisoned;
+    });
+    const result = axSelectPreferenceEvidence(
+      [valid, ...malformed],
+      context([valid])
+    );
+
+    expect(result.applied.map((entry) => entry.recordId)).toEqual([
+      'valid-beside-many-malformed',
+    ]);
+    expect(result.excluded).toHaveLength(32);
+    expect(result.excluded).toEqual(
+      expect.arrayContaining(
+        malformed.map((entry) => ({
+          recordId: entry.id,
+          reason: 'malformed',
+        }))
+      )
+    );
+  });
+
   it('excludes null records and revisions as malformed without denying valid records', () => {
     const valid = record('valid-beside-null');
     const withNullRecord = axSelectPreferenceEvidence(
@@ -719,9 +749,10 @@ describe('axSelectPreferenceEvidence', () => {
       streamVersion: largeHistoryRevisions.length,
       revisions: largeHistoryRevisions,
     };
-    expect(() =>
+    expect(
       axSelectPreferenceEvidence([largeHistory], context([largeHistory]))
-    ).toThrow(/per-record byte limit/);
+        .excluded
+    ).toEqual([{ recordId: 'large-history', reason: 'malformed' }]);
 
     const large = Array.from({ length: 70 }, (_, index) =>
       record(`large-${index}`, {
