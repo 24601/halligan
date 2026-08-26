@@ -1143,6 +1143,29 @@ import {
   runAxEventStoreConformance,
 } from './event/conformance.js';
 import {
+  type AxDemandAppendResult,
+  AxDemandBoundary,
+  type AxDemandBoundaryOptions,
+  type AxDemandCalibration,
+  type AxDemandDetection,
+  type AxDemandDetector,
+  type AxDemandDisposition,
+  type AxDemandGrantState,
+  type AxDemandGrantValidationContext,
+  type AxDemandObservation,
+  type AxDemandOutcome,
+  type AxDemandPolicy,
+  type AxDemandProposal,
+  type AxDemandProvenance,
+  type AxDemandReceipt,
+  type AxDemandRecord,
+  type AxDemandScope,
+  type AxDemandStore,
+  AxInMemoryDemandStore,
+  type AxInMemoryDemandStoreOptions,
+  axDemandEventObserver,
+} from './event/demand.js';
+import {
   AxEventRouteBuilder,
   AxEventTargetBuilder,
   eventInput,
@@ -1651,6 +1674,7 @@ export { AxBootstrapFewShot };
 export { AxContentProcessingError };
 export { AxContextMetricsCollector };
 export { AxDefaultCostTracker };
+export { AxDemandBoundary };
 export { AxDockerSession };
 export { AxEmbeddingAdapter };
 export { AxEvalUtil };
@@ -1677,6 +1701,7 @@ export { AxGenerateError };
 export { AxInMemoryAgentSessionScheduler };
 export { AxInMemoryAgentSessionStore };
 export { AxInMemoryBalancerStatsStore };
+export { AxInMemoryDemandStore };
 export { AxInMemoryEventStore };
 export { AxInMemoryProgramStateStore };
 export { AxJSRuntime };
@@ -1798,6 +1823,7 @@ export { axDefaultFlowLogger };
 export { axDefaultMetricsConfig };
 export { axDefaultOptimizerLogger };
 export { axDefaultOptimizerMetricsConfig };
+export { axDemandEventObserver };
 export { axDeserializeOptimizedProgram };
 export { axEmitUsageEvent };
 export { axErasePreferenceEvidence };
@@ -2373,6 +2399,23 @@ export type { AxDateRange };
 export type { AxDateRangeValue };
 export type { AxDebugChatResponseUsage };
 export type { AxDelegationClaims };
+export type { AxDemandAppendResult };
+export type { AxDemandBoundaryOptions };
+export type { AxDemandCalibration };
+export type { AxDemandDetection };
+export type { AxDemandDetector };
+export type { AxDemandDisposition };
+export type { AxDemandGrantState };
+export type { AxDemandGrantValidationContext };
+export type { AxDemandObservation };
+export type { AxDemandOutcome };
+export type { AxDemandPolicy };
+export type { AxDemandProposal };
+export type { AxDemandProvenance };
+export type { AxDemandReceipt };
+export type { AxDemandRecord };
+export type { AxDemandScope };
+export type { AxDemandStore };
 export type { AxDiscoveryTurnSummary };
 export type { AxDockerContainer };
 export type { AxEmbedRequest };
@@ -2549,6 +2592,7 @@ export type { AxGenerateResult };
 export type { AxIField };
 export type { AxIRRuntimeCapabilities };
 export type { AxIRRuntimeCapabilitiesInput };
+export type { AxInMemoryDemandStoreOptions };
 export type { AxInMemoryEventStoreOptions };
 export type { AxInputFunctionType };
 export type { AxJSRuntimeNodePermissionAllowlist };

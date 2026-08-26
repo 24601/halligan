@@ -95,6 +95,160 @@ program signature. The immutable
 `eventContext` remains available to nested programs and tool handlers for
 identity, trust, causation, cancellation, and idempotency.
 
+## Advisory Demand Detection
+
+`AxDemandBoundary` is an optional provider-neutral boundary for turning an
+observation into retained detector evidence and a host-reviewable disposition
+proposal. Connect it through an `observe` route with
+`axDemandEventObserver(boundary)`: the event runtime still owns ingress,
+dedupe, debounce, and scheduling, while the boundary records `demand`,
+`no_demand`, or `uncertain` plus confidence, calibration, provenance, expiry,
+and one of `ignore`, `annotate`, `notify`, `propose`, or `act`.
+
+Every disposition is advisory, including `act`. The proposal is always marked
+`authority: 'advisory'` and `requiresHostReview: true`. The boundary has no
+target, tool, sink, notification, or effect callback, so it cannot perform or
+authorize an action. A host must re-check current authorization and settle any
+effect at its own boundary. A standing-grant reference is opaque; the optional
+validator only records whether that reference was valid when the proposal was
+created. Revocation after creation is therefore another reason the host must
+authorize again at review time.
+
+Detector output is untrusted structured evidence. Free-text reasons are stored
+but never parsed as policy, detector reason codes remain only on the detection,
+and detectors cannot select dedupe keys. Proposal `reasonCodes` contain only
+boundary-owned policy classifications. Invalid detector output, including a
+non-string reason or standing-grant reference, becomes an explicit `uncertain`
+record with a fail-closed fallback. Explicit no-demand and stale evidence prefer
+`ignore`; low-confidence or conflicting evidence prefers `annotate`. None
+disappears silently.
+Observations default to 1 MiB and detections to 64 KiB; hosts can lower both
+limits. Map only consented, necessary fields, redact before this boundary, and
+set an application retention policy: cursor retention is not permission to
+collect or keep unrelated personal data.
+
+Detector and standing-grant callbacks receive separate deeply frozen copies;
+the store receives a different canonical clone, so callback mutation cannot
+rewrite retained identity, evidence, or provenance. Grant validation receives
+a structured context containing its opaque reference, observation, boundary
+scope, and abort signal. The scope always binds boundary ID, route ID, instance
+key, and principal identity around the host's local observation/dedupe key. A
+custom observation mapper cannot remove that authority scope. Host observations
+and detector outputs are schema-snapshotted into detached plain records with one
+read per declared field; validation, byte limits, freezing, and retention all
+use that same snapshot. Throwing detector getters become explicit uncertainty,
+while throwing host getters reject before detector invocation. Detector ID,
+version, and callback are likewise captured once at boundary construction;
+default boundary identity, callback binding, and retained detector metadata use
+only that frozen descriptor.
+
+Observation validation and size failures reject explicitly before detector
+invocation; rejected host input is not retained. A detection's `confidence` is
+its estimated demand probability, not authority or an action score. Host
+disposition allowlists must contain `ignore` or `annotate`, and every fallback
+stays within that allowlist.
+
+Observation, provenance, and expiry times must be non-negative safe integer
+timestamps. Evidence beyond the configured future-skew allowance (five minutes
+by default) is ignored. Detector and grant callbacks are abortable and bounded
+to 30 seconds by default; configured timeouts cannot exceed the portable timer
+maximum of 2,147,483,647 milliseconds. A timeout is retained as fail-closed
+uncertainty, including when a callback's abort listener rejects first; caller or
+runtime cancellation rejects the observation and is never converted into
+successful evidence. Timeout or cancellation does not release the
+underlying callback reservation: an abort-ignoring promise remains charged
+against both `maxInFlight` and `maxInFlightBytes` until it actually settles.
+Reservations count the serialized observation and scope retained by detector
+callbacks, plus the grant reference for grant callbacks. Capacity exhaustion
+rejects new work. Hosts that must recover that capacity need an actually
+terminable worker or process boundary.
+
+Recorded detector latency is always finite and nonnegative. Clock reversal,
+overflow, or a duration above `Number.MAX_SAFE_INTEGER` milliseconds is clamped
+to zero or that maximum, with `metrics.detectorLatencyCapped: true`; hosts must
+not interpret a capped sample as an exact duration. Timestamp window arithmetic
+uses safe-integer differences and rejects invalid host/store clocks.
+
+`AxInMemoryDemandStore` retains cursor-addressable records, supports snapshots
+for tests and process-managed restoration, and atomically deduplicates appended
+proposals in one process. A boundary also single-flights concurrent callbacks
+for the same scoped key. Each waiter owns its cancellation independently; work
+is aborted only when no waiters remain. Pending work is bounded to 1,000 keys
+and 64 MiB by default. Separate processes or boundary instances still need a
+host reservation protocol if callback-level exactly-once behavior is required.
+Restored seed records are ordered by numeric cursor before pagination, and
+duplicate seed cursors or dedupe keys are rejected.
+
+Every `AxDemandStore.append` receives the boundary's internal abort signal and
+must check it atomically immediately before committing a new record. If the
+signal is already aborted, append must reject without retaining the record.
+This store contract prevents cancellation during an asynchronous durable append
+from becoming historical evidence; a post-append boundary check cannot undo an
+external commit.
+
+`maxInFlight` and `maxInFlightBytes` are applied as separate per-class ceilings:
+once to transient keyed work and once to unsettled detector/grant callback
+reservations shared together. They are not one aggregate pool, avoiding double
+charging while a callback belongs to live keyed work; worst-case combined
+accounted evidence is therefore twice the configured byte ceiling.
+
+The in-memory defaults retain at most 10,000 records, 64 MiB, 1,000 scopes,
+1,000 records per scope, and seven days. Oldest records/scopes are evicted when
+a bound is crossed; retention eviction also removes their dedupe keys, so a
+later replay can be evaluated again. Scope components default to a combined 16
+KiB bound. Production hosts should supply an `AxDemandStore` with explicit
+atomic dedupe, persistence, and retention. The detector itself remains
+host-supplied; Ax does not start a classifier, timer, notification system, or
+generic agent loop.
+
+Dedupe keys identify immutable observations. Replaying a key returns the
+original retained record even after its proposal expires; a genuinely new
+observation needs a new host-selected key. Expiry prevents a proposal from
+remaining current, not an event from remaining deduplicated. Duplicate receipts
+are explicitly `historical: true`; hosts must never treat a prior grant state as
+current authority.
+
+Observe options, the scope container, and each scope field are captured once,
+preventing getter-backed options from combining unrelated route, instance, or
+principal values. Provenance polarity accepts only `supports`, `contradicts`,
+or `neutral`; malformed host polarity rejects before detection, while malformed
+detector polarity becomes explicit invalid-detector uncertainty.
+
+Run the deterministic mechanism evaluation with:
+
+```bash
+npm run event:demand:eval
+npx vitest run scripts/eval-demand-boundary.test.ts
+```
+
+The fixed ID-addressed fixture contains 40 synthetic observations (8 demand, 32
+no-demand) and reports confusion counts, precision/recall, Brier score, ECE,
+false fires, retained-but-not-fired demand, measured callback counts/latency,
+and bytes against reactive and naive confidence-threshold baselines. Fixtures,
+labels, and outputs are checked in together: this characterizes policy
+mechanics and is explicitly **not** an independent model held-out evaluation or
+an improvement claim. The deliberately misleading well-formed detector remains
+a false fire, while conservative handling reduces recall.
+
+The checked-in fixed result is:
+
+| Policy | TP | FP | TN | FN | Precision | Recall |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Reactive explicit-request baseline | 2 | 0 | 32 | 6 | 1.000 | 0.250 |
+| Naive confidence ≥ 0.75 | 7 | 5 | 27 | 1 | 0.583 | 0.875 |
+| Advisory boundary | 4 | 1 | 31 | 4 | 0.800 | 0.500 |
+
+False fire and false suppression are FP and FN respectively. Detector
+calibration over the 39 structurally valid detector scores is Brier 0.132826
+and 5-bucket ECE 0.230; the deliberately malformed score is excluded. The
+boundary retained all 40 records, measured 40 detector and two grant-validator
+callbacks with zero capped latency samples, 10,146 observation bytes, and
+13,523 detection bytes. The command also reports monotonic detector and
+end-to-end evaluation latency for that run; latency is not asserted as a
+fixed-clock zero. No provider or effect callback is configured by this fixture.
+These values characterize the mechanism fixture, not model quality or
+performance limits.
+
 ## Signature-Aware Input Mapping
 
 The program signature is the destination contract. `eventPath` describes

@@ -73,6 +73,57 @@ await source.publish({ event, identity, trust: 'authenticated' });
 - Use `.wakeInput()` and `.resumeInput()` when the two actions need different
   contracts. Neither action silently uses the other action's mapping.
 - Use `observe` for progress/logs and `invalidate` for catalog changes.
+- For proactive demand evidence, connect `AxDemandBoundary` through
+  `axDemandEventObserver(...)` on an `observe` route. Treat every disposition,
+  including `act`, as an advisory proposal. Host authorization and effect
+  settlement remain separate and mandatory.
+- Keep detector free text and reason codes non-authoritative. Proposal reason
+  codes are boundary-owned policy classifications. Retain explicit `no_demand`
+  and `uncertain` records; downgrade stale, conflicting, low-confidence,
+  malformed, or revoked-grant evidence instead of silently dropping it.
+- Detector confidence estimates demand probability; it is not authority. Require
+  `ignore` or `annotate` in host disposition allowlists so fallback remains
+  fail-closed.
+- Callbacks receive deeply frozen copies while a separate canonical clone is
+  retained. Route, instance, principal, and boundary scope wraps every local
+  dedupe key even when a custom mapper supplies the observation.
+- Host observations and detector outputs are read once into plain snapshots;
+  validation, byte measurement, and retention use the same frozen values.
+- Detector ID, version, and callback are captured once at construction and bind
+  boundary identity, callback `this`, and retained detector metadata.
+- Keep callbacks within the configured timeout and propagate runtime
+  cancellation as cancellation, not successful uncertainty. One boundary
+  single-flights a scoped key with per-waiter cancellation and bounded pending
+  keys/bytes; distributed hosts need reservations for callback-level
+  exactly-once behavior.
+- Bind stateful host methods before passing them as standing-grant callbacks;
+  the boundary snapshots and invokes the callback without using itself as the
+  receiver. Policy disposition arrays are copied at construction.
+- Timed-out or cancelled callback promises retain count and evidence-byte
+  reservations until they settle. Transient keyed work and unsettled callbacks
+  use separate per-class `maxInFlight`/`maxInFlightBytes` ceilings. Use a
+  terminable worker/process boundary if capacity must be recoverable from an
+  abort-ignoring callback.
+- Observe options and scope fields are captured once. Provenance polarity is
+  limited to `supports`, `contradicts`, or `neutral`.
+- Detector latency metrics are finite and nonnegative. Extreme or reversing
+  clocks clamp to the safe-integer range and set `detectorLatencyCapped`; do not
+  treat capped samples as exact durations.
+- Use a host `AxDemandStore` for durable/distributed cursor and dedupe
+  guarantees. `AxInMemoryDemandStore` is volatile; its snapshots are suitable
+  for deterministic restart tests, not a durable service. Seed cursors are
+  numerically ordered for pagination; seed cursors and dedupe keys must be
+  unique. Custom stores must atomically check the signal passed to `append`
+  immediately before commit and retain no new record when it is aborted.
+- Bound retention explicitly. In-memory defaults are 10,000 records, 64 MiB,
+  1,000 scopes, 1,000 records per scope, and seven days; eviction removes the
+  corresponding dedupe key.
+- Treat dedupe keys as immutable observation identities. Proposal expiry does
+  not reopen an event key; duplicate receipts are historical, and a new
+  observation needs a new host key.
+- Minimize and redact observations before detection, lower the 1 MiB
+  observation and 64 KiB detection defaults when practical, and enforce host
+  privacy/retention policy on the backlog.
 - Use `resume` only with an owned continuation correlation key.
 - Use `createProgram(instance)` for stateful multi-tenant Agents.
 - Declare `retrySafety: 'idempotent'` only when stable delivery keys protect
@@ -260,6 +311,12 @@ Use `AxManualEventClock`, `AxInMemoryEventStore`, deterministic event IDs, and
 an output-capturing sink. Assert that unmatched or observe-only events never
 invoke the program, tenant scopes do not collide, outputs exist before sinks,
 and uncertain side effects become `outcome_unknown`.
+
+For advisory demand policy, run `npm run event:demand:eval`. Its deterministic
+mechanism fixture compares reactive and naive-threshold baselines and reports
+fixed confusion counts, calibration, false fires/suppression, measured callback
+counts/latency/bytes, and negative results. It is not an independent model
+held-out set or an improvement claim.
 
 Persistent store implementations must pass
 `runAxEventStoreConformance(createStore, { clock })`. A store must not advertise

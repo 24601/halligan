@@ -13,12 +13,16 @@ import {
   type AxAIOpenAIResponsesRequest,
   type AxAIService,
   type AxCodeRuntime,
+  AxDemandBoundary,
+  type AxDemandDetector,
+  type AxDemandStore,
   type AxEventComponentDefinition,
   type AxEventComponentInspection,
   type AxExecutableSkillArtifact,
   type AxExecutableSkillSelection,
   type AxFunction,
   type AxFunctionHandler,
+  AxInMemoryDemandStore,
   AxJSRuntime,
   type AxJSRuntimeSpeculationEvent,
   type AxMetricFn,
@@ -28,6 +32,7 @@ import {
   type AxProgrammable,
   type AxProgramSource,
   ax,
+  axDemandEventObserver,
   axEventComponentManager,
   axExecutableSkillRef,
   axProgramSourceRuntimeProtocol,
@@ -142,6 +147,37 @@ type _invalidOut = Expect<
 >;
 const emptySig = AxSignature.create('');
 type _emptyIn = Expect<Equal<SigIn<typeof emptySig>, Record<string, any>>>;
+
+// === Advisory demand boundary type tests ===
+const demandDetector: AxDemandDetector = {
+  id: 'typed-detector',
+  version: '1',
+  detect: (observation) => ({
+    outcome: observation.type === 'request' ? 'demand' : 'no_demand',
+    confidence: 0.8,
+    requestedDisposition: 'notify',
+    reasonCode: 'typed_fixture',
+    evidence: observation.provenance,
+  }),
+};
+const demandStore: AxDemandStore = new AxInMemoryDemandStore();
+const demandBoundary = new AxDemandBoundary({
+  id: 'typed-boundary',
+  detector: demandDetector,
+  store: demandStore,
+  validateStandingGrant: ({ reference, scope, signal }) => {
+    void reference;
+    void scope.principalScope;
+    void signal;
+    return 'unknown';
+  },
+});
+const demandObserver: ReturnType<typeof axDemandEventObserver> =
+  axDemandEventObserver(demandBoundary);
+void demandObserver;
+
+// @ts-expect-error detector is a required host-owned boundary
+new AxDemandBoundary({});
 
 // Test type-safe field addition methods
 const testSig = AxSignature.create('userInput: string -> responseText: string');

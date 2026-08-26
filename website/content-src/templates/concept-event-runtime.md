@@ -49,6 +49,67 @@ database, queue, callback, or other destination.
 The core rule is simple: an event invokes a model only when a route you wrote
 chooses `wake` or `resume`.
 
+## Advisory Demand Proposals
+
+TypeScript applications can attach `axDemandEventObserver(boundary)` to an
+`observe` route when a host-supplied detector should turn observations into a
+retained, reviewable proposal. `AxDemandBoundary` records explicit `demand`,
+`no_demand`, or `uncertain` evidence; confidence and calibration; provenance;
+expiry; an opaque standing-grant reference; and an `ignore`, `annotate`,
+`notify`, `propose`, or `act` disposition.
+
+These names describe proposals, not effects. Every record says
+`authority: 'advisory'` and `requiresHostReview: true`; the boundary has no
+target, tool, sink, notification, or effect callback. The host must authorize
+again and settle any effect separately. Detector prose is retained but never
+becomes policy or authority, detector reason codes remain separate from
+boundary-owned proposal policy codes, malformed output becomes explicit
+uncertainty, and only the host-owned observation can choose dedupe identity.
+
+Confidence estimates demand probability; it is not an action score. Host
+disposition allowlists must retain `ignore` or `annotate` as a fail-closed
+fallback. Observation validation failures reject explicitly before detection.
+
+Detector and grant callbacks receive deeply frozen copies while a separate
+canonical clone is retained. Boundary, route, instance, and principal scope
+wraps every local dedupe key even when a custom mapper supplies the observation.
+Callbacks have bounded timeouts, and runtime cancellation remains cancellation
+rather than successful evidence. Observation and detector fields are read once
+into plain snapshots used consistently for validation, byte limits, and
+retention. Detector metadata and callback are also captured once at boundary
+construction and bind callback identity and retained provenance.
+
+Detector latency metrics remain finite and nonnegative. Extreme or reversing
+clocks clamp to the safe-integer range and mark the sample as capped rather than
+serializing a non-finite duration.
+
+Timeout does not free an abort-ignoring callback's bounded count or evidence-byte
+reservation; it stays charged until the underlying promise settles. Transient
+keyed work and unsettled callbacks use separate per-class ceilings. Observe
+options and scope fields are captured once, and provenance polarity is
+restricted to `supports`, `contradicts`, or `neutral`.
+
+The built-in demand store is process-local and volatile. Supply an application
+store when cursor/backlog and dedupe must survive a restart or coordinate
+workers. Custom stores must atomically check the signal passed to
+`append(record, { signal })` immediately before commit and retain no new record
+when it is aborted. The event runtime remains responsible for scheduling; this
+API does not add a timer, notification product, user profile, or autonomous
+loop.
+Observations and detections are bounded; applications should map only
+consented, necessary evidence and apply their own redaction and retention
+policy.
+
+One boundary single-flights concurrent callbacks for a scoped key with
+per-waiter cancellation and bounded pending keys/bytes. The in-memory store also
+bounds records, bytes, scopes, records per scope, and age, evicting oldest
+entries and their dedupe keys. Distributed callback-level exactly-once behavior
+still requires a host reservation protocol.
+
+Dedupe keys identify immutable observations: proposal expiry does not reopen a
+previously processed key. Duplicate receipts are historical, and a new
+observation needs a new host-selected key.
+
 ## Wake: Start A Program From An Event
 
 A `wake` route starts a new run. This minimal assembly creates a source, maps

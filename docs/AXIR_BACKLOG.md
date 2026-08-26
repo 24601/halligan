@@ -18,6 +18,12 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
 
 ## Open
 
+- `axir-2026-08-25-port-advisory-demand-evidence-and-disposition-proposals` [runtime] Port advisory demand evidence and disposition proposals
+  - Status: open
+  - Source commit: `ca760294f5ea4f207052c39c2218e1195103bc2a`
+  - TS paths: `src/ax/event/demand.ts`
+  - Impact: TypeScript exposes a provider-neutral advisory demand boundary with retained observations, calibration/provenance, explicit no-demand and uncertainty, cursor/dedupe, grant references, and observe-route integration; generated packages do not yet expose this policy/store surface.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 - `axir-2026-08-25-port-causal-candidate-evidence-artifacts` [axoptimize] Port causal candidate evidence artifacts
   - Status: open
   - Source PR: #15
@@ -117,6 +123,13 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
   - TS paths: `src/ax/dsp`, `src/ax/agent/agentInternal/playbookEvolve`, `src/ax/agent/agent.test-d.ts`
   - Impact: TypeScript metrics can return an explicit scalar score with bounded per-example textual feedback and named Pareto objective scores; GEPA aligns feedback with reflective datasets and playbook evolution consumes the structured scalar. Generated language optimizers still expose only scalar or legacy score-vector evaluation.
   - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+- `axir-2026-08-25-port-trusted-event-component-lifecycle-manager` [axprogram] Port trusted event component lifecycle manager
+  - Status: open
+  - Source PR: #9
+  - Source commit: `ef6087a382f2275cfc9dd7e5f90ea4acadabc1c6`
+  - TS paths: `src/ax/event/components.ts`
+  - Impact: TypeScript exposes a trusted process-local event integration manager with stable component IDs and versions, dependency ordering, scoped reverse disposers, transactional activation rollback, serialized transitions, cooperative abort, inspectable diagnostics, and manager-visible hot replacement. Generated Python, Java, C++, Go, and Rust event runtimes retain their existing source lifecycle but do not expose this generic host component API.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 - `axir-2026-08-26-port-gepa-built-in-maxexamples-0-optional-reflectiveexamples` [axoptimize] Port GEPA built-in maxExamples 0 optional reflectiveExamples
   - Status: open
   - Source PR: #53
@@ -143,13 +156,6 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
   - Source commit: `3d515e18fb8ae707eec068749c60355f546a7aee`
   - TS paths: `src/ax/agent`
   - Impact: TypeScript agent.playbook().evolve() can require semantic train/validation disjointness and complete held-out evidence, fail closed on insufficient budget or evaluator errors, and prevent verify:false bypass; generated language runtimes retain only the permissive verify gate.
-  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
-- `axir-2026-08-25-port-trusted-event-component-lifecycle-manager` [axprogram] Port trusted event component lifecycle manager
-  - Status: open
-  - Source PR: #9
-  - Source commit: `ef6087a382f2275cfc9dd7e5f90ea4acadabc1c6`
-  - TS paths: `src/ax/event/components.ts`
-  - Impact: TypeScript exposes a trusted process-local event integration manager with stable component IDs and versions, dependency ordering, scoped reverse disposers, transactional activation rollback, serialized transitions, cooperative abort, inspectable diagnostics, and manager-visible hot replacement. Generated Python, Java, C++, Go, and Rust event runtimes retain their existing source lifecycle but do not expose this generic host component API.
   - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 
 ## Done

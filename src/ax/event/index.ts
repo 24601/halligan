@@ -24,6 +24,31 @@ export type {
   AxEventStoreConformanceReport,
 } from './conformance.js';
 export { runAxEventStoreConformance } from './conformance.js';
+export type {
+  AxDemandAppendResult,
+  AxDemandBoundaryOptions,
+  AxDemandCalibration,
+  AxDemandDetection,
+  AxDemandDetector,
+  AxDemandDisposition,
+  AxDemandGrantState,
+  AxDemandGrantValidationContext,
+  AxDemandObservation,
+  AxDemandOutcome,
+  AxDemandPolicy,
+  AxDemandProposal,
+  AxDemandProvenance,
+  AxDemandReceipt,
+  AxDemandRecord,
+  AxDemandScope,
+  AxDemandStore,
+  AxInMemoryDemandStoreOptions,
+} from './demand.js';
+export {
+  AxDemandBoundary,
+  AxInMemoryDemandStore,
+  axDemandEventObserver,
+} from './demand.js';
 export {
   AxEventRouteBuilder,
   AxEventTargetBuilder,
