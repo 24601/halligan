@@ -683,6 +683,31 @@ import {
 import { axModelInfoGrok } from './ai/x-grok/info.js';
 import { AxAIGrokEmbedModels, AxAIGrokModel } from './ai/x-grok/types.js';
 import {
+  AxAuthorizationDeniedError,
+  axAttenuateAuthority,
+  axAuthorityClaim,
+  axAuthorize,
+  axFunctionAuthorityTarget,
+  axSnapshotAuthority,
+  axValidateCapabilityGrant,
+} from './authority/authority.js';
+import type {
+  AxActor,
+  AxAuthorityClaim,
+  AxAuthorityContext,
+  AxAuthorityDelegationOptions,
+  AxAuthorityInheritance,
+  AxAuthorityValue,
+  AxAuthorizationAuditEvent,
+  AxAuthorizationReceipt,
+  AxAuthorizationRequestContext,
+  AxAuthorizer,
+  AxCapabilityGrant,
+  AxDelegationClaims,
+  AxPrincipal,
+  AxResourceScope,
+} from './authority/types.js';
+import {
   type AxAssertion,
   AxAssertionError,
   type AxStreamingAssertion,
@@ -1414,6 +1439,7 @@ export { AxAgentPlaybook };
 export { AxAgentProtocolCompletionSignal };
 export { AxAgentSharedRuntimeSession };
 export { AxAssertionError };
+export { AxAuthorizationDeniedError };
 export { AxBalancer };
 export { AxBaseAI };
 export { AxBaseOptimizer };
@@ -1524,10 +1550,13 @@ export { axAnalyzeChatPromptRequirements };
 export { axAnalyzeRequestRequirements };
 export { axApplyMCPAuthentication };
 export { axApplyOpenAIChatAudioRequest };
+export { axAttenuateAuthority };
 export { axAudioFormatFromMimeType };
 export { axAudioInputFilename };
 export { axAudioInputToBlob };
 export { axAudioMimeType };
+export { axAuthorityClaim };
+export { axAuthorize };
 export { axBaseAIDefaultConfig };
 export { axBaseAIDefaultCreativeConfig };
 export { axBuildDistillerDefinition };
@@ -1562,6 +1591,7 @@ export { axExecutableSkillRef };
 export { axFetchJsonSpeech };
 export { axFetchMultipartTranscription };
 export { axFrameSampler };
+export { axFunctionAuthorityTarget };
 export { axGetAIProfile };
 export { axGetCompatibilityReport };
 export { axGetFormatCompatibility };
@@ -1635,11 +1665,13 @@ export { axShouldUseGeminiLiveAudio };
 export { axShouldUseGrokRealtime };
 export { axShouldUseOpenAIRealtime };
 export { axSignUCPRequest };
+export { axSnapshotAuthority };
 export { axSpanAttributes };
 export { axSpanEvents };
 export { axUpdateBalancerRouteStats };
 export { axUpdateMetricsConfig };
 export { axUpdateOptimizerMetricsConfig };
+export { axValidateCapabilityGrant };
 export { axValidateChatRequestMessage };
 export { axValidateChatResponseResult };
 export { axValidateEventEnvelope };
@@ -1875,6 +1907,7 @@ export type { AxAIWebLLMModelId };
 export type { AxAPI };
 export type { AxAPIConfig };
 export type { AxAPIResponseMetadata };
+export type { AxActor };
 export type { AxAgentActorTurnCallback };
 export type { AxAgentActorTurnCallbackArgs };
 export type { AxAgentAutoPromotionRecord };
@@ -1987,6 +2020,15 @@ export type { AxAssertion };
 export type { AxAttempt };
 export type { AxAudioFormat };
 export type { AxAudioInput };
+export type { AxAuthorityClaim };
+export type { AxAuthorityContext };
+export type { AxAuthorityDelegationOptions };
+export type { AxAuthorityInheritance };
+export type { AxAuthorityValue };
+export type { AxAuthorizationAuditEvent };
+export type { AxAuthorizationReceipt };
+export type { AxAuthorizationRequestContext };
+export type { AxAuthorizer };
 export type { AxBalancerAdaptiveStrategy };
 export type { AxBalancerCandidateScore };
 export type { AxBalancerCostContext };
@@ -2002,6 +2044,7 @@ export type { AxBalancerStatsStore };
 export type { AxBaseAIArgs };
 export type { AxBestOfNOptions };
 export type { AxBootstrapOptimizerOptions };
+export type { AxCapabilityGrant };
 export type { AxChatAudioConfig };
 export type { AxChatAudioOutput };
 export type { AxChatLogEntry };
@@ -2038,6 +2081,7 @@ export type { AxCostTrackerOptions };
 export type { AxDateRange };
 export type { AxDateRangeValue };
 export type { AxDebugChatResponseUsage };
+export type { AxDelegationClaims };
 export type { AxDiscoveryTurnSummary };
 export type { AxDockerContainer };
 export type { AxEmbedRequest };
@@ -2367,6 +2411,7 @@ export type { AxPlaybookEvolveOptions };
 export type { AxPlaybookEvolveResult };
 export type { AxPlaybookOptions };
 export type { AxPlaybookSnapshot };
+export type { AxPrincipal };
 export type { AxProgramDemos };
 export type { AxProgramExamples };
 export type { AxProgramForwardOptions };
@@ -2413,6 +2458,7 @@ export type { AxResolvedCitations };
 export type { AxResolvedContextPolicy };
 export type { AxResolvedExecutorModelPolicy };
 export type { AxResolvedExecutorModelPolicyEntry };
+export type { AxResourceScope };
 export type { AxResultPickerFunction };
 export type { AxResultPickerFunctionFieldResults };
 export type { AxResultPickerFunctionFunctionResults };

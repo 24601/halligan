@@ -469,6 +469,7 @@ export class AxAgent<IN extends AxGenIn, OUT extends AxGenOut>
       const coordSig = this.fullSignature;
       this.func = {
         name: toCamelCase(init.agentIdentity.name),
+        componentId: `agent:${init.agentIdentity.namespace ? `${init.agentIdentity.namespace}:` : ''}${toCamelCase(init.agentIdentity.name)}`,
         description: init.agentIdentity.description,
         ...(init.agentIdentity.namespace
           ? { namespace: init.agentIdentity.namespace }
