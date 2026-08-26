@@ -58,6 +58,29 @@ const zeroScoreVector = (
   return Object.fromEntries([...knownKeys].map((key) => [key, 0]));
 };
 
+export const normalizeGEPABatchScoreVectors = (
+  vectors: readonly Readonly<Record<string, number>>[],
+  failedRows: ReadonlySet<number>,
+  knownKeys: ReadonlySet<string> = new Set()
+): Record<string, number>[] => {
+  const siblingKeys = new Set(knownKeys);
+  for (const [index, vector] of vectors.entries()) {
+    if (failedRows.has(index)) continue;
+    for (const key of Object.keys(vector)) siblingKeys.add(key);
+  }
+  if (siblingKeys.size === 0) {
+    return vectors.map((vector) => ({ ...vector }));
+  }
+  return vectors.map((vector) =>
+    Object.fromEntries(
+      [...siblingKeys].map((key) => [
+        key,
+        Number.isFinite(vector[key]) ? vector[key] : 0,
+      ])
+    )
+  );
+};
+
 const MAX_METRIC_FEEDBACK_CHARS = 4_000;
 
 export const normalizeGEPAMetricFeedback = (
@@ -252,6 +275,7 @@ export async function evaluateGEPABatch<IN, OUT extends AxGenOut>(args: {
     output?: unknown;
     error?: string;
   }> = [];
+  const failedRows = new Set<number>();
   for (const [index, ex] of args.set.entries()) {
     args.applyConfig(args.cfg);
     let prediction: unknown;
@@ -288,6 +312,7 @@ export async function evaluateGEPABatch<IN, OUT extends AxGenOut>(args: {
       const message = error instanceof Error ? error.message : String(error);
       prediction = { error: message };
       scores = zeroScoreVector(args.state.observedScoreKeys);
+      failedRows.add(index);
       if (args.captureTraces) trajectories.push({ calls, error: message });
       args.verboseLog?.(
         `Evaluation failed during ${args.phase}; scoring this example as zero. Error: ${message}`
@@ -308,11 +333,21 @@ export async function evaluateGEPABatch<IN, OUT extends AxGenOut>(args: {
     );
   }
 
+  const scoreVectors = normalizeGEPABatchScoreVectors(
+    rows.map((row) => row.scores),
+    failedRows,
+    args.state.observedScoreKeys
+  );
+  const normalizedRows = rows.map((row, index) => ({
+    ...row,
+    scores: scoreVectors[index]!,
+  }));
+
   return {
-    rows,
-    avg: avgVec(rows.map((row) => row.scores)),
-    scalars: rows.map((row) => row.scalar),
-    sum: rows.reduce((total, row) => total + row.scalar, 0),
+    rows: normalizedRows,
+    avg: avgVec(scoreVectors),
+    scalars: normalizedRows.map((row) => row.scalar),
+    sum: normalizedRows.reduce((total, row) => total + row.scalar, 0),
     trajectories: args.captureTraces ? trajectories : undefined,
   };
 }

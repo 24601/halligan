@@ -98,4 +98,38 @@ describe('createAxGenAdapter', () => {
       { score: 0.8, feedback: 'improve-b', output: { answer: 'b' } },
     ]);
   });
+
+  it.each([0, 1, 2])(
+    'zero-fills named objectives when adapter rollout %i fails',
+    async (failureIndex) => {
+      const adapter = createAxGenAdapter({
+        program: {
+          applyOptimizedComponents: () => {},
+          forward: async (_ai: AxAIService, input: any) => {
+            if (input.fail) throw new Error('failed');
+            return { answer: 'ok' };
+          },
+        } as any,
+        ai: {} as AxAIService,
+        sampleCount: 1,
+        metricFn: async () => ({
+          score: 0.8,
+          scores: { accuracy: 1, brevity: 1 },
+        }),
+      });
+
+      const batch = await adapter.evaluate(
+        [0, 1, 2].map((index) => ({ fail: index === failureIndex })),
+        {}
+      );
+
+      expect(batch.scoreVectors).toEqual(
+        [0, 1, 2].map((index) =>
+          index === failureIndex
+            ? { accuracy: 0, brevity: 0 }
+            : { accuracy: 1, brevity: 1 }
+        )
+      );
+    }
+  );
 });

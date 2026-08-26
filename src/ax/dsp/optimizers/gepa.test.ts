@@ -161,7 +161,7 @@ describe('AxGEPA Optimizer', () => {
         { maxMetricCalls: 2 }
       );
 
-      // bestScore follows the existing Pareto-vector scalarization convention;
+      // bestScore follows the existing Pareto-vector averaging convention;
       // the explicit 0.9 scalar is used for rollout acceptance decisions.
       expect(result.bestScore).toBe(0.5);
       expect(result.paretoFront[0]?.scores).toEqual({

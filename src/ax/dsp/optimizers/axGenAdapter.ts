@@ -11,6 +11,7 @@ import type {
 } from '../types.js';
 import type { AxGEPAAdapter, AxGEPAEvaluationBatch } from './gepaAdapter.js';
 import {
+  normalizeGEPABatchScoreVectors,
   normalizeGEPAMetricResult,
   scalarizeGEPAScores,
 } from './gepaEvaluation.js';
@@ -67,8 +68,9 @@ export function createAxGenAdapter<IN, OUT extends AxGenOut>({
       const scoreVectors: Record<string, number>[] = [];
       const feedback: Array<string | undefined> = [];
       const trajectories: AxRolloutTrace<OUT>[] = [];
+      const failedRows = new Set<number>();
 
-      for (const datum of batch) {
+      for (const [index, datum] of batch.entries()) {
         const calls: AxFunctionCallTrace[] = [];
         try {
           const output = await program.forward(ai, datum, {
@@ -95,15 +97,8 @@ export function createAxGenAdapter<IN, OUT extends AxGenOut>({
           const message = err instanceof Error ? err.message : String(err);
           outputs.push({ error: message });
           scores.push(0);
-          const observedKeys = new Set<string>();
-          for (const vector of scoreVectors) {
-            for (const key of Object.keys(vector)) observedKeys.add(key);
-          }
-          scoreVectors.push(
-            observedKeys.size === 0
-              ? { score: 0 }
-              : Object.fromEntries([...observedKeys].map((key) => [key, 0]))
-          );
+          scoreVectors.push({ score: 0 });
+          failedRows.add(index);
           feedback.push(undefined);
           if (captureTraces) trajectories.push({ calls, error: message });
         }
@@ -112,7 +107,7 @@ export function createAxGenAdapter<IN, OUT extends AxGenOut>({
       return {
         outputs,
         scores,
-        scoreVectors,
+        scoreVectors: normalizeGEPABatchScoreVectors(scoreVectors, failedRows),
         feedback,
         trajectories: captureTraces ? trajectories : undefined,
       } satisfies AxGEPAEvaluationBatch<

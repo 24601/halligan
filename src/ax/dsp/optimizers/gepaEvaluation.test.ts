@@ -140,7 +140,7 @@ describe('evaluateGEPABatch', () => {
     expect(state.totalCalls).toBe(1);
   });
 
-  it('uses an adapter explicit scalar instead of re-scalarizing named objectives', async () => {
+  it('uses an adapter explicit scalar instead of averaging named objectives', async () => {
     const state = { totalCalls: 0, observedScoreKeys: new Set<string>() };
     const result = await evaluateGEPABatch({
       program: {} as any,
@@ -237,4 +237,44 @@ describe('evaluateGEPABatch', () => {
       error: 'rollout failed',
     });
   });
+
+  it.each([0, 1, 2])(
+    'zero-fills named objectives when direct rollout %i fails',
+    async (failureIndex) => {
+      const state = { totalCalls: 0, observedScoreKeys: new Set<string>() };
+      const result = await evaluateGEPABatch({
+        program: {
+          forward: async (_ai: AxAIService, input: any) => {
+            if (input.fail) throw new Error('rollout failed');
+            return { ok: true };
+          },
+        } as any,
+        ai: {} as AxAIService,
+        metricFn: async () => ({
+          score: 0.8,
+          scores: { accuracy: 1, brevity: 1 },
+        }),
+        cfg: {},
+        set: [0, 1, 2].map((index) => ({ fail: index === failureIndex })),
+        phase: 'failure-order',
+        sampleCount: 1,
+        maxMetricCalls: 10,
+        state,
+        applyConfig: () => {},
+        scalarize: (scores) => scalarizeGEPAScores(scores),
+      });
+
+      expect(result?.rows.map((row) => row.scores)).toEqual(
+        [0, 1, 2].map((index) =>
+          index === failureIndex
+            ? { accuracy: 0, brevity: 0 }
+            : { accuracy: 1, brevity: 1 }
+        )
+      );
+      expect(result?.avg).toEqual({
+        accuracy: 2 / 3,
+        brevity: 2 / 3,
+      });
+    }
+  );
 });
