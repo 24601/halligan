@@ -89,6 +89,10 @@ Continuation matching is **identity-scoped**: a correlation value for one
 tenant cannot resume another tenant's run. Consumption is atomic, so two
 workers cannot fire the same continuation twice. A missing, ambiguous, or
 expired continuation becomes a dead letter; it never turns into fresh work.
+Admission is durably snapshotted on the run before invocation. Retries and
+recovery use only that immutable continuation, target, and instance, so expiry
+and correlation-key reuse cannot retarget persisted output or consume a
+replacement. Legacy resume runs without a snapshot fail closed.
 
 Targets may use separate `wakeInput` and `resumeInput` plans because the first
 event and the returning event often carry different shapes. The action-specific
@@ -142,8 +146,8 @@ this is recoverable coordination, not an atomic commit across SQLite and the
 payload provider. Recovery atomically binds committed payload ownership to the
 existing succeeded run; lease takeover then performs sink-only resume without
 invoking the target. Resume-route sink contexts preserve the admitted
-continuation. Failed provider reconciliation quarantines that delivery without
-blocking unrelated claims.
+continuation snapshot and its original target/instance binding. Failed provider
+reconciliation quarantines that delivery without blocking unrelated claims.
 
 The runtime persists output before dispatching sinks. Sink retries use the
 stable `(runId, sinkId)` key and redrive only the failed sink; they never repeat
@@ -188,7 +192,9 @@ returned shutdown promise, and concurrent calls join it. Ax best-effort requests
 `return()` on active stream iterators, ignores cancellation failures, and
 suppresses post-abort chunks,
 but timed-out host work may continue and perform later side effects because Ax
-cannot terminate JavaScript.
+cannot terminate JavaScript. After workers settle or the deadline expires, Ax
+independently attempts best-effort store close; a permanently hung worker cannot
+prevent that attempt, and a store-close rejection does not reject `close()`.
 Caller-owned protocol clients must still be closed by the caller. For
 deterministic tests, `AxManualEventClock` advances retries,
 debounce windows, and continuation expiry without waiting for wall-clock time.

@@ -588,6 +588,8 @@ export interface AxEventRun<OUT = unknown> {
   routeId: string;
   targetId?: string;
   instanceKey: string;
+  /** Immutable continuation admission used by resume retries and recovery. */
+  admittedContinuation?: Readonly<AxEventContinuation>;
   /** Worker owning the fenced claim when this run record was written. */
   claimedBy?: string;
   status: AxEventRunStatus;
@@ -781,6 +783,6 @@ export interface AxEventStagedPayloadStore extends AxEventPayloadStore {
 
 export interface AxEventCloseOptions {
   drain?: boolean;
-  /** Bounds source-handle shutdown and, when enabled, drain waiting. */
+  /** One host-time return deadline for source, drain, worker, and store shutdown. */
   timeoutMs?: number;
 }

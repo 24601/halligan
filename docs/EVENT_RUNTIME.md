@@ -83,8 +83,10 @@ another tenant's notification.
 - `observe` records or forwards telemetry without calling a model.
 - `invalidate` refreshes a declared catalog or cache without calling a model.
 - `wake` starts a target with inputs produced by its typed input plan.
-- `resume` finds the continuation that owns a correlation key and restores its
-  target instance.
+- `resume` finds the continuation that owns a correlation key and durably
+  snapshots that admission on the run before invocation. Retries and recovery
+  use only that immutable continuation/target/instance binding; correlation-key
+  reuse cannot retarget persisted work.
 
 Matching an event is never enough to invoke an LLM. The route action remains
 the authorization boundary.
@@ -357,7 +359,10 @@ abort signal. This bounds when
 capabilities it already captured, or prevent its later host side effects.
 Sources, iterators, tools, and stores must cooperate with abort or use a
 host-owned revocation/epoch check before external writes. Timed-out work and
-eventual best-effort store close may continue after the returned promise settles.
+store close may continue after the returned promise settles. Once workers
+settle or their share of the overall deadline expires, Ax independently starts
+best-effort store close; a permanently hung worker cannot prevent that attempt,
+and store-close rejection is observed and suppressed.
 Caller-owned protocol clients remain caller-owned. Background source failures
 are supervised through `onSourceError`; they are never thrown from an
 unobserved callback.
@@ -405,7 +410,13 @@ without blocking unrelated claims, reads, close, or the supervised worker loop.
 A successful recovery atomically commits the stage and binds
 the existing succeeded run to its delivery; lease takeover then dispatches only
 final sinks from that persisted output and never invokes the target again. A
-resume route preserves its admitted continuation in the recovered sink context.
+resume route persists its admitted continuation snapshot before invocation and
+uses that exact snapshot for retries, recovered sink context, target/instance
+selection, and completion. An expired original plus a replacement under the
+same correlation key does not retarget output or consume the replacement.
+Legacy resume runs without a durable admission snapshot fail closed instead of
+performing a fresh lookup; legacy wake runs retain their configured-target
+fallback.
 A live provider-commit acknowledgement must still hold the exact active,
 unexpired owner/token. Stale acknowledgements and every failure after staging
 begins use structural output-persistence phases. Failed provider reconciliation

@@ -578,6 +578,12 @@ describe('AxEventRuntime', () => {
     });
     let returnCalls = 0;
     let lateChunkSinks = 0;
+    const storeClose = vi.fn(async () => {
+      throw new Error('store-close-fail');
+    });
+    const store = Object.assign(new AxInMemoryEventStore(), {
+      close: storeClose,
+    });
     const signature = new AxSignature('eventId?:string -> handled:boolean');
     const streamingProgram = {
       getId: () => 'non-cooperative-stream',
@@ -607,6 +613,7 @@ describe('AxEventRuntime', () => {
       }),
     } as unknown as AxProgrammable<any, any>;
     const runtime = new AxEventRuntime({
+      store,
       workerConcurrency: 1,
       routes: [
         eventRoute({
@@ -648,6 +655,9 @@ describe('AxEventRuntime', () => {
     expect(repeatedCloseSettled).toBe(false);
     await Promise.all([firstClose, repeatedClose]);
     expect(returnCalls).toBeGreaterThanOrEqual(1);
+    expect(storeClose).toHaveBeenCalledOnce();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(storeClose).toHaveBeenCalledOnce();
 
     releaseNext({
       done: false,
@@ -715,6 +725,7 @@ describe('AxEventRuntime', () => {
     const store = new AxInMemoryEventStore({ clock });
     let targetCalls = 0;
     let sinkContinuation: Readonly<AxEventContinuation> | undefined;
+    let sinkInstanceKey: string | undefined;
     const target = eventTarget({
       id: 'resume-recovery-target',
       ai,
@@ -729,6 +740,7 @@ describe('AxEventRuntime', () => {
           id: 'resume-recovery-sink',
           write: (_output, context) => {
             sinkContinuation = context.eventContext.continuation;
+            sinkInstanceKey = context.eventContext.instanceKey;
           },
         },
       ],
@@ -765,12 +777,24 @@ describe('AxEventRuntime', () => {
       publishTimeoutMs: 100,
     });
     const claimed = (await store.claim('worker-a', clock.now(), 100))!;
+    const continuation: AxEventContinuation = {
+      id: 'resume-recovery-continuation',
+      targetId: target.id,
+      routeId: 'start-recovery',
+      instanceKey: 'original-instance',
+      identityScope: 'anonymous',
+      correlation: [{ kind: 'job', value: 'job-42' }],
+      createdAt: clock.now(),
+      expiresAt: clock.now() + 50,
+      metadata: { admitted: 'yes' },
+    };
     const run: AxEventRun = {
       id: 'resume-recovery-run',
       deliveryId: claimed.id,
       routeId: claimed.routeId,
       targetId: target.id,
-      instanceKey: claimed.instanceKey,
+      instanceKey: continuation.instanceKey,
+      admittedContinuation: continuation,
       claimedBy: claimed.claimedBy,
       fencingToken: claimed.fencingToken,
       status: 'succeeded',
@@ -787,18 +811,27 @@ describe('AxEventRuntime', () => {
       invocationStarted: true,
     });
     await store.saveRun(run);
-    const continuation: AxEventContinuation = {
-      id: 'resume-recovery-continuation',
+    await store.registerContinuation(continuation);
+    clock.advanceBy(51);
+    await expect(
+      store.findContinuation(
+        continuation.identityScope,
+        continuation.correlation[0]!,
+        clock.now()
+      )
+    ).resolves.toBeUndefined();
+    const replacement: AxEventContinuation = {
+      id: 'replacement-continuation',
       targetId: target.id,
-      routeId: 'start-recovery',
-      instanceKey: claimed.instanceKey,
+      routeId: 'replacement-start',
+      instanceKey: 'replacement-instance',
       identityScope: 'anonymous',
       correlation: [{ kind: 'job', value: 'job-42' }],
       createdAt: clock.now(),
-      metadata: { admitted: 'yes' },
+      metadata: { admitted: 'replacement' },
     };
-    await store.registerContinuation(continuation);
-    clock.advanceBy(101);
+    await store.registerContinuation(replacement);
+    clock.advanceBy(50);
 
     await runtime.start();
     for (let index = 0; index < 50; index++) {
@@ -811,6 +844,14 @@ describe('AxEventRuntime', () => {
     }
     expect(targetCalls).toBe(0);
     expect(sinkContinuation).toEqual(continuation);
+    expect(sinkInstanceKey).toBe(continuation.instanceKey);
+    await expect(
+      store.findContinuation(
+        replacement.identityScope,
+        replacement.correlation[0]!,
+        clock.now()
+      )
+    ).resolves.toEqual(replacement);
     expect(await store.getDelivery(receipt.deliveryIds[0]!)).toEqual(
       expect.objectContaining({
         status: 'succeeded',

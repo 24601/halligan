@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  type AxEventContinuation,
   AxEventOutputPersistenceError,
   type AxEventRun,
   AxEventRuntime,
@@ -1143,6 +1144,179 @@ describe('AxSQLiteEventStore', () => {
         runId: run.id,
       })
     );
+    await runtime.close({ drain: false });
+  });
+
+  it('recovers the persisted continuation admission after correlation reuse', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const filename = join(directory, 'continuation-admission.sqlite');
+    const clock = new AxManualEventClock(1_000);
+    const initial = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    const receipt = await initial.enqueue({
+      ingress: {
+        event: {
+          specversion: '1.0',
+          id: 'resume-recovery',
+          source: 'test://sqlite-effects',
+          type: 'resume.recovery',
+        },
+        identity: {},
+        trust: 'authenticated',
+      },
+      deliveries: [
+        {
+          routeId: 'resume-route',
+          action: 'resume',
+          targetId: 'resume-target',
+          instanceKey: 'delivery-instance',
+          sizeBytes: 128,
+          retrySafety: 'idempotent',
+          ordering: 'strict',
+        },
+      ],
+      acceptedAt: clock.now(),
+      publishTimeoutMs: 1_000,
+    });
+    const claimed = (await initial.claim('worker-a', clock.now(), 100))!;
+    const admitted: AxEventContinuation = {
+      id: 'admitted-continuation',
+      targetId: 'resume-target',
+      routeId: 'start-route',
+      instanceKey: 'original-instance',
+      identityScope: 'anonymous',
+      correlation: [{ kind: 'job', value: 'job-42' }],
+      createdAt: clock.now(),
+      expiresAt: clock.now() + 50,
+      metadata: { admission: 'original' },
+    };
+    const run: AxEventRun = {
+      id: 'resume-recovery-run',
+      deliveryId: claimed.id,
+      routeId: claimed.routeId,
+      targetId: admitted.targetId,
+      instanceKey: admitted.instanceKey,
+      admittedContinuation: admitted,
+      claimedBy: claimed.claimedBy,
+      fencingToken: claimed.fencingToken,
+      status: 'succeeded',
+      attempt: 1,
+      startedAt: clock.now(),
+      finishedAt: clock.now(),
+      output: { handled: true },
+    };
+    await initial.saveDelivery({
+      ...claimed,
+      status: 'running',
+      attempt: 1,
+      runId: run.id,
+      invocationStarted: true,
+    });
+    await initial.saveRun(run);
+    await initial.registerContinuation(admitted);
+    await initial.close();
+
+    clock.advanceBy(51);
+    const restarted = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    await expect(
+      restarted.findContinuation(
+        admitted.identityScope,
+        admitted.correlation[0]!,
+        clock.now()
+      )
+    ).resolves.toBeUndefined();
+    const replacement: AxEventContinuation = {
+      id: 'replacement-continuation',
+      targetId: admitted.targetId,
+      routeId: 'replacement-route',
+      instanceKey: 'replacement-instance',
+      identityScope: admitted.identityScope,
+      correlation: admitted.correlation,
+      createdAt: clock.now(),
+      metadata: { admission: 'replacement' },
+    };
+    await restarted.registerContinuation(replacement);
+    clock.advanceBy(50);
+
+    let targetCalls = 0;
+    let sinkContinuation: Readonly<AxEventContinuation> | undefined;
+    let sinkInstanceKey: string | undefined;
+    const signature = s('trigger?:string -> handled:boolean');
+    const program = {
+      getId: () => 'resume-recovery-target',
+      getSignature: () => signature,
+      forward: async () => {
+        targetCalls++;
+        return { handled: false };
+      },
+      streamingForward: async function* () {},
+    } as unknown as AxProgrammable<any, any>;
+    const runtime = new AxEventRuntime({
+      clock,
+      store: restarted,
+      programStateStore: restarted,
+      coordination: 'multi-worker',
+      workerConcurrency: 1,
+      leaseMs: 100,
+      heartbeatMs: 25,
+      routes: [
+        eventRoute({
+          id: 'resume-route',
+          match: { types: ['resume.recovery'] },
+          action: 'resume',
+          correlation: () => admitted.correlation[0]!,
+          target: eventTarget({
+            id: admitted.targetId,
+            ai: {} as never,
+            program,
+            mapInput: () => ({}),
+            retrySafety: 'idempotent',
+            sinks: [
+              {
+                id: 'resume-recovery-sink',
+                write: (_output, context) => {
+                  sinkContinuation = context.eventContext.continuation;
+                  sinkInstanceKey = context.eventContext.instanceKey;
+                },
+              },
+            ],
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    for (let index = 0; index < 100; index++) {
+      if ((await restarted.getDelivery(claimed.id))?.status === 'succeeded') {
+        break;
+      }
+      await Promise.resolve();
+    }
+
+    expect(targetCalls).toBe(0);
+    expect(sinkContinuation).toEqual(admitted);
+    expect(sinkInstanceKey).toBe(admitted.instanceKey);
+    expect(await restarted.getDelivery(receipt.deliveryIds[0]!)).toEqual(
+      expect.objectContaining({
+        status: 'succeeded',
+        fencingToken: 2,
+        runId: run.id,
+      })
+    );
+    await expect(
+      restarted.findContinuation(
+        replacement.identityScope,
+        replacement.correlation[0]!,
+        clock.now()
+      )
+    ).resolves.toEqual(replacement);
     await runtime.close({ drain: false });
   });
 

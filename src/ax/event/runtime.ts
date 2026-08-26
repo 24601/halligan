@@ -537,19 +537,14 @@ export class AxEventRuntime {
     }
     const workers = Promise.allSettled(this.workerPromises);
     await this.waitUntilCloseDeadline(workers, deadline);
-    const storeClose = workers.then(() => this.store.close?.());
+    // A non-cooperative worker must not prevent the store's own best-effort
+    // shutdown from ever starting. Rejections are observed but close remains a
+    // bounded, non-throwing revocation attempt.
+    const storeClose = Promise.resolve()
+      .then(() => this.store.close?.())
+      .catch(() => undefined);
     await this.waitUntilCloseDeadline(storeClose, deadline);
-    if (closeTimerNow() < deadline) this.started = false;
-    else {
-      void storeClose.then(
-        () => {
-          this.started = false;
-        },
-        () => {
-          this.started = false;
-        }
-      );
-    }
+    this.started = false;
   }
 
   private async waitUntilCloseDeadline(
@@ -641,7 +636,7 @@ export class AxEventRuntime {
     workerId: string
   ): Promise<void> {
     let claimed = initialClaim;
-    const recoveredRun =
+    let previousRun =
       claimed.recoveredFromExpiredLease && claimed.runId
         ? await this.store.getRun(claimed.runId)
         : undefined;
@@ -649,7 +644,7 @@ export class AxEventRuntime {
       claimed.recoveredFromExpiredLease &&
       claimed.invocationStarted &&
       claimed.retrySafety === 'unknown' &&
-      recoveredRun?.status !== 'succeeded'
+      previousRun?.status !== 'succeeded'
     ) {
       await this.parkOutcomeUnknownEffects(claimed);
       const reason =
@@ -681,45 +676,74 @@ export class AxEventRuntime {
     let targetId = target?.id;
     let instanceKey = claimed.instanceKey;
     try {
-      if (route.action === 'resume') {
-        const correlation =
-          route.correlation?.(claimed.ingress) ??
-          claimed.ingress.correlation?.[0];
-        if (!correlation) {
+      if (route.action === 'resume' && claimed.runId && !previousRun) {
+        // A previous attempt owns resume admission for the lifetime of this
+        // delivery. Load it before any fresh correlation lookup so replacement
+        // continuations can never redirect retries or recovery.
+        previousRun = await this.store.getRun(claimed.runId);
+        if (!previousRun) {
           throw new Error(
-            `Resume route ${route.id} did not produce a correlation key`
+            `outcome_unknown: resume delivery ${claimed.id} lost its durable continuation admission`
           );
         }
-        continuation = await this.store.findContinuation(
-          claimed.identityScope,
-          correlation,
-          this.clock.now()
-        );
-        if (!continuation) {
-          throw new AxEventContinuationNotFoundError(correlation);
-        }
-        targetId = continuation.targetId;
-        target = this.targets.get(targetId);
-        instanceKey = continuation.instanceKey;
-        if (!target) {
-          throw new Error(`Continuation target ${targetId} is not configured`);
-        }
       }
-
       if (
         await this.resumePersistedCompletion(
           claimed,
           workerId,
           route,
-          target,
-          targetId,
-          instanceKey,
-          continuation
+          previousRun
         )
       ) {
-        if (continuation)
-          await this.store.completeContinuation(continuation.id);
+        if (previousRun?.admittedContinuation) {
+          await this.store.completeContinuation(
+            previousRun.admittedContinuation.id
+          );
+        }
         return;
+      }
+
+      if (route.action === 'resume') {
+        if (previousRun) {
+          continuation = previousRun.admittedContinuation;
+          if (!continuation) {
+            throw new Error(
+              `outcome_unknown: resume run ${previousRun.id} has no durable continuation admission`
+            );
+          }
+        } else {
+          const correlation =
+            route.correlation?.(claimed.ingress) ??
+            claimed.ingress.correlation?.[0];
+          if (!correlation) {
+            throw new Error(
+              `Resume route ${route.id} did not produce a correlation key`
+            );
+          }
+          continuation = await this.store.findContinuation(
+            claimed.identityScope,
+            correlation,
+            this.clock.now()
+          );
+          if (!continuation) {
+            throw new AxEventContinuationNotFoundError(correlation);
+          }
+        }
+        targetId = continuation.targetId;
+        target = this.targets.get(targetId);
+        instanceKey = continuation.instanceKey;
+        if (
+          previousRun &&
+          (previousRun.targetId !== targetId ||
+            previousRun.instanceKey !== instanceKey)
+        ) {
+          throw new Error(
+            `outcome_unknown: resume run ${previousRun.id} continuation admission does not match its target binding`
+          );
+        }
+        if (!target) {
+          throw new Error(`Continuation target ${targetId} is not configured`);
+        }
       }
 
       const runId = axEventId('event-run');
@@ -795,6 +819,9 @@ export class AxEventRuntime {
         routeId: route.id,
         ...(targetId ? { targetId } : {}),
         instanceKey,
+        ...(continuation
+          ? { admittedContinuation: structuredClone(continuation) }
+          : {}),
         claimedBy: workerId,
         status: 'running',
         attempt,
@@ -1066,14 +1093,39 @@ export class AxEventRuntime {
     claimed: Readonly<AxEventDelivery>,
     workerId: string,
     route: Readonly<AxEventRoute>,
-    target: Readonly<AxEventTarget<any, any>> | undefined,
-    targetId: string | undefined,
-    instanceKey: string,
-    continuation: Readonly<AxEventContinuation> | undefined
+    persisted: Readonly<AxEventRun> | undefined
   ): Promise<boolean> {
-    if (!claimed.recoveredFromExpiredLease || !claimed.runId) return false;
-    const persisted = await this.store.getRun(claimed.runId);
-    if (!persisted || persisted.status !== 'succeeded') return false;
+    if (
+      !claimed.recoveredFromExpiredLease ||
+      persisted?.status !== 'succeeded'
+    ) {
+      return false;
+    }
+    const continuation = persisted.admittedContinuation;
+    if (route.action === 'resume' && !continuation) {
+      throw new Error(
+        `outcome_unknown: succeeded resume run ${persisted.id} has no durable continuation admission`
+      );
+    }
+    if (
+      continuation &&
+      (persisted.targetId !== continuation.targetId ||
+        persisted.instanceKey !== continuation.instanceKey)
+    ) {
+      throw new Error(
+        `outcome_unknown: succeeded resume run ${persisted.id} continuation admission does not match its target binding`
+      );
+    }
+    // Legacy wake runs may predate persisted target IDs; the configured wake
+    // route remains their compatibility fallback. Resume runs never use it.
+    const targetId =
+      persisted.targetId ??
+      (route.action === 'resume' ? undefined : route.target?.id);
+    const target = targetId ? this.targets.get(targetId) : undefined;
+    if (targetId && !target) {
+      throw new Error(`Persisted target ${targetId} is not configured`);
+    }
+    const instanceKey = persisted.instanceKey;
 
     const controller = new AbortController();
     const heartbeatController = new AbortController();

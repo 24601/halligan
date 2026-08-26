@@ -61,7 +61,9 @@ await source.publish({ event, identity, trust: 'authenticated' });
 - Use `.wakeInput()` and `.resumeInput()` when the two actions need different
   contracts. Neither action silently uses the other action's mapping.
 - Use `observe` for progress/logs and `invalidate` for catalog changes.
-- Use `resume` only with an owned continuation correlation key.
+- Use `resume` only with an owned continuation correlation key. Admission is
+  snapshotted on the run before invocation; retries/recovery use that immutable
+  continuation, target, and instance rather than looking up a reused key.
 - Use `createProgram(instance)` for stateful multi-tenant Agents.
 - Declare `retrySafety: 'idempotent'` only when stable delivery keys protect
   every possible side effect.
@@ -104,7 +106,9 @@ await source.publish({ event, identity, trust: 'authenticated' });
   `return()` on active streams, swallows sync/async cancellation failures, and
   suppresses post-abort chunks. This is return-bounded only: non-cooperative
   host work may continue and perform later side effects; use cooperative abort
-  or a host revocation check before writes.
+  or a host revocation check before writes. After worker settlement or deadline,
+  Ax independently attempts best-effort store close and suppresses its rejection;
+  a permanently hung worker cannot prevent the attempt.
 - The in-memory store is volatile and single-process.
   Waiting runtimes schedule claimed/running lease expiry and reclaim with a new
   safe fencing token instead of wedging expired work.
@@ -167,7 +171,11 @@ staging/abort expiry marks its fenced delivery terminal before owned cleanup.
 Malformed recovery rows are isolated so unrelated work and worker loops remain
 live. Recovery atomically binds the persisted succeeded
 run to the delivery, then takeover resumes final sinks only; target invocation
-is never repeated, and resume-route sinks retain the admitted continuation.
+is never repeated. Resume admission is persisted before invocation, and
+resume-route retries/recovery retain that exact continuation/target/instance
+snapshot even if the original expires and its correlation key is reused. A
+legacy resume run without a snapshot fails closed; legacy wake recovery keeps
+its configured-target fallback.
 Live commit acknowledgement requires the current unexpired
 owner/token. Failed reconciliation quarantines that delivery without stopping
 unrelated claims. Legacy `put/delete` stores are never uploaded to
