@@ -12,8 +12,8 @@
     "build": "npm run build --workspaces --if-present",
     "ci:verify": "npm run build && npm test",
     "fix": "npm run fix --workspaces --if-present",
-    "test": "run-s test:evaluation-policy test:release-workflow test:axir:tools test:axir test:axir:packages test:mcp-events:generated test:mcp-oauth test:mcp-interop test:examples:generated test:format test:lint test:tests test:spelling",
-    "test:evaluation-policy": "vitest run scripts/evaluation-policy.test.js",
+    "test": "run-s test:contribution-policy test:release-workflow test:axir:tools test:axir test:axir:packages test:mcp-events:generated test:mcp-oauth test:mcp-interop test:examples:generated test:format test:lint test:tests test:spelling",
+    "test:contribution-policy": "vitest run scripts/external-contribution-policy.test.js",
     "test:release-workflow": "vitest run scripts/release.test.js",
     "test:axir:tools": "vitest run scripts/axir-backlog.test.js scripts/axir-conformance-sync.test.js scripts/ci-scope.test.js scripts/test-generated-examples.test.js",
     "test:axir": "node scripts/test-axir.mjs",
@@ -34,7 +34,7 @@
     "profiles:generate": "node scripts/generate-provider-profiles.mjs",
     "profiles:check": "node scripts/generate-provider-profiles.mjs --check",
     "profiles:smoke": "npm run tsx src/examples/provider-profile-smoke.ts",
-    "eval:frame-sampler": "node --import=tsx scripts/evaluate-frame-sampler.ts",
+    "eval:react": "node --import=tsx src/examples/structured-react-eval.ts",
     "axir:generate-packages": "node scripts/generate-axir-packages.mjs",
     "axir:check-packages": "node scripts/check-axir-packages.mjs",
     "axir:audit:coverage": "node scripts/run-axir.mjs audit coverage ir/axcore/root.axir",
@@ -79,7 +79,9 @@
     "lint": "biome lint .",
     "format": "biome format .",
     "check": "biome check .",
-    "init-package": "node scripts/initPackage.js"
+    "init-package": "node scripts/initPackage.js",
+    "eval:frame-sampler": "node --import=tsx scripts/evaluate-frame-sampler.ts",
+    "test:evaluation-policy": "vitest run scripts/evaluation-policy.test.js"
   },
   "engines": {
     "node": ">=20"
@@ -93,7 +95,7 @@
     "@vitest/coverage-v8": "^3.2.1",
     "cspell": "^8.17.3",
     "lefthook": "^1.7.15",
-    "mermaid": "^11.15.0",
+    "mermaid": "^11.16.1",
     "npm-run-all2": "^8.0.4",
     "pagefind": "^1.5.2",
     "release-it": "^19.0.3",

@@ -389,6 +389,7 @@ export class AxMCPExecutionContext {
         annotations: tool.annotations as Record<string, unknown> | undefined,
         meta: tool._meta,
       },
+      ...(tool.execution ? { execution: tool.execution } : {}),
       func: async (args, extra): Promise<unknown> => {
         if (tool.execution?.taskSupport === 'required') {
           if (client.getEra() === 'modern') {
