@@ -12,27 +12,16 @@ fn read_request(stream: &mut TcpStream) -> String {
     let mut expected = None;
     loop {
         let read = stream.read(&mut tmp).unwrap_or(0);
-        if read == 0 {
-            break;
-        }
+        if read == 0 { break; }
         request.extend_from_slice(&tmp[..read]);
         if expected.is_none() {
             if let Some(end) = request.windows(4).position(|value| value == b"\r\n\r\n") {
                 let headers = String::from_utf8_lossy(&request[..end + 4]);
-                let length = headers
-                    .lines()
-                    .find_map(|line| {
-                        line.to_ascii_lowercase()
-                            .strip_prefix("content-length:")
-                            .map(|value| value.trim().parse::<usize>().unwrap_or(0))
-                    })
-                    .unwrap_or(0);
+                let length = headers.lines().find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length:").map(|value| value.trim().parse::<usize>().unwrap_or(0))).unwrap_or(0);
                 expected = Some(end + 4 + length);
             }
         }
-        if expected.is_some_and(|length| request.len() >= length) {
-            break;
-        }
+        if expected.is_some_and(|length| request.len() >= length) { break; }
     }
     String::from_utf8_lossy(&request).into_owned()
 }
@@ -51,20 +40,14 @@ fn main() -> AxResult<()> {
             let request: Value = serde_json::from_str(body).expect("JSON-RPC request");
             let method = request["method"].as_str().unwrap_or_default();
             let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
-            if method == "initialize" {
-                failures.push("modern client sent initialize".to_string());
-            }
-            if method != "server/discover" && params.get("_meta").is_none() {
-                failures.push(format!("{method} omitted request _meta"));
-            }
+            if method == "initialize" { failures.push("modern client sent initialize".to_string()); }
+            if method != "server/discover" && params.get("_meta").is_none() { failures.push(format!("{method} omitted request _meta")); }
             calls += 1;
             let meta = json!({"io.modelcontextprotocol/serverInfo":{"name":"modern-loopback","version":format!("1.0.{calls}")}});
             let mut result = json!({"resultType":"complete","_meta":meta});
             let mut done = false;
             match method {
-                "server/discover" => {
-                    result = json!({"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{},"extensions":{"io.modelcontextprotocol/tasks":{}}},"ttlMs":60000,"cacheScope":"public","_meta":meta})
-                }
+                "server/discover" => result = json!({"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{},"extensions":{"io.modelcontextprotocol/tasks":{}}},"ttlMs":60000,"cacheScope":"public","_meta":meta}),
                 "tools/list" => {
                     tool_lists += 1;
                     result = json!({"resultType":"complete","tools":[
@@ -73,24 +56,13 @@ fn main() -> AxResult<()> {
                     ],"ttlMs":60000,"cacheScope":"public","_meta":meta});
                 }
                 "tools/call" if params["name"] == "start_reindex" => {
-                    if !raw.to_ascii_lowercase().contains("mcp-param-scope: all") {
-                        failures.push("Mcp-Param-Scope was not propagated".into());
-                    }
+                    if !raw.to_ascii_lowercase().contains("mcp-param-scope: all") { failures.push("Mcp-Param-Scope was not propagated".into()); }
                     result = json!({"resultType":"task","taskId":"task-1","status":"working","createdAt":"2026-07-29T00:00:00Z","lastUpdatedAt":"2026-07-29T00:00:00Z","ttlMs":null,"_meta":meta});
                 }
-                "tasks/get" => {
-                    result = json!({"taskId":"task-1","status":"completed","createdAt":"2026-07-29T00:00:00Z","lastUpdatedAt":"2026-07-29T00:00:01Z","ttlMs":null,"result":{"resultType":"complete","structuredContent":{"indexed":42},"_meta":meta},"_meta":meta})
-                }
-                "tools/call" if params.get("requestState").is_none() => {
-                    result = json!({"resultType":"input_required","inputRequests":{"roots":{"method":"roots/list"}},"requestState":"opaque-roots-state","_meta":meta})
-                }
+                "tasks/get" => result = json!({"taskId":"task-1","status":"completed","createdAt":"2026-07-29T00:00:00Z","lastUpdatedAt":"2026-07-29T00:00:01Z","ttlMs":null,"result":{"resultType":"complete","structuredContent":{"indexed":42},"_meta":meta},"_meta":meta}),
+                "tools/call" if params.get("requestState").is_none() => result = json!({"resultType":"input_required","inputRequests":{"roots":{"method":"roots/list"}},"requestState":"opaque-roots-state","_meta":meta}),
                 "tools/call" => {
-                    if params["requestState"] != "opaque-roots-state"
-                        || params["inputResponses"]["roots"]["roots"][0]["uri"]
-                            != "file:///workspace"
-                    {
-                        failures.push("roots MRTR response was not echoed".into());
-                    }
+                    if params["requestState"] != "opaque-roots-state" || params["inputResponses"]["roots"]["roots"][0]["uri"] != "file:///workspace" { failures.push("roots MRTR response was not echoed".into()); }
                     result = json!({"resultType":"complete","structuredContent":{"roots":1},"_meta":meta});
                     done = true;
                 }
@@ -100,9 +72,7 @@ fn main() -> AxResult<()> {
             let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", envelope.len(), envelope);
             stream.write_all(response.as_bytes()).unwrap();
             stream.flush().unwrap();
-            if done {
-                break;
-            }
+            if done { break; }
         }
         (tool_lists, calls, failures)
     });
@@ -111,10 +81,7 @@ fn main() -> AxResult<()> {
         format!("http://127.0.0.1:{port}/mcp"),
         json!({"ssrfProtection":{"requireHttps":false,"allowLocalhost":true,"allowPrivateNetworks":true}}),
     )?;
-    let mut client = AxMCPClient::new(
-        Box::new(transport),
-        json!({"era":"modern","roots":[{"uri":"file:///workspace","name":"workspace"}]}),
-    );
+    let mut client = AxMCPClient::new(Box::new(transport), json!({"era":"modern","roots":[{"uri":"file:///workspace","name":"workspace"}]}));
     client.init()?;
     assert_eq!(client.get_era(), Some("modern"));
     client.refresh_with_force(false)?;
@@ -126,14 +93,8 @@ fn main() -> AxResult<()> {
     client.close()?;
     let (tool_lists, calls, failures) = server.join().unwrap();
     assert_eq!(tool_lists, 1, "cacheable tools/list was fetched again");
-    assert!(
-        calls >= 6 && failures.is_empty(),
-        "modern roundtrip failures: {failures:?}"
-    );
-    assert_ne!(
-        catalog.server_info["version"], "1.0.1",
-        "serverInfo did not refresh"
-    );
+    assert!(calls >= 6 && failures.is_empty(), "modern roundtrip failures: {failures:?}");
+    assert_ne!(catalog.server_info["version"], "1.0.1", "serverInfo did not refresh");
     println!("mcp-modern-roundtrip-ok");
     Ok(())
 }
