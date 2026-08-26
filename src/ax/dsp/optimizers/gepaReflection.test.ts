@@ -253,6 +253,54 @@ describe('GEPA reflection helpers', () => {
     expect(seenExamples).toBe(0);
   });
 
+  it('reaches the built-in teacher when maxExamples is 0', async () => {
+    let calls = 0;
+    let seenPrompt: string | undefined;
+    const ai = new AxMockAIService({
+      chatResponse: async (req) => {
+        calls++;
+        seenPrompt = JSON.stringify(req.chatPrompt);
+        return {
+          results: [
+            {
+              index: 0,
+              content: 'New Value: from zero examples',
+              finishReason: 'stop',
+            },
+          ],
+        };
+      },
+    });
+
+    const proposed = await proposeGEPAComponentValue({
+      ai,
+      target: {
+        id: 'root::instruction',
+        kind: 'instruction',
+        current: 'Keep this',
+      },
+      currentValue: 'Keep this',
+      tuples: [
+        {
+          input: { value: 'secret-training-entity' },
+          prediction: {},
+          score: 0,
+        },
+      ],
+      proposal: {
+        maxExamples: 0,
+      },
+    });
+
+    expect(proposed).toBe('from zero examples');
+    expect(calls).toBe(1);
+    expect(seenPrompt).toBeDefined();
+    expect(seenPrompt).not.toContain('secret-training-entity');
+    expect(seenPrompt).not.toContain(
+      "Value for input field 'reflectiveExamples' is required"
+    );
+  });
+
   it('records custom-policy exceptions and retries instead of declining', async () => {
     const errors: Array<string | undefined> = [];
     const proposed = await proposeGEPAComponentValue({

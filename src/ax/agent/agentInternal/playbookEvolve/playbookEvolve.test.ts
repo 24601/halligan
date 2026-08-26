@@ -139,6 +139,13 @@ describe('agent.playbook().evolve()', () => {
     expect(actorPromptOf(ag)).toContain(BULLET_MARKER);
     expect(result.playbookSnapshot).toBeDefined();
     expect(ag.getPlaybook().getState().playbook.stats.bulletCount).toBe(1);
+    const acceptedBullet = Object.values(
+      ag.getPlaybook().getState().playbook.sections
+    ).flat()[0];
+    expect(acceptedBullet?.evidence).toMatchObject({
+      provenance: [{ source: 'agent-evolve' }],
+      verification: [{ verifierId: 'agent.playbook.evolve', result: 'passed' }],
+    });
     expect(result.metricCallsUsed).toBeGreaterThan(0);
     expect(events.some((e) => e.startsWith('mining'))).toBe(true);
   });
