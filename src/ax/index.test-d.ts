@@ -12,11 +12,15 @@ import {
   type AxAIOpenAIResponsesConfig,
   type AxAIOpenAIResponsesRequest,
   type AxAIService,
+  type AxExecutableSkillArtifact,
+  type AxExecutableSkillSelection,
   type AxFunction,
   type AxFunctionHandler,
   type AxParetoResult,
   type AxProgrammable,
   ax,
+  axExecutableSkillRef,
+  axSelectExecutableSkills,
   f,
   flow,
   fn,
@@ -599,3 +603,37 @@ const responsesConfigMaxEffort: AxAIOpenAIResponsesConfig<
   string
 >['reasoningEffort'] = 'max';
 void responsesConfigMaxEffort;
+
+// === Host-owned executable skill selection ===
+const executableSkill: AxExecutableSkillArtifact = {
+  id: 'report-export',
+  version: '2',
+  name: 'Report export',
+  description: 'Export an authorized report',
+  functionRef: 'functions/report-export/2',
+  verification: { mode: 'receiptless' },
+  requirements: { capabilities: ['report.read'] },
+};
+const executableSkillSelection: AxExecutableSkillSelection =
+  axSelectExecutableSkills(
+    [executableSkill],
+    {
+      admittedArtifacts: [axExecutableSkillRef(executableSkill)],
+      principal: 'principal:reporter',
+      audience: 'agent:reporting',
+      capabilities: ['report.read'],
+      now: '2026-08-25T00:00:00.000Z',
+      resolveFunction: () => ({
+        name: 'export_report',
+        description: 'Export report',
+        func: () => 'report',
+      }),
+    },
+    { query: 'export report', topK: 1 }
+  );
+const selectedExecutableFunction: AxAgentFunction | undefined =
+  executableSkillSelection.artifacts[0]?.function;
+void selectedExecutableFunction;
+
+// @ts-expect-error trusted principal, clock, admission, and resolver are mandatory
+axSelectExecutableSkills([executableSkill], { capabilities: ['report.read'] });
