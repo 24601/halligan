@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import type { AxAuthorityContext } from '../authority/types.js';
 import {
   AxDemandBoundary,
   type AxDemandDetection,
@@ -1490,11 +1491,114 @@ describe('AxDemandBoundary', () => {
       'route-b',
     ]);
     expect(
-      records.every(
-        (record) => record.scope.principalScope === 'synthetic-tenant///'
-      )
+      records.every((record) => record.scope.principalScope === 'anonymous')
     ).toBe(true);
     expect(demand.detect).toHaveBeenCalledTimes(2);
+    await runtime.close();
+  });
+
+  it('scopes event demand dedupe from host authority, not ingress identity', async () => {
+    const demand = boundary(detection());
+    const routeId = 'authority-demand-route';
+    const observer = axDemandEventObserver(demand.value, () =>
+      observation('authority-scoped', { dedupeKey: 'authority-scoped' })
+    );
+    const authority = (
+      principal: Readonly<{ id: string; tenantId: string }>
+    ): AxAuthorityContext => ({
+      principal,
+      actor: { id: `actor-${principal.id}`, kind: 'agent' },
+      grants: [
+        {
+          version: 1,
+          id: `grant-${principal.id}`,
+          principalId: principal.id,
+          operations: ['event.observe'],
+          resources: [
+            {
+              type: 'event.route',
+              id: routeId,
+              tenantId: principal.tenantId,
+            },
+          ],
+          leaseEpoch: 1,
+        },
+      ],
+      leaseEpoch: 1,
+      now: () => now,
+      authorize: (operation, context) => ({
+        version: 1,
+        receiptId: `receipt-${principal.id}-${context.requestId}`,
+        requestId: context.requestId,
+        decision: 'allow',
+        operation,
+        resource: context.resource,
+        principalId: context.principal.id,
+        actor: { id: context.actor.id, kind: context.actor.kind },
+        grantIds: context.grants.map((grant) => grant.id),
+        leaseEpoch: context.leaseEpoch,
+        authorizedAt: context.now,
+      }),
+    });
+    const authorityA = authority({ id: 'principal-a', tenantId: 'tenant-a' });
+    const authorityB = authority({ id: 'principal-b', tenantId: 'tenant-b' });
+    const runtime = new AxEventRuntime({
+      store: new AxInMemoryEventStore(),
+      authority: (ingress) =>
+        ingress.event.id === 'spoofed-identity' ? authorityB : authorityA,
+      routes: [
+        eventRoute(routeId)
+          .types('work.changed')
+          .instanceKey(() => 'shared-instance')
+          .observe(observer)
+          .build(),
+      ],
+    });
+    const ingress = (
+      id: string,
+      identity: Readonly<{
+        tenantId?: string;
+        accountId?: string;
+        userId?: string;
+      }>
+    ) => ({
+      event: {
+        specversion: '1.0' as const,
+        id,
+        source: 'app://synthetic',
+        type: 'work.changed',
+      },
+      identity,
+      trust: 'untrusted' as const,
+    });
+
+    await runtime.start();
+    await runtime.publish(
+      ingress('identity-a', {
+        tenantId: 'payload-tenant-a',
+        userId: 'payload-user-a',
+      })
+    );
+    await runtime.publish(
+      ingress('identity-b', {
+        tenantId: 'payload-tenant-b',
+        userId: 'payload-user-b',
+      })
+    );
+    await runtime.publish(
+      ingress('spoofed-identity', {
+        tenantId: 'tenant-a',
+        userId: 'principal-a',
+      })
+    );
+    await runtime.waitForIdle();
+
+    const records = (await demand.value.list()).records;
+    expect(records).toHaveLength(2);
+    expect(demand.detect).toHaveBeenCalledTimes(2);
+    expect(records.map((record) => record.scope.principalScope).sort()).toEqual(
+      ['["tenant-a","principal-a"]', '["tenant-b","principal-b"]']
+    );
     await runtime.close();
   });
 

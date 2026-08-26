@@ -1,5 +1,5 @@
 import type { AxEventContext, AxEventIngress, AxEventValue } from './types.js';
-import { axEventIdentityScope, axValidateEventEnvelope } from './util.js';
+import { axValidateEventEnvelope } from './util.js';
 
 export type AxDemandDisposition =
   | 'ignore'
@@ -1278,6 +1278,7 @@ export function axDemandEventObserver(
   context: Readonly<AxEventContext>
 ) => Promise<void> {
   return async (ingress, context) => {
+    const principal = context.authority?.principal;
     const observation = map?.(ingress, context) ?? {
       id: `${ingress.event.source}\n${ingress.event.id}`,
       source: ingress.event.source,
@@ -1304,7 +1305,9 @@ export function axDemandEventObserver(
       scope: {
         routeId: context.routeId,
         instanceKey: context.instanceKey,
-        principalScope: axEventIdentityScope(context.identity),
+        principalScope: principal
+          ? JSON.stringify([principal.tenantId ?? '', principal.id])
+          : 'anonymous',
       },
     });
   };

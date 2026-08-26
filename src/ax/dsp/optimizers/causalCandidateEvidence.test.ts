@@ -1,0 +1,765 @@
+import { describe, expect, it } from 'vitest';
+import {
+  AxOptimizedProgramImpl,
+  axAttachCausalCandidateEvidence,
+  axDeserializeOptimizedProgram,
+  axReplaceOptimizedProgramSnapshot,
+  axSerializeOptimizedProgram,
+} from '../optimizer.js';
+import type {
+  AxCausalCandidateEvidenceOptions,
+  AxCausalCandidateEvidenceRecord,
+  AxCausalEvidenceAuthorityVerifier,
+} from './causalCandidateEvidence.js';
+import {
+  axCreateCausalCandidateEvidenceManifest,
+  axFingerprintCausalEvidence,
+} from './causalCandidateEvidence.js';
+import type { AxGEPACandidateLineageManifest } from './gepaLineage.js';
+
+const componentId = 'answerer::instruction';
+const programSourceComponentId = 'source-program::program-source';
+const digest = (character: string) => `sha256:${character.repeat(64)}`;
+
+function hostReceipt(receiptId: string): {
+  options: AxCausalCandidateEvidenceOptions;
+  verify: AxCausalEvidenceAuthorityVerifier;
+} {
+  const registry = hostReceiptRegistry();
+  return { options: registry.options(receiptId), verify: registry.verify };
+}
+
+function hostReceiptRegistry(): {
+  options: (receiptId: string) => AxCausalCandidateEvidenceOptions;
+  verify: AxCausalEvidenceAuthorityVerifier;
+} {
+  const boundPayloads = new Map<string, string>();
+  const verify: AxCausalEvidenceAuthorityVerifier = (
+    payload,
+    authority,
+    purpose
+  ) => {
+    if (
+      authority.principalId !== 'host:test' ||
+      authority.evaluatorId !== 'eval:test' ||
+      authority.verifierId !== 'verifier:test' ||
+      authority.receiptVersion !== '1'
+    ) {
+      return false;
+    }
+    const boundPayload = boundPayloads.get(authority.receiptId);
+    if (boundPayload === undefined) {
+      if (purpose === 'replay') return false;
+      boundPayloads.set(authority.receiptId, payload);
+      return true;
+    }
+    return boundPayload === payload;
+  };
+  return {
+    options: (receiptId) => ({
+      authority: {
+        principalId: 'host:test',
+        evaluatorId: 'eval:test',
+        verifierId: 'verifier:test',
+        receiptId,
+        receiptVersion: '1',
+      },
+      verifyAuthority: verify,
+    }),
+    verify,
+  };
+}
+
+function record(
+  overrides: Partial<AxCausalCandidateEvidenceRecord> = {}
+): AxCausalCandidateEvidenceRecord {
+  const metric = (before: number, after: number) => ({
+    metrics: [{ metric: 'accuracy', before, after, sampleCount: 10 }],
+  });
+  return {
+    id: 'claim-1',
+    sequence: 0,
+    eventKind: 'candidate_decision',
+    candidateId: 'c1',
+    evidence: [
+      {
+        id: 'trace-1',
+        kind: 'trace',
+        fingerprint: digest('a'),
+        summary: 'contains raw-looking detail that is omitted by default',
+      },
+    ],
+    hypothesis: 'The instruction misses the required grounding rule.',
+    affectedComponents: [
+      {
+        componentId,
+        surface: 'instruction',
+        beforeFingerprint: digest('b'),
+        afterFingerprint: digest('c'),
+      },
+    ],
+    predictedBenefit: [
+      {
+        metric: 'accuracy',
+        split: 'held_out',
+        expectedDirection: 'increase',
+        minimumExpectedDelta: 0.1,
+        confidence: 0.8,
+      },
+    ],
+    predictedRegressions: [],
+    outcome: { heldIn: metric(0.5, 0.8), heldOut: metric(0.5, 0.7) },
+    decision: { status: 'promoted', reason: 'Held-out gain was positive.' },
+    ablation: {
+      kind: 'ablation',
+      removedComponentIds: [componentId],
+      heldIn: metric(0.8, 0.5),
+      heldOut: metric(0.7, 0.5),
+      attribution: 'supports',
+      summary: 'Removing the instruction removed the measured gain.',
+    },
+    ...overrides,
+  };
+}
+
+function chain(length: number): AxCausalCandidateEvidenceRecord[] {
+  return Array.from({ length }, (_, index) =>
+    record({
+      id: `claim-${index}`,
+      sequence: index,
+      parentRecordId: index ? `claim-${index - 1}` : undefined,
+      candidateId: `c${index}`,
+      evidence: [
+        {
+          id: `trace-${index}`,
+          kind: 'trace',
+          fingerprint: digest((index % 10).toString()),
+        },
+      ],
+    })
+  );
+}
+
+function lineage(id: string): AxGEPACandidateLineageManifest {
+  return {
+    version: 1,
+    records: [
+      {
+        id,
+        parentIds: [],
+        round: 0,
+        strategy: 'seed',
+        componentDelta: [],
+        omittedComponentCount: 0,
+        evaluations: [],
+        metricCallsAtDecision: 1,
+        metricCallBudget: 10,
+        decision: 'accepted',
+        reason: 'seed candidate',
+        disposition: 'selected',
+      },
+    ],
+    maxRecords: 100,
+    maxArtifactBytes: 4096,
+    omittedRecordCount: 0,
+    selectedCandidateId: id,
+    selectedCandidateRetained: true,
+    paretoCandidateIds: [id],
+    metricCallsUsed: 1,
+    metricCallBudget: 10,
+    stoppedReason: 'completed',
+    termination: { phase: 'complete', round: 1, metricCallsUsed: 1 },
+    checkpointSemantics: 'snapshot_only',
+    privacy: {
+      componentValues: 'fingerprints',
+      failureMessages: 'fingerprints',
+    },
+  };
+}
+
+function artifact(
+  value = 'new',
+  candidateLineage?: AxGEPACandidateLineageManifest
+) {
+  return new AxOptimizedProgramImpl({
+    bestScore: 0.7,
+    stats: {} as any,
+    componentMap: { [componentId]: value },
+    candidateLineage,
+    optimizerType: 'test',
+    optimizationTime: 1,
+    totalRounds: 1,
+    converged: true,
+  });
+}
+
+function programSourceArtifact(source: string, candidateId: string) {
+  return new AxOptimizedProgramImpl({
+    bestScore: 0.7,
+    stats: {} as any,
+    componentMap: { [programSourceComponentId]: source },
+    candidateLineage: lineage(candidateId),
+    optimizerType: 'GEPA',
+    optimizationTime: 1,
+    totalRounds: 1,
+    converged: true,
+  });
+}
+
+describe('causal candidate evidence', () => {
+  it('omits evidence summaries by default and precisely describes free text', () => {
+    const receipt = hostReceipt('receipt-redaction');
+    const manifest = axCreateCausalCandidateEvidenceManifest(
+      [record()],
+      receipt.options
+    );
+
+    expect(manifest.records[0]?.evidence[0]?.summary).toBeUndefined();
+    expect(manifest.records[0]?.ablation?.summary).toBeUndefined();
+    expect(manifest.privacy).toMatchObject({
+      evidencePayloads: 'not_in_schema',
+      freeText: 'bounded_not_redacted',
+      evidenceSummaries: 'omitted',
+    });
+    expect(Object.isFrozen(manifest.records[0]?.outcome.heldOut.metrics)).toBe(
+      true
+    );
+  });
+
+  it('fails closed instead of dropping newest records on overflow', () => {
+    const receipt = hostReceipt('receipt-bounds');
+    expect(() =>
+      axCreateCausalCandidateEvidenceManifest(chain(8), {
+        ...receipt.options,
+        includeEvidenceSummaries: true,
+        maxSummaryChars: 16,
+        maxRecords: 1,
+      })
+    ).toThrow(/exceeds maxRecords/);
+    expect(() =>
+      axCreateCausalCandidateEvidenceManifest(chain(8), {
+        ...receipt.options,
+        includeEvidenceSummaries: true,
+        maxSummaryChars: 16,
+        maxArtifactBytes: 2800,
+      })
+    ).toThrow(/exceeds maxArtifactBytes/);
+  });
+
+  it('rejects minted-receipt forgery on replay', () => {
+    const registry = hostReceiptRegistry();
+    const attached = axAttachCausalCandidateEvidence(
+      artifact(),
+      [record()],
+      registry.options('receipt-replay-known')
+    );
+    const forged = JSON.parse(
+      JSON.stringify(axSerializeOptimizedProgram(attached))
+    );
+    forged.causalCandidateEvidence.records[0].hypothesis = 'FORGED HYPOTHESIS';
+    forged.causalCandidateEvidence.receipts[0].authority.receiptId =
+      'receipt-forged-mint';
+    expect(() =>
+      axDeserializeOptimizedProgram(forged, {
+        causalEvidenceVerifier: registry.verify,
+      })
+    ).toThrow(/authority verification failed/);
+  });
+
+  it('does not accept a forged already-issued capability', () => {
+    const receipt = hostReceipt('receipt-bypass');
+    const forged = axSerializeOptimizedProgram(
+      axAttachCausalCandidateEvidence(artifact(), [record()], receipt.options)
+    ) as any;
+    forged.causalCandidateEvidence.records[0].hypothesis = 'FORGED HYPOTHESIS';
+    forged.causalEvidenceAlreadyIssued = true;
+    let verifierCalls = 0;
+
+    expect(() =>
+      axDeserializeOptimizedProgram(forged, {
+        causalEvidenceVerifier: (...args) => {
+          verifierCalls += 1;
+          return receipt.verify(...args);
+        },
+      })
+    ).toThrow(/authority verification failed/);
+    expect(verifierCalls).toBeGreaterThan(0);
+    expect(
+      () =>
+        new AxOptimizedProgramImpl({
+          ...forged,
+          causalEvidenceVerifier: () => false,
+          causalEvidenceAlreadyIssued: Symbol('forged'),
+        } as any)
+    ).toThrow(/authority verification failed/);
+  });
+
+  it('rejects an unknown inherited receipt while appending', () => {
+    const attacker = hostReceiptRegistry();
+    const forgedPrior = Object.assign(artifact(), {
+      causalCandidateEvidence: axCreateCausalCandidateEvidenceManifest(
+        [record()],
+        attacker.options('receipt-forged-prior')
+      ),
+    });
+    const host = hostReceiptRegistry();
+
+    expect(() =>
+      axAttachCausalCandidateEvidence(
+        forgedPrior,
+        [
+          record({
+            id: 'claim-2',
+            sequence: 1,
+            parentRecordId: 'claim-1',
+            candidateId: 'c2',
+            evidence: [
+              { id: 'trace-2', kind: 'trace', fingerprint: digest('d') },
+            ],
+          }),
+        ],
+        host.options('receipt-legit-new')
+      )
+    ).toThrow(/authority verification failed/);
+  });
+
+  it('uses canonical UTF-8 SHA-256 rather than collision-prone FNV identity', async () => {
+    const left = 'trace-1mf0zaf-23065';
+    const right = 'trace-v4wu3d-67395';
+    const [leftDigest, rightDigest, composed, decomposed] = await Promise.all([
+      axFingerprintCausalEvidence(left),
+      axFingerprintCausalEvidence(right),
+      axFingerprintCausalEvidence('é'),
+      axFingerprintCausalEvidence('e\u0301'),
+    ]);
+
+    expect(leftDigest).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(leftDigest).not.toBe(rightDigest);
+    expect(composed).toBe(decomposed);
+    await expect(
+      axFingerprintCausalEvidence(String.fromCharCode(0xd800))
+    ).rejects.toThrow(/well-formed UTF-16/);
+    await expect(
+      axFingerprintCausalEvidence(String.fromCharCode(0xd801))
+    ).rejects.toThrow(/well-formed UTF-16/);
+  });
+
+  it('rejects invalid thresholds, duplicate metrics, and incomparable ablations', () => {
+    const options = hostReceipt('receipt-invalid-metrics').options;
+    expect(() =>
+      axCreateCausalCandidateEvidenceManifest(
+        [
+          record({
+            predictedBenefit: [
+              {
+                metric: 'accuracy',
+                split: 'held_out',
+                expectedDirection: 'increase',
+                minimumExpectedDelta: -0.1,
+              },
+            ],
+          }),
+        ],
+        options
+      )
+    ).toThrow(/non-negative/);
+    expect(() =>
+      axCreateCausalCandidateEvidenceManifest(
+        [
+          record({
+            outcome: {
+              heldIn: record().outcome.heldIn,
+              heldOut: {
+                metrics: [
+                  {
+                    metric: 'accuracy',
+                    before: 0.5,
+                    after: 0.7,
+                    sampleCount: 10,
+                  },
+                  {
+                    metric: 'accuracy',
+                    before: 0.5,
+                    after: 0.8,
+                    sampleCount: 10,
+                  },
+                ],
+              },
+            },
+          }),
+        ],
+        options
+      )
+    ).toThrow(/unique metric names/);
+    expect(() =>
+      axCreateCausalCandidateEvidenceManifest(
+        [
+          record({
+            ablation: {
+              ...record().ablation!,
+              heldOut: {
+                metrics: [
+                  { metric: 'other', before: 0.7, after: 0.5, sampleCount: 10 },
+                ],
+              },
+            },
+          }),
+        ],
+        options
+      )
+    ).toThrow(/ablation metrics must match/);
+  });
+
+  it('enforces chronology, settlement targets, and global evidence bindings', () => {
+    const options = hostReceipt('receipt-chronology').options;
+    expect(() =>
+      axCreateCausalCandidateEvidenceManifest(
+        [record(), record({ id: 'claim-2', sequence: 2, candidateId: 'c2' })],
+        options
+      )
+    ).toThrow(/sequence must equal 1/);
+    expect(() =>
+      axCreateCausalCandidateEvidenceManifest(
+        [
+          record(),
+          record({
+            id: 'settlement-1',
+            sequence: 1,
+            parentRecordId: 'claim-1',
+            eventKind: 'settlement',
+            candidateId: 'unrelated',
+            settlesRecordId: 'claim-1',
+            decision: { status: 'rejected', reason: 'rollback' },
+          }),
+        ],
+        options
+      )
+    ).toThrow(/same candidate/);
+    expect(() =>
+      axCreateCausalCandidateEvidenceManifest(
+        [
+          record(),
+          record({
+            id: 'claim-2',
+            sequence: 1,
+            parentRecordId: 'claim-1',
+            candidateId: 'c2',
+            evidence: [
+              { id: 'trace-1', kind: 'trace', fingerprint: digest('d') },
+            ],
+          }),
+        ],
+        options
+      )
+    ).toThrow(/conflicts with a prior fingerprint/);
+  });
+
+  it('attaches, replays with host verification, and rejects exact-field forgery', () => {
+    const receipt = hostReceipt('receipt-replay');
+    const attached = axAttachCausalCandidateEvidence(
+      artifact(),
+      [record()],
+      receipt.options
+    );
+    const serialized = axSerializeOptimizedProgram(attached);
+    const replayed = axDeserializeOptimizedProgram(serialized, {
+      causalEvidenceVerifier: receipt.verify,
+    });
+
+    expect(replayed.causalCandidateEvidence).toEqual(
+      attached.causalCandidateEvidence
+    );
+    const forged = JSON.parse(JSON.stringify(serialized));
+    forged.causalCandidateEvidence.omittedRecordCount = 1;
+    expect(() =>
+      axDeserializeOptimizedProgram(forged, {
+        causalEvidenceVerifier: receipt.verify,
+      })
+    ).toThrow(/metadata/);
+    forged.causalCandidateEvidence.totalRecordCount = 2;
+    expect(() =>
+      axDeserializeOptimizedProgram(forged, {
+        causalEvidenceVerifier: receipt.verify,
+      })
+    ).toThrow(/receipt does not cover|unauthorized/);
+    const extraField = JSON.parse(JSON.stringify(serialized));
+    extraField.causalCandidateEvidence.unsigned = 'forged';
+    expect(() =>
+      axDeserializeOptimizedProgram(extraField, {
+        causalEvidenceVerifier: receipt.verify,
+      })
+    ).toThrow(/metadata/);
+    expect(() => axDeserializeOptimizedProgram(serialized)).toThrow(
+      /verifier is required/
+    );
+  });
+
+  it('verifies and returns one detached snapshot despite verifier mutation', () => {
+    const receipt = hostReceipt('receipt-mutation-isolation');
+    const serialized = axSerializeOptimizedProgram(
+      axAttachCausalCandidateEvidence(artifact(), [record()], receipt.options)
+    ) as any;
+    const original = serialized.causalCandidateEvidence.records[0].hypothesis;
+    const mutatingVerifier: AxCausalEvidenceAuthorityVerifier = (
+      payload,
+      authority,
+      purpose
+    ) => {
+      const verified = receipt.verify(payload, authority, purpose);
+      serialized.causalCandidateEvidence.records[0].hypothesis =
+        'FORGED AFTER VERIFY';
+      return verified;
+    };
+
+    const replayed = axDeserializeOptimizedProgram(serialized, {
+      causalEvidenceVerifier: mutatingVerifier,
+    });
+    expect(serialized.causalCandidateEvidence.records[0].hypothesis).toBe(
+      'FORGED AFTER VERIFY'
+    );
+    expect(replayed.causalCandidateEvidence?.records[0]?.hypothesis).toBe(
+      original
+    );
+  });
+
+  it('preserves exact history through rollback then appends a valid settlement', () => {
+    const receipts = hostReceiptRegistry();
+    const promoted = axAttachCausalCandidateEvidence(
+      artifact('candidate'),
+      [record()],
+      receipts.options('receipt-first')
+    );
+    const historyBeforeRollback = JSON.stringify(
+      promoted.causalCandidateEvidence?.records
+    );
+    const rolledBack = axReplaceOptimizedProgramSnapshot(
+      promoted,
+      artifact('old'),
+      receipts.verify
+    );
+    const settled = axAttachCausalCandidateEvidence(
+      rolledBack,
+      [
+        record({
+          id: 'settlement-1',
+          sequence: 1,
+          eventKind: 'settlement',
+          parentRecordId: 'claim-1',
+          settlesRecordId: 'claim-1',
+          decision: { status: 'rejected', reason: 'rolled back' },
+        }),
+      ],
+      receipts.options('receipt-settlement')
+    );
+
+    expect(rolledBack.componentMap).toEqual(artifact('old').componentMap);
+    expect(JSON.stringify(rolledBack.causalCandidateEvidence?.records)).toBe(
+      historyBeforeRollback
+    );
+    expect(settled.causalCandidateEvidence?.records.slice(0, 1)).toEqual(
+      promoted.causalCandidateEvidence?.records
+    );
+    expect(settled.causalCandidateEvidence?.records[1]).toMatchObject({
+      eventKind: 'settlement',
+      settlesRecordId: 'claim-1',
+    });
+    expect(
+      settled.causalCandidateEvidence?.receipts.map(
+        (receipt) => receipt.authority.receiptId
+      )
+    ).toEqual(['receipt-first', 'receipt-settlement']);
+    const replayed = axDeserializeOptimizedProgram(
+      axSerializeOptimizedProgram(settled),
+      { causalEvidenceVerifier: receipts.verify }
+    );
+    expect(replayed.causalCandidateEvidence?.receipts).toEqual(
+      settled.causalCandidateEvidence?.receipts
+    );
+    const forgedPriorBatch = axSerializeOptimizedProgram(settled) as any;
+    forgedPriorBatch.causalCandidateEvidence.records[0].hypothesis =
+      'forged prior batch';
+    expect(() =>
+      axDeserializeOptimizedProgram(forgedPriorBatch, {
+        causalEvidenceVerifier: receipts.verify,
+      })
+    ).toThrow(/authority verification failed/);
+  });
+
+  it('preserves program-source identity through causal replay, rollback, and settlement', () => {
+    const selectedSource = JSON.stringify({
+      version: 'ax-program-source/v1',
+      capabilities: [],
+      steps: [
+        {
+          op: 'return',
+          outputs: { answer: { op: 'literal', value: 'selected' } },
+        },
+      ],
+    });
+    const rollbackSource = JSON.stringify({
+      version: 'ax-program-source/v1',
+      capabilities: [],
+      steps: [
+        {
+          op: 'return',
+          outputs: { answer: { op: 'literal', value: 'rollback' } },
+        },
+      ],
+    });
+    const receipts = hostReceiptRegistry();
+    const decision = record({
+      candidateId: 'program-source-c1',
+      affectedComponents: [
+        {
+          componentId: programSourceComponentId,
+          surface: 'program-source',
+          beforeFingerprint: digest('b'),
+          afterFingerprint: digest('c'),
+        },
+      ],
+      ablation: undefined,
+    });
+    const attached = axAttachCausalCandidateEvidence(
+      programSourceArtifact(selectedSource, 'program-source-c1'),
+      [decision],
+      receipts.options('receipt-program-source-decision')
+    );
+    const evidenceBeforeReplay = JSON.stringify(
+      attached.causalCandidateEvidence
+    );
+
+    const replayed = axDeserializeOptimizedProgram(
+      axSerializeOptimizedProgram(attached),
+      { causalEvidenceVerifier: receipts.verify }
+    );
+    expect(replayed.componentMap?.[programSourceComponentId]).toBe(
+      selectedSource
+    );
+    expect(replayed.candidateLineage?.selectedCandidateId).toBe(
+      'program-source-c1'
+    );
+    expect(JSON.stringify(replayed.causalCandidateEvidence)).toBe(
+      evidenceBeforeReplay
+    );
+
+    const rolledBack = axReplaceOptimizedProgramSnapshot(
+      replayed,
+      programSourceArtifact(rollbackSource, 'program-source-c1'),
+      receipts.verify
+    );
+    expect(rolledBack.componentMap?.[programSourceComponentId]).toBe(
+      rollbackSource
+    );
+    expect(rolledBack.candidateLineage?.selectedCandidateId).toBe(
+      'program-source-c1'
+    );
+    expect(JSON.stringify(rolledBack.causalCandidateEvidence)).toBe(
+      evidenceBeforeReplay
+    );
+
+    const settled = axAttachCausalCandidateEvidence(
+      rolledBack,
+      [
+        record({
+          id: 'settlement-1',
+          sequence: 1,
+          eventKind: 'settlement',
+          parentRecordId: 'claim-1',
+          settlesRecordId: 'claim-1',
+          candidateId: 'program-source-c1',
+          affectedComponents: decision.affectedComponents,
+          decision: { status: 'rejected', reason: 'rolled back' },
+          ablation: undefined,
+        }),
+      ],
+      receipts.options('receipt-program-source-settlement')
+    );
+    expect(settled.componentMap?.[programSourceComponentId]).toBe(
+      rollbackSource
+    );
+    expect(settled.candidateLineage?.selectedCandidateId).toBe(
+      'program-source-c1'
+    );
+    expect(settled.causalCandidateEvidence?.records[0]).toEqual(
+      replayed.causalCandidateEvidence?.records[0]
+    );
+    expect(
+      settled.causalCandidateEvidence?.records.map(
+        (evidenceRecord) => evidenceRecord.candidateId
+      )
+    ).toEqual(['program-source-c1', 'program-source-c1']);
+    expect(
+      settled.causalCandidateEvidence?.receipts.map(
+        (receipt) => receipt.authority.receiptId
+      )
+    ).toEqual([
+      'receipt-program-source-decision',
+      'receipt-program-source-settlement',
+    ]);
+
+    const settledReplay = axDeserializeOptimizedProgram(
+      axSerializeOptimizedProgram(settled),
+      { causalEvidenceVerifier: receipts.verify }
+    );
+    expect(settledReplay.componentMap?.[programSourceComponentId]).toBe(
+      rollbackSource
+    );
+    expect(settledReplay.candidateLineage?.selectedCandidateId).toBe(
+      'program-source-c1'
+    );
+    expect(settledReplay.causalCandidateEvidence).toEqual(
+      settled.causalCandidateEvidence
+    );
+    expect(JSON.stringify(attached.causalCandidateEvidence)).toBe(
+      evidenceBeforeReplay
+    );
+  });
+
+  it('preserves lineage and causal evidence across artifact boundaries', () => {
+    const receipts = hostReceiptRegistry();
+    const attached = axAttachCausalCandidateEvidence(
+      artifact('candidate', lineage('candidate-lineage')),
+      [record()],
+      receipts.options('receipt-combined')
+    );
+
+    expect(attached.candidateLineage?.selectedCandidateId).toBe(
+      'candidate-lineage'
+    );
+    expect(Object.isFrozen(attached.candidateLineage)).toBe(true);
+    expect(Object.isFrozen(attached.causalCandidateEvidence)).toBe(true);
+
+    const replayed = axDeserializeOptimizedProgram(
+      axSerializeOptimizedProgram(attached),
+      { causalEvidenceVerifier: receipts.verify }
+    );
+    expect(replayed.candidateLineage).toEqual(attached.candidateLineage);
+    expect(replayed.causalCandidateEvidence).toEqual(
+      attached.causalCandidateEvidence
+    );
+    expect(Object.isFrozen(replayed.candidateLineage)).toBe(true);
+    expect(Object.isFrozen(replayed.causalCandidateEvidence)).toBe(true);
+
+    const replaced = axReplaceOptimizedProgramSnapshot(
+      replayed,
+      artifact('replacement', lineage('replacement-lineage')),
+      receipts.verify
+    );
+    expect(replaced.componentMap).toEqual({ [componentId]: 'replacement' });
+    expect(replaced.candidateLineage?.selectedCandidateId).toBe(
+      'replacement-lineage'
+    );
+    expect(replaced.causalCandidateEvidence).toEqual(
+      replayed.causalCandidateEvidence
+    );
+    expect(Object.isFrozen(replaced.candidateLineage)).toBe(true);
+    expect(Object.isFrozen(replaced.causalCandidateEvidence)).toBe(true);
+  });
+
+  it('preserves legacy artifacts without requiring an evidence verifier', () => {
+    const replayed = axDeserializeOptimizedProgram(
+      axSerializeOptimizedProgram(artifact())
+    );
+    expect(replayed.causalCandidateEvidence).toBeUndefined();
+  });
+});

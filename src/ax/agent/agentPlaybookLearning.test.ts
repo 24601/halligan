@@ -454,6 +454,43 @@ describe('collectCoveredFailureSignatures', () => {
     ).toBe(false);
   });
 
+  it('evaluates scoped lesson coverage with the currently applied conditions', () => {
+    const scoped = pbWith(['f-1']);
+    scoped.sections.failures_to_avoid[0]!.evidence = {
+      applicability: { allOf: ['tenant:paid'] },
+    };
+    const snapshot = {
+      playbook: scoped,
+      artifact: {
+        playbook: scoped,
+        feedback: [event([BOOM])],
+        history: [
+          {
+            source: 'online' as const,
+            epoch: -1,
+            exampleIndex: 0,
+            operations: [],
+            updatedBulletIds: ['f-1'],
+          },
+        ],
+      },
+    };
+
+    expect(collectCoveredFailureSignatures(snapshot as any).has(BOOM)).toBe(
+      false
+    );
+    expect(
+      collectCoveredFailureSignatures(snapshot as any, {
+        conditions: ['tenant:paid'],
+      }).has(BOOM)
+    ).toBe(true);
+    expect(
+      collectCoveredFailureSignatures(snapshot as any, {
+        conditions: ['tenant:free'],
+      }).has(BOOM)
+    ).toBe(false);
+  });
+
   it('covers a deliberate curator no-op but re-learns a transient failure', () => {
     // Deliberate decline: curator ran, produced no ops (no delta). Covered —
     // don't re-spend on a signature the curator already judged.

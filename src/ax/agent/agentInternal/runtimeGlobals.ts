@@ -4,6 +4,20 @@ import type {
   AxFunction,
   AxFunctionJSONSchema,
 } from '../../ai/types.js';
+import {
+  axAuthorize,
+  axFunctionAuthorityTarget,
+  axSnapshotAuthority,
+} from '../../authority/authority.js';
+import type {
+  AxAuthorityContext,
+  AxAuthorityInheritance,
+} from '../../authority/types.js';
+import {
+  type JSRuntimeHostFunctionSpeculationLaunch,
+  setJSRuntimeHostFunctionSpeculationAdapter,
+} from '../../funcs/jsRuntimeHostFunction.js';
+import { mergeAbortSignals } from '../../util/abort.js';
 import { AxAgentProtocolCompletionSignal } from '../completion.js';
 import { serializeForEval } from '../optimize.js';
 import { DISCOVERY_DISCOVER_NAME, MEMORIES_LOAD_NAME } from '../runtime.js';
@@ -135,9 +149,15 @@ export function wrapFunction(
   functionCallRecorder?: AxAgentFunctionCallRecorder,
   kind: 'internal' | 'external' = 'external',
   onFunctionCall?: AxAgentOnFunctionCall,
-  eventContext?: import('../../event/types.js').AxEventContext
+  eventContext?: import('../../event/types.js').AxEventContext,
+  authority?: AxAuthorityContext,
+  authorityInheritance?: AxAuthorityInheritance
 ): (...args: unknown[]) => Promise<unknown> {
-  return async (...args: unknown[]) => {
+  const normalizedQualifiedName = qualifiedName ?? fn.name;
+
+  const normalizeCallArgs = (
+    args: readonly unknown[]
+  ): Record<string, unknown> => {
     let callArgs: Record<string, unknown>;
 
     if (
@@ -158,9 +178,10 @@ export function wrapFunction(
         }
       });
     }
+    return callArgs;
+  };
 
-    const normalizedQualifiedName = qualifiedName ?? fn.name;
-    const protocol = protocolForTrigger?.(normalizedQualifiedName);
+  const observeCall = async (callArgs: Record<string, unknown>) => {
     if (onFunctionCall) {
       try {
         await onFunctionCall({
@@ -171,38 +192,282 @@ export function wrapFunction(
         });
       } catch {}
     }
+  };
+
+  const observeResult = async (
+    callArgs: Record<string, unknown>,
+    result: Promise<unknown>,
+    serializedArguments?: Promise<unknown>
+  ): Promise<unknown> => {
+    const getSerializedArguments = async (): Promise<
+      ReturnType<typeof serializeForEval>
+    > => {
+      if (!serializedArguments) return serializeForEval(callArgs);
+      return structuredClone(await serializedArguments) as ReturnType<
+        typeof serializeForEval
+      >;
+    };
     try {
-      const result = await fn.func(callArgs, {
-        abortSignal,
-        ai,
-        protocol,
-        eventContext,
-      });
-      functionCallRecorder?.({
-        qualifiedName: normalizedQualifiedName,
-        name: fn.name,
-        arguments: serializeForEval(callArgs),
-        result: serializeForEval(result),
-      });
-      return result;
-    } catch (err) {
-      if (err instanceof AxAgentProtocolCompletionSignal) {
-        functionCallRecorder?.({
+      const value = await result;
+      if (functionCallRecorder) {
+        functionCallRecorder({
           qualifiedName: normalizedQualifiedName,
           name: fn.name,
-          arguments: serializeForEval(callArgs),
+          arguments: await getSerializedArguments(),
+          result: serializeForEval(value),
         });
+      }
+      return value;
+    } catch (err) {
+      if (err instanceof AxAgentProtocolCompletionSignal) {
+        if (functionCallRecorder) {
+          functionCallRecorder({
+            qualifiedName: normalizedQualifiedName,
+            name: fn.name,
+            arguments: await getSerializedArguments(),
+          });
+        }
         throw err;
       }
-      functionCallRecorder?.({
-        qualifiedName: normalizedQualifiedName,
-        name: fn.name,
-        arguments: serializeForEval(callArgs),
-        error: err instanceof Error ? err.message : String(err),
-      });
+      if (functionCallRecorder) {
+        functionCallRecorder({
+          qualifiedName: normalizedQualifiedName,
+          name: fn.name,
+          arguments: await getSerializedArguments(),
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
       throw err;
     }
   };
+
+  const authorizeCall = async (invocationSignal: AbortSignal | undefined) => {
+    if (!authority) return undefined;
+    const invocationAuthority = axSnapshotAuthority(authority);
+    const target = axFunctionAuthorityTarget(
+      fn as AxFunction,
+      invocationAuthority,
+      normalizedQualifiedName
+    );
+    const receipt = await axAuthorize(
+      invocationAuthority,
+      target.operation,
+      target.resource,
+      invocationSignal
+    );
+    return { authority: invocationAuthority, receipt: receipt!, target };
+  };
+
+  const launchFunction = (
+    callArgs: Record<string, unknown>,
+    invocationSignal: AbortSignal | undefined,
+    protocol: AxAgentCompletionProtocol | undefined,
+    authorization: Awaited<ReturnType<typeof authorizeCall>>
+  ): Promise<unknown> => {
+    try {
+      return Promise.resolve(
+        fn.func(callArgs, {
+          abortSignal: invocationSignal,
+          ai,
+          protocol,
+          eventContext,
+          authority: authorization?.authority,
+          authorityInheritance,
+          authorityReceipt: authorization?.receipt,
+        })
+      );
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  };
+
+  const createIsolatedCompletionProtocol = (): {
+    protocol?: AxAgentCompletionProtocol;
+    claimProtocol: () => Promise<void>;
+  } => {
+    if (!protocolForTrigger) {
+      return { claimProtocol: async () => {} };
+    }
+    const real = protocolForTrigger(normalizedQualifiedName);
+    const queued: Array<
+      | Readonly<{
+          kind: 'final' | 'askClarification' | 'guideAgent';
+          args: unknown[];
+        }>
+      | Readonly<{ kind: 'success' | 'failed'; message: string }>
+    > = [];
+    let claimed = false;
+    let replay: Promise<void> | undefined;
+    const protocol: AxAgentCompletionProtocol = {
+      final: (...args: unknown[]): never => {
+        if (claimed) return real.final(...args);
+        queued.push({ kind: 'final', args });
+        throw new AxAgentProtocolCompletionSignal('final');
+      },
+      askClarification: (...args: unknown[]): never => {
+        if (claimed) return real.askClarification(...args);
+        queued.push({ kind: 'askClarification', args });
+        throw new AxAgentProtocolCompletionSignal('askClarification');
+      },
+      guideAgent: (guidance: string): never => {
+        if (claimed) return real.guideAgent(guidance);
+        queued.push({ kind: 'guideAgent', args: [guidance] });
+        throw new AxAgentProtocolCompletionSignal('guide_agent');
+      },
+      success: async (message: string): Promise<void> => {
+        if (claimed) return real.success(message);
+        queued.push({ kind: 'success', message });
+      },
+      failed: async (message: string): Promise<void> => {
+        if (claimed) return real.failed(message);
+        queued.push({ kind: 'failed', message });
+      },
+    };
+    return {
+      protocol,
+      claimProtocol: () => {
+        if (replay) return replay;
+        claimed = true;
+        replay = (async () => {
+          try {
+            for (const item of queued) {
+              switch (item.kind) {
+                case 'success':
+                  await real.success(item.message);
+                  break;
+                case 'failed':
+                  await real.failed(item.message);
+                  break;
+                case 'final':
+                  real.final(...item.args);
+                  break;
+                case 'askClarification':
+                  real.askClarification(...item.args);
+                  break;
+                case 'guideAgent':
+                  real.guideAgent(String(item.args[0] ?? ''));
+                  break;
+              }
+            }
+          } catch (error) {
+            if (!(error instanceof AxAgentProtocolCompletionSignal)) {
+              throw error;
+            }
+          }
+        })();
+        return replay;
+      },
+    };
+  };
+
+  const runLogicalCall = async (
+    callArgs: Record<string, unknown>,
+    invocationSignal: AbortSignal | undefined
+  ): Promise<unknown> => {
+    const authorization = await authorizeCall(invocationSignal);
+    if (onFunctionCall) await observeCall(callArgs);
+    return observeResult(
+      callArgs,
+      launchFunction(
+        callArgs,
+        invocationSignal,
+        protocolForTrigger?.(normalizedQualifiedName),
+        authorization
+      )
+    );
+  };
+
+  const wrapped = (...args: unknown[]): Promise<unknown> =>
+    runLogicalCall(normalizeCallArgs(args), abortSignal);
+
+  const cloneArguments = (args: readonly unknown[]): readonly unknown[] =>
+    structuredClone(args) as readonly unknown[];
+
+  const commitSpeculativeCall = async (
+    args: readonly unknown[],
+    speculative: JSRuntimeHostFunctionSpeculationLaunch
+  ): Promise<unknown> => {
+    if (speculative.authorizationDenied) return speculative.result;
+
+    let observerArgs = args;
+    try {
+      if (speculative.argumentsBefore) {
+        observerArgs = cloneArguments(speculative.argumentsBefore);
+      }
+    } catch {}
+
+    if (onFunctionCall) await observeCall(normalizeCallArgs(observerArgs));
+    let canClaim = true;
+    try {
+      canClaim = speculative.canClaim?.() ?? true;
+    } catch {
+      canClaim = false;
+    }
+    if (!canClaim) {
+      speculative.abort?.('speculative authority invalidated');
+      return observeResult(
+        normalizeCallArgs(args),
+        Promise.reject(new Error('speculative authority invalidated')),
+        speculative.serializedArgumentsAfter
+      );
+    }
+    speculative.retain?.();
+    const result = speculative.claimProtocol
+      ? speculative.claimProtocol().then(() => speculative.result)
+      : speculative.result;
+    return observeResult(
+      normalizeCallArgs(args),
+      result,
+      speculative.serializedArgumentsAfter
+    );
+  };
+
+  // Child agents are intentionally excluded: their nested tools and budgets
+  // do not have a proven pure-call contract. External AxFunction/MCP/UCP
+  // callables still require an exact AxJSRuntime speculation allowlist entry.
+  if (kind === 'external') {
+    setJSRuntimeHostFunctionSpeculationAdapter(wrapped, {
+      launch: async (args, signal) => {
+        const callArgs = normalizeCallArgs(args);
+        const invocationSignal = mergeAbortSignals(abortSignal, signal);
+        try {
+          const authorization = await authorizeCall(invocationSignal);
+          const argumentsBefore = cloneArguments([callArgs]);
+          const isolated = createIsolatedCompletionProtocol();
+          const result = launchFunction(
+            callArgs,
+            invocationSignal,
+            isolated.protocol,
+            authorization
+          );
+          const serializedArgumentsAfter = result.then(
+            () => serializeForEval(callArgs),
+            () => serializeForEval(callArgs)
+          );
+          void serializedArgumentsAfter.catch(() => {});
+          return {
+            result,
+            argumentsBefore,
+            serializedArgumentsAfter,
+            signal: invocationSignal,
+            canClaim: () => invocationSignal?.aborted !== true,
+            claimProtocol: isolated.claimProtocol,
+          };
+        } catch (error) {
+          const result = Promise.reject(error);
+          void result.catch(() => {});
+          return {
+            result,
+            authorizationDenied: true,
+            signal: invocationSignal,
+          };
+        }
+      },
+      commit: (args, speculative) => commitSpeculativeCall(args, speculative),
+    });
+  }
+
+  return wrapped;
 }
 
 /**
@@ -284,6 +549,12 @@ export function buildRuntimeGlobals(
   const eventContext = s._activeEventContext as
     | import('../../event/types.js').AxEventContext
     | undefined;
+  const authority = s._activeAuthority
+    ? axSnapshotAuthority(s._activeAuthority as AxAuthorityContext)
+    : undefined;
+  const authorityInheritance = s._activeAuthorityInheritance as
+    | AxAuthorityInheritance
+    | undefined;
 
   // Agent functions under namespace.* (e.g. utils.myFn, custom.otherFn).
   // Agent-derived entries carry `_kind: 'internal'` so that `onFunctionCall`
@@ -305,7 +576,9 @@ export function buildRuntimeGlobals(
           functionCallRecorder,
           agentFn._kind ?? 'external',
           onFunctionCall,
-          eventContext
+          eventContext,
+          authority,
+          authorityInheritance
         )
       : buildStageToolStub(qualifiedName);
     if (agentFn._alwaysInclude !== true) {
@@ -346,7 +619,9 @@ export function buildRuntimeGlobals(
               functionCallRecorder,
               'external',
               onFunctionCall,
-              eventContext
+              eventContext,
+              authority,
+              authorityInheritance
             )
           : buildStageToolStub(qualifiedName);
         registerCallable(
@@ -365,53 +640,159 @@ export function buildRuntimeGlobals(
         fn: T
       ): T | ReturnType<typeof buildStageToolStub> =>
         executesTools ? fn : buildStageToolStub(qualifiedName);
+      const call = <T>(
+        qualifiedName: string,
+        operation: string,
+        type: string,
+        id: string,
+        fn: () => T
+      ): T | Promise<T> => {
+        if (!authority) return fn();
+        if (!executesTools) return buildStageToolStub(qualifiedName)() as never;
+        return axAuthorize(
+          authority,
+          operation,
+          {
+            type,
+            id,
+            ...(authority.principal.tenantId
+              ? { tenantId: authority.principal.tenantId }
+              : {}),
+          },
+          abortSignal
+        ).then(fn);
+      };
       mcpRoot[namespace] = {
         tools,
         prompts: {
-          list: () => client.getPrompts(),
+          list: () =>
+            call(
+              `mcp.${namespace}.prompts.list`,
+              'mcp.prompt.list',
+              'mcp.prompt.catalog',
+              namespace,
+              () => client.getPrompts()
+            ),
           get: executeOrStub(
             `mcp.${namespace}.prompts.get`,
             (name: string, args?: Record<string, string>) =>
-              client.getPrompt(name, args)
+              call(
+                `mcp.${namespace}.prompts.get`,
+                'mcp.prompt.get',
+                'mcp.prompt',
+                `${namespace}:${name}`,
+                () => client.getPrompt(name, args)
+              )
           ),
         },
         resources: {
-          list: () => client.getResources(),
-          templates: () => client.getResourceTemplates(),
+          list: () =>
+            call(
+              `mcp.${namespace}.resources.list`,
+              'mcp.resource.list',
+              'mcp.resource.catalog',
+              namespace,
+              () => client.getResources()
+            ),
+          templates: () =>
+            call(
+              `mcp.${namespace}.resources.templates`,
+              'mcp.resource.templates',
+              'mcp.resource.catalog',
+              namespace,
+              () => client.getResourceTemplates()
+            ),
           read: executeOrStub(
             `mcp.${namespace}.resources.read`,
-            (uri: string) => client.readResource(uri)
+            (uri: string) =>
+              call(
+                `mcp.${namespace}.resources.read`,
+                'mcp.resource.read',
+                'mcp.resource',
+                `${namespace}:${uri}`,
+                () => client.readResource(uri)
+              )
           ),
           subscribe: executeOrStub(
             `mcp.${namespace}.resources.subscribe`,
-            (uri: string) => client.subscribeResource(uri)
+            (uri: string) =>
+              call(
+                `mcp.${namespace}.resources.subscribe`,
+                'mcp.resource.subscribe',
+                'mcp.resource',
+                `${namespace}:${uri}`,
+                () => client.subscribeResource(uri)
+              )
           ),
           unsubscribe: executeOrStub(
             `mcp.${namespace}.resources.unsubscribe`,
-            (uri: string) => client.unsubscribeResource(uri)
+            (uri: string) =>
+              call(
+                `mcp.${namespace}.resources.unsubscribe`,
+                'mcp.resource.unsubscribe',
+                'mcp.resource',
+                `${namespace}:${uri}`,
+                () => client.unsubscribeResource(uri)
+              )
           ),
         },
         tasks: {
           list: executeOrStub(
             `mcp.${namespace}.tasks.list`,
-            (cursor?: string) => client.listTasks(cursor)
+            (cursor?: string) =>
+              call(
+                `mcp.${namespace}.tasks.list`,
+                'mcp.task.list',
+                'mcp.task.catalog',
+                namespace,
+                () => client.listTasks(cursor)
+              )
           ),
           get: executeOrStub(`mcp.${namespace}.tasks.get`, (taskId: string) =>
-            client.getTask(taskId)
+            call(
+              `mcp.${namespace}.tasks.get`,
+              'mcp.task.get',
+              'mcp.task',
+              `${namespace}:${taskId}`,
+              () => client.getTask(taskId)
+            )
           ),
           result: executeOrStub(
             `mcp.${namespace}.tasks.result`,
-            (taskId: string) => client.getTaskResult(taskId)
+            (taskId: string) =>
+              call(
+                `mcp.${namespace}.tasks.result`,
+                'mcp.task.result',
+                'mcp.task',
+                `${namespace}:${taskId}`,
+                () => client.getTaskResult(taskId)
+              )
           ),
           cancel: executeOrStub(
             `mcp.${namespace}.tasks.cancel`,
-            (taskId: string) => client.cancelTask(taskId)
+            (taskId: string) =>
+              call(
+                `mcp.${namespace}.tasks.cancel`,
+                'mcp.task.cancel',
+                'mcp.task',
+                `${namespace}:${taskId}`,
+                () => client.cancelTask(taskId)
+              )
           ),
         },
         complete: executeOrStub(
           `mcp.${namespace}.complete`,
-          (...args: Parameters<typeof client.complete>) =>
-            client.complete(...args)
+          (...args: Parameters<typeof client.complete>) => {
+            const ref = args[0];
+            const id = `${namespace}:${ref.type}:${ref.type === 'ref/prompt' ? ref.name : ref.uri}`;
+            return call(
+              `mcp.${namespace}.complete`,
+              'mcp.completion.complete',
+              'mcp.completion',
+              id,
+              () => client.complete(...args)
+            );
+          }
         ),
       };
     }
@@ -433,7 +814,9 @@ export function buildRuntimeGlobals(
               functionCallRecorder,
               'external',
               onFunctionCall,
-              eventContext
+              eventContext,
+              authority,
+              authorityInheritance
             )
           : buildStageToolStub(qualifiedName);
         registerCallable(
@@ -449,8 +832,42 @@ export function buildRuntimeGlobals(
       }
       ucpRoot[namespace] = {
         ...operations,
-        profile: () => client.getProfile(),
-        operations: () => client.getOperationNames(),
+        profile: () => {
+          if (!authority) return client.getProfile();
+          if (!executesTools) {
+            return buildStageToolStub(`ucp.${namespace}.profile`)();
+          }
+          return axAuthorize(
+            authority,
+            'ucp.profile.read',
+            {
+              type: 'ucp.catalog',
+              id: namespace,
+              ...(authority.principal.tenantId
+                ? { tenantId: authority.principal.tenantId }
+                : {}),
+            },
+            abortSignal
+          ).then(() => client.getProfile());
+        },
+        operations: () => {
+          if (!authority) return client.getOperationNames();
+          if (!executesTools) {
+            return buildStageToolStub(`ucp.${namespace}.operations`)();
+          }
+          return axAuthorize(
+            authority,
+            'ucp.operation.list',
+            {
+              type: 'ucp.catalog',
+              id: namespace,
+              ...(authority.principal.tenantId
+                ? { tenantId: authority.principal.tenantId }
+                : {}),
+            },
+            abortSignal
+          ).then(() => client.getOperationNames());
+        },
       };
     }
   }

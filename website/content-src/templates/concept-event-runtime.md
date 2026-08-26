@@ -207,6 +207,31 @@ protocol clients must still be closed by the caller. For deterministic tests,
 `AxManualEventClock` advances retries, debounce windows, and continuation
 expiry without waiting for wall-clock time.
 
+## Trusted Live Components In TypeScript
+
+TypeScript additionally exposes `AxEventComponentManager` for trusted,
+host-defined process-local listeners, adapters, and source registrations. It
+orders declared dependencies, serializes graph transitions, scopes every
+registered disposer, rolls failed activation back in reverse order, and stages
+a replacement candidate plus its active transitive dependents before switching
+all manager-visible bindings together. Inactive replacements remain inactive,
+and partial disposal includes the transitive dependent definition closure.
+`AxEventRuntime` uses it internally for source handles and fences overlapping
+startup/close. Cleanup keeps reverse order but can be bounded; timeout is
+reported as failed and uncertain while later cleanup and runtime close proceed.
+Failed or otherwise unsettled effect ownership fences reactivation and
+replacement—including newly introduced external dependencies—before another
+external resource can be acquired; retry remains available after a failed
+activation only when rollback fully settled.
+Caller-created protocol clients remain caller-owned.
+
+This is not a durable plugin loader or a general transaction system. It does
+not load model-generated code, persist or auto-deploy definitions, reverse
+unregistered or arbitrary external I/O, or make candidate setup externally
+invisible. The TypeScript mechanism/boundary evaluator explicitly labels its
+unmanaged baseline and deterministic-schedule limits. Its exact command and the
+full API example are in the [Event Runtime maintainer guide](https://github.com/ax-llm/ax/blob/main/docs/EVENT_RUNTIME.md#trusted-live-components).
+
 ## Generated Languages
 
 Generated Python, Java, C++, Go, and Rust packages use the same deterministic
@@ -216,6 +241,7 @@ single-worker state machine and conformance rules. Their runtime is inline:
 is no hidden worker thread. The packages cover continuations, state restoration,
 cooperative cancellation, dead letters, output-before-sink ordering, and
 sink-only redrive; persistent multi-worker support requires a separately
-conforming store.
+conforming store. The generic live-component manager described above is
+TypeScript-only until its open AxIR backlog entry is completed.
 
 See [MCP]({{langRoot}}/concepts/mcp/), [MCP Subscriptions]({{langRoot}}/concepts/mcp-subscriptions/), and the [Event Runtime maintainer guide](https://github.com/ax-llm/ax/blob/main/docs/EVENT_RUNTIME.md).

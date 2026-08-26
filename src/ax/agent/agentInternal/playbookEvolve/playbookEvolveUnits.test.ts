@@ -7,7 +7,7 @@ import {
   isFailureRecord,
 } from './failureClusters.js';
 import type { AxAgentPlaybookEvolveRunRecord } from './playbookEvolveTypes.js';
-import { buildProposal } from './proposals.js';
+import { applyProposal, buildProposal } from './proposals.js';
 import {
   buildFailureExcerpt,
   coerceToArray,
@@ -166,6 +166,57 @@ describe('evalHarness', () => {
     expect(result.records[0]?.passed).toBe(true);
     expect(result.records[1]?.passed).toBe(false);
     expect(result.exhausted).toBe(false);
+    expect(result.complete).toBe(true);
+  });
+
+  it.each([
+    ['non-finite weight', [{ ...task('a'), weight: Number.POSITIVE_INFINITY }]],
+    ['negative weight', [{ ...task('a'), weight: -1 }]],
+    ['zero total weight', [{ ...task('a'), weight: 0 }]],
+  ])('marks a %s aggregate incomplete', async (_, tasks) => {
+    const result = await runAgentEvalBatch({
+      agent: { _forwardForEvaluation: async () => prediction() },
+      ai: {} as any,
+      tasks,
+      metric: async () => 1,
+      scoreThreshold: 0.7,
+      budget: { remaining: 10 },
+    });
+    expect(result.complete).toBe(false);
+  });
+
+  it('marks finite weights whose weighted score overflows incomplete', async () => {
+    const result = await runAgentEvalBatch({
+      agent: { _forwardForEvaluation: async () => prediction() },
+      ai: {} as any,
+      tasks: [{ ...task('a'), weight: Number.MAX_VALUE }],
+      metric: async () => 2,
+      scoreThreshold: 0.7,
+      budget: { remaining: 10 },
+    });
+    expect(result.mean).toBe(Number.POSITIVE_INFINITY);
+    expect(result.complete).toBe(false);
+  });
+
+  it('uses the scalar score from structured metric results', async () => {
+    const agent = {
+      _forwardForEvaluation: vi.fn(async () => prediction()),
+    };
+    const result = await runAgentEvalBatch({
+      agent,
+      ai: {} as any,
+      tasks: [task('a')],
+      metric: async () => ({
+        score: 0.8,
+        feedback: 'GEPA can consume this text; playbook evolution does not.',
+        scores: { quality: 0 },
+      }),
+      scoreThreshold: 0.7,
+      budget: { remaining: 1 },
+    });
+
+    expect(result.mean).toBe(0.8);
+    expect(result.records[0]).toMatchObject({ score: 0.8, passed: true });
   });
 
   it('stops when the budget runs out and marks exhaustion', async () => {
@@ -265,6 +316,113 @@ describe('proposals', () => {
     expect(proposal.feedback).toContain('Compute inline');
     expect(proposal.feedback).toContain(BOOM);
   });
+
+  it('surfaces both update and restoration failures', async () => {
+    const proposal = buildProposal(weakness);
+    const updateError = new Error('post-mutation failure');
+    const rollbackError = new Error('snapshot restoration failure');
+    const handle = {
+      getState: () => ({ value: 'before' }),
+      update: async () => {
+        throw updateError;
+      },
+      load: () => {
+        throw rollbackError;
+      },
+    };
+
+    try {
+      await applyProposal({ proposal, playbookHandle: handle });
+      throw new Error('expected applyProposal to reject');
+    } catch (error) {
+      expect(error).toBeInstanceOf(AggregateError);
+      expect((error as AggregateError).errors).toEqual([
+        updateError,
+        rollbackError,
+      ]);
+      expect((error as Error).message).toContain(
+        'update failed and exact rollback also failed'
+      );
+    }
+  });
+
+  it('restores exactly once when post-update state retrieval fails', async () => {
+    const proposal = buildProposal(weakness);
+    const before: {
+      value: string;
+      artifact: { history: { updatedBulletIds: string[] }[] };
+    } = { value: 'before', artifact: { history: [] } };
+    let state = structuredClone(before);
+    const retrievalError = new Error('post-update state retrieval failed');
+    const getState = vi
+      .fn()
+      .mockImplementationOnce(() => structuredClone(state))
+      .mockImplementationOnce(() => {
+        throw retrievalError;
+      });
+    const load = vi.fn((snapshot: typeof before) => {
+      state = structuredClone(snapshot);
+    });
+    const handle = {
+      getState,
+      update: async () => {
+        state = {
+          value: 'after',
+          artifact: { history: [{ updatedBulletIds: ['candidate-1'] }] },
+        };
+      },
+      load,
+    };
+
+    await expect(
+      applyProposal({ proposal, playbookHandle: handle })
+    ).rejects.toBe(retrievalError);
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(load).toHaveBeenCalledWith(before);
+    expect(state).toEqual(before);
+  });
+
+  it('surfaces post-update retrieval and restoration failures without retry', async () => {
+    const proposal = buildProposal(weakness);
+    const before: {
+      value: string;
+      artifact: { history: { updatedBulletIds: string[] }[] };
+    } = { value: 'before', artifact: { history: [] } };
+    let state = structuredClone(before);
+    const retrievalError = new Error('post-update state retrieval failed');
+    const rollbackError = new Error('snapshot restoration failed');
+    const getState = vi
+      .fn()
+      .mockImplementationOnce(() => structuredClone(state))
+      .mockImplementationOnce(() => {
+        throw retrievalError;
+      });
+    const load = vi.fn(() => {
+      throw rollbackError;
+    });
+    const handle = {
+      getState,
+      update: async () => {
+        state = {
+          value: 'after',
+          artifact: { history: [{ updatedBulletIds: ['candidate-1'] }] },
+        };
+      },
+      load,
+    };
+
+    try {
+      await applyProposal({ proposal, playbookHandle: handle });
+      throw new Error('expected applyProposal to reject');
+    } catch (error) {
+      expect(error).toBeInstanceOf(AggregateError);
+      expect((error as AggregateError).errors).toEqual([
+        retrievalError,
+        rollbackError,
+      ]);
+    }
+    expect(load).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('evalHarness runsPerTask', () => {
@@ -321,5 +479,6 @@ describe('evalHarness runsPerTask', () => {
     expect(result.records).toHaveLength(2);
     expect(result.records[1]?.score).toBe(1);
     expect(result.exhausted).toBe(true);
+    expect(result.complete).toBe(false);
   });
 });
