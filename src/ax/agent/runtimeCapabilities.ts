@@ -211,13 +211,7 @@ const requirementArrayPaths = new Set([
 const admissionReceipts = new WeakSet<object>();
 const admittedImplementations = new WeakMap<
   AxRuntimeAdmissionReceipt,
-  Readonly<{
-    language: string | undefined;
-    createSession: AxCodeRuntime['createSession'];
-    getUsageInstructions: AxCodeRuntime['getUsageInstructions'];
-    getPrimitiveOverrides: AxCodeRuntime['getPrimitiveOverrides'];
-    formatCallable: AxCodeRuntime['formatCallable'];
-  }>
+  AxRuntimeImplementation
 >();
 const admissionSources = new Set<AxRuntimeAdmissionEvidence['source']>([
   'adapter-execution',
@@ -256,6 +250,45 @@ function ownDataValue(value: unknown, key: string, path: string): unknown {
     throw new Error(`${path}.${key} must be an own data property`);
   }
   return descriptor.value;
+}
+
+type AxRuntimeImplementation = Readonly<{
+  language: string | undefined;
+  createSession: AxCodeRuntime['createSession'];
+  getUsageInstructions: AxCodeRuntime['getUsageInstructions'];
+  getPrimitiveOverrides: AxCodeRuntime['getPrimitiveOverrides'];
+  formatCallable: AxCodeRuntime['formatCallable'];
+}>;
+
+function captureRuntimeImplementation(
+  runtime: AxCodeRuntime
+): AxRuntimeImplementation {
+  const descriptors = Object.getOwnPropertyDescriptors(runtime);
+  const captured = (
+    key: keyof AxRuntimeImplementation,
+    required = false
+  ): unknown => {
+    const descriptor = Object.hasOwn(descriptors, key)
+      ? descriptors[key]
+      : undefined;
+    if (!descriptor) {
+      if (required) {
+        throw new Error(`runtime.${key} must be an own data property`);
+      }
+      return undefined;
+    }
+    if (!('value' in descriptor)) {
+      throw new Error(`runtime.${key} must be an own data property`);
+    }
+    return descriptor.value;
+  };
+  return frozenNullRecord<AxRuntimeImplementation>([
+    ['language', captured('language')],
+    ['createSession', captured('createSession', true)],
+    ['getUsageInstructions', captured('getUsageInstructions', true)],
+    ['getPrimitiveOverrides', captured('getPrimitiveOverrides')],
+    ['formatCallable', captured('formatCallable')],
+  ]);
 }
 
 function frozenProtocol(value: AxRuntimeProtocol): AxRuntimeProtocol {
@@ -313,8 +346,12 @@ function frozenResources(
 
 function frozenProtocols(value: unknown): readonly AxRuntimeProtocol[] {
   if (!Array.isArray(value)) return Object.freeze([]);
+  const length = ownDataValue(value, 'length', 'protocol.features');
+  if (!Number.isSafeInteger(length) || (length as number) < 0) {
+    throw new Error('protocol.features.length must be an own array length');
+  }
   const protocols: AxRuntimeProtocol[] = [];
-  for (let index = 0; index < value.length; index++) {
+  for (let index = 0; index < (length as number); index++) {
     const descriptor = Object.getOwnPropertyDescriptor(value, index);
     if (!descriptor || !('value' in descriptor)) {
       throw new Error('protocol.features must contain own data entries');
@@ -563,7 +600,7 @@ function captureRequirementDataTree(
     return value;
   }
   if (seen.has(value)) {
-    throw new Error(`${path} must not contain cycles`);
+    throw new Error(`${path} must not contain cycles or repeated references`);
   }
   seen.add(value);
   const isArray = Array.isArray(value);
@@ -622,7 +659,6 @@ function captureRequirementDataTree(
       }
     }
   }
-  seen.delete(value);
   return Object.freeze(captured);
 }
 
@@ -899,21 +935,7 @@ export function axCreateRuntimeAdmissionReceipt(
   evidence: AxRuntimeAdmissionEvidence
 ): AxRuntimeAdmissionReceipt {
   const evidenceSnapshot = snapshotAdmissionEvidence(evidence);
-  const implementation = frozenNullRecord<
-    Readonly<{
-      language: string | undefined;
-      createSession: AxCodeRuntime['createSession'];
-      getUsageInstructions: AxCodeRuntime['getUsageInstructions'];
-      getPrimitiveOverrides: AxCodeRuntime['getPrimitiveOverrides'];
-      formatCallable: AxCodeRuntime['formatCallable'];
-    }>
-  >([
-    ['language', runtime.language],
-    ['createSession', runtime.createSession],
-    ['getUsageInstructions', runtime.getUsageInstructions],
-    ['getPrimitiveOverrides', runtime.getPrimitiveOverrides],
-    ['formatCallable', runtime.formatCallable],
-  ]);
+  const implementation = captureRuntimeImplementation(runtime);
   if (
     typeof implementation.createSession !== 'function' ||
     typeof implementation.getUsageInstructions !== 'function' ||
@@ -971,13 +993,14 @@ function resolveAdmission(
   if (!receipt) return { stale: false };
   const implementation = admittedImplementations.get(receipt);
   try {
+    const current = captureRuntimeImplementation(runtime);
     const stale =
       !implementation ||
-      runtime.language !== implementation.language ||
-      runtime.createSession !== implementation.createSession ||
-      runtime.getUsageInstructions !== implementation.getUsageInstructions ||
-      runtime.getPrimitiveOverrides !== implementation.getPrimitiveOverrides ||
-      runtime.formatCallable !== implementation.formatCallable;
+      current.language !== implementation.language ||
+      current.createSession !== implementation.createSession ||
+      current.getUsageInstructions !== implementation.getUsageInstructions ||
+      current.getPrimitiveOverrides !== implementation.getPrimitiveOverrides ||
+      current.formatCallable !== implementation.formatCallable;
     return stale ? { stale: true } : { receipt, stale: false };
   } catch {
     return { stale: true };
@@ -1007,14 +1030,14 @@ function supportsProtocol(
 }
 
 function capabilityRejectionReasons(
-  runtime: AxCodeRuntime,
+  runtimeLanguage: unknown,
   capabilities: AxRuntimeCapabilities,
   requirements: AxRuntimeCapabilityRequirements,
   admission: AxRuntimeAdmissionReceipt | undefined,
   staleAdmission: boolean
 ): string[] {
   const reasons: string[] = [];
-  if ((runtime.language ?? 'JavaScript') !== capabilities.language) {
+  if ((runtimeLanguage ?? 'JavaScript') !== capabilities.language) {
     reasons.push('runtime language contradicts capabilities declaration');
   }
   for (const key of ['inspect', 'snapshot', 'patch', 'abort'] as const) {
@@ -1146,8 +1169,20 @@ export function axSelectCodeRuntime(
     const admission = needsAdmission
       ? resolveAdmission(runtime, options?.admissions)
       : { stale: false };
+    let runtimeLanguage: unknown;
+    try {
+      runtimeLanguage = admission.receipt
+        ? admittedImplementations.get(admission.receipt)?.language
+        : ownDataValue(runtime, 'language', 'runtime');
+    } catch {
+      rejected.push({
+        index,
+        reasons: ['malformed runtime language metadata'],
+      });
+      continue;
+    }
     const reasons = capabilityRejectionReasons(
-      runtime,
+      runtimeLanguage,
       capabilities,
       requirementSnapshot,
       admission.receipt,

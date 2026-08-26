@@ -622,6 +622,206 @@ describe('axSelectCodeRuntime', () => {
     expect(replacementExecutions).toBe(0);
   });
 
+  it('does not admit inherited executable metadata', () => {
+    const metadataKeys = [
+      'language',
+      'createSession',
+      'getUsageInstructions',
+      'getPrimitiveOverrides',
+      'formatCallable',
+    ] as const;
+    const reads = Object.fromEntries(
+      metadataKeys.map((key) => [key, 0])
+    ) as Record<(typeof metadataKeys)[number], number>;
+    const previous = new Map(
+      metadataKeys.map((key) => [
+        key,
+        Object.getOwnPropertyDescriptor(Object.prototype, key),
+      ])
+    );
+    for (const key of metadataKeys) {
+      Object.defineProperty(Object.prototype, key, {
+        configurable: true,
+        get() {
+          reads[key]++;
+          return key === 'language'
+            ? 'polluted'
+            : key === 'createSession'
+              ? () => unsupportedSession
+              : () => '';
+        },
+      });
+    }
+    try {
+      expect(() =>
+        axCreateRuntimeAdmissionReceipt(
+          {} as AxCodeRuntime,
+          admissionEvidence()
+        )
+      ).toThrow(/runtime.createSession must be an own data property/);
+
+      const candidate = {
+        createSession: () => unsupportedSession,
+        getUsageInstructions: () => '',
+      } as AxCodeRuntime;
+      const admission = axCreateRuntimeAdmissionReceipt(
+        candidate,
+        admissionEvidence()
+      );
+      expect(Object.hasOwn(admission.executable, 'language')).toBe(false);
+      expect(Object.hasOwn(admission.executable, 'getPrimitiveOverrides')).toBe(
+        false
+      );
+      expect(Object.hasOwn(admission.executable, 'formatCallable')).toBe(false);
+    } finally {
+      for (const key of metadataKeys) {
+        const descriptor = previous.get(key);
+        if (descriptor) {
+          Object.defineProperty(Object.prototype, key, descriptor);
+        } else {
+          Reflect.deleteProperty(Object.prototype, key);
+        }
+      }
+    }
+    expect(reads).toEqual({
+      language: 0,
+      createSession: 0,
+      getUsageInstructions: 0,
+      getPrimitiveOverrides: 0,
+      formatCallable: 0,
+    });
+  });
+
+  it.each([
+    'language',
+    'createSession',
+    'getUsageInstructions',
+    'getPrimitiveOverrides',
+    'formatCallable',
+  ] as const)('rejects an own %s accessor without invoking it', (key) => {
+    let reads = 0;
+    const candidate = runtime(capabilities()) as AxCodeRuntime &
+      Record<string, unknown>;
+    Object.defineProperty(candidate, key, {
+      configurable: true,
+      enumerable: true,
+      get() {
+        reads++;
+        return key === 'language' ? 'spoofed' : () => unsupportedSession;
+      },
+    });
+
+    expect(() =>
+      axCreateRuntimeAdmissionReceipt(candidate, admissionEvidence())
+    ).toThrow(new RegExp(`runtime\\.${key} must be an own data property`));
+    expect(reads).toBe(0);
+  });
+
+  it('captures every runtime metadata field through descriptors without value gets', () => {
+    const keys = [
+      'language',
+      'createSession',
+      'getUsageInstructions',
+      'getPrimitiveOverrides',
+      'formatCallable',
+    ] as const;
+    const descriptorReads = Object.fromEntries(
+      keys.map((key) => [key, 0])
+    ) as Record<(typeof keys)[number], number>;
+    let valueReads = 0;
+    const target: AxCodeRuntime = {
+      capabilities: capabilities({ authority: admissionEvidence().authority }),
+      language: 'JavaScript',
+      createSession: () => unsupportedSession,
+      getUsageInstructions: () => '',
+      getPrimitiveOverrides: () => undefined,
+      formatCallable: () => '',
+    };
+    const candidate = new Proxy(target, {
+      getOwnPropertyDescriptor(value, key) {
+        if (typeof key === 'string' && keys.includes(key as never)) {
+          descriptorReads[key as (typeof keys)[number]]++;
+        }
+        return Reflect.getOwnPropertyDescriptor(value, key);
+      },
+      get(value, key, receiver) {
+        if (typeof key === 'string' && keys.includes(key as never))
+          valueReads++;
+        return Reflect.get(value, key, receiver);
+      },
+    });
+    const admission = axCreateRuntimeAdmissionReceipt(
+      candidate,
+      admissionEvidence()
+    );
+    const selected = axSelectCodeRuntime(
+      [candidate],
+      {
+        schemaVersion: axRuntimeCapabilityRequirementsVersion,
+        authority: { host: 'denied' },
+      },
+      { admissions: [admission] }
+    );
+
+    expect(selected.runtime).toBe(admission.executable);
+    expect(valueReads).toBe(0);
+    expect(descriptorReads).toEqual({
+      language: 2,
+      createSession: 2,
+      getUsageInstructions: 2,
+      getPrimitiveOverrides: 2,
+      formatCallable: 2,
+    });
+  });
+
+  it('captures declaration array length without a property-value read', () => {
+    let lengthReads = 0;
+    let lengthDescriptors = 0;
+    const features = new Proxy(
+      [axRuntimeProtocolFromToken('ax-program-source-runtime/js-v1')],
+      {
+        get(target, key, receiver) {
+          if (key === 'length') lengthReads++;
+          return Reflect.get(target, key, receiver);
+        },
+        getOwnPropertyDescriptor(target, key) {
+          if (key === 'length') lengthDescriptors++;
+          return Reflect.getOwnPropertyDescriptor(target, key);
+        },
+      }
+    );
+
+    expect(
+      capabilities({
+        protocol: {
+          name: axCodeRuntimeProtocol,
+          version: axCodeRuntimeProtocolVersion,
+          features,
+        },
+      }).protocol.features
+    ).toHaveLength(1);
+    expect(lengthReads).toBe(0);
+    expect(lengthDescriptors).toBe(1);
+  });
+
+  it('rejects repeated proxied requirement aliases without reflecting twice', () => {
+    let ownKeyReads = 0;
+    const shared = new Proxy(['JavaScript'], {
+      ownKeys(target) {
+        ownKeyReads++;
+        return Reflect.ownKeys(target);
+      },
+    });
+
+    expect(() =>
+      axSelectCodeRuntime([runtime(capabilities())], {
+        language: shared,
+        platform: shared as never,
+      })
+    ).toThrow(/cycles or repeated references/);
+    expect(ownKeyReads).toBe(1);
+  });
+
   it('ignores inherited optional resource bounds in admissions', () => {
     const authority = admissionEvidence().authority;
     const evidence = admissionEvidence({

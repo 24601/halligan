@@ -94,6 +94,16 @@ describe('AxJSRuntime secure defaults', () => {
 });
 
 describe('AxJSRuntime', () => {
+  it('exposes required admission methods as own data properties', () => {
+    const runtime = new AxJSRuntime();
+    expect(
+      Object.getOwnPropertyDescriptor(runtime, 'createSession')
+    ).toMatchObject({ value: expect.any(Function) });
+    expect(
+      Object.getOwnPropertyDescriptor(runtime, 'getUsageInstructions')
+    ).toMatchObject({ value: expect.any(Function) });
+  });
+
   it('keeps the default declaration denied and conservative', () => {
     expect(new AxJSRuntime().capabilities.authority).toEqual({
       host: 'denied',

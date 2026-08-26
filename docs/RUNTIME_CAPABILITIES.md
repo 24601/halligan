@@ -47,12 +47,13 @@ insufficient declarations are rejected.
 
 At selector ingress, requirements are accepted only as realm-local plain
 objects and dense arrays with enumerable own-data properties: accessors,
-symbols, hidden fields, cycles, and exotic and cross-realm objects are rejected.
-Proxies cannot be identified portably: their `getPrototypeOf`, `ownKeys`, and
-`getOwnPropertyDescriptor` traps may run while descriptors are captured, so
-callers must not pass effectful proxies. Each observed descriptor value is
-detached directly into the canonical tree; the live source graph is not
-traversed again and property-value getters are not used.
+symbols, hidden fields, cycles, repeated object aliases, and exotic and
+cross-realm objects are rejected. Proxies cannot be identified portably:
+their `getPrototypeOf`, `ownKeys`, and `getOwnPropertyDescriptor` traps may run
+at every requirements, declaration, admission-evidence, and runtime-metadata
+reflection boundary, so callers must not pass effectful proxies to any of
+those APIs. Each observed descriptor value is detached directly into the
+canonical tree; a boundary does not subsequently use property-value getters.
 
 Accepted input is rebuilt as deeply frozen null-prototype records and dense
 arrays. Only that canonical snapshot is used for schema validation, admission
@@ -65,6 +66,15 @@ records, persistence records, and protocol records use the same frozen
 null-prototype boundary. Optional timeout and memory bounds are copied only
 from own data properties; ambient prototype values cannot become admitted
 bounds.
+
+Admission additionally requires `createSession` and `getUsageInstructions` to
+be own data methods on the runtime. Optional `language`,
+`getPrimitiveOverrides`, and `formatCallable` metadata is admitted only when
+present as an own data property. The built-in JavaScript runtime exposes its
+required methods this way; custom class runtimes can bind their prototype
+methods onto the instance before requesting admission. Runtime accessors and
+inherited executable metadata are never invoked or promoted into the admitted
+facade.
 
 Inspect/snapshot/patch/abort, language, platform, protocol, and persistence may
 be matched against the immutable declaration snapshot. Authority and resource

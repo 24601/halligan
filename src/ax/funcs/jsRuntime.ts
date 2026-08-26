@@ -159,6 +159,8 @@ export class AxJSRuntime implements AxCodeRuntime {
       allowDenoRemoteImport?: boolean;
     }>
   ) {
+    this.createSession = this.createSession.bind(this);
+    this.getUsageInstructions = this.getUsageInstructions.bind(this);
     this.timeout = options?.timeout ?? 900_000;
     this.permissions = options?.permissions ?? [];
     this.allowUnsafeNodeHostAccess =
