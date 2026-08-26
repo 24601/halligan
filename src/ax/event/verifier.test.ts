@@ -8,11 +8,14 @@ import {
   AxInMemoryProgramStateStore,
 } from './memoryStore.js';
 import { AxEventRuntime, eventRoute, eventTarget } from './runtime.js';
-import type {
-  AxEventContext,
-  AxEventIngress,
-  AxEventRun,
-  AxEventVerifierPolicy,
+import {
+  type AxEventContext,
+  type AxEventContinuation,
+  type AxEventIngress,
+  type AxEventRun,
+  type AxEventVerifierPolicy,
+  type AxEventVerifierTransitionRequest,
+  AxManualEventClock,
 } from './types.js';
 import * as eventUtil from './util.js';
 
@@ -88,6 +91,149 @@ function setup(
     ],
   });
   return { runtime, target };
+}
+
+async function directVerifierTransitionFixture(
+  id: string,
+  continuationIds: readonly string[] = [],
+  admittedContinuationId?: string
+) {
+  const clock = new AxManualEventClock(1_000);
+  const store = new AxInMemoryEventStore({ clock });
+  const receipt = await store.enqueue({
+    ingress: ingress(id),
+    deliveries: [
+      {
+        routeId: 'run-goal',
+        action: admittedContinuationId ? 'resume' : 'wake',
+        targetId: 'goal',
+        instanceKey: id,
+        sizeBytes: 1,
+        retrySafety: 'idempotent',
+        ordering: 'strict',
+      },
+    ],
+    acceptedAt: clock.now(),
+    publishTimeoutMs: 100,
+  });
+  const claimed = (await store.claim(`${id}-worker`, clock.now(), 100))!;
+  const run: AxEventRun = {
+    id: `${id}-run`,
+    deliveryId: claimed.id,
+    routeId: claimed.routeId,
+    targetId: claimed.targetId,
+    instanceKey: claimed.instanceKey,
+    claimedBy: claimed.claimedBy,
+    fencingToken: claimed.fencingToken,
+    status: 'running',
+    attempt: 1,
+    startedAt: clock.now(),
+  };
+  await store.saveDelivery({
+    ...claimed,
+    status: 'running',
+    attempt: 1,
+    runId: run.id,
+    invocationStarted: true,
+  });
+  await store.saveRun(run);
+
+  const continuations = new Map<string, AxEventContinuation>();
+  for (const continuationId of continuationIds) {
+    const continuation: AxEventContinuation = {
+      id: continuationId,
+      targetId: 'goal',
+      routeId: 'run-goal',
+      instanceKey: id,
+      identityScope: claimed.identityScope,
+      correlation: [{ kind: 'direct-verifier', value: continuationId }],
+      createdAt: clock.now(),
+    };
+    continuations.set(continuationId, continuation);
+    await store.registerContinuation(continuation);
+  }
+  if (admittedContinuationId) {
+    const admitted = continuations.get(admittedContinuationId)!;
+    expect(
+      await store.admitContinuation(
+        claimed.id,
+        claimed.claimedBy!,
+        claimed.fencingToken!,
+        admitted.identityScope,
+        admitted.correlation[0]!,
+        clock.now()
+      )
+    ).toEqual(admitted);
+  }
+
+  const parent = (await store.getDelivery(claimed.id))!;
+  const continuation: AxEventContinuation = {
+    id: `${id}-next-continuation`,
+    targetId: 'goal',
+    routeId: 'run-goal',
+    instanceKey: id,
+    identityScope: parent.identityScope,
+    correlation: [{ kind: 'direct-verifier-next', value: id }],
+    createdAt: clock.now(),
+  };
+  const request: AxEventVerifierTransitionRequest = {
+    operationId: `${id}-operation`,
+    childDeliveryId: `${id}-child`,
+    parent: {
+      delivery: {
+        ...parent,
+        status: 'waiting_event',
+      },
+      run: {
+        ...run,
+        status: 'waiting_event',
+        finishedAt: clock.now(),
+      },
+      expectedFencingToken: parent.fencingToken!,
+    },
+    continuation,
+    child: {
+      ingress: ingress(`${id}-child-event`),
+      deliveries: [
+        {
+          routeId: 'run-goal',
+          action: 'resume',
+          targetId: 'goal',
+          instanceKey: id,
+          sizeBytes: 1,
+          retrySafety: 'idempotent',
+          ordering: 'strict',
+        },
+      ],
+      acceptedAt: clock.now(),
+      publishTimeoutMs: 100,
+    },
+  };
+  expect(receipt.deliveryIds).toEqual([parent.id]);
+  return { clock, store, parent, run, continuations, request };
+}
+
+async function expectNoVerifierTransitionMutation(
+  fixture: Awaited<ReturnType<typeof directVerifierTransitionFixture>>,
+  request: Readonly<AxEventVerifierTransitionRequest> = fixture.request
+) {
+  expect(await fixture.store.getDelivery(fixture.parent.id)).toEqual(
+    fixture.parent
+  );
+  expect(await fixture.store.getRun(fixture.run.id)).toEqual(fixture.run);
+  expect(
+    await fixture.store.getDelivery(request.childDeliveryId)
+  ).toBeUndefined();
+  expect(
+    await fixture.store.findContinuation(
+      request.continuation.identityScope,
+      request.continuation.correlation[0]!,
+      fixture.clock.now()
+    )
+  ).toBeUndefined();
+  expect(
+    await fixture.store.confirmVerifierTransition(request)
+  ).toBeUndefined();
 }
 
 describe('AxEventRuntime verifier continuation policy', () => {
@@ -1061,6 +1207,87 @@ describe('AxEventRuntime verifier continuation policy', () => {
       await runtime.close();
     }
   );
+
+  it('rejects an expired verifier claim without takeover or partial writes', async () => {
+    const fixture = await directVerifierTransitionFixture('expired-transition');
+    fixture.clock.advanceBy(101);
+
+    await expect(
+      fixture.store.transitionVerifier(fixture.request)
+    ).rejects.toThrow('Stale verifier transition');
+    await expectNoVerifierTransitionMutation(fixture);
+  });
+
+  it('rejects verifier cross-consumption and preserves both continuations', async () => {
+    const fixture = await directVerifierTransitionFixture(
+      'cross-consumption',
+      ['continuation-a', 'continuation-b'],
+      'continuation-a'
+    );
+    const request: AxEventVerifierTransitionRequest = {
+      ...fixture.request,
+      consumeContinuationId: 'continuation-b',
+    };
+
+    await expect(fixture.store.transitionVerifier(request)).rejects.toThrow(
+      'continuation consumption does not match admission'
+    );
+    await expectNoVerifierTransitionMutation(fixture, request);
+    for (const continuation of fixture.continuations.values()) {
+      expect(
+        await fixture.store.findContinuation(
+          continuation.identityScope,
+          continuation.correlation[0]!,
+          fixture.clock.now()
+        )
+      ).toEqual(continuation);
+    }
+  });
+
+  it('rejects verifier transition when an admission is not consumed', async () => {
+    const fixture = await directVerifierTransitionFixture(
+      'missing-consumption',
+      ['admitted-continuation'],
+      'admitted-continuation'
+    );
+
+    await expect(
+      fixture.store.transitionVerifier(fixture.request)
+    ).rejects.toThrow('continuation consumption does not match admission');
+    await expectNoVerifierTransitionMutation(fixture);
+    const admitted = fixture.continuations.get('admitted-continuation')!;
+    expect(
+      await fixture.store.findContinuation(
+        admitted.identityScope,
+        admitted.correlation[0]!,
+        fixture.clock.now()
+      )
+    ).toEqual(admitted);
+  });
+
+  it('rejects verifier consumption when the parent has no admission', async () => {
+    const fixture = await directVerifierTransitionFixture(
+      'unexpected-consumption',
+      ['no-admission-continuation']
+    );
+    const request: AxEventVerifierTransitionRequest = {
+      ...fixture.request,
+      consumeContinuationId: 'no-admission-continuation',
+    };
+
+    await expect(fixture.store.transitionVerifier(request)).rejects.toThrow(
+      'continuation consumption does not match admission'
+    );
+    await expectNoVerifierTransitionMutation(fixture, request);
+    const noAdmission = fixture.continuations.get('no-admission-continuation')!;
+    expect(
+      await fixture.store.findContinuation(
+        noAdmission.identityScope,
+        noAdmission.correlation[0]!,
+        fixture.clock.now()
+      )
+    ).toEqual(noAdmission);
+  });
 
   it('does not mutate store state when a child projection fails validation', async () => {
     const store = new AxInMemoryEventStore();

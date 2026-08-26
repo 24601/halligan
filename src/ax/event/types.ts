@@ -164,6 +164,34 @@ export class AxEventInputError extends Error {
   }
 }
 
+export class AxEventOutputPersistenceError extends Error {
+  readonly code = 'output_persistence_failed';
+
+  constructor(
+    message: string,
+    readonly phase: 'preflight' | 'stage' | 'commit' | 'recovery',
+    options?: ErrorOptions
+  ) {
+    super(`output_persistence_failed: ${message}`, options);
+    this.name = 'AxEventOutputPersistenceError';
+  }
+}
+
+/** Cross-realm guard for stores loaded through another package instance. */
+export function axIsEventOutputPersistenceError(
+  error: unknown
+): error is AxEventOutputPersistenceError {
+  if (!error || typeof error !== 'object') return false;
+  const candidate = error as { code?: unknown; phase?: unknown };
+  return (
+    candidate.code === 'output_persistence_failed' &&
+    (candidate.phase === 'preflight' ||
+      candidate.phase === 'stage' ||
+      candidate.phase === 'commit' ||
+      candidate.phase === 'recovery')
+  );
+}
+
 export type AxEventRouteAction = 'observe' | 'invalidate' | 'resume' | 'wake';
 
 export interface AxEventMatcher {
@@ -192,6 +220,103 @@ export interface AxEventContinuation {
   metadata?: Readonly<Record<string, AxEventValue>>;
 }
 
+export type AxEventEffectStatus =
+  | 'intent'
+  | 'dispatched'
+  | 'succeeded'
+  | 'failed'
+  | 'parked';
+
+export interface AxEventEffectIntent {
+  /** Stable domain operation name, such as `payments.capture`. */
+  operation: string;
+  /** Stable key that the effect implementation must pass to the provider. */
+  idempotencyKey: string;
+  /** Declare idempotent only when replay with the same key is safe. */
+  replaySafety?: 'idempotent' | 'unknown';
+  /**
+   * Persistable, redacted request descriptor bound to this effect identity.
+   * Include every request field whose change must make key reuse fail closed.
+   * Credentials do not belong here.
+   */
+  metadata?: Readonly<Record<string, AxEventValue>>;
+}
+
+export interface AxEventEffect {
+  id: string;
+  deliveryId: string;
+  runId: string;
+  identityScope: string;
+  operation: string;
+  idempotencyKey: string;
+  replaySafety: 'idempotent' | 'unknown';
+  /** SHA-256 of the canonical operation, key, safety, and metadata bytes. */
+  requestDigest: string;
+  status: AxEventEffectStatus;
+  metadata?: Readonly<Record<string, AxEventValue>>;
+  receipt?: AxEventValue;
+  error?: string;
+  parkedReason?: string;
+  createdAt: number;
+  updatedAt: number;
+  dispatchedAt?: number;
+  settledAt?: number;
+  dispatchCount: number;
+  version: number;
+}
+
+export type AxEventEffectSettlement =
+  | Readonly<{ status: 'succeeded'; receipt?: AxEventValue }>
+  | Readonly<{
+      status: 'failed';
+      receipt?: AxEventValue;
+      error?: string;
+    }>;
+
+export interface AxEventEffectCreateRequest extends AxEventEffectIntent {
+  id: string;
+  deliveryId: string;
+  runId: string;
+  identityScope: string;
+  createdAt: number;
+}
+
+export type AxEventEffectTransition =
+  | Readonly<{ type: 'dispatched'; at: number }>
+  | Readonly<{
+      type: 'settled';
+      at: number;
+      settlement: Readonly<AxEventEffectSettlement>;
+    }>
+  | Readonly<{ type: 'parked'; at: number; reason: string }>
+  | Readonly<{ type: 'not_dispatched'; at: number }>;
+
+export type AxEventEffectResolution =
+  | Readonly<{ status: 'succeeded'; receipt?: AxEventValue }>
+  | Readonly<{
+      status: 'failed';
+      receipt?: AxEventValue;
+      error?: string;
+    }>
+  | Readonly<{ status: 'not_dispatched' }>
+  | Readonly<{ status: 'indeterminate' }>
+  | Readonly<{ status: 'parked'; reason: string }>;
+
+export interface AxEventEffectResolverContext {
+  readonly delivery: Readonly<AxEventDelivery>;
+  readonly abortSignal: AbortSignal;
+}
+
+export type AxEventEffectResolver = (
+  effect: Readonly<AxEventEffect>,
+  context: Readonly<AxEventEffectResolverContext>
+) => AxEventEffectResolution | Promise<Readonly<AxEventEffectResolution>>;
+
+export interface AxEventEffectFence {
+  deliveryId: string;
+  fencingToken: number;
+}
+
 export interface AxEventContext {
   readonly runtimeId: string;
   readonly runId: string;
@@ -214,6 +339,19 @@ export interface AxEventContext {
   ): string;
   /** Run work only after this invocation's continuations are durably registered. */
   afterContinuationsRegistered(callback: () => void | Promise<void>): void;
+  declareEffect(
+    intent: Readonly<AxEventEffectIntent>
+  ): Promise<Readonly<AxEventEffect>>;
+  markEffectDispatched(
+    effectId: string,
+    expectedVersion: number
+  ): Promise<Readonly<AxEventEffect>>;
+  settleEffect(
+    effectId: string,
+    expectedVersion: number,
+    settlement: Readonly<AxEventEffectSettlement>
+  ): Promise<Readonly<AxEventEffect>>;
+  listEffects(): Promise<readonly Readonly<AxEventEffect>[]>;
 }
 
 export type AxEventInheritance = 'all' | 'none';
@@ -413,7 +551,7 @@ export interface AxEventTarget<IN = any, OUT = any> {
   /** Host-only gate run after output persistence and before final sinks. */
   verifier?: Readonly<AxEventVerifierPolicy<OUT>>;
   sinks?: readonly AxEventSink<OUT>[];
-  retrySafety?: 'idempotent' | 'unknown';
+  retrySafety?: 'idempotent' | 'effect-aware' | 'unknown';
 }
 
 export interface AxEventSinkContext<OUT = unknown> {
@@ -479,6 +617,7 @@ export type AxEventDeliveryStatus =
   | 'cancelled'
   | 'dead_lettered'
   | 'output_persistence_failed'
+  | 'parked'
   | 'outcome_unknown';
 
 export interface AxEventDelivery {
@@ -498,23 +637,27 @@ export interface AxEventDelivery {
   runId?: string;
   error?: string;
   sizeBytes: number;
-  retrySafety: 'idempotent' | 'unknown';
+  retrySafety: 'idempotent' | 'effect-aware' | 'unknown';
   ordering: 'strict' | 'relaxed';
   leaseExpiresAt?: number;
   fencingToken?: number;
   invocationStarted?: boolean;
   recoveredFromExpiredLease?: boolean;
+  /** Immutable, exclusively admitted continuation binding for resume redrive. */
+  admittedContinuation?: Readonly<AxEventContinuation>;
 }
 
 export type AxEventRunStatus =
   | 'queued'
   | 'running'
+  | 'finalizing'
   | 'waiting_event'
   | 'succeeded'
   | 'failed'
   | 'verification_failed'
   | 'cancelled'
   | 'output_persistence_failed'
+  | 'parked'
   | 'outcome_unknown';
 
 export interface AxEventSinkAttempt {
@@ -530,6 +673,10 @@ export interface AxEventRun<OUT = unknown> {
   routeId: string;
   targetId?: string;
   instanceKey: string;
+  /** Immutable continuation admission used by resume retries and recovery. */
+  admittedContinuation?: Readonly<AxEventContinuation>;
+  /** Worker owning the fenced claim when this run record was written. */
+  claimedBy?: string;
   status: AxEventRunStatus;
   attempt: number;
   startedAt: number;
@@ -561,6 +708,7 @@ export interface AxEventStoreCapabilities {
   transactions: boolean;
   compareAndSet: boolean;
   outputPersistence: boolean;
+  effectLedger?: boolean;
   conformance?: Readonly<{ multiWorker?: string; schemaVersion?: number }>;
   verifierTransitions?: 'axevent-verifier-transition-v2';
 }
@@ -574,7 +722,7 @@ export interface AxEventEnqueueRequest {
     > & {
       availableAt?: number;
       coalesce?: 'latest';
-      retrySafety?: 'idempotent' | 'unknown';
+      retrySafety?: 'idempotent' | 'effect-aware' | 'unknown';
       ordering?: 'strict' | 'relaxed';
     }
   >[];
@@ -597,6 +745,7 @@ export interface AxEventVerifierTransitionRequest {
   }>;
   continuation: Readonly<AxEventContinuation>;
   child: Readonly<AxEventEnqueueRequest>;
+  /** Must exactly identify the immutable continuation admitted to the parent. */
   consumeContinuationId?: string;
 }
 
@@ -610,6 +759,12 @@ export interface AxEventVerifierTransitionRecord {
 
 export interface AxEventStore {
   readonly capabilities: Readonly<AxEventStoreCapabilities>;
+  /**
+   * Clock used for lease validation when the store owns that policy. Runtimes
+   * adopt this clock unless one is explicitly supplied, in which case both
+   * must be the same instance.
+   */
+  readonly clock?: AxEventClock;
   enqueue(
     request: Readonly<AxEventEnqueueRequest>,
     signal?: AbortSignal
@@ -635,7 +790,8 @@ export interface AxEventStore {
     deliveryId: string,
     workerId: string,
     fencingToken: number,
-    leaseExpiresAt: number
+    leaseExpiresAt: number,
+    signal?: AbortSignal
   ): Promise<void>;
   getDelivery(
     deliveryId: string
@@ -651,16 +807,58 @@ export interface AxEventStore {
     correlation: Readonly<AxEventCorrelationKey>,
     now: number
   ): Promise<Readonly<AxEventContinuation> | undefined>;
+  /**
+   * Atomically and exclusively binds one active continuation to a fenced
+   * delivery. Resume routes fail closed when a store does not implement this.
+   */
+  admitContinuation?(
+    deliveryId: string,
+    workerId: string,
+    fencingToken: number,
+    identityScope: string,
+    correlation: Readonly<AxEventCorrelationKey>,
+    now: number
+  ): Promise<Readonly<AxEventContinuation> | undefined>;
+  /**
+   * Atomically persists a successful terminal resume delivery and consumes
+   * the immutable continuation admitted to that delivery. Resume routes fail
+   * closed when a store does not implement this operation.
+   */
+  saveDeliveryAndCompleteContinuation?(
+    delivery: Readonly<AxEventDelivery>
+  ): Promise<void>;
   completeContinuation(id: string): Promise<void>;
   addDeadLetter(deadLetter: Readonly<AxEventDeadLetter>): Promise<void>;
   getDeadLetter(id: string): Promise<Readonly<AxEventDeadLetter> | undefined>;
   removeDeadLetter(id: string): Promise<void>;
   listDeadLetters(): Promise<readonly Readonly<AxEventDeadLetter>[]>;
-  redriveDelivery(deliveryId: string, now: number): Promise<void>;
+  redriveDelivery(
+    deliveryId: string,
+    now: number,
+    options?: Readonly<{ preserveRun?: boolean }>
+  ): Promise<void>;
   nextAvailableAt(now: number): Promise<number | undefined>;
   waitForWork(signal?: AbortSignal): Promise<void>;
   isIdle(): Promise<boolean>;
   close?(): void | Promise<void>;
+}
+
+/** Opt-in effect journal extension; legacy AxEventStore implementations remain valid. */
+export interface AxEventEffectStore extends AxEventStore {
+  readonly capabilities: Readonly<
+    AxEventStoreCapabilities & { effectLedger: true }
+  >;
+  declareEffect(
+    request: Readonly<AxEventEffectCreateRequest>,
+    fence: Readonly<AxEventEffectFence>
+  ): Promise<Readonly<AxEventEffect>>;
+  transitionEffect(
+    effectId: string,
+    expectedVersion: number,
+    transition: Readonly<AxEventEffectTransition>,
+    fence: Readonly<AxEventEffectFence>
+  ): Promise<Readonly<AxEventEffect>>;
+  listEffects(deliveryId: string): Promise<readonly Readonly<AxEventEffect>[]>;
 }
 
 export interface AxEventSourceHandle {
@@ -711,6 +909,10 @@ export interface AxEventRuntimeOptions {
         | Readonly<AxAuthorityContext>
         | undefined
         | Promise<Readonly<AxAuthorityContext> | undefined>);
+  /** Reconciles dispatched effects during retry/recovery; it never runs for new intent. */
+  effectResolver?: AxEventEffectResolver;
+  /** Maximum resolver duration before the effect is parked. Defaults to 30 seconds. */
+  effectResolverTimeoutMs?: number;
 }
 
 export interface AxEventPayloadStore {
@@ -719,7 +921,34 @@ export interface AxEventPayloadStore {
   delete(reference: string): Promise<void>;
 }
 
+export interface AxEventPayloadStageRequest {
+  /** Host-assigned operation identity; reuse must be idempotent for the same payload. */
+  stageId: string;
+  key: string;
+  value: unknown;
+  sizeBytes: number;
+  /** Uncommitted ownership must be reclaimed by this time. */
+  expiresAt: number;
+  signal: AbortSignal;
+}
+
+/**
+ * Optional bounded ownership protocol for payloads that cannot be stored inline.
+ *
+ * Distinct stage IDs may resolve to one shared content reference. abort() releases
+ * only the named stage's ownership and must remain safe after an uncertain commit.
+ * All operations are idempotent; an aborted stage can never be resurrected.
+ */
+export interface AxEventStagedPayloadStore extends AxEventPayloadStore {
+  stage(
+    request: Readonly<AxEventPayloadStageRequest>
+  ): Promise<Readonly<{ reference: string }>>;
+  commit(stageId: string, signal: AbortSignal): Promise<void>;
+  abort(stageId: string, signal: AbortSignal): Promise<void>;
+}
+
 export interface AxEventCloseOptions {
   drain?: boolean;
+  /** One host-time return deadline for source, drain, worker, and store shutdown. */
   timeoutMs?: number;
 }

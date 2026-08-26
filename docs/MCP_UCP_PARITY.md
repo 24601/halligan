@@ -62,7 +62,7 @@ source/test cell:
 | Events | Listening reconnect and logical resubscription | Implemented | Nonblocking handles; legacy exact-once RPC restoration; modern fresh-id listen reissue with desired filters; real localhost HTTP/SSE six-language legacy smoke |
 | Event durability | Volatile single-worker inbox | Implemented | `AxInMemoryEventStore` capability contract and deterministic tests |
 | Event durability | Persistent cooperating-process store | Implemented | Node-only `AxSQLiteEventStore`, WAL transactions, leases, fencing, retention, and conformance test |
-| Event durability | Multi-worker capability negotiation | Implemented | runtime startup rejects stores without the `axevent-store-v1` conformance marker |
+| Event durability | Multi-worker capability negotiation | Implemented | runtime startup rejects stores without a conformance marker; the combined SQLite verifier/effect-ledger store advertises `axevent-store-v7` |
 | Completion | `completion/complete` | Implemented | client and AxAgent runtime module |
 | Logging | Era-scoped logging level and server messages | Implemented | Legacy `logging/setLevel`; modern request `_meta` from client/per-request `logLevel`; shared callbacks |
 | Roots | Legacy `roots/list` and modern MRTR roots input | Implemented | Shared handler, server-request tests, MRTR tests, and AxIR legacy fixture |

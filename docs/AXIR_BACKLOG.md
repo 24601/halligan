@@ -18,6 +18,12 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
 
 ## Open
 
+- `axir-2026-08-25-port-axeventruntime-effect-aware-resumability` [axprogram] Port AxEventRuntime effect-aware resumability
+  - Status: open
+  - Source commit: `ca760294f5ea4f207052c39c2218e1195103bc2a`
+  - TS paths: `src/ax/event/types.ts`, `src/ax/event/runtime.ts`, `src/ax/event/memoryStore.ts`, `src/ax/event/mapping.ts`, `src/ax/event/util.ts`, `src/ax/event/conformance.ts`
+  - Impact: Add the effect intent/dispatched/settled/parked state machine, resolver outcomes, effect-level replay safety, fencing, exclusive continuation admission/redrive binding, shutdown revocation, and host APIs to AxIR plus all generated language runtimes and conformance fixtures without claiming exactly-once effects.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 - `axir-2026-08-25-port-provider-neutral-temporal-interaction-timeline` [axprogram] Port provider-neutral temporal interaction timeline
   - Status: open
   - Source commit: `ca760294f5ea4f207052c39c2218e1195103bc2a`

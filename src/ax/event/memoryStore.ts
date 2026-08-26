@@ -6,6 +6,11 @@ import {
   type AxEventCorrelationKey,
   type AxEventDeadLetter,
   type AxEventDelivery,
+  type AxEventEffect,
+  type AxEventEffectCreateRequest,
+  type AxEventEffectFence,
+  type AxEventEffectStore,
+  type AxEventEffectTransition,
   type AxEventEnqueueRequest,
   type AxEventPublishReceipt,
   type AxEventRun,
@@ -17,12 +22,17 @@ import {
   AxSystemEventClock,
 } from './types.js';
 import {
+  axApplyEventEffectTransition,
   axEventCanonicalDigest,
   axEventCanonicalJson,
+  axEventContinuationFingerprint,
+  axEventEffectRequestDigest,
   axEventId,
   axEventIdentityScope,
+  axEventIngressFingerprint,
   axEventScopedCorrelationKey,
   axEventScopedDedupeKey,
+  axValidateEventEffectCreateRequest,
 } from './util.js';
 
 export interface AxInMemoryEventStoreOptions {
@@ -34,7 +44,9 @@ export interface AxInMemoryEventStoreOptions {
 
 type Waiter = { resolve: () => void; reject: (error: unknown) => void };
 
-export class AxInMemoryEventStore implements AxEventStore {
+const MAX_FENCING_TOKEN = Number.MAX_SAFE_INTEGER;
+
+export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
   readonly capabilities = {
     durability: 'volatile',
     coordination: 'single-worker',
@@ -43,9 +55,10 @@ export class AxInMemoryEventStore implements AxEventStore {
     compareAndSet: false,
     outputPersistence: true,
     verifierTransitions: 'axevent-verifier-transition-v2',
+    effectLedger: true,
   } as const;
 
-  private readonly clock: AxEventClock;
+  readonly clock: AxEventClock;
   private readonly maxPendingDeliveries: number;
   private readonly maxPendingBytes: number;
   private readonly maxEventBytes: number;
@@ -54,15 +67,18 @@ export class AxInMemoryEventStore implements AxEventStore {
   private readonly deliveryOrder: string[] = [];
   private readonly dedupe = new Map<
     string,
-    { eventId: string; deliveryIds: string[] }
+    { eventId: string; deliveryIds: string[]; ingressFingerprint: string }
   >();
   private readonly runs = new Map<string, AxEventRun>();
+  private readonly effects = new Map<string, AxEventEffect>();
+  private readonly effectKeys = new Map<string, string>();
   private readonly continuations = new Map<string, AxEventContinuation>();
   private readonly continuationKeys = new Map<string, string>();
   private readonly verifierTransitions = new Map<
     string,
     AxEventVerifierTransitionRecord
   >();
+  private readonly continuationAdmissions = new Map<string, string>();
   private readonly deadLetters = new Map<string, AxEventDeadLetter>();
   private readonly workWaiters = new Set<Waiter>();
   private readonly capacityWaiters = new Set<Waiter>();
@@ -81,9 +97,16 @@ export class AxInMemoryEventStore implements AxEventStore {
     request: Readonly<AxEventEnqueueRequest>,
     signal?: AbortSignal
   ): Promise<AxEventPublishReceipt> {
+    this.assertWritable(signal);
     const dedupeKey = axEventScopedDedupeKey(request.ingress);
+    const ingressFingerprint = axEventIngressFingerprint(request.ingress);
     const duplicate = this.dedupe.get(dedupeKey);
     if (duplicate) {
+      if (duplicate.ingressFingerprint !== ingressFingerprint) {
+        throw new Error(
+          `Event identity conflicts with previously accepted ingress ${request.ingress.event.source}:${request.ingress.event.id}`
+        );
+      }
       return {
         eventId: duplicate.eventId,
         accepted: true,
@@ -111,6 +134,9 @@ export class AxInMemoryEventStore implements AxEventStore {
       required = this.capacityRequirement(request);
     }
 
+    // There are no awaits after this check, so shutdown/abort cannot race the
+    // following in-memory mutation in the same JavaScript turn.
+    this.assertWritable(signal);
     const deliveryIds: string[] = [];
     for (const descriptor of request.deliveries) {
       const coalesced =
@@ -168,6 +194,7 @@ export class AxInMemoryEventStore implements AxEventStore {
     this.dedupe.set(dedupeKey, {
       eventId: request.ingress.event.id,
       deliveryIds,
+      ingressFingerprint,
     });
     this.notify(this.workWaiters);
     return {
@@ -221,8 +248,14 @@ export class AxInMemoryEventStore implements AxEventStore {
     const parent = this.deliveries.get(request.parent.delivery.id);
     if (
       !parent ||
+      !request.parent.delivery.claimedBy ||
+      parent.claimedBy !== request.parent.delivery.claimedBy ||
       parent.fencingToken !== request.parent.expectedFencingToken ||
-      (parent.status !== 'claimed' && parent.status !== 'running')
+      request.parent.delivery.fencingToken !==
+        request.parent.expectedFencingToken ||
+      (parent.status !== 'claimed' && parent.status !== 'running') ||
+      parent.leaseExpiresAt === undefined ||
+      parent.leaseExpiresAt <= this.clock.now()
     ) {
       throw new Error(
         `Stale verifier transition for ${request.parent.delivery.id}`
@@ -234,6 +267,39 @@ export class AxInMemoryEventStore implements AxEventStore {
       request.child.deliveries.length !== 1
     ) {
       throw new Error('Verifier transition requires one waiting child');
+    }
+    this.assertNoNonterminalEffects(parent.id);
+    const admitted = parent.admittedContinuation;
+    if (
+      (admitted === undefined) !==
+        (request.parent.delivery.admittedContinuation === undefined) ||
+      (admitted &&
+        request.parent.delivery.admittedContinuation &&
+        axEventContinuationFingerprint(admitted) !==
+          axEventContinuationFingerprint(
+            request.parent.delivery.admittedContinuation
+          ))
+    ) {
+      throw new Error(`Continuation admission for ${parent.id} is immutable`);
+    }
+    if (request.consumeContinuationId !== admitted?.id) {
+      throw new Error(
+        `Verifier transition continuation consumption does not match admission for ${parent.id}`
+      );
+    }
+    if (admitted) {
+      const admissionOwner = this.continuationAdmissions.get(admitted.id);
+      const continuation = this.continuations.get(admitted.id);
+      if (
+        admissionOwner !== parent.id ||
+        !continuation ||
+        axEventContinuationFingerprint(continuation) !==
+          axEventContinuationFingerprint(admitted)
+      ) {
+        throw new Error(
+          `outcome_unknown: continuation admission for ${parent.id} is missing or changed`
+        );
+      }
     }
     const descriptor = request.child.deliveries[0]!;
     if (
@@ -327,6 +393,7 @@ export class AxInMemoryEventStore implements AxEventStore {
     this.dedupe.set(dedupeKey, {
       eventId: request.child.ingress.event.id,
       deliveryIds: [delivery.id],
+      ingressFingerprint: axEventIngressFingerprint(request.child.ingress),
     });
     const receipt: AxEventPublishReceipt = {
       eventId: request.child.ingress.event.id,
@@ -380,17 +447,29 @@ export class AxInMemoryEventStore implements AxEventStore {
     now: number,
     leaseMs = 30_000
   ): Promise<AxEventDelivery | undefined> {
+    this.assertWritable();
     for (const id of this.deliveryOrder) {
       const delivery = this.deliveries.get(id);
-      if (!delivery || delivery.status !== 'queued') continue;
-      if (delivery.availableAt > now) continue;
+      if (!delivery) continue;
+      const recovered =
+        ((delivery.status === 'claimed' || delivery.status === 'running') &&
+          delivery.leaseExpiresAt !== undefined &&
+          delivery.leaseExpiresAt <= now) ||
+        (delivery.status === 'queued' &&
+          delivery.runId !== undefined &&
+          delivery.invocationStarted === true);
+      if (delivery.status !== 'queued' && !recovered) continue;
+      if (delivery.status === 'queued' && delivery.availableAt > now) continue;
       if (this.hasEarlierInstanceWork(delivery)) continue;
+      const fencingToken = delivery.fencingToken ?? 0;
+      this.assertFencingTokenCanAdvance(delivery.id, fencingToken);
       const claimed: AxEventDelivery = {
         ...delivery,
         status: 'claimed',
         claimedBy: workerId,
-        fencingToken: (delivery.fencingToken ?? 0) + 1,
+        fencingToken: fencingToken + 1,
         leaseExpiresAt: now + leaseMs,
+        ...(recovered ? { recoveredFromExpiredLease: true } : {}),
       };
       this.deliveries.set(id, claimed);
       return structuredClone(claimed);
@@ -402,16 +481,25 @@ export class AxInMemoryEventStore implements AxEventStore {
     deliveryId: string,
     workerId: string,
     fencingToken: number,
-    leaseExpiresAt: number
+    leaseExpiresAt: number,
+    signal?: AbortSignal
   ): Promise<void> {
+    this.assertWritable(signal);
+    this.assertSafeFencingToken(deliveryId, fencingToken);
     const delivery = this.deliveries.get(deliveryId);
+    const now = this.clock.now();
     if (
       !delivery ||
       delivery.claimedBy !== workerId ||
-      delivery.fencingToken !== fencingToken
+      delivery.fencingToken !== fencingToken ||
+      (delivery.status !== 'claimed' && delivery.status !== 'running') ||
+      delivery.leaseExpiresAt === undefined ||
+      delivery.leaseExpiresAt <= now ||
+      leaseExpiresAt <= now
     ) {
       throw new Error(`Stale event claim for ${deliveryId}`);
     }
+    this.assertWritable(signal);
     this.deliveries.set(deliveryId, { ...delivery, leaseExpiresAt });
   }
 
@@ -423,8 +511,39 @@ export class AxInMemoryEventStore implements AxEventStore {
   }
 
   async saveDelivery(delivery: Readonly<AxEventDelivery>): Promise<void> {
+    this.assertWritable();
+    this.assertActiveClaim(
+      delivery.id,
+      delivery.claimedBy,
+      delivery.fencingToken
+    );
+    if (
+      delivery.status === 'succeeded' ||
+      delivery.status === 'waiting_event'
+    ) {
+      this.assertNoNonterminalEffects(delivery.id);
+    }
     const previous = this.deliveries.get(delivery.id);
-    this.deliveries.set(delivery.id, structuredClone(delivery));
+    if (delivery.admittedContinuation && !previous?.admittedContinuation) {
+      throw new Error(
+        `Continuation admission for ${delivery.id} must be created atomically`
+      );
+    }
+    if (
+      delivery.admittedContinuation &&
+      previous?.admittedContinuation &&
+      axEventContinuationFingerprint(delivery.admittedContinuation) !==
+        axEventContinuationFingerprint(previous.admittedContinuation)
+    ) {
+      throw new Error(`Continuation admission for ${delivery.id} is immutable`);
+    }
+    const stored = structuredClone({
+      ...delivery,
+      ...(previous?.admittedContinuation
+        ? { admittedContinuation: previous.admittedContinuation }
+        : {}),
+    });
+    this.deliveries.set(delivery.id, stored);
     if (
       previous &&
       !this.isTerminal(previous.status) &&
@@ -438,6 +557,8 @@ export class AxInMemoryEventStore implements AxEventStore {
   }
 
   async saveRun(run: Readonly<AxEventRun>): Promise<void> {
+    this.assertWritable();
+    this.assertActiveClaim(run.deliveryId, run.claimedBy, run.fencingToken);
     this.runs.set(run.id, structuredClone(run));
   }
 
@@ -446,9 +567,91 @@ export class AxInMemoryEventStore implements AxEventStore {
     return run ? structuredClone(run) : undefined;
   }
 
+  async declareEffect(
+    request: Readonly<AxEventEffectCreateRequest>,
+    fence: Readonly<AxEventEffectFence>
+  ): Promise<Readonly<AxEventEffect>> {
+    this.assertWritable();
+    axValidateEventEffectCreateRequest(request);
+    const requestDigest = await axEventEffectRequestDigest(request);
+    this.assertWritable();
+    this.assertFence(fence);
+    if (request.deliveryId !== fence.deliveryId) {
+      throw new Error(`Event effect fence does not own ${request.deliveryId}`);
+    }
+    const key = this.effectKey(
+      request.deliveryId,
+      request.operation,
+      request.idempotencyKey
+    );
+    const existingId = this.effectKeys.get(key);
+    if (existingId) {
+      const existing = this.effects.get(existingId)!;
+      if (existing.requestDigest !== requestDigest) {
+        throw new Error(
+          `Event effect intent conflicts with existing ${request.operation}:${request.idempotencyKey}`
+        );
+      }
+      return structuredClone(existing);
+    }
+    const effect: AxEventEffect = {
+      id: request.id,
+      deliveryId: request.deliveryId,
+      runId: request.runId,
+      identityScope: request.identityScope,
+      operation: request.operation,
+      idempotencyKey: request.idempotencyKey,
+      replaySafety: request.replaySafety ?? 'unknown',
+      requestDigest,
+      status: 'intent',
+      ...(request.metadata
+        ? { metadata: structuredClone(request.metadata) }
+        : {}),
+      createdAt: request.createdAt,
+      updatedAt: request.createdAt,
+      dispatchCount: 0,
+      version: 1,
+    };
+    this.effects.set(effect.id, effect);
+    this.effectKeys.set(key, effect.id);
+    return structuredClone(effect);
+  }
+
+  async transitionEffect(
+    effectId: string,
+    expectedVersion: number,
+    transition: Readonly<AxEventEffectTransition>,
+    fence: Readonly<AxEventEffectFence>
+  ): Promise<Readonly<AxEventEffect>> {
+    this.assertWritable();
+    this.assertFence(fence);
+    const effect = this.effects.get(effectId);
+    if (!effect) throw new Error(`Unknown event effect: ${effectId}`);
+    if (effect.deliveryId !== fence.deliveryId) {
+      throw new Error(`Event effect fence does not own ${effectId}`);
+    }
+    const next = axApplyEventEffectTransition(effect, transition);
+    if (next.version === effect.version) return structuredClone(effect);
+    if (effect.version !== expectedVersion) {
+      throw new Error(`Stale event effect version for ${effectId}`);
+    }
+    this.effects.set(effectId, structuredClone(next));
+    return structuredClone(next);
+  }
+
+  async listEffects(
+    deliveryId: string
+  ): Promise<readonly Readonly<AxEventEffect>[]> {
+    return [...this.effects.values()]
+      .filter((effect) => effect.deliveryId === deliveryId)
+      .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id))
+      .map((effect) => structuredClone(effect));
+  }
+
   async registerContinuation(
     continuation: Readonly<AxEventContinuation>
   ): Promise<void> {
+    this.assertWritable();
     for (const correlation of continuation.correlation) {
       const key = axEventScopedCorrelationKey(
         continuation.identityScope,
@@ -496,7 +699,139 @@ export class AxInMemoryEventStore implements AxEventStore {
     return structuredClone(continuation);
   }
 
+  async admitContinuation(
+    deliveryId: string,
+    workerId: string,
+    fencingToken: number,
+    identityScope: string,
+    correlation: Readonly<AxEventCorrelationKey>,
+    now: number
+  ): Promise<Readonly<AxEventContinuation> | undefined> {
+    this.assertWritable();
+    this.assertActiveClaim(deliveryId, workerId, fencingToken);
+    const delivery = this.deliveries.get(deliveryId)!;
+    if (delivery.identityScope !== identityScope) {
+      throw new Error(
+        `Continuation admission identity does not own delivery ${deliveryId}`
+      );
+    }
+    if (delivery.admittedContinuation) {
+      const admitted = delivery.admittedContinuation;
+      if (
+        admitted.identityScope !== identityScope ||
+        !admitted.correlation.some(
+          (value) =>
+            value.kind === correlation.kind && value.value === correlation.value
+        )
+      ) {
+        throw new Error(
+          `outcome_unknown: continuation admission for ${deliveryId} conflicts with its resume correlation`
+        );
+      }
+      return structuredClone(admitted);
+    }
+    const key = axEventScopedCorrelationKey(
+      identityScope,
+      correlation.kind,
+      correlation.value
+    );
+    const continuationId = this.continuationKeys.get(key);
+    if (!continuationId) return;
+    const continuation = this.continuations.get(continuationId);
+    if (!continuation) return;
+    if (continuation.expiresAt !== undefined && continuation.expiresAt <= now) {
+      await this.completeContinuation(continuationId);
+      return;
+    }
+    const owner = this.continuationAdmissions.get(continuationId);
+    if (owner && owner !== deliveryId) return;
+    const admitted = structuredClone(continuation);
+    this.continuationAdmissions.set(continuationId, deliveryId);
+    this.deliveries.set(deliveryId, {
+      ...delivery,
+      admittedContinuation: admitted,
+    });
+    return structuredClone(admitted);
+  }
+
+  async saveDeliveryAndCompleteContinuation(
+    delivery: Readonly<AxEventDelivery>
+  ): Promise<void> {
+    this.assertWritable();
+    if (
+      delivery.status !== 'succeeded' &&
+      delivery.status !== 'waiting_event'
+    ) {
+      throw new Error(
+        `Event delivery ${delivery.id} must be successfully terminal before continuation completion`
+      );
+    }
+    this.assertActiveClaim(
+      delivery.id,
+      delivery.claimedBy,
+      delivery.fencingToken
+    );
+    this.assertNoNonterminalEffects(delivery.id);
+    const previous = this.deliveries.get(delivery.id)!;
+    const admitted = previous.admittedContinuation;
+    if (
+      !admitted ||
+      !delivery.admittedContinuation ||
+      axEventContinuationFingerprint(admitted) !==
+        axEventContinuationFingerprint(delivery.admittedContinuation)
+    ) {
+      throw new Error(
+        `outcome_unknown: continuation admission for ${delivery.id} is missing or changed`
+      );
+    }
+    const admissionOwner = this.continuationAdmissions.get(admitted.id);
+    if (admissionOwner && admissionOwner !== delivery.id) {
+      throw new Error(
+        `outcome_unknown: continuation ${admitted.id} is bound to another delivery`
+      );
+    }
+    const continuation = this.continuations.get(admitted.id);
+    if (
+      continuation &&
+      axEventContinuationFingerprint(continuation) !==
+        axEventContinuationFingerprint(admitted)
+    ) {
+      throw new Error(
+        `outcome_unknown: continuation ${admitted.id} no longer matches its delivery admission`
+      );
+    }
+
+    const stored = structuredClone({
+      ...delivery,
+      admittedContinuation: admitted,
+    });
+    const keys = admitted.correlation.map((correlation) =>
+      axEventScopedCorrelationKey(
+        admitted.identityScope,
+        correlation.kind,
+        correlation.value
+      )
+    );
+
+    // All validation and cloning precede this synchronous mutation block. It
+    // is indivisible with respect to every other in-memory store operation.
+    this.deliveries.set(delivery.id, stored);
+    for (const key of keys) {
+      if (this.continuationKeys.get(key) === admitted.id) {
+        this.continuationKeys.delete(key);
+      }
+    }
+    this.continuations.delete(admitted.id);
+    this.continuationAdmissions.delete(admitted.id);
+    if (!this.isTerminal(previous.status)) {
+      this.pendingDeliveries--;
+      this.pendingBytes -= previous.sizeBytes;
+      this.notify(this.capacityWaiters);
+    }
+  }
+
   async completeContinuation(id: string): Promise<void> {
+    this.assertWritable();
     this.completeContinuationNow(id);
   }
 
@@ -513,9 +848,11 @@ export class AxInMemoryEventStore implements AxEventStore {
       );
     }
     this.continuations.delete(id);
+    this.continuationAdmissions.delete(id);
   }
 
   async addDeadLetter(deadLetter: Readonly<AxEventDeadLetter>): Promise<void> {
+    this.assertWritable();
     this.deadLetters.set(deadLetter.id, structuredClone(deadLetter));
   }
 
@@ -527,6 +864,7 @@ export class AxInMemoryEventStore implements AxEventStore {
   }
 
   async removeDeadLetter(id: string): Promise<void> {
+    this.assertWritable();
     this.deadLetters.delete(id);
   }
 
@@ -536,11 +874,21 @@ export class AxInMemoryEventStore implements AxEventStore {
       .map((value) => structuredClone(value));
   }
 
-  async redriveDelivery(deliveryId: string, now: number): Promise<void> {
+  async redriveDelivery(
+    deliveryId: string,
+    now: number,
+    options?: Readonly<{ preserveRun?: boolean }>
+  ): Promise<void> {
+    this.assertWritable();
     const delivery = this.deliveries.get(deliveryId);
     if (!delivery) throw new Error(`Unknown event delivery: ${deliveryId}`);
     if (!this.isTerminal(delivery.status)) {
       throw new Error(`Event delivery ${deliveryId} is not terminal`);
+    }
+    const fencingToken = delivery.fencingToken ?? 0;
+    this.assertFencingTokenCanAdvance(delivery.id, fencingToken);
+    if (options?.preserveRun && !delivery.runId) {
+      throw new Error(`Event delivery ${deliveryId} has no run to preserve`);
     }
     const redriven: AxEventDelivery = {
       ...delivery,
@@ -549,7 +897,11 @@ export class AxInMemoryEventStore implements AxEventStore {
       availableAt: now,
       error: undefined,
       claimedBy: undefined,
-      runId: undefined,
+      runId: options?.preserveRun ? delivery.runId : undefined,
+      leaseExpiresAt: undefined,
+      invocationStarted: options?.preserveRun ? true : undefined,
+      ...(options?.preserveRun ? { recoveredFromExpiredLease: true } : {}),
+      fencingToken: fencingToken + 1,
     };
     this.deliveries.set(deliveryId, redriven);
     this.pendingDeliveries++;
@@ -560,9 +912,18 @@ export class AxInMemoryEventStore implements AxEventStore {
   async nextAvailableAt(_now: number): Promise<number | undefined> {
     let next: number | undefined;
     for (const delivery of this.deliveries.values()) {
-      if (delivery.status !== 'queued') continue;
-      if (next === undefined || delivery.availableAt < next) {
-        next = delivery.availableAt;
+      const availableAt =
+        delivery.status === 'queued'
+          ? delivery.availableAt
+          : (delivery.status === 'claimed' || delivery.status === 'running') &&
+              delivery.leaseExpiresAt !== undefined
+            ? delivery.leaseExpiresAt
+            : undefined;
+      if (
+        availableAt !== undefined &&
+        (next === undefined || availableAt < next)
+      ) {
+        next = availableAt;
       }
     }
     return next;
@@ -572,23 +933,29 @@ export class AxInMemoryEventStore implements AxEventStore {
     if (signal?.aborted) throw signal.reason;
     if (
       [...this.deliveries.values()].some(
-        (delivery) => delivery.status === 'queued'
+        (delivery) =>
+          delivery.status === 'queued' ||
+          ((delivery.status === 'claimed' || delivery.status === 'running') &&
+            delivery.leaseExpiresAt !== undefined)
       )
     ) {
       return;
     }
-    await new Promise<void>((resolve, reject) => {
-      const waiter = { resolve, reject };
-      this.workWaiters.add(waiter);
-      signal?.addEventListener(
-        'abort',
-        () => {
-          this.workWaiters.delete(waiter);
-          reject(signal.reason);
-        },
-        { once: true }
-      );
-    });
+    let waiter: Waiter | undefined;
+    const abort = () => {
+      if (waiter) this.workWaiters.delete(waiter);
+      waiter?.reject(signal?.reason);
+    };
+    try {
+      await new Promise<void>((resolve, reject) => {
+        waiter = { resolve, reject };
+        this.workWaiters.add(waiter);
+        signal?.addEventListener('abort', abort, { once: true });
+      });
+    } finally {
+      if (waiter) this.workWaiters.delete(waiter);
+      signal?.removeEventListener('abort', abort);
+    }
   }
 
   async isIdle(): Promise<boolean> {
@@ -602,6 +969,14 @@ export class AxInMemoryEventStore implements AxEventStore {
     }
     this.workWaiters.clear();
     this.capacityWaiters.clear();
+  }
+
+  private assertWritable(signal?: AbortSignal): void {
+    if (signal?.aborted) {
+      throw (
+        signal.reason ?? new Error('AxInMemoryEventStore operation aborted')
+      );
+    }
   }
 
   private hasCapacity(count: number, bytes: number): boolean {
@@ -687,6 +1062,7 @@ export class AxInMemoryEventStore implements AxEventStore {
       status === 'cancelled' ||
       status === 'dead_lettered' ||
       status === 'output_persistence_failed' ||
+      status === 'parked' ||
       status === 'outcome_unknown' ||
       status === 'waiting_event'
     );
@@ -789,6 +1165,93 @@ export class AxInMemoryEventStore implements AxEventStore {
   private notify(waiters: Set<Waiter>): void {
     for (const waiter of waiters) waiter.resolve();
     waiters.clear();
+  }
+
+  private assertFence(fence: Readonly<AxEventEffectFence>): void {
+    this.assertSafeFencingToken(fence.deliveryId, fence.fencingToken);
+    const delivery = this.deliveries.get(fence.deliveryId);
+    if (
+      !delivery ||
+      !Number.isSafeInteger(delivery.fencingToken) ||
+      delivery.fencingToken! < 0 ||
+      delivery.fencingToken !== fence.fencingToken ||
+      !delivery.claimedBy ||
+      (delivery.status !== 'claimed' && delivery.status !== 'running') ||
+      delivery.leaseExpiresAt === undefined ||
+      delivery.leaseExpiresAt <= this.clock.now()
+    ) {
+      throw new Error(
+        `Stale or expired fencing token for event delivery ${fence.deliveryId}`
+      );
+    }
+  }
+
+  private assertActiveClaim(
+    deliveryId: string,
+    claimedBy: string | undefined,
+    fencingToken: number | undefined
+  ): void {
+    if (!claimedBy || fencingToken === undefined) {
+      throw new Error(`Stale event claim for ${deliveryId}`);
+    }
+    this.assertSafeFencingToken(deliveryId, fencingToken);
+    const delivery = this.deliveries.get(deliveryId);
+    if (
+      !delivery ||
+      !Number.isSafeInteger(delivery.fencingToken) ||
+      delivery.fencingToken! < 0 ||
+      delivery.claimedBy !== claimedBy ||
+      delivery.fencingToken !== fencingToken ||
+      (delivery.status !== 'claimed' && delivery.status !== 'running') ||
+      delivery.leaseExpiresAt === undefined ||
+      delivery.leaseExpiresAt <= this.clock.now()
+    ) {
+      throw new Error(`Stale or expired event claim for ${deliveryId}`);
+    }
+  }
+
+  private assertNoNonterminalEffects(deliveryId: string): void {
+    const pending = [...this.effects.values()].some(
+      (effect) =>
+        effect.deliveryId === deliveryId &&
+        (effect.status === 'intent' ||
+          effect.status === 'dispatched' ||
+          effect.status === 'parked')
+    );
+    if (pending) {
+      throw new Error(`Event delivery ${deliveryId} has a nonterminal effect`);
+    }
+  }
+
+  private assertSafeFencingToken(
+    deliveryId: string,
+    fencingToken: number
+  ): void {
+    if (!Number.isSafeInteger(fencingToken) || fencingToken < 0) {
+      throw new Error(
+        `Unsafe fencing token for event delivery ${deliveryId}; rotate the delivery identity`
+      );
+    }
+  }
+
+  private assertFencingTokenCanAdvance(
+    deliveryId: string,
+    fencingToken: number
+  ): void {
+    this.assertSafeFencingToken(deliveryId, fencingToken);
+    if (fencingToken >= MAX_FENCING_TOKEN) {
+      throw new Error(
+        `Fencing token exhausted for event delivery ${deliveryId}; rotate the delivery identity`
+      );
+    }
+  }
+
+  private effectKey(
+    deliveryId: string,
+    operation: string,
+    idempotencyKey: string
+  ): string {
+    return JSON.stringify([deliveryId, operation, idempotencyKey]);
   }
 }
 

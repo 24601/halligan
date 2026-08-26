@@ -119,6 +119,17 @@ export type {
   AxEventDeadLetter,
   AxEventDelivery,
   AxEventDeliveryStatus,
+  AxEventEffect,
+  AxEventEffectCreateRequest,
+  AxEventEffectFence,
+  AxEventEffectIntent,
+  AxEventEffectResolution,
+  AxEventEffectResolver,
+  AxEventEffectResolverContext,
+  AxEventEffectSettlement,
+  AxEventEffectStatus,
+  AxEventEffectStore,
+  AxEventEffectTransition,
   AxEventEnvelope,
   AxEventIdentity,
   AxEventIngress,
@@ -132,6 +143,7 @@ export type {
   AxEventPath,
   AxEventPathRoot,
   AxEventPathSegment,
+  AxEventPayloadStageRequest,
   AxEventPayloadStore,
   AxEventProgramStateAdapter,
   AxEventPublishReceipt,
@@ -146,6 +158,7 @@ export type {
   AxEventSource,
   AxEventSourceContext,
   AxEventSourceHandle,
+  AxEventStagedPayloadStore,
   AxEventStore,
   AxEventStoreCapabilities,
   AxEventTarget,
@@ -168,9 +181,17 @@ export {
   AxEventContinuationNotFoundError,
   AxEventInputError,
   AxEventOutcomeUnknownError,
+  AxEventOutputPersistenceError,
   AxManualEventClock,
   AxSystemEventClock,
+  axIsEventOutputPersistenceError,
 } from './types.js';
 export type { AxUCPWebhookEventSourceOptions } from './ucpSource.js';
 export { AxUCPWebhookEventSource } from './ucpSource.js';
-export { axEventCanonicalJson } from './util.js';
+export {
+  axEventCanonicalJson,
+  axEventContinuationFingerprint,
+  axEventEffectRequestDigest,
+  axEventEffectRequestFingerprint,
+  axEventIngressFingerprint,
+} from './util.js';

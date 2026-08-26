@@ -1,0 +1,1773 @@
+import { describe, expect, it, vi } from 'vitest';
+import { AxSignature } from '../dsp/sig.js';
+import type { AxProgrammable } from '../dsp/types.js';
+import { AxInMemoryEventStore } from './memoryStore.js';
+import { AxEventRuntime, eventRoute, eventTarget } from './runtime.js';
+import {
+  type AxEventContext,
+  type AxEventContinuation,
+  type AxEventDelivery,
+  type AxEventEffectResolution,
+  type AxEventIngress,
+  type AxEventRun,
+  type AxEventStore,
+  type AxEventVerifierTransitionRequest,
+  AxManualEventClock,
+} from './types.js';
+
+const ai = {} as never;
+
+function effectProgram(
+  forward: (context: Readonly<AxEventContext>) => unknown | Promise<unknown>
+): AxProgrammable<any, any> {
+  const signature = new AxSignature('eventId?:string -> handled:boolean');
+  return {
+    getId: () => 'effect-program',
+    getSignature: () => signature,
+    forward: async (_ai: unknown, _input: unknown, options: any) =>
+      forward(options.eventContext),
+    streamingForward: async function* () {},
+  } as unknown as AxProgrammable<any, any>;
+}
+
+function ingress(id: string): AxEventIngress {
+  return {
+    event: {
+      specversion: '1.0',
+      id,
+      source: 'test://effects',
+      type: 'effect.requested',
+    },
+    identity: { tenantId: 'tenant-a' },
+    trust: 'authenticated',
+  };
+}
+
+function runtimeFor(
+  store: AxEventStore,
+  forward: (context: Readonly<AxEventContext>) => unknown | Promise<unknown>,
+  options: Partial<ConstructorParameters<typeof AxEventRuntime>[0]> = {},
+  targetRetrySafety: 'idempotent' | 'effect-aware' | 'unknown' = 'effect-aware'
+): AxEventRuntime {
+  return new AxEventRuntime({
+    retryBaseMs: 1,
+    retryMaxMs: 1,
+    maxAttempts: 3,
+    ...options,
+    store,
+    routes: [
+      eventRoute({
+        id: 'effect-route',
+        match: { types: ['effect.requested'] },
+        action: 'wake',
+        target: eventTarget({
+          id: 'effect-target',
+          ai,
+          program: effectProgram(forward),
+          mapInput: () => ({}),
+          retrySafety: targetRetrySafety,
+        }),
+      }),
+    ],
+  });
+}
+
+const nonterminalEffectStatuses = ['intent', 'dispatched', 'parked'] as const;
+
+async function deliveryWithNonterminalEffect(
+  id: string,
+  effectStatus: (typeof nonterminalEffectStatuses)[number],
+  action: 'wake' | 'resume' = 'wake'
+) {
+  const clock = new AxManualEventClock(1_000);
+  const store = new AxInMemoryEventStore({ clock });
+  const receipt = await store.enqueue({
+    ingress: ingress(id),
+    deliveries: [
+      {
+        routeId: 'effect-route',
+        action,
+        targetId: 'effect-target',
+        instanceKey: id,
+        sizeBytes: 1,
+        retrySafety: 'effect-aware',
+        ordering: 'strict',
+      },
+    ],
+    acceptedAt: clock.now(),
+    publishTimeoutMs: 100,
+  });
+  const claimed = (await store.claim(`${id}-worker`, clock.now(), 100))!;
+  const run: AxEventRun = {
+    id: `${id}-run`,
+    deliveryId: claimed.id,
+    routeId: claimed.routeId,
+    targetId: claimed.targetId,
+    instanceKey: claimed.instanceKey,
+    claimedBy: claimed.claimedBy,
+    fencingToken: claimed.fencingToken,
+    status: 'running',
+    attempt: 1,
+    startedAt: clock.now(),
+  };
+  const delivery: AxEventDelivery = {
+    ...claimed,
+    status: 'running',
+    attempt: 1,
+    runId: run.id,
+    invocationStarted: true,
+  };
+  await store.saveDelivery(delivery);
+  await store.saveRun(run);
+  let effect = await store.declareEffect(
+    {
+      id: `${id}-effect`,
+      deliveryId: claimed.id,
+      runId: run.id,
+      identityScope: claimed.identityScope,
+      operation: `${id}.write`,
+      idempotencyKey: `${id}-key`,
+      replaySafety: 'idempotent',
+      createdAt: clock.now(),
+    },
+    { deliveryId: claimed.id, fencingToken: claimed.fencingToken! }
+  );
+  if (effectStatus === 'dispatched') {
+    effect = await store.transitionEffect(
+      effect.id,
+      effect.version,
+      { type: 'dispatched', at: clock.now() },
+      { deliveryId: claimed.id, fencingToken: claimed.fencingToken! }
+    );
+  } else if (effectStatus === 'parked') {
+    effect = await store.transitionEffect(
+      effect.id,
+      effect.version,
+      { type: 'parked', at: clock.now(), reason: 'operator review' },
+      { deliveryId: claimed.id, fencingToken: claimed.fencingToken! }
+    );
+  }
+  expect(effect.status).toBe(effectStatus);
+  expect(receipt.deliveryIds).toEqual([claimed.id]);
+  return { clock, store, delivery, run, effect };
+}
+
+describe('AxEventRuntime effects', () => {
+  it('preserves legacy stores until application code opts into effects', async () => {
+    const backing = new AxInMemoryEventStore();
+    const { effectLedger: _effectLedger, ...legacyCapabilities } =
+      backing.capabilities;
+    const legacyStore = new Proxy(backing, {
+      get(target, property) {
+        if (property === 'capabilities') return legacyCapabilities;
+        if (
+          property === 'declareEffect' ||
+          property === 'transitionEffect' ||
+          property === 'listEffects'
+        ) {
+          return;
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as AxEventStore;
+    const runtime = runtimeFor(
+      legacyStore,
+      async () => ({ handled: true }),
+      {},
+      'idempotent'
+    );
+    await runtime.start();
+    const receipt = await runtime.publish(ingress('legacy-store'));
+    await runtime.waitForIdle();
+
+    expect((await backing.getDelivery(receipt.deliveryIds[0]!))?.status).toBe(
+      'succeeded'
+    );
+    await expect(runtime.getEffects(receipt.deliveryIds[0]!)).rejects.toThrow(
+      'does not support the effect ledger'
+    );
+    await runtime.close();
+    const resolverRuntime = runtimeFor(
+      legacyStore,
+      async () => ({ handled: true }),
+      {
+        effectResolver: () => ({ status: 'indeterminate' }),
+      }
+    );
+    await expect(resolverRuntime.start()).rejects.toThrow(
+      'effectResolver requires an effect-aware AxEventStore'
+    );
+    const effectAwareRuntime = runtimeFor(
+      legacyStore,
+      async () => ({ handled: true }),
+      {},
+      'effect-aware'
+    );
+    await expect(effectAwareRuntime.start()).rejects.toThrow(
+      'configuration for effect-aware targets effect-target requires an effect-aware AxEventStore'
+    );
+  });
+
+  it.each(nonterminalEffectStatuses)(
+    'atomically rejects ordinary successful completion with a %s effect',
+    async (effectStatus) => {
+      const fixture = await deliveryWithNonterminalEffect(
+        `ordinary-${effectStatus}`,
+        effectStatus
+      );
+
+      for (const status of ['succeeded', 'waiting_event'] as const) {
+        await expect(
+          fixture.store.saveDelivery({ ...fixture.delivery, status })
+        ).rejects.toThrow('nonterminal effect');
+        expect(await fixture.store.getDelivery(fixture.delivery.id)).toEqual(
+          fixture.delivery
+        );
+        expect(await fixture.store.getRun(fixture.run.id)).toEqual(fixture.run);
+        expect(await fixture.store.listEffects(fixture.delivery.id)).toEqual([
+          fixture.effect,
+        ]);
+      }
+    }
+  );
+
+  it.each(nonterminalEffectStatuses)(
+    'atomically rejects resume completion with a %s effect',
+    async (effectStatus) => {
+      const fixture = await deliveryWithNonterminalEffect(
+        `resume-${effectStatus}`,
+        effectStatus,
+        'resume'
+      );
+      const continuation: AxEventContinuation = {
+        id: `resume-${effectStatus}-continuation`,
+        targetId: 'effect-target',
+        routeId: 'effect-route',
+        instanceKey: fixture.delivery.instanceKey,
+        identityScope: fixture.delivery.identityScope,
+        correlation: [{ kind: 'resume-effect', value: effectStatus }],
+        createdAt: fixture.clock.now(),
+      };
+      await fixture.store.registerContinuation(continuation);
+      const admitted = await fixture.store.admitContinuation(
+        fixture.delivery.id,
+        fixture.delivery.claimedBy!,
+        fixture.delivery.fencingToken!,
+        continuation.identityScope,
+        continuation.correlation[0]!,
+        fixture.clock.now()
+      );
+      const active = (await fixture.store.getDelivery(fixture.delivery.id))!;
+
+      for (const status of ['succeeded', 'waiting_event'] as const) {
+        await expect(
+          fixture.store.saveDeliveryAndCompleteContinuation({
+            ...active,
+            admittedContinuation: admitted,
+            status,
+          })
+        ).rejects.toThrow('nonterminal effect');
+        expect(await fixture.store.getDelivery(active.id)).toEqual(active);
+        expect(await fixture.store.getRun(fixture.run.id)).toEqual(fixture.run);
+        expect(
+          await fixture.store.findContinuation(
+            continuation.identityScope,
+            continuation.correlation[0]!,
+            fixture.clock.now()
+          )
+        ).toEqual(continuation);
+        expect(await fixture.store.listEffects(active.id)).toEqual([
+          fixture.effect,
+        ]);
+      }
+    }
+  );
+
+  it.each(nonterminalEffectStatuses)(
+    'atomically rejects verifier handoff with a %s effect',
+    async (effectStatus) => {
+      const fixture = await deliveryWithNonterminalEffect(
+        `verifier-${effectStatus}`,
+        effectStatus
+      );
+      const continuation: AxEventContinuation = {
+        id: `verifier-${effectStatus}-continuation`,
+        targetId: 'effect-target',
+        routeId: 'effect-route',
+        instanceKey: fixture.delivery.instanceKey,
+        identityScope: fixture.delivery.identityScope,
+        correlation: [{ kind: 'verifier-effect', value: effectStatus }],
+        createdAt: fixture.clock.now(),
+      };
+      const request: AxEventVerifierTransitionRequest = {
+        operationId: `verifier-${effectStatus}-operation`,
+        childDeliveryId: `verifier-${effectStatus}-child`,
+        parent: {
+          delivery: {
+            ...fixture.delivery,
+            status: 'waiting_event',
+          },
+          run: {
+            ...fixture.run,
+            status: 'waiting_event',
+            finishedAt: fixture.clock.now(),
+          },
+          expectedFencingToken: fixture.delivery.fencingToken!,
+        },
+        continuation,
+        child: {
+          ingress: ingress(`verifier-${effectStatus}-child-event`),
+          deliveries: [
+            {
+              routeId: 'effect-route',
+              action: 'resume',
+              targetId: 'effect-target',
+              instanceKey: fixture.delivery.instanceKey,
+              sizeBytes: 1,
+              retrySafety: 'effect-aware',
+              ordering: 'strict',
+            },
+          ],
+          acceptedAt: fixture.clock.now(),
+          publishTimeoutMs: 100,
+        },
+      };
+
+      await expect(fixture.store.transitionVerifier(request)).rejects.toThrow(
+        'nonterminal effect'
+      );
+      expect(await fixture.store.getDelivery(fixture.delivery.id)).toEqual(
+        fixture.delivery
+      );
+      expect(await fixture.store.getRun(fixture.run.id)).toEqual(fixture.run);
+      expect(
+        await fixture.store.getDelivery(request.childDeliveryId)
+      ).toBeUndefined();
+      expect(
+        await fixture.store.findContinuation(
+          continuation.identityScope,
+          continuation.correlation[0]!,
+          fixture.clock.now()
+        )
+      ).toBeUndefined();
+      expect(
+        await fixture.store.confirmVerifierTransition(request)
+      ).toBeUndefined();
+      expect(await fixture.store.listEffects(fixture.delivery.id)).toEqual([
+        fixture.effect,
+      ]);
+    }
+  );
+
+  it('reuses a persisted not-dispatched intent after a crash', async () => {
+    const store = new AxInMemoryEventStore();
+    const dispatch = vi.fn();
+    let calls = 0;
+    const runtime = runtimeFor(store, async (context) => {
+      calls++;
+      let effect = await context.declareEffect({
+        operation: 'messages.send',
+        idempotencyKey: context.idempotencyKey,
+        replaySafety: 'idempotent',
+        metadata: { recipient: 'redacted' },
+      });
+      if (calls === 1) throw new Error('crash before dispatch');
+      expect(effect.status).toBe('intent');
+      effect = await context.markEffectDispatched(effect.id, effect.version);
+      dispatch(context.idempotencyKey);
+      await context.settleEffect(effect.id, effect.version, {
+        status: 'succeeded',
+        receipt: { providerId: 'message-1' },
+      });
+      return { handled: true };
+    });
+    await runtime.start();
+    const receipt = await runtime.publish(ingress('before-dispatch'));
+    await runtime.waitForIdle();
+
+    expect(calls).toBe(2);
+    expect(dispatch).toHaveBeenCalledOnce();
+    expect(await runtime.getEffects(receipt.deliveryIds[0]!)).toEqual([
+      expect.objectContaining({
+        status: 'succeeded',
+        dispatchCount: 1,
+        receipt: { providerId: 'message-1' },
+      }),
+    ]);
+    await runtime.close();
+  });
+
+  it('replays an indeterminate effect only when explicitly idempotent', async () => {
+    const store = new AxInMemoryEventStore();
+    const keys: string[] = [];
+    let calls = 0;
+    const runtime = runtimeFor(store, async (context) => {
+      calls++;
+      let effect = await context.declareEffect({
+        operation: 'inventory.reserve',
+        idempotencyKey: 'reservation-42',
+        replaySafety: 'idempotent',
+      });
+      effect = await context.markEffectDispatched(effect.id, effect.version);
+      keys.push(effect.idempotencyKey);
+      if (calls === 1) throw new Error('crash after dispatch');
+      await context.settleEffect(effect.id, effect.version, {
+        status: 'succeeded',
+        receipt: { reservationId: 'reservation-42' },
+      });
+      return { handled: true };
+    });
+    await runtime.start();
+    const receipt = await runtime.publish(ingress('idempotent-replay'));
+    await runtime.waitForIdle();
+
+    expect(keys).toEqual(['reservation-42', 'reservation-42']);
+    expect(await runtime.getEffects(receipt.deliveryIds[0]!)).toEqual([
+      expect.objectContaining({ status: 'succeeded', dispatchCount: 2 }),
+    ]);
+    await runtime.close();
+  });
+
+  it('does not dispatch again after an effect settled before a crash', async () => {
+    const store = new AxInMemoryEventStore();
+    const dispatch = vi.fn();
+    let calls = 0;
+    const runtime = runtimeFor(store, async (context) => {
+      calls++;
+      let effect = await context.declareEffect({
+        operation: 'billing.capture',
+        idempotencyKey: 'charge-42',
+      });
+      if (effect.status === 'succeeded') return { handled: true };
+      effect = await context.markEffectDispatched(effect.id, effect.version);
+      dispatch();
+      await context.settleEffect(effect.id, effect.version, {
+        status: 'succeeded',
+        receipt: { chargeId: 'charge-42' },
+      });
+      if (calls === 1) throw new Error('crash after settlement');
+      return { handled: true };
+    });
+    await runtime.start();
+    const receipt = await runtime.publish(ingress('after-settlement'));
+    await runtime.waitForIdle();
+
+    expect(calls).toBe(2);
+    expect(dispatch).toHaveBeenCalledOnce();
+    expect((await runtime.getEffects(receipt.deliveryIds[0]!))[0]?.status).toBe(
+      'succeeded'
+    );
+    await runtime.close();
+  });
+
+  it('parks an unresolved non-idempotent effect instead of retrying it', async () => {
+    const store = new AxInMemoryEventStore();
+    const forward = vi.fn(async (context: Readonly<AxEventContext>) => {
+      const effect = await context.declareEffect({
+        operation: 'email.send',
+        idempotencyKey: 'email-42',
+      });
+      await context.markEffectDispatched(effect.id, effect.version);
+      throw new Error('connection lost after dispatch');
+    });
+    const runtime = runtimeFor(store, forward);
+    await runtime.start();
+    const receipt = await runtime.publish(ingress('non-idempotent'));
+    await runtime.waitForIdle();
+
+    const delivery = await store.getDelivery(receipt.deliveryIds[0]!);
+    expect(delivery?.status).toBe('parked');
+    expect(forward).toHaveBeenCalledOnce();
+    expect((await runtime.getEffects(delivery!.id))[0]).toEqual(
+      expect.objectContaining({ status: 'parked' })
+    );
+    expect(await runtime.listDeadLetters()).toEqual([
+      expect.objectContaining({
+        kind: 'delivery',
+        reason: expect.stringContaining('Indeterminate non-idempotent effect'),
+      }),
+    ]);
+    await runtime.close();
+  });
+
+  it('continues reconciling later effects after an earlier parked record', async () => {
+    const store = new AxInMemoryEventStore();
+    const resolved = vi.fn();
+    const withResolver = new AxEventRuntime({
+      retryBaseMs: 1,
+      retryMaxMs: 1,
+      maxAttempts: 3,
+      store,
+      effectResolver: async (effect) => {
+        if (effect.operation === 'ledger.post') {
+          resolved();
+          return { status: 'succeeded', receipt: { posted: true } };
+        }
+        return { status: 'parked', reason: 'operator review required' };
+      },
+      routes: [
+        eventRoute({
+          id: 'effect-route',
+          match: { types: ['effect.requested'] },
+          action: 'wake',
+          target: eventTarget({
+            id: 'effect-target',
+            ai,
+            program: effectProgram(async (context) => {
+              const parked = await context.declareEffect({
+                operation: 'email.send',
+                idempotencyKey: 'email-first',
+              });
+              await context.markEffectDispatched(parked.id, parked.version);
+              const later = await context.declareEffect({
+                operation: 'ledger.post',
+                idempotencyKey: 'ledger-second',
+                replaySafety: 'idempotent',
+              });
+              await context.markEffectDispatched(later.id, later.version);
+              throw new Error('connection lost after first dispatch');
+            }),
+            mapInput: () => ({}),
+            retrySafety: 'effect-aware',
+          }),
+        }),
+      ],
+    });
+    await withResolver.start();
+    const receipt = await withResolver.publish(ingress('multi-effect'));
+    await withResolver.waitForIdle();
+    const effects = await withResolver.getEffects(receipt.deliveryIds[0]!);
+    expect(effects.map((effect) => effect.status).sort()).toEqual([
+      'parked',
+      'succeeded',
+    ]);
+    expect(resolved).toHaveBeenCalledOnce();
+    await withResolver.close();
+  });
+
+  it('preserves unknown target behavior while parking its effect evidence', async () => {
+    const store = new AxInMemoryEventStore();
+    const forward = vi.fn(async (context: Readonly<AxEventContext>) => {
+      const effect = await context.declareEffect({
+        operation: 'legacy-target.effect',
+        idempotencyKey: 'legacy-target-effect-42',
+        replaySafety: 'idempotent',
+      });
+      await context.markEffectDispatched(effect.id, effect.version);
+      throw new Error('target outcome is unknown');
+    });
+    const runtime = runtimeFor(store, forward, {}, 'unknown');
+    await runtime.start();
+    const receipt = await runtime.publish(ingress('unknown-target-effect'));
+    await runtime.waitForIdle();
+
+    const delivery = await store.getDelivery(receipt.deliveryIds[0]!);
+    expect(delivery?.status).toBe('outcome_unknown');
+    expect(forward).toHaveBeenCalledOnce();
+    expect((await runtime.getEffects(delivery!.id))[0]).toEqual(
+      expect.objectContaining({
+        status: 'parked',
+        parkedReason: expect.stringContaining('outcome_unknown'),
+      })
+    );
+    await runtime.close();
+  });
+
+  it('parks and recovers a target completion with an unsettled dispatched effect', async () => {
+    const store = new AxInMemoryEventStore();
+    const forward = vi.fn(async (context: Readonly<AxEventContext>) => {
+      const effect = await context.declareEffect({
+        operation: 'messages.send',
+        idempotencyKey: 'completion-receipt-42',
+      });
+      if (effect.status === 'intent') {
+        await context.markEffectDispatched(effect.id, effect.version);
+      }
+      return { handled: true };
+    });
+    const runtime = runtimeFor(store, forward, {
+      effectResolver: () => ({
+        status: 'succeeded',
+        receipt: { providerId: 'recovered' },
+      }),
+    });
+    await runtime.start();
+    const receipt = await runtime.publish(ingress('unsettled-completion'));
+    await runtime.waitForIdle();
+
+    const deliveryId = receipt.deliveryIds[0]!;
+    const parkedDelivery = await store.getDelivery(deliveryId);
+    expect(parkedDelivery).toEqual(
+      expect.objectContaining({
+        status: 'parked',
+        error: expect.stringContaining(
+          'Target completed with unsettled effect messages.send:completion-receipt-42 (dispatched)'
+        ),
+      })
+    );
+    expect(await store.getRun(parkedDelivery!.runId!)).toEqual(
+      expect.objectContaining({ status: 'parked' })
+    );
+    expect((await runtime.getEffects(deliveryId))[0]).toEqual(
+      expect.objectContaining({
+        status: 'parked',
+        parkedReason: expect.stringContaining(
+          'Target completed with unsettled effect'
+        ),
+      })
+    );
+    const [deadLetter] = await runtime.listDeadLetters();
+    expect(deadLetter).toEqual(
+      expect.objectContaining({ kind: 'delivery', deliveryId })
+    );
+    await runtime.redrive(deadLetter!.id);
+    await runtime.waitForIdle();
+
+    expect(await store.getDelivery(deliveryId)).toEqual(
+      expect.objectContaining({ status: 'succeeded' })
+    );
+    expect((await runtime.getEffects(deliveryId))[0]).toEqual(
+      expect.objectContaining({
+        status: 'succeeded',
+        receipt: { providerId: 'recovered' },
+      })
+    );
+    expect(forward).toHaveBeenCalledTimes(2);
+    await runtime.close();
+  });
+
+  it('parks an unsettled effect declared by a recovered final sink', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const store = new AxInMemoryEventStore({ clock });
+    const receipt = await store.enqueue({
+      ingress: ingress('recovered-sink-effect'),
+      deliveries: [
+        {
+          routeId: 'effect-route',
+          action: 'wake',
+          targetId: 'effect-target',
+          instanceKey: 'recovered-sink-effect',
+          sizeBytes: 1,
+          retrySafety: 'effect-aware',
+          ordering: 'strict',
+        },
+      ],
+      acceptedAt: clock.now(),
+      publishTimeoutMs: 100,
+    });
+    const claimed = (await store.claim('crashed-worker', clock.now(), 100))!;
+    const run: AxEventRun = {
+      id: 'recovered-sink-run',
+      deliveryId: claimed.id,
+      routeId: claimed.routeId,
+      targetId: claimed.targetId,
+      instanceKey: claimed.instanceKey,
+      claimedBy: claimed.claimedBy,
+      fencingToken: claimed.fencingToken,
+      status: 'finalizing',
+      attempt: 1,
+      startedAt: clock.now(),
+      output: { handled: true },
+    };
+    await store.saveDelivery({
+      ...claimed,
+      status: 'running',
+      attempt: 1,
+      runId: run.id,
+      invocationStarted: true,
+    });
+    await store.saveRun(run);
+    clock.advanceBy(101);
+
+    const target = vi.fn(() => ({ handled: true }));
+    const sink = vi.fn(
+      async (
+        _output: unknown,
+        context: { eventContext: Readonly<AxEventContext> }
+      ) => {
+        const effect = await context.eventContext.declareEffect({
+          operation: 'sink.deliver',
+          idempotencyKey: 'recovered-sink-42',
+        });
+        await context.eventContext.markEffectDispatched(
+          effect.id,
+          effect.version
+        );
+      }
+    );
+    const runtime = new AxEventRuntime({
+      clock,
+      store,
+      leaseMs: 100,
+      heartbeatMs: 25,
+      routes: [
+        eventRoute({
+          id: 'effect-route',
+          match: { types: ['effect.requested'] },
+          action: 'wake',
+          target: eventTarget({
+            id: 'effect-target',
+            ai,
+            program: effectProgram(target),
+            mapInput: () => ({}),
+            retrySafety: 'effect-aware',
+            sinks: [{ id: 'recovered-sink', write: sink }],
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    const deliveryId = receipt.deliveryIds[0]!;
+    await vi.waitFor(async () =>
+      expect((await store.getDelivery(deliveryId))?.status).toBe('parked')
+    );
+
+    expect(target).not.toHaveBeenCalled();
+    expect(sink).toHaveBeenCalledOnce();
+    expect(await store.getDelivery(deliveryId)).toEqual(
+      expect.objectContaining({ status: 'parked', runId: run.id })
+    );
+    expect(await store.getRun(run.id)).toEqual(
+      expect.objectContaining({ status: 'parked' })
+    );
+    expect((await runtime.getEffects(deliveryId))[0]).toEqual(
+      expect.objectContaining({
+        status: 'parked',
+        parkedReason: expect.stringContaining(
+          'Target completed with unsettled effect sink.deliver:recovered-sink-42 (dispatched)'
+        ),
+      })
+    );
+    expect(await runtime.listDeadLetters()).toEqual([
+      expect.objectContaining({ kind: 'delivery', deliveryId, runId: run.id }),
+    ]);
+    await runtime.close();
+  });
+
+  it('recovers a crashed finalizing run with an unsettled sink effect without rerunning code', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const store = new AxInMemoryEventStore({ clock });
+    const receipt = await store.enqueue({
+      ingress: ingress('crashed-finalizing-effect'),
+      deliveries: [
+        {
+          routeId: 'effect-route',
+          action: 'wake',
+          targetId: 'effect-target',
+          instanceKey: 'crashed-finalizing-effect',
+          sizeBytes: 1,
+          retrySafety: 'effect-aware',
+          ordering: 'strict',
+        },
+      ],
+      acceptedAt: clock.now(),
+      publishTimeoutMs: 100,
+    });
+    const claimed = (await store.claim('crashed-worker', clock.now(), 100))!;
+    const run: AxEventRun = {
+      id: 'crashed-finalizing-run',
+      deliveryId: claimed.id,
+      routeId: claimed.routeId,
+      targetId: claimed.targetId,
+      instanceKey: claimed.instanceKey,
+      claimedBy: claimed.claimedBy,
+      fencingToken: claimed.fencingToken,
+      status: 'finalizing',
+      attempt: 1,
+      startedAt: clock.now(),
+      output: { handled: true },
+    };
+    await store.saveDelivery({
+      ...claimed,
+      status: 'running',
+      attempt: 1,
+      runId: run.id,
+      invocationStarted: true,
+    });
+    await store.saveRun(run);
+    const effect = await store.declareEffect(
+      {
+        id: 'crashed-sink-effect',
+        deliveryId: claimed.id,
+        runId: run.id,
+        identityScope: claimed.identityScope,
+        operation: 'sink.deliver',
+        idempotencyKey: 'crashed-sink-42',
+        createdAt: clock.now(),
+      },
+      { deliveryId: claimed.id, fencingToken: claimed.fencingToken! }
+    );
+    await store.transitionEffect(
+      effect.id,
+      effect.version,
+      { type: 'dispatched', at: clock.now() },
+      { deliveryId: claimed.id, fencingToken: claimed.fencingToken! }
+    );
+    clock.advanceBy(101);
+
+    const target = vi.fn(() => ({ handled: true }));
+    const sink = vi.fn();
+    const runtime = new AxEventRuntime({
+      clock,
+      store,
+      leaseMs: 100,
+      heartbeatMs: 25,
+      routes: [
+        eventRoute({
+          id: 'effect-route',
+          match: { types: ['effect.requested'] },
+          action: 'wake',
+          target: eventTarget({
+            id: 'effect-target',
+            ai,
+            program: effectProgram(target),
+            mapInput: () => ({}),
+            retrySafety: 'effect-aware',
+            sinks: [{ id: 'crashed-sink', write: sink }],
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    const deliveryId = receipt.deliveryIds[0]!;
+    await vi.waitFor(async () =>
+      expect((await store.getDelivery(deliveryId))?.status).toBe('parked')
+    );
+
+    expect(target).not.toHaveBeenCalled();
+    expect(sink).not.toHaveBeenCalled();
+    expect(await store.getRun(run.id)).toEqual(
+      expect.objectContaining({ status: 'parked' })
+    );
+    expect((await runtime.getEffects(deliveryId))[0]).toEqual(
+      expect.objectContaining({ status: 'parked' })
+    );
+    await runtime.close();
+  });
+
+  it('replays an idempotent sink effect from a crashed finalizing run', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const store = new AxInMemoryEventStore({ clock });
+    const receipt = await store.enqueue({
+      ingress: ingress('idempotent-finalizing-effect'),
+      deliveries: [
+        {
+          routeId: 'effect-route',
+          action: 'wake',
+          targetId: 'effect-target',
+          instanceKey: 'idempotent-finalizing-effect',
+          sizeBytes: 1,
+          retrySafety: 'effect-aware',
+          ordering: 'strict',
+        },
+      ],
+      acceptedAt: clock.now(),
+      publishTimeoutMs: 100,
+    });
+    const claimed = (await store.claim('crashed-worker', clock.now(), 100))!;
+    const run: AxEventRun = {
+      id: 'idempotent-finalizing-run',
+      deliveryId: claimed.id,
+      routeId: claimed.routeId,
+      targetId: claimed.targetId,
+      instanceKey: claimed.instanceKey,
+      claimedBy: claimed.claimedBy,
+      fencingToken: claimed.fencingToken,
+      status: 'finalizing',
+      attempt: 1,
+      startedAt: clock.now(),
+      output: { handled: true },
+    };
+    await store.saveDelivery({
+      ...claimed,
+      status: 'running',
+      attempt: 1,
+      runId: run.id,
+      invocationStarted: true,
+    });
+    await store.saveRun(run);
+    let effect = await store.declareEffect(
+      {
+        id: 'idempotent-sink-effect',
+        deliveryId: claimed.id,
+        runId: run.id,
+        identityScope: claimed.identityScope,
+        operation: 'sink.deliver',
+        idempotencyKey: 'idempotent-sink-42',
+        replaySafety: 'idempotent',
+        createdAt: clock.now(),
+      },
+      { deliveryId: claimed.id, fencingToken: claimed.fencingToken! }
+    );
+    effect = await store.transitionEffect(
+      effect.id,
+      effect.version,
+      { type: 'dispatched', at: clock.now() },
+      { deliveryId: claimed.id, fencingToken: claimed.fencingToken! }
+    );
+    clock.advanceBy(101);
+
+    const target = vi.fn(() => ({ handled: true }));
+    const sink = vi.fn(async (_output, context) => {
+      let recovered = await context.eventContext.declareEffect({
+        operation: 'sink.deliver',
+        idempotencyKey: 'idempotent-sink-42',
+        replaySafety: 'idempotent',
+      });
+      recovered = await context.eventContext.markEffectDispatched(
+        recovered.id,
+        recovered.version
+      );
+      await context.eventContext.settleEffect(recovered.id, recovered.version, {
+        status: 'succeeded',
+      });
+    });
+    const runtime = new AxEventRuntime({
+      clock,
+      store,
+      leaseMs: 100,
+      heartbeatMs: 25,
+      routes: [
+        eventRoute({
+          id: 'effect-route',
+          match: { types: ['effect.requested'] },
+          action: 'wake',
+          target: eventTarget({
+            id: 'effect-target',
+            ai,
+            program: effectProgram(target),
+            mapInput: () => ({}),
+            retrySafety: 'effect-aware',
+            sinks: [{ id: 'idempotent-sink', write: sink }],
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    const deliveryId = receipt.deliveryIds[0]!;
+    await vi.waitFor(async () =>
+      expect((await store.getDelivery(deliveryId))?.status).toBe('succeeded')
+    );
+
+    expect(target).not.toHaveBeenCalled();
+    expect(sink).toHaveBeenCalledOnce();
+    expect(await store.getRun(run.id)).toEqual(
+      expect.objectContaining({ status: 'succeeded' })
+    );
+    expect((await runtime.getEffects(deliveryId))[0]).toEqual(
+      expect.objectContaining({ status: 'succeeded', dispatchCount: 2 })
+    );
+    await runtime.close();
+  });
+
+  it('does not retry a final sink after an indeterminate non-idempotent dispatch', async () => {
+    const store = new AxInMemoryEventStore();
+    const providerDispatch = vi.fn();
+    const sink = vi.fn(async (_output, context) => {
+      const effect = await context.eventContext.declareEffect({
+        operation: 'sink.non-idempotent',
+        idempotencyKey: 'sink-non-idempotent-42',
+      });
+      await context.eventContext.markEffectDispatched(
+        effect.id,
+        effect.version
+      );
+      providerDispatch();
+      throw new Error('timeout after provider dispatch');
+    });
+    const runtime = new AxEventRuntime({
+      store,
+      retryBaseMs: 1,
+      retryMaxMs: 1,
+      maxAttempts: 3,
+      routes: [
+        eventRoute({
+          id: 'effect-route',
+          match: { types: ['effect.requested'] },
+          action: 'wake',
+          target: eventTarget({
+            id: 'effect-target',
+            ai,
+            program: effectProgram(() => ({ handled: true })),
+            mapInput: () => ({}),
+            retrySafety: 'effect-aware',
+            sinks: [{ id: 'non-idempotent-sink', write: sink }],
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    const receipt = await runtime.publish(
+      ingress('sink-timeout-after-dispatch')
+    );
+    await runtime.waitForIdle();
+
+    const deliveryId = receipt.deliveryIds[0]!;
+    expect(sink).toHaveBeenCalledOnce();
+    expect(providerDispatch).toHaveBeenCalledOnce();
+    expect(await store.getDelivery(deliveryId)).toEqual(
+      expect.objectContaining({ status: 'parked' })
+    );
+    expect((await runtime.getEffects(deliveryId))[0]).toEqual(
+      expect.objectContaining({ status: 'parked', dispatchCount: 1 })
+    );
+    await runtime.close();
+  });
+
+  it('retries a failed sink under a fresh fence with effect ledger access', async () => {
+    const store = new AxInMemoryEventStore();
+    const target = vi.fn(() => ({ handled: true }));
+    let sinkCalls = 0;
+    const sink = vi.fn(async (_output, context) => {
+      sinkCalls++;
+      if (sinkCalls === 1) throw new Error('failed before dispatch');
+      let effect = await context.eventContext.declareEffect({
+        operation: 'sink.redrive',
+        idempotencyKey: 'sink-redrive-42',
+      });
+      effect = await context.eventContext.markEffectDispatched(
+        effect.id,
+        effect.version
+      );
+      await context.eventContext.settleEffect(effect.id, effect.version, {
+        status: 'succeeded',
+      });
+    });
+    const runtime = new AxEventRuntime({
+      store,
+      maxAttempts: 1,
+      routes: [
+        eventRoute({
+          id: 'effect-route',
+          match: { types: ['effect.requested'] },
+          action: 'wake',
+          target: eventTarget({
+            id: 'effect-target',
+            ai,
+            program: effectProgram(target),
+            mapInput: () => ({}),
+            retrySafety: 'effect-aware',
+            sinks: [{ id: 'redrive-sink', write: sink }],
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    const receipt = await runtime.publish(ingress('effect-aware-sink-redrive'));
+    await runtime.waitForIdle();
+    const deadLetter = (await runtime.listDeadLetters()).find(
+      (value) => value.kind === 'sink'
+    )!;
+
+    await runtime.redrive(deadLetter.id);
+    await vi.waitFor(() => expect(sink).toHaveBeenCalledTimes(2));
+
+    const deliveryId = receipt.deliveryIds[0]!;
+    expect(target).toHaveBeenCalledOnce();
+    expect(await store.getDelivery(deliveryId)).toEqual(
+      expect.objectContaining({ status: 'succeeded' })
+    );
+    expect((await runtime.getEffects(deliveryId))[0]).toEqual(
+      expect.objectContaining({ status: 'succeeded' })
+    );
+    expect(await runtime.listDeadLetters()).toEqual([]);
+    await runtime.close();
+  });
+
+  it.each<{
+    name: string;
+    resolution: AxEventEffectResolution;
+    expectedEffect: string;
+    expectedDelivery: string;
+    expectedCalls: number;
+  }>([
+    {
+      name: 'provider success',
+      resolution: { status: 'succeeded', receipt: { providerId: 'resolved' } },
+      expectedEffect: 'succeeded',
+      expectedDelivery: 'succeeded',
+      expectedCalls: 2,
+    },
+    {
+      name: 'provider failure',
+      resolution: { status: 'failed', error: 'rejected' },
+      expectedEffect: 'failed',
+      expectedDelivery: 'succeeded',
+      expectedCalls: 2,
+    },
+    {
+      name: 'not dispatched',
+      resolution: { status: 'not_dispatched' },
+      expectedEffect: 'succeeded',
+      expectedDelivery: 'succeeded',
+      expectedCalls: 2,
+    },
+    {
+      name: 'still indeterminate',
+      resolution: { status: 'indeterminate' },
+      expectedEffect: 'parked',
+      expectedDelivery: 'parked',
+      expectedCalls: 1,
+    },
+    {
+      name: 'manual review',
+      resolution: { status: 'parked', reason: 'operator review required' },
+      expectedEffect: 'parked',
+      expectedDelivery: 'parked',
+      expectedCalls: 1,
+    },
+  ])('applies the resolver outcome: $name', async (test) => {
+    const store = new AxInMemoryEventStore();
+    let calls = 0;
+    const resolver = vi.fn(() => test.resolution);
+    const runtime = runtimeFor(
+      store,
+      async (context) => {
+        calls++;
+        let effect = await context.declareEffect({
+          operation: 'domain.resolve',
+          idempotencyKey: 'resolve-42',
+        });
+        if (calls === 1) {
+          await context.markEffectDispatched(effect.id, effect.version);
+          throw new Error('crash after dispatch');
+        }
+        if (effect.status === 'intent') {
+          if (test.resolution.status === 'not_dispatched') {
+            expect(effect).toEqual(
+              expect.objectContaining({
+                dispatchedAt: undefined,
+                dispatchCount: 0,
+              })
+            );
+          }
+          effect = await context.markEffectDispatched(
+            effect.id,
+            effect.version
+          );
+          await context.settleEffect(effect.id, effect.version, {
+            status: 'succeeded',
+          });
+        }
+        return { handled: true };
+      },
+      { effectResolver: resolver }
+    );
+    await runtime.start();
+    const receipt = await runtime.publish(ingress(`resolver-${test.name}`));
+    await runtime.waitForIdle();
+
+    const delivery = await store.getDelivery(receipt.deliveryIds[0]!);
+    expect(delivery?.status).toBe(test.expectedDelivery);
+    expect((await runtime.getEffects(delivery!.id))[0]?.status).toBe(
+      test.expectedEffect
+    );
+    expect(calls).toBe(test.expectedCalls);
+    expect(resolver).toHaveBeenCalledOnce();
+    await runtime.close();
+  });
+
+  it('parks a resolver outcome that fails transition validation', async () => {
+    const store = new AxInMemoryEventStore();
+    let calls = 0;
+    const runtime = runtimeFor(
+      store,
+      async (context) => {
+        calls++;
+        const effect = await context.declareEffect({
+          operation: 'domain.invalid-resolution',
+          idempotencyKey: 'invalid-resolution-42',
+        });
+        await context.markEffectDispatched(effect.id, effect.version);
+        throw new Error('crash after dispatch');
+      },
+      {
+        effectResolver: () => ({ status: 'parked', reason: '' }),
+      }
+    );
+    await runtime.start();
+    const receipt = await runtime.publish(ingress('invalid-resolver-outcome'));
+    await runtime.waitForIdle();
+
+    expect(calls).toBe(1);
+    expect(await store.getDelivery(receipt.deliveryIds[0]!)).toEqual(
+      expect.objectContaining({ status: 'parked' })
+    );
+    expect((await runtime.getEffects(receipt.deliveryIds[0]!))[0]).toEqual(
+      expect.objectContaining({
+        status: 'parked',
+        parkedReason: expect.stringContaining('invalid outcome'),
+      })
+    );
+    await runtime.close();
+  });
+
+  it('rejects stale effect revisions and accepts identical settlement replay', async () => {
+    const store = new AxInMemoryEventStore();
+    const runtime = runtimeFor(store, async (context) => {
+      const intent = await context.declareEffect({
+        operation: 'messages.compare-and-set',
+        idempotencyKey: 'message-cas-42',
+        replaySafety: 'idempotent',
+      });
+      const dispatched = await context.markEffectDispatched(
+        intent.id,
+        intent.version
+      );
+      await expect(
+        context.markEffectDispatched(intent.id, intent.version)
+      ).rejects.toThrow('Stale event effect version');
+      const settlement = {
+        status: 'succeeded' as const,
+        receipt: {
+          providerId: 'message-cas-42',
+          details: { amount: 42, currency: 'USD' },
+        },
+      };
+      const settled = await context.settleEffect(
+        intent.id,
+        dispatched.version,
+        settlement
+      );
+      await expect(
+        context.settleEffect(intent.id, dispatched.version, settlement)
+      ).resolves.toEqual(settled);
+      await expect(
+        context.settleEffect(intent.id, settled.version, {
+          status: 'succeeded',
+          receipt: {
+            details: { currency: 'USD', amount: 42 },
+            providerId: 'message-cas-42',
+          },
+        })
+      ).resolves.toEqual(settled);
+      await expect(
+        context.settleEffect(intent.id, settled.version, {
+          status: 'failed',
+          error: 'conflicting result',
+        })
+      ).rejects.toThrow('already settled');
+      return { handled: true };
+    });
+    await runtime.start();
+    const receipt = await runtime.publish(ingress('effect-version-cas'));
+    await runtime.waitForIdle();
+    expect((await store.getDelivery(receipt.deliveryIds[0]!))?.status).toBe(
+      'succeeded'
+    );
+    await runtime.close();
+  });
+
+  it('keeps newline-bearing in-memory effect identities distinct', async () => {
+    const store = new AxInMemoryEventStore();
+    const runtime = runtimeFor(store, async (context) => {
+      const first = await context.declareEffect({
+        operation: 'pay\nfoo',
+        idempotencyKey: 'bar',
+      });
+      const second = await context.declareEffect({
+        operation: 'pay',
+        idempotencyKey: 'foo\nbar',
+      });
+      expect(second.id).not.toBe(first.id);
+      await context.settleEffect(first.id, first.version, {
+        status: 'succeeded',
+        receipt: { providerId: 'first' },
+      });
+      await context.settleEffect(second.id, second.version, {
+        status: 'failed',
+        receipt: { providerId: 'second' },
+      });
+      return { handled: true };
+    });
+    await runtime.start();
+    const receipt = await runtime.publish(ingress('newline-effect-identities'));
+    await runtime.waitForIdle();
+
+    expect(await runtime.getEffects(receipt.deliveryIds[0]!)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          operation: 'pay\nfoo',
+          status: 'succeeded',
+        }),
+        expect.objectContaining({ operation: 'pay', status: 'failed' }),
+      ])
+    );
+    await runtime.close();
+  });
+
+  it('rejects conflicting intent and oversized persisted effect data', async () => {
+    const store = new AxInMemoryEventStore();
+    const runtime = runtimeFor(store, async (context) => {
+      const effect = await context.declareEffect({
+        operation: 'bounded.effect',
+        idempotencyKey: 'bounded-effect-42',
+        metadata: { amount: 42, classification: 'redacted' },
+      });
+      const canonicalDuplicate = await context.declareEffect({
+        operation: effect.operation,
+        idempotencyKey: effect.idempotencyKey,
+        metadata: { classification: 'redacted', amount: 42 },
+      });
+      expect(canonicalDuplicate.id).toBe(effect.id);
+      expect(canonicalDuplicate.requestDigest).toMatch(/^[a-f0-9]{64}$/);
+      await expect(
+        context.declareEffect({
+          operation: effect.operation,
+          idempotencyKey: effect.idempotencyKey,
+          metadata: { amount: 43, classification: 'redacted' },
+        })
+      ).rejects.toThrow('intent conflicts');
+      await expect(
+        context.declareEffect({
+          operation: 'bounded.metadata',
+          idempotencyKey: 'bounded-metadata-42',
+          metadata: { value: 'x'.repeat(17 * 1024) },
+        })
+      ).rejects.toThrow('maximum is 16384');
+      await expect(
+        context.settleEffect(effect.id, effect.version, {
+          status: 'succeeded',
+          receipt: { value: 'x'.repeat(65 * 1024) },
+        })
+      ).rejects.toThrow('maximum is 65536');
+      await context.settleEffect(effect.id, effect.version, {
+        status: 'succeeded',
+      });
+      return { handled: true };
+    });
+    await runtime.start();
+    const receipt = await runtime.publish(ingress('effect-bounds'));
+    await runtime.waitForIdle();
+    expect((await store.getDelivery(receipt.deliveryIds[0]!))?.status).toBe(
+      'succeeded'
+    );
+    await runtime.close();
+  });
+
+  it('times out a hung resolver and parks the indeterminate effect', async () => {
+    const store = new AxInMemoryEventStore();
+    let resolverSignal: AbortSignal | undefined;
+    const runtime = runtimeFor(
+      store,
+      async (context) => {
+        const effect = await context.declareEffect({
+          operation: 'resolver.timeout',
+          idempotencyKey: 'resolver-timeout-42',
+        });
+        await context.markEffectDispatched(effect.id, effect.version);
+        throw new Error('crash after dispatch');
+      },
+      {
+        effectResolverTimeoutMs: 20,
+        effectResolver: (_effect, context) => {
+          resolverSignal = context.abortSignal;
+          return new Promise<AxEventEffectResolution>(() => {});
+        },
+      }
+    );
+    await runtime.start();
+    const receipt = await runtime.publish(ingress('resolver-timeout'));
+    await runtime.waitForIdle();
+
+    expect((await store.getDelivery(receipt.deliveryIds[0]!))?.status).toBe(
+      'parked'
+    );
+    expect((await runtime.getEffects(receipt.deliveryIds[0]!))[0]).toEqual(
+      expect.objectContaining({
+        status: 'parked',
+        parkedReason: expect.stringContaining(
+          'Effect resolver timed out after 20ms'
+        ),
+      })
+    );
+    expect(resolverSignal?.aborted).toBe(true);
+    await runtime.close();
+  });
+
+  it('closes without waiting for a resolver that ignores abort', async () => {
+    const store = new AxInMemoryEventStore();
+    let resolverSignal: AbortSignal | undefined;
+    let resolverStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      resolverStarted = resolve;
+    });
+    const runtime = runtimeFor(
+      store,
+      async (context) => {
+        const effect = await context.declareEffect({
+          operation: 'resolver.close',
+          idempotencyKey: 'resolver-close-42',
+        });
+        await context.markEffectDispatched(effect.id, effect.version);
+        throw new Error('crash after dispatch');
+      },
+      {
+        effectResolverTimeoutMs: 60_000,
+        effectResolver: (_effect, context) => {
+          resolverSignal = context.abortSignal;
+          resolverStarted();
+          return new Promise<AxEventEffectResolution>(() => {});
+        },
+      }
+    );
+    await runtime.start();
+    const receipt = await runtime.publish(ingress('resolver-close'));
+    await started;
+    const closeStartedAt = Date.now();
+    await runtime.close({ drain: false });
+
+    expect(Date.now() - closeStartedAt).toBeLessThan(1_000);
+    expect(resolverSignal?.aborted).toBe(true);
+    expect((await store.getDelivery(receipt.deliveryIds[0]!))?.status).toBe(
+      'parked'
+    );
+    expect((await store.listEffects(receipt.deliveryIds[0]!))[0]?.status).toBe(
+      'parked'
+    );
+  });
+
+  it('deduplicates repeated intent declarations and event redelivery', async () => {
+    const store = new AxInMemoryEventStore();
+    const ids: string[] = [];
+    const runtime = runtimeFor(store, async (context) => {
+      const first = await context.declareEffect({
+        operation: 'audit.append',
+        idempotencyKey: 'audit-42',
+        metadata: { classification: 'redacted' },
+      });
+      const duplicate = await context.declareEffect({
+        operation: 'audit.append',
+        idempotencyKey: 'audit-42',
+        metadata: { classification: 'redacted' },
+      });
+      ids.push(first.id, duplicate.id);
+      await context.settleEffect(first.id, first.version, {
+        status: 'succeeded',
+      });
+      return { handled: true };
+    });
+    await runtime.start();
+    const event = ingress('duplicate-intent');
+    const first = await runtime.publish(event);
+    const duplicate = await runtime.publish(event);
+    await runtime.waitForIdle();
+
+    expect(duplicate.duplicate).toBe(true);
+    expect(duplicate.deliveryIds).toEqual(first.deliveryIds);
+    expect(ids[0]).toBe(ids[1]);
+    expect(await runtime.getEffects(first.deliveryIds[0]!)).toHaveLength(1);
+    await runtime.close();
+  });
+
+  it('parks every unsettled effect when its run is cancelled', async () => {
+    const store = new AxInMemoryEventStore();
+    let runId = '';
+    let startedResolve!: () => void;
+    const started = new Promise<void>((resolve) => {
+      startedResolve = resolve;
+    });
+    const runtime = runtimeFor(store, async (context) => {
+      runId = context.runId;
+      await context.declareEffect({
+        operation: 'exports.prepare',
+        idempotencyKey: 'export-intent-42',
+      });
+      const effect = await context.declareEffect({
+        operation: 'exports.submit',
+        idempotencyKey: 'export-42',
+        replaySafety: 'idempotent',
+      });
+      await context.markEffectDispatched(effect.id, effect.version);
+      startedResolve();
+      await new Promise<void>((_resolve, reject) => {
+        context.abortSignal.addEventListener(
+          'abort',
+          () => reject(context.abortSignal.reason),
+          { once: true }
+        );
+      });
+      return { handled: true };
+    });
+    await runtime.start();
+    const receipt = await runtime.publish(ingress('cancel-effect'));
+    await started;
+    expect(runtime.cancelRun(runId, 'operator cancelled')).toBe(true);
+    await runtime.waitForIdle();
+
+    const delivery = await store.getDelivery(receipt.deliveryIds[0]!);
+    expect(delivery?.status).toBe('parked');
+    expect(await runtime.getEffects(delivery!.id)).toEqual([
+      expect.objectContaining({
+        status: 'parked',
+        parkedReason: expect.stringContaining('operator cancelled'),
+      }),
+      expect.objectContaining({
+        status: 'parked',
+        parkedReason: expect.stringContaining('operator cancelled'),
+      }),
+    ]);
+    expect(await runtime.listDeadLetters()).toEqual([
+      expect.objectContaining({
+        kind: 'delivery',
+        reason: expect.stringContaining('operator cancelled'),
+      }),
+    ]);
+    await runtime.close();
+  });
+
+  it('fails closed on unsafe, stale, expired, and exhausted in-memory fences', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const store = new AxInMemoryEventStore({ clock });
+    const receipt = await store.enqueue({
+      ingress: ingress('memory-fence-parity'),
+      deliveries: [
+        {
+          routeId: 'effect-route',
+          action: 'wake',
+          targetId: 'effect-target',
+          instanceKey: 'memory-fence-parity',
+          sizeBytes: 1,
+          retrySafety: 'effect-aware',
+          ordering: 'strict',
+        },
+      ],
+      acceptedAt: clock.now(),
+      publishTimeoutMs: 100,
+    });
+    const deliveryId = receipt.deliveryIds[0]!;
+    const claimed = (await store.claim('worker-a', clock.now(), 100))!;
+    const runs = (token: number): AxEventRun => ({
+      id: `run-${token}`,
+      deliveryId,
+      routeId: claimed.routeId,
+      targetId: claimed.targetId,
+      instanceKey: claimed.instanceKey,
+      claimedBy: 'worker-a',
+      status: 'running',
+      attempt: 1,
+      startedAt: clock.now(),
+      fencingToken: token,
+    });
+    const deliveries = (
+      store as unknown as { deliveries: Map<string, AxEventDelivery> }
+    ).deliveries;
+
+    const negative = { ...claimed, fencingToken: -1 };
+    deliveries.set(deliveryId, negative);
+    await expect(store.saveDelivery(negative)).rejects.toThrow(
+      'Unsafe fencing token'
+    );
+    await expect(store.saveRun(runs(-9))).rejects.toThrow(
+      'Unsafe fencing token'
+    );
+    await expect(
+      store.saveRun(runs(Number.MAX_SAFE_INTEGER + 1))
+    ).rejects.toThrow('Unsafe fencing token');
+    await expect(
+      store.renewClaim(deliveryId, 'worker-a', -1, clock.now() + 100)
+    ).rejects.toThrow('Unsafe fencing token');
+    await expect(
+      store.declareEffect(
+        {
+          id: 'effect-negative-fence',
+          deliveryId,
+          runId: 'run-negative',
+          identityScope: claimed.identityScope,
+          operation: 'unsafe.write',
+          idempotencyKey: 'unsafe-key',
+          createdAt: clock.now(),
+        },
+        { deliveryId, fencingToken: -1 }
+      )
+    ).rejects.toThrow('Unsafe fencing token');
+
+    deliveries.set(deliveryId, claimed);
+    clock.advanceBy(101);
+    await expect(store.saveDelivery(claimed)).rejects.toThrow(
+      'Stale or expired event claim'
+    );
+    await expect(store.saveRun(runs(claimed.fencingToken!))).rejects.toThrow(
+      'Stale or expired event claim'
+    );
+
+    deliveries.set(deliveryId, {
+      ...claimed,
+      status: 'queued',
+      fencingToken: -9,
+      availableAt: clock.now(),
+      claimedBy: undefined,
+      leaseExpiresAt: undefined,
+    });
+    await expect(store.claim('worker-b', clock.now(), 100)).rejects.toThrow(
+      'Unsafe fencing token'
+    );
+    deliveries.set(deliveryId, {
+      ...claimed,
+      status: 'succeeded',
+      fencingToken: Number.MAX_SAFE_INTEGER,
+    });
+    await expect(store.saveRun(runs(Number.MAX_SAFE_INTEGER))).rejects.toThrow(
+      'Stale or expired event claim'
+    );
+    await expect(
+      store.redriveDelivery(deliveryId, clock.now())
+    ).rejects.toThrow('Fencing token exhausted');
+    deliveries.set(deliveryId, {
+      ...claimed,
+      status: 'queued',
+      fencingToken: Number.MAX_SAFE_INTEGER,
+      availableAt: clock.now(),
+      claimedBy: undefined,
+      leaseExpiresAt: undefined,
+    });
+    await expect(store.claim('worker-b', clock.now(), 100)).rejects.toThrow(
+      'Fencing token exhausted'
+    );
+  });
+
+  it('reclaims an expired in-memory lease with a fresh fencing token', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const store = new AxInMemoryEventStore({ clock });
+    const receipt = await store.enqueue({
+      ingress: ingress('memory-expired-claim'),
+      deliveries: [
+        {
+          routeId: 'effect-route',
+          action: 'wake',
+          targetId: 'effect-target',
+          instanceKey: 'memory-expired-claim',
+          sizeBytes: 1,
+          retrySafety: 'effect-aware',
+          ordering: 'strict',
+        },
+      ],
+      acceptedAt: clock.now(),
+      publishTimeoutMs: 100,
+    });
+    const first = (await store.claim('worker-a', clock.now(), 100))!;
+    await store.saveDelivery({
+      ...first,
+      status: 'running',
+      invocationStarted: true,
+    });
+    clock.advanceBy(101);
+
+    const takeover = await store.claim('worker-b', clock.now(), 100);
+    expect(takeover).toEqual(
+      expect.objectContaining({
+        id: receipt.deliveryIds[0],
+        claimedBy: 'worker-b',
+        fencingToken: 2,
+        recoveredFromExpiredLease: true,
+      })
+    );
+    await expect(
+      store.saveDelivery({ ...first, status: 'succeeded' })
+    ).rejects.toThrow('Stale or expired event claim');
+  });
+
+  it('fails closed when expired-lease recovery finds unknown retry safety', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const store = new AxInMemoryEventStore({ clock });
+    const receipt = await store.enqueue({
+      ingress: ingress('unknown-recovered-retry-safety'),
+      deliveries: [
+        {
+          routeId: 'effect-route',
+          action: 'wake',
+          targetId: 'effect-target',
+          instanceKey: 'unknown-recovered-retry-safety',
+          sizeBytes: 1,
+          retrySafety: 'idempotent',
+          ordering: 'strict',
+        },
+      ],
+      acceptedAt: clock.now(),
+      publishTimeoutMs: 100,
+    });
+    const claimed = (await store.claim('worker-a', clock.now(), 100))!;
+    await store.saveDelivery({
+      ...claimed,
+      status: 'running',
+      invocationStarted: true,
+      retrySafety: 'future-policy' as never,
+    });
+    clock.advanceBy(101);
+    const forward = vi.fn(() => ({ handled: true }));
+    const runtime = runtimeFor(
+      store,
+      forward,
+      { clock, leaseMs: 100, heartbeatMs: 25 },
+      'idempotent'
+    );
+    await runtime.start();
+    for (let index = 0; index < 50; index++) {
+      if (
+        (await store.getDelivery(receipt.deliveryIds[0]!))?.status ===
+        'outcome_unknown'
+      ) {
+        break;
+      }
+      await Promise.resolve();
+    }
+
+    expect(forward).not.toHaveBeenCalled();
+    expect(await store.getDelivery(receipt.deliveryIds[0]!)).toEqual(
+      expect.objectContaining({ status: 'outcome_unknown' })
+    );
+    await runtime.close();
+  });
+
+  it('wakes a waiting runtime when an in-memory claim lease expires', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const store = new AxInMemoryEventStore({ clock });
+    const receipt = await store.enqueue({
+      ingress: ingress('memory-runtime-expired-claim'),
+      deliveries: [
+        {
+          routeId: 'effect-route',
+          action: 'wake',
+          targetId: 'effect-target',
+          instanceKey: 'memory-runtime-expired-claim',
+          sizeBytes: 1,
+          retrySafety: 'idempotent',
+          ordering: 'strict',
+        },
+      ],
+      acceptedAt: clock.now(),
+      publishTimeoutMs: 100,
+    });
+    await store.claim('worker-a', clock.now(), 100);
+    let targetCalls = 0;
+    const runtime = runtimeFor(
+      store,
+      () => {
+        targetCalls++;
+        return { handled: true };
+      },
+      { clock, leaseMs: 100, heartbeatMs: 25 },
+      'idempotent'
+    );
+    await runtime.start();
+    for (let index = 0; index < 10; index++) await Promise.resolve();
+    expect(targetCalls).toBe(0);
+
+    clock.advanceBy(101);
+    for (let index = 0; index < 50; index++) {
+      if (
+        (await store.getDelivery(receipt.deliveryIds[0]!))?.status ===
+        'succeeded'
+      ) {
+        break;
+      }
+      await Promise.resolve();
+    }
+    expect(targetCalls).toBe(1);
+    expect(await store.getDelivery(receipt.deliveryIds[0]!)).toEqual(
+      expect.objectContaining({ status: 'succeeded', fencingToken: 2 })
+    );
+    await runtime.close({ drain: false });
+  });
+});

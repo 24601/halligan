@@ -1,5 +1,9 @@
 import { sha256 } from '../util/crypto.js';
 import type {
+  AxEventContinuation,
+  AxEventEffect,
+  AxEventEffectCreateRequest,
+  AxEventEffectTransition,
   AxEventEnvelope,
   AxEventIdentity,
   AxEventIngress,
@@ -7,6 +11,10 @@ import type {
   AxEventScalar,
   AxEventValue,
 } from './types.js';
+
+export const AX_EVENT_EFFECT_METADATA_MAX_BYTES = 16 * 1024;
+export const AX_EVENT_EFFECT_RECEIPT_MAX_BYTES = 64 * 1024;
+const EVENT_EFFECT_TEXT_MAX_BYTES = 4 * 1024;
 
 let fallbackId = 0;
 
@@ -34,6 +42,20 @@ export function axEventScopedDedupeKey(
   ingress: Readonly<AxEventIngress>
 ): string {
   return `${axEventIdentityScope(ingress.identity)}\n${ingress.event.source}\n${ingress.event.id}`;
+}
+
+/** Canonical JSON bytes used to bind an accepted event identity to its envelope. */
+export function axEventIngressFingerprint(
+  ingress: Readonly<AxEventIngress>
+): string {
+  return canonicalJson(ingress);
+}
+
+/** Canonical bytes used to compare immutable continuation admissions. */
+export function axEventContinuationFingerprint(
+  continuation: Readonly<AxEventContinuation>
+): string {
+  return canonicalJson(continuation);
 }
 
 export function axEventScopedCorrelationKey(
@@ -135,6 +157,226 @@ export function axEventSizeBytes(ingress: Readonly<AxEventIngress>): number {
   return new TextEncoder().encode(json).byteLength;
 }
 
+function axEventValueSizeBytes(value: unknown): number {
+  return new TextEncoder().encode(JSON.stringify(value)).byteLength;
+}
+
+function validateBoundedEffectValue(
+  value: unknown,
+  field: string,
+  maximum: number
+): void {
+  assertPersistable(value, field, new Set());
+  const bytes = axEventValueSizeBytes(value);
+  if (bytes > maximum) {
+    throw new Error(
+      `AxEventEffect.${field} is ${bytes} bytes; maximum is ${maximum}`
+    );
+  }
+}
+
+function validateBoundedEffectText(value: string, field: string): void {
+  const bytes = new TextEncoder().encode(value).byteLength;
+  if (bytes > EVENT_EFFECT_TEXT_MAX_BYTES) {
+    throw new Error(
+      `AxEventEffect.${field} is ${bytes} bytes; maximum is ${EVENT_EFFECT_TEXT_MAX_BYTES}`
+    );
+  }
+}
+
+export function axValidateEventEffectCreateRequest(
+  request: Readonly<AxEventEffectCreateRequest>
+): void {
+  for (const field of [
+    'id',
+    'deliveryId',
+    'runId',
+    'identityScope',
+    'operation',
+    'idempotencyKey',
+  ] as const) {
+    if (!request[field].trim()) {
+      throw new Error(`AxEventEffect.${field} must be a non-empty string`);
+    }
+    validateBoundedEffectText(request[field], field);
+  }
+  if (
+    request.replaySafety !== undefined &&
+    request.replaySafety !== 'idempotent' &&
+    request.replaySafety !== 'unknown'
+  ) {
+    throw new Error('AxEventEffect.replaySafety is invalid');
+  }
+  if (request.metadata !== undefined) {
+    validateBoundedEffectValue(
+      request.metadata,
+      'metadata',
+      AX_EVENT_EFFECT_METADATA_MAX_BYTES
+    );
+  }
+}
+
+/**
+ * Binds an effect identity to its canonical, redacted request descriptor.
+ * The digest deliberately excludes delivery/run ids and timestamps so replay
+ * can declare the same logical effect from a replacement run.
+ */
+export async function axEventEffectRequestDigest(
+  request: Readonly<AxEventEffectCreateRequest>
+): Promise<string> {
+  const bytes = new TextEncoder().encode(
+    axEventEffectRequestFingerprint(request)
+  );
+  const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
+  return [...new Uint8Array(digest)]
+    .map((value) => value.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+/** Canonical bytes hashed by {@link axEventEffectRequestDigest}. */
+export function axEventEffectRequestFingerprint(
+  request: Readonly<AxEventEffectCreateRequest>
+): string {
+  return canonicalJson({
+    operation: request.operation,
+    idempotencyKey: request.idempotencyKey,
+    replaySafety: request.replaySafety ?? 'unknown',
+    metadata: request.metadata ?? null,
+  });
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => canonicalJson(item)).join(',')}]`;
+  }
+  return `{${Object.keys(value)
+    .filter((key) => (value as Record<string, unknown>)[key] !== undefined)
+    .sort()
+    .map(
+      (key) =>
+        `${JSON.stringify(key)}:${canonicalJson((value as Record<string, unknown>)[key])}`
+    )
+    .join(',')}}`;
+}
+
+export function axApplyEventEffectTransition(
+  effect: Readonly<AxEventEffect>,
+  transition: Readonly<AxEventEffectTransition>
+): AxEventEffect {
+  if (!Number.isFinite(transition.at) || transition.at < effect.createdAt) {
+    throw new Error(`Invalid transition time for event effect ${effect.id}`);
+  }
+  if (transition.type === 'dispatched') {
+    if (effect.status !== 'intent' && effect.status !== 'dispatched') {
+      throw new Error(
+        `Illegal event effect transition ${effect.status} -> dispatched`
+      );
+    }
+    return {
+      ...effect,
+      status: 'dispatched',
+      dispatchedAt: transition.at,
+      updatedAt: transition.at,
+      dispatchCount: effect.dispatchCount + 1,
+      version: effect.version + 1,
+    };
+  }
+  if (transition.type === 'settled') {
+    const { settlement } = transition;
+    if (settlement.receipt !== undefined) {
+      validateBoundedEffectValue(
+        settlement.receipt,
+        'receipt',
+        AX_EVENT_EFFECT_RECEIPT_MAX_BYTES
+      );
+    }
+    if (settlement.status === 'failed' && settlement.error !== undefined) {
+      validateBoundedEffectText(settlement.error, 'error');
+    }
+    if (effect.status === 'succeeded' || effect.status === 'failed') {
+      const same =
+        effect.status === settlement.status &&
+        canonicalJson(effect.receipt) === canonicalJson(settlement.receipt) &&
+        (effect.error || undefined) ===
+          (settlement.status === 'failed'
+            ? settlement.error || undefined
+            : undefined);
+      if (same) return structuredClone(effect);
+      throw new Error(
+        `Event effect ${effect.id} already settled as ${effect.status}`
+      );
+    }
+    if (
+      effect.status !== 'intent' &&
+      effect.status !== 'dispatched' &&
+      effect.status !== 'parked'
+    ) {
+      throw new Error(
+        `Illegal event effect transition ${effect.status} -> ${settlement.status}`
+      );
+    }
+    return {
+      ...effect,
+      status: settlement.status,
+      ...(settlement.receipt !== undefined
+        ? { receipt: structuredClone(settlement.receipt) }
+        : {}),
+      ...(settlement.status === 'failed' && settlement.error
+        ? { error: settlement.error }
+        : {}),
+      parkedReason: undefined,
+      settledAt: transition.at,
+      updatedAt: transition.at,
+      version: effect.version + 1,
+    };
+  }
+  if (transition.type === 'parked') {
+    if (
+      effect.status !== 'intent' &&
+      effect.status !== 'dispatched' &&
+      effect.status !== 'parked'
+    ) {
+      throw new Error(
+        `Illegal event effect transition ${effect.status} -> parked`
+      );
+    }
+    if (!transition.reason.trim()) {
+      throw new Error('Parked event effects require a reason');
+    }
+    validateBoundedEffectText(transition.reason, 'parkedReason');
+    if (
+      effect.status === 'parked' &&
+      effect.parkedReason === transition.reason
+    ) {
+      return structuredClone(effect);
+    }
+    return {
+      ...effect,
+      status: 'parked',
+      parkedReason: transition.reason,
+      updatedAt: transition.at,
+      version: effect.version + 1,
+    };
+  }
+  if (effect.status !== 'dispatched' && effect.status !== 'parked') {
+    throw new Error(
+      `Illegal event effect transition ${effect.status} -> intent`
+    );
+  }
+  return {
+    ...effect,
+    status: 'intent',
+    dispatchedAt: undefined,
+    dispatchCount: 0,
+    parkedReason: undefined,
+    updatedAt: transition.at,
+    version: effect.version + 1,
+  };
+}
+
 function matchesList(
   value: string | undefined,
   list: readonly string[] | undefined
@@ -158,5 +400,14 @@ export function axEventMatches(
 }
 
 export function axEventErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  if (error instanceof Error) return error.message;
+  if (
+    error &&
+    typeof error === 'object' &&
+    'message' in error &&
+    typeof error.message === 'string'
+  ) {
+    return error.message;
+  }
+  return String(error);
 }

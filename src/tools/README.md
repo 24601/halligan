@@ -23,7 +23,12 @@ processes.
 
 `@ax-llm/ax-tools/event/sqlite` exports `AxSQLiteEventStore` and
 `AX_SQLITE_EVENT_STANDARD_RETENTION`. It supports cooperating Node processes
-that share a local SQLite file. It is not intended for network filesystems.
+that share a local SQLite file. Its combined schema v7 uses the verifier journal,
+effect ledger, canonical ingress fingerprints, staged payload ownership, and
+exclusive continuation admission. It classifies historical stores by actual
+shape rather than overlapping legacy version numbers. The SQLite event store
+does not persist demand-boundary records or temporal interaction timelines. It
+is not intended for network filesystems.
 
 ### Function Tools
 

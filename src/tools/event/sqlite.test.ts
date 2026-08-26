@@ -1,26 +1,93 @@
+import { createHash } from 'node:crypto';
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  type AxEventContinuation,
+  AxEventOutputPersistenceError,
+  type AxEventRun,
   AxEventRuntime,
+  type AxEventStagedPayloadStore,
   AxManualEventClock,
   type AxProgrammable,
   AxPushEventSource,
   AxUCPWebhookEventSource,
-  axEventCanonicalJson,
   eventPath,
   eventRoute,
   eventTarget,
   runAxEventStoreConformance,
   s,
 } from '@ax-llm/ax';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import Database from 'better-sqlite3';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
   AX_SQLITE_EVENT_STANDARD_RETENTION,
   AxSQLiteEventStore,
 } from './sqlite.js';
 
 const directories: string[] = [];
+
+const payloadStaging = {
+  maxOutstandingCount: 4,
+  maxOutstandingBytes: 1024 * 1024,
+  maxPayloadBytes: 1024 * 1024,
+  stageTtlMs: 1_000,
+  persistenceTimeoutMs: 10,
+} as const;
+
+function storeRequest(id: string, now: number) {
+  return {
+    ingress: {
+      event: {
+        specversion: '1.0' as const,
+        id,
+        source: 'test://sqlite-effects',
+        type: 'effect.test',
+      },
+      identity: { tenantId: 'tenant' },
+      trust: 'authenticated' as const,
+    },
+    deliveries: [
+      {
+        routeId: 'route',
+        action: 'wake' as const,
+        targetId: 'target',
+        instanceKey: id,
+        sizeBytes: 128,
+        retrySafety: 'idempotent' as const,
+        ordering: 'strict' as const,
+      },
+    ],
+    acceptedAt: now,
+    publishTimeoutMs: 1_000,
+  };
+}
+
+function sqliteLogicalHash(filename: string): string {
+  const db = new Database(filename, { readonly: true });
+  const schema = db
+    .prepare(
+      `SELECT type, name, sql FROM sqlite_master
+       WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name`
+    )
+    .all();
+  const tables = (
+    db
+      .prepare(
+        `SELECT name FROM sqlite_master
+         WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`
+      )
+      .all() as Array<{ name: string }>
+  ).map(({ name }) => ({
+    name,
+    rows: db.prepare(`SELECT * FROM ${name} ORDER BY rowid`).all(),
+  }));
+  const version = db.pragma('user_version', { simple: true });
+  db.close();
+  return createHash('sha256')
+    .update(JSON.stringify({ version, schema, tables }))
+    .digest('hex');
+}
 
 afterEach(() => {
   for (const directory of directories.splice(0)) {
@@ -45,12 +112,8 @@ describe('AxSQLiteEventStore', () => {
       },
       { clock }
     );
-    expect(report.assertions).toBeGreaterThanOrEqual(20);
-    expect(report.capability.conformance?.multiWorker).toBe('axevent-store-v1');
-    expect(report.capability.conformance?.schemaVersion).toBe(4);
-    expect(report.capability.verifierTransitions).toBe(
-      'axevent-verifier-transition-v2'
-    );
+    expect(report.assertions).toBeGreaterThanOrEqual(32);
+    expect(report.capability.conformance?.multiWorker).toBe('axevent-store-v7');
   });
 
   it('requires explicit retention and WAL-enabled local storage', () => {
@@ -64,50 +127,1518 @@ describe('AxSQLiteEventStore', () => {
     ).toThrow('requires explicit retention');
   });
 
-  it('migrates legacy event schemas to verifier-v4 journal metadata', async () => {
+  it('restores unresolved effects after restart and prunes only settled effects', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
     directories.push(directory);
-    for (const version of [1, 3]) {
-      const filename = join(directory, `verifier-v${version}.sqlite`);
-      let store = new AxSQLiteEventStore({
+    const filename = join(directory, 'effect-restart.sqlite');
+    const clock = new AxManualEventClock(1_000);
+    const retention = {
+      eventAndResultMs: 100,
+      runMetadataAndDeadLettersMs: 1_000,
+      completedContinuationsMs: 1_000,
+      settledEffectsMs: 50,
+    };
+    const first = new AxSQLiteEventStore({ filename, clock, retention });
+    const settledReceipt = await first.enqueue(
+      storeRequest('settled', clock.now())
+    );
+    const settledDelivery = await first.claim('worker', clock.now(), 100);
+    const settledFence = {
+      deliveryId: settledDelivery!.id,
+      fencingToken: settledDelivery!.fencingToken!,
+    };
+    const settledEffect = await first.declareEffect(
+      {
+        id: 'settled-effect',
+        deliveryId: settledDelivery!.id,
+        runId: 'settled-run',
+        identityScope: settledDelivery!.identityScope,
+        operation: 'effect.settled',
+        idempotencyKey: 'settled-key',
+        createdAt: clock.now(),
+      },
+      settledFence
+    );
+    await first.transitionEffect(
+      settledEffect.id,
+      settledEffect.version,
+      {
+        type: 'settled',
+        at: clock.now(),
+        settlement: { status: 'succeeded' },
+      },
+      settledFence
+    );
+    await first.saveDelivery({ ...settledDelivery!, status: 'succeeded' });
+
+    const unresolvedReceipt = await first.enqueue(
+      storeRequest('unresolved', clock.now())
+    );
+    const unresolvedDelivery = await first.claim('worker', clock.now(), 100);
+    const unresolvedFence = {
+      deliveryId: unresolvedDelivery!.id,
+      fencingToken: unresolvedDelivery!.fencingToken!,
+    };
+    await first.declareEffect(
+      {
+        id: 'unresolved-effect',
+        deliveryId: unresolvedDelivery!.id,
+        runId: 'unresolved-run',
+        identityScope: unresolvedDelivery!.identityScope,
+        operation: 'effect.unresolved',
+        idempotencyKey: 'unresolved-key',
+        createdAt: clock.now(),
+      },
+      unresolvedFence
+    );
+    await first.saveDelivery({ ...unresolvedDelivery!, status: 'parked' });
+    await first.close();
+
+    clock.advanceBy(51);
+    const restarted = new AxSQLiteEventStore({ filename, clock, retention });
+    expect(await restarted.listEffects(settledReceipt.deliveryIds[0]!)).toEqual(
+      [expect.objectContaining({ status: 'succeeded' })]
+    );
+    expect(await restarted.getDelivery(settledReceipt.deliveryIds[0]!)).toEqual(
+      expect.objectContaining({ status: 'succeeded' })
+    );
+    expect(
+      await restarted.listEffects(unresolvedReceipt.deliveryIds[0]!)
+    ).toEqual([expect.objectContaining({ status: 'intent' })]);
+    expect(
+      await restarted.getDelivery(unresolvedReceipt.deliveryIds[0]!)
+    ).toEqual(expect.objectContaining({ status: 'parked' }));
+    await restarted.close();
+
+    clock.advanceBy(50);
+    const expired = new AxSQLiteEventStore({ filename, clock, retention });
+    expect(await expired.listEffects(settledReceipt.deliveryIds[0]!)).toEqual(
+      []
+    );
+    expect(await expired.getDelivery(settledReceipt.deliveryIds[0]!)).toBe(
+      undefined
+    );
+    expect(
+      await expired.listEffects(unresolvedReceipt.deliveryIds[0]!)
+    ).toEqual([expect.objectContaining({ status: 'intent' })]);
+    await expired.close();
+  });
+
+  it('does not prune settled effects while their delivery is still in flight', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const filename = join(directory, 'in-flight-settled.sqlite');
+    const clock = new AxManualEventClock(1_000);
+    const retention = {
+      eventAndResultMs: 100,
+      runMetadataAndDeadLettersMs: 1_000,
+      completedContinuationsMs: 1_000,
+      settledEffectsMs: 50,
+    };
+    const first = new AxSQLiteEventStore({ filename, clock, retention });
+    const receipt = await first.enqueue(storeRequest('in-flight', clock.now()));
+    const delivery = await first.claim('worker', clock.now(), 100);
+    const fence = {
+      deliveryId: delivery!.id,
+      fencingToken: delivery!.fencingToken!,
+    };
+    const effect = await first.declareEffect(
+      {
+        id: 'in-flight-settled-effect',
+        deliveryId: delivery!.id,
+        runId: 'in-flight-run',
+        identityScope: delivery!.identityScope,
+        operation: 'effect.in-flight',
+        idempotencyKey: 'in-flight-key',
+        createdAt: clock.now(),
+      },
+      fence
+    );
+    await first.transitionEffect(
+      effect.id,
+      effect.version,
+      {
+        type: 'settled',
+        at: clock.now(),
+        settlement: { status: 'succeeded' },
+      },
+      fence
+    );
+    await first.close();
+
+    clock.advanceBy(51);
+    const restarted = new AxSQLiteEventStore({ filename, clock, retention });
+    expect(await restarted.listEffects(receipt.deliveryIds[0]!)).toEqual([
+      expect.objectContaining({ status: 'succeeded' }),
+    ]);
+    expect(await restarted.getDelivery(receipt.deliveryIds[0]!)).toEqual(
+      expect.objectContaining({ status: 'claimed' })
+    );
+    await restarted.close();
+  });
+
+  it('migrates schema-v1 databases and legacy retention objects', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const filename = join(directory, 'legacy.sqlite');
+    const clock = new AxManualEventClock(1_000);
+    const current = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    const receipt = await current.enqueue(storeRequest('legacy', clock.now()));
+    await current.close();
+
+    const legacy = new Database(filename);
+    legacy.exec(`
+      DROP TABLE event_verifier_transitions;
+      DROP TABLE event_store_metadata;
+      DROP TABLE event_effects;
+      DROP TABLE event_payload_stages;
+      DROP INDEX event_continuation_admission;
+      ALTER TABLE event_continuations DROP COLUMN admitted_delivery_id;
+      ALTER TABLE event_deliveries DROP COLUMN admitted_continuation_json;
+      ALTER TABLE event_dedupe DROP COLUMN ingress_fingerprint;
+      ALTER TABLE event_dedupe DROP COLUMN ingress_json;
+      PRAGMA user_version = 1;
+    `);
+    legacy.close();
+    const migrated = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: {
+        eventAndResultMs: 1_000,
+        runMetadataAndDeadLettersMs: 1_000,
+        completedContinuationsMs: 1_000,
+      },
+    });
+    expect(migrated.capabilities.conformance.schemaVersion).toBe(7);
+    expect(await migrated.getDelivery(receipt.deliveryIds[0]!)).toEqual(
+      expect.objectContaining({ status: 'queued' })
+    );
+    expect(await migrated.listEffects(receipt.deliveryIds[0]!)).toEqual([]);
+    await expect(
+      migrated.enqueue(storeRequest('legacy', clock.now()))
+    ).resolves.toEqual(expect.objectContaining({ duplicate: true }));
+    const changed = storeRequest('legacy', clock.now());
+    await expect(
+      migrated.enqueue({
+        ...changed,
+        ingress: {
+          ...changed.ingress,
+          event: { ...changed.ingress.event, type: 'effect.changed' },
+        },
+      })
+    ).rejects.toThrow('identity conflicts with previously accepted ingress');
+    await migrated.close();
+  });
+
+  it('migrates schema-v2 effect request digests without losing replay identity', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const filename = join(directory, 'legacy-v2.sqlite');
+    const clock = new AxManualEventClock(1_000);
+    const current = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    await current.enqueue(storeRequest('legacy-v2', clock.now()));
+    const claimed = await current.claim('worker', clock.now(), 100);
+    const fence = {
+      deliveryId: claimed!.id,
+      fencingToken: claimed!.fencingToken!,
+    };
+    const request = {
+      id: 'legacy-v2-effect',
+      deliveryId: claimed!.id,
+      runId: 'legacy-v2-run',
+      identityScope: claimed!.identityScope,
+      operation: 'legacy.effect',
+      idempotencyKey: 'legacy-effect-key',
+      replaySafety: 'idempotent' as const,
+      metadata: { amount: 42, redacted: true },
+      createdAt: clock.now(),
+    };
+    const original = await current.declareEffect(request, fence);
+    await current.close();
+
+    const legacy = new Database(filename);
+    legacy.exec(`
+      DROP TABLE event_verifier_transitions;
+      DROP TABLE event_store_metadata;
+      DROP TABLE event_payload_stages;
+      DROP INDEX event_continuation_admission;
+      ALTER TABLE event_continuations DROP COLUMN admitted_delivery_id;
+      ALTER TABLE event_deliveries DROP COLUMN admitted_continuation_json;
+      ALTER TABLE event_dedupe DROP COLUMN ingress_fingerprint;
+      ALTER TABLE event_dedupe DROP COLUMN ingress_json;
+      UPDATE event_effects
+      SET effect_json=json_remove(effect_json, '$.requestDigest');
+      PRAGMA user_version = 2;
+    `);
+    legacy.close();
+
+    const migrated = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    const [migratedEffect] = await migrated.listEffects(claimed!.id);
+    expect(migratedEffect).toEqual(
+      expect.objectContaining({
+        id: original.id,
+        requestDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+      })
+    );
+    await expect(
+      migrated.declareEffect(
+        {
+          ...request,
+          id: 'legacy-v2-duplicate',
+          metadata: { redacted: true, amount: 42 },
+        },
+        fence
+      )
+    ).resolves.toEqual(expect.objectContaining({ id: original.id }));
+    await expect(
+      migrated.declareEffect(
+        {
+          ...request,
+          id: 'legacy-v2-conflict',
+          metadata: { amount: 43, redacted: true },
+        },
+        fence
+      )
+    ).rejects.toThrow('intent conflicts');
+    await migrated.close();
+  });
+
+  it('migrates and replays a schema-v2 zero-route dedupe record', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const filename = join(directory, 'legacy-v2-zero-route.sqlite');
+    const clock = new AxManualEventClock(1_000);
+    const request = {
+      ...storeRequest('legacy-v2-zero-route', clock.now()),
+      deliveries: [],
+    };
+    const current = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    await expect(current.enqueue(request)).resolves.toEqual(
+      expect.objectContaining({ duplicate: false, deliveryIds: [] })
+    );
+    await current.close();
+
+    const legacy = new Database(filename);
+    legacy.exec(`
+      DROP TABLE event_verifier_transitions;
+      DROP TABLE event_store_metadata;
+      DROP TABLE event_payload_stages;
+      DROP INDEX event_continuation_admission;
+      ALTER TABLE event_continuations DROP COLUMN admitted_delivery_id;
+      ALTER TABLE event_deliveries DROP COLUMN admitted_continuation_json;
+      ALTER TABLE event_dedupe DROP COLUMN ingress_fingerprint;
+      PRAGMA user_version = 2;
+    `);
+    legacy.close();
+
+    const migrated = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    await expect(migrated.enqueue(request)).resolves.toEqual(
+      expect.objectContaining({ duplicate: true, deliveryIds: [] })
+    );
+    await migrated.close();
+
+    const verified = new Database(filename);
+    expect(verified.pragma('user_version', { simple: true })).toBe(7);
+    expect(
+      verified
+        .prepare(
+          `SELECT COUNT(*) AS count FROM event_dedupe
+           WHERE ingress_json IS NULL OR ingress_fingerprint IS NULL`
+        )
+        .get()
+    ).toEqual({ count: 0 });
+    verified.close();
+  });
+
+  it('expires an unverifiable zero-route tombstone before migration and permits identity reuse', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const filename = join(directory, 'legacy-v2-expired-zero-route.sqlite');
+    const clock = new AxManualEventClock(10_000);
+    const retention = {
+      ...AX_SQLITE_EVENT_STANDARD_RETENTION,
+      eventAndResultMs: 100,
+    };
+    const request = {
+      ...storeRequest('legacy-v2-expired-zero-route', clock.now()),
+      deliveries: [],
+    };
+    const current = new AxSQLiteEventStore({ filename, clock, retention });
+    await current.enqueue(request);
+    await current.close();
+
+    const legacy = new Database(filename);
+    legacy.exec(`
+      DROP TABLE event_verifier_transitions;
+      DROP TABLE event_store_metadata;
+      DROP TABLE event_payload_stages;
+      DROP INDEX event_continuation_admission;
+      ALTER TABLE event_continuations DROP COLUMN admitted_delivery_id;
+      ALTER TABLE event_deliveries DROP COLUMN admitted_continuation_json;
+      ALTER TABLE event_dedupe DROP COLUMN ingress_fingerprint;
+      ALTER TABLE event_dedupe DROP COLUMN ingress_json;
+      UPDATE event_dedupe SET created_at=0;
+      PRAGMA user_version = 2;
+    `);
+    legacy.close();
+
+    const migrated = new AxSQLiteEventStore({ filename, clock, retention });
+    await expect(migrated.enqueue(request)).resolves.toEqual(
+      expect.objectContaining({ duplicate: false, deliveryIds: [] })
+    );
+    await migrated.close();
+  });
+
+  it('quarantines a legacy zero-route dedupe record without retained ingress', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const filename = join(directory, 'legacy-unverifiable-zero-route.sqlite');
+    const clock = new AxManualEventClock(1_000);
+    const request = {
+      ...storeRequest('legacy-unverifiable-zero-route', clock.now()),
+      deliveries: [],
+    };
+    const current = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    await current.enqueue(request);
+    await current.close();
+
+    const legacy = new Database(filename);
+    legacy.exec(`
+      DROP TABLE event_verifier_transitions;
+      DROP TABLE event_store_metadata;
+      DROP TABLE event_payload_stages;
+      DROP INDEX event_continuation_admission;
+      ALTER TABLE event_continuations DROP COLUMN admitted_delivery_id;
+      ALTER TABLE event_deliveries DROP COLUMN admitted_continuation_json;
+      ALTER TABLE event_dedupe DROP COLUMN ingress_fingerprint;
+      ALTER TABLE event_dedupe DROP COLUMN ingress_json;
+      PRAGMA user_version = 2;
+    `);
+    legacy.close();
+
+    const migrated = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    await expect(migrated.enqueue(request)).rejects.toThrow(
+      'cannot be verified against legacy ingress'
+    );
+    await expect(
+      migrated.enqueue({
+        ...request,
+        ingress: {
+          ...request.ingress,
+          event: { ...request.ingress.event, type: 'effect.changed' },
+        },
+      })
+    ).rejects.toThrow('cannot be verified against legacy ingress');
+    await migrated.close();
+
+    const verified = new Database(filename);
+    expect(
+      verified
+        .prepare(`SELECT ingress_json, ingress_fingerprint FROM event_dedupe`)
+        .get()
+    ).toEqual({
+      ingress_json: null,
+      ingress_fingerprint: expect.stringMatching(/^legacy-unverifiable:/),
+    });
+    expect(
+      verified.prepare('SELECT COUNT(*) AS count FROM event_deliveries').get()
+    ).toEqual({ count: 0 });
+    verified.close();
+  });
+
+  it('keeps staging exclusive and quarantines lease loss before cleanup', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const filename = join(directory, 'payload-takeover.sqlite');
+    const clock = new AxManualEventClock(1_000);
+    let payloadStarted!: () => void;
+    let releasePayload!: () => void;
+    const started = new Promise<void>((resolve) => {
+      payloadStarted = resolve;
+    });
+    const firstPayload = new Promise<void>((resolve) => {
+      releasePayload = resolve;
+    });
+    const aborted: string[] = [];
+    const committed: string[] = [];
+    const stagedValues = new Map<string, unknown>();
+    let stages = 0;
+    let winnerPayload: unknown;
+    const payloadStore: AxEventStagedPayloadStore = {
+      stage: async ({ stageId, value }) => {
+        stages++;
+        stagedValues.set(stageId, value);
+        if (stages === 1) {
+          payloadStarted();
+          await firstPayload;
+        }
+        return { reference: 'payload://content-addressed' };
+      },
+      commit: async (stageId) => {
+        committed.push(stageId);
+        winnerPayload = stagedValues.get(stageId);
+      },
+      abort: async (stageId) => {
+        aborted.push(stageId);
+        stagedValues.delete(stageId);
+      },
+      put: async () => {
+        throw new Error('legacy put must not be called');
+      },
+      get: async () => winnerPayload,
+      delete: async () => {
+        throw new Error('shared references must not be deleted');
+      },
+    };
+    const first = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+      maxInlinePayloadBytes: 1,
+      payloadStore,
+      payloadStaging,
+    });
+    const peer = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+      maxInlinePayloadBytes: 1,
+      payloadStore,
+      payloadStaging,
+    });
+    await first.enqueue(storeRequest('payload-takeover', clock.now()));
+    const claimed = await first.claim('worker-a', clock.now(), 100);
+    const run: AxEventRun = {
+      id: 'payload-takeover-run',
+      deliveryId: claimed!.id,
+      routeId: claimed!.routeId,
+      instanceKey: claimed!.instanceKey,
+      claimedBy: claimed!.claimedBy,
+      status: 'succeeded',
+      attempt: 1,
+      startedAt: clock.now(),
+      finishedAt: clock.now(),
+      output: { persisted: true },
+      fencingToken: claimed!.fencingToken,
+    };
+    const saving = first.saveRun(run);
+    await started;
+    clock.advanceBy(101);
+    const takeover = await peer.claim('worker-b', clock.now(), 100);
+    expect(takeover).toBeUndefined();
+    releasePayload();
+
+    await expect(saving).rejects.toMatchObject({
+      code: 'output_persistence_failed',
+      phase: 'stage',
+    });
+    expect(await first.getRun(run.id)).toBeUndefined();
+    await expect(peer.getDelivery(claimed!.id)).resolves.toEqual(
+      expect.objectContaining({
+        status: 'output_persistence_failed',
+        fencingToken: claimed!.fencingToken,
+      })
+    );
+    expect(await peer.claim('worker-b', clock.now(), 100)).toBeUndefined();
+    expect(committed).toHaveLength(0);
+    expect(aborted).toHaveLength(1);
+    await first.close();
+    await peer.close();
+  });
+
+  it('cleans a superseded abort stage without marking its live delivery terminal', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const filename = join(directory, 'payload-superseded-cleanup.sqlite');
+    const clock = new AxManualEventClock(1_000);
+    const initial = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    await initial.enqueue(storeRequest('payload-superseded', clock.now()));
+    const claimed = (await initial.claim('worker-a', clock.now(), 1_000))!;
+    const run: AxEventRun = {
+      id: 'payload-superseded-run',
+      deliveryId: claimed.id,
+      routeId: claimed.routeId,
+      instanceKey: claimed.instanceKey,
+      claimedBy: claimed.claimedBy,
+      fencingToken: claimed.fencingToken,
+      status: 'succeeded',
+      attempt: 1,
+      startedAt: clock.now(),
+      finishedAt: clock.now(),
+      output: { current: true },
+    };
+    await initial.saveDelivery({
+      ...claimed,
+      status: 'running',
+      attempt: 1,
+      runId: run.id,
+      invocationStarted: true,
+    });
+    await initial.saveRun(run);
+    await initial.close();
+
+    const stageId = 'event-payload-stage:superseded';
+    const seeded = new Database(filename);
+    seeded
+      .prepare(
+        `INSERT INTO event_payload_stages(
+           stage_id, run_id, delivery_id, fencing_token, reference,
+           size_bytes, expires_at, state, created_at, updated_at
+         ) VALUES(?,?,?,?,?,?,?,?,?,?)`
+      )
+      .run(
+        stageId,
+        run.id,
+        run.deliveryId,
+        run.fencingToken,
+        'payload://superseded',
+        128,
+        clock.now() + 1_000,
+        'abort_pending',
+        clock.now(),
+        clock.now()
+      );
+    seeded.close();
+
+    const aborted: string[] = [];
+    const restarted = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+      payloadStaging,
+      payloadStore: {
+        stage: async () => ({ reference: 'payload://unused' }),
+        commit: async () => {},
+        abort: async (id) => {
+          aborted.push(id);
+        },
+        put: async () => 'payload://legacy-unused',
+        get: async () => undefined,
+        delete: async () => {},
+      },
+    });
+    await expect(restarted.getRun(run.id)).resolves.toEqual(
+      expect.objectContaining({ output: { current: true } })
+    );
+    expect(await restarted.getDelivery(claimed.id)).toEqual(
+      expect.objectContaining({ status: 'running', fencingToken: 1 })
+    );
+    expect(aborted).toEqual([stageId]);
+    await restarted.close();
+  });
+
+  it('revalidates lease ownership after payload persistence without takeover', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const filename = join(directory, 'payload-expiry.sqlite');
+    const clock = new AxManualEventClock(1_000);
+    const aborted: string[] = [];
+    const store = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+      maxInlinePayloadBytes: 1,
+      payloadStore: {
+        stage: async () => {
+          clock.advanceBy(101);
+          return { reference: 'payload://expired' };
+        },
+        commit: async () => {},
+        abort: async (stageId) => {
+          aborted.push(stageId);
+        },
+        put: async () => 'payload://legacy-unused',
+        get: async () => undefined,
+        delete: async () => {},
+      },
+      payloadStaging,
+    });
+    await store.enqueue(storeRequest('payload-expiry', clock.now()));
+    const claimed = await store.claim('worker-a', clock.now(), 100);
+    const run: AxEventRun = {
+      id: 'payload-expiry-run',
+      deliveryId: claimed!.id,
+      routeId: claimed!.routeId,
+      instanceKey: claimed!.instanceKey,
+      claimedBy: claimed!.claimedBy,
+      status: 'succeeded',
+      attempt: 1,
+      startedAt: clock.now(),
+      finishedAt: clock.now(),
+      output: { persisted: true },
+      fencingToken: claimed!.fencingToken,
+    };
+
+    await expect(store.saveRun(run)).rejects.toMatchObject({
+      code: 'output_persistence_failed',
+      phase: 'stage',
+    });
+    await expect(
+      store.saveDelivery({ ...claimed!, status: 'succeeded' })
+    ).rejects.toThrow('Stale or expired event claim');
+    expect(await store.getRun(run.id)).toBeUndefined();
+    expect(aborted).toHaveLength(1);
+    await store.close();
+  });
+
+  it('rejects a stale live commit acknowledgement after peer takeover', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const filename = join(directory, 'payload-commit-takeover.sqlite');
+    const clock = new AxManualEventClock(1_000);
+    let commitCalls = 0;
+    let takeover: Awaited<ReturnType<AxSQLiteEventStore['claim']>>;
+    const peerRef: { current?: AxSQLiteEventStore } = {};
+    const payloadStore: AxEventStagedPayloadStore = {
+      stage: async () => ({ reference: 'payload://commit-takeover' }),
+      commit: async () => {
+        commitCalls++;
+        if (commitCalls === 1) {
+          clock.advanceBy(101);
+          takeover = await peerRef.current!.claim('worker-b', clock.now(), 100);
+        }
+      },
+      abort: async () => {},
+      put: async () => 'payload://legacy-unused',
+      get: async () => ({ output: { persisted: true } }),
+      delete: async () => {},
+    };
+    const first = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+      maxInlinePayloadBytes: 1,
+      payloadStore,
+      payloadStaging,
+    });
+    const peer = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+      maxInlinePayloadBytes: 1,
+      payloadStore,
+      payloadStaging,
+    });
+    peerRef.current = peer;
+    await first.enqueue(storeRequest('payload-commit-takeover', clock.now()));
+    const claimed = (await first.claim('worker-a', clock.now(), 100))!;
+    await expect(
+      first.saveRun({
+        id: 'payload-commit-takeover-run',
+        deliveryId: claimed.id,
+        routeId: claimed.routeId,
+        instanceKey: claimed.instanceKey,
+        claimedBy: claimed.claimedBy,
+        status: 'succeeded',
+        attempt: 1,
+        startedAt: clock.now(),
+        finishedAt: clock.now(),
+        output: { persisted: true },
+        fencingToken: claimed.fencingToken,
+      })
+    ).rejects.toMatchObject({
+      code: 'output_persistence_failed',
+      phase: 'commit',
+    });
+    expect(takeover).toEqual(
+      expect.objectContaining({
+        id: claimed.id,
+        claimedBy: 'worker-b',
+        fencingToken: 2,
+        recoveredFromExpiredLease: true,
+        runId: 'payload-commit-takeover-run',
+      })
+    );
+    expect(commitCalls).toBe(2);
+    await first.close();
+    await peer.close();
+  });
+
+  it('types a database failure after provider commit and retains the journal', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const filename = join(directory, 'payload-post-commit-db-failure.sqlite');
+    const clock = new AxManualEventClock(1_000);
+    let providerCommitted = false;
+    const storeRef: { current?: AxSQLiteEventStore } = {};
+    const store = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+      maxInlinePayloadBytes: 1,
+      payloadStaging,
+      payloadStore: {
+        stage: async () => ({ reference: 'payload://post-commit' }),
+        commit: async () => {
+          providerCommitted = true;
+          (storeRef.current as unknown as { db: { close(): void } }).db.close();
+        },
+        abort: async () => {},
+        put: async () => 'payload://legacy-unused',
+        get: async () => ({ output: { persisted: true } }),
+        delete: async () => {},
+      },
+    });
+    storeRef.current = store;
+    await store.enqueue(storeRequest('payload-post-commit', clock.now()));
+    const claimed = (await store.claim('worker-a', clock.now(), 100))!;
+    await expect(
+      store.saveRun({
+        id: 'payload-post-commit-run',
+        deliveryId: claimed.id,
+        routeId: claimed.routeId,
+        instanceKey: claimed.instanceKey,
+        claimedBy: claimed.claimedBy,
+        status: 'succeeded',
+        attempt: 1,
+        startedAt: clock.now(),
+        finishedAt: clock.now(),
+        output: { persisted: true },
+        fencingToken: claimed.fencingToken,
+      })
+    ).rejects.toMatchObject({
+      code: 'output_persistence_failed',
+      phase: 'commit',
+    });
+    expect(providerCommitted).toBe(true);
+    const inspect = new Database(filename, { readonly: true });
+    expect(
+      inspect
+        .prepare(
+          `SELECT state FROM event_payload_stages
+           WHERE run_id='payload-post-commit-run'`
+        )
+        .get()
+    ).toEqual({ state: 'commit_pending' });
+    inspect.close();
+  });
+
+  it('fails before upload for legacy stores and insufficient lease budget', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const clock = new AxManualEventClock(1_000);
+    let legacyPuts = 0;
+    const legacy = new AxSQLiteEventStore({
+      filename: join(directory, 'payload-legacy.sqlite'),
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+      maxInlinePayloadBytes: 1,
+      payloadStore: {
+        put: async () => {
+          legacyPuts++;
+          throw new Error('must not upload');
+        },
+        get: async () => undefined,
+        delete: async () => {},
+      },
+    });
+    await legacy.enqueue(storeRequest('payload-legacy', clock.now()));
+    const legacyClaim = (await legacy.claim('worker-a', clock.now(), 100))!;
+    const run: AxEventRun = {
+      id: 'payload-preflight-run',
+      deliveryId: legacyClaim.id,
+      routeId: legacyClaim.routeId,
+      instanceKey: legacyClaim.instanceKey,
+      claimedBy: legacyClaim.claimedBy,
+      status: 'succeeded',
+      attempt: 1,
+      startedAt: clock.now(),
+      finishedAt: clock.now(),
+      output: { large: true },
+      fencingToken: legacyClaim.fencingToken,
+    };
+    await expect(legacy.saveRun(run)).rejects.toBeInstanceOf(
+      AxEventOutputPersistenceError
+    );
+    expect(legacyPuts).toBe(0);
+    await legacy.close();
+
+    let stages = 0;
+    const shortLease = new AxSQLiteEventStore({
+      filename: join(directory, 'payload-short-lease.sqlite'),
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+      maxInlinePayloadBytes: 1,
+      payloadStaging,
+      payloadStore: {
+        stage: async () => {
+          stages++;
+          return { reference: 'payload://must-not-stage' };
+        },
+        commit: async () => {},
+        abort: async () => {},
+        put: async () => 'payload://legacy-unused',
+        get: async () => undefined,
+        delete: async () => {},
+      },
+    });
+    await shortLease.enqueue(storeRequest('payload-short-lease', clock.now()));
+    const shortClaim = (await shortLease.claim('worker-a', clock.now(), 19))!;
+    await expect(
+      shortLease.saveRun({
+        ...run,
+        id: 'payload-short-lease-run',
+        deliveryId: shortClaim.id,
+        routeId: shortClaim.routeId,
+        instanceKey: shortClaim.instanceKey,
+        claimedBy: shortClaim.claimedBy,
+        fencingToken: shortClaim.fencingToken,
+      })
+    ).rejects.toMatchObject({
+      code: 'output_persistence_failed',
+      phase: 'preflight',
+    });
+    expect(stages).toBe(0);
+    await shortLease.close();
+  });
+
+  it('bounds orphaned staged ownership by count, bytes, and operation timeout', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const filename = join(directory, 'payload-bounds.sqlite');
+    const clock = new AxManualEventClock(1_000);
+    const initial = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    await initial.close();
+    const seeded = new Database(filename);
+    seeded
+      .prepare(
+        `INSERT INTO event_payload_stages(
+           stage_id, run_id, delivery_id, fencing_token, reference,
+           size_bytes, expires_at, state, created_at, updated_at
+         ) VALUES(?,?,?,?,?,?,?,?,?,?)`
+      )
+      .run(
+        'orphaned-stage',
+        'orphan-run',
+        'orphan-delivery',
+        1,
+        'payload://shared',
+        64,
+        clock.now() + 1_000,
+        'abort_pending',
+        clock.now(),
+        clock.now()
+      );
+    seeded.close();
+
+    let stageCalls = 0;
+    const boundedPolicy = {
+      ...payloadStaging,
+      maxOutstandingCount: 1,
+      maxOutstandingBytes: 64,
+    };
+    const store = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+      maxInlinePayloadBytes: 1,
+      payloadStaging: boundedPolicy,
+      payloadStore: {
+        stage: async () => {
+          stageCalls++;
+          return { reference: 'payload://must-not-stage' };
+        },
+        commit: async () => {},
+        abort: async () => new Promise<void>(() => {}),
+        put: async () => 'payload://legacy-unused',
+        get: async () => undefined,
+        delete: async () => {},
+      },
+    });
+    await store.enqueue(storeRequest('payload-bounds', clock.now()));
+    const startedAt = Date.now();
+    const claimed = (await store.claim('worker-a', clock.now(), 1_000))!;
+    await expect(
+      store.saveRun({
+        id: 'payload-bounds-run',
+        deliveryId: claimed.id,
+        routeId: claimed.routeId,
+        instanceKey: claimed.instanceKey,
+        claimedBy: claimed.claimedBy,
+        status: 'succeeded',
+        attempt: 1,
+        startedAt: clock.now(),
+        finishedAt: clock.now(),
+        output: { large: true },
+        fencingToken: claimed.fencingToken,
+      })
+    ).rejects.toMatchObject({
+      code: 'output_persistence_failed',
+      phase: 'preflight',
+    });
+    expect(Date.now() - startedAt).toBeLessThan(500);
+    expect(stageCalls).toBe(0);
+    const outstanding = new Database(filename, { readonly: true });
+    expect(
+      outstanding
+        .prepare(
+          `SELECT COUNT(*) AS count, SUM(size_bytes) AS bytes
+           FROM event_payload_stages WHERE state!='committed'`
+        )
+        .get()
+    ).toEqual({ count: 1, bytes: 64 });
+    outstanding.close();
+    await store.close();
+  });
+
+  it('reconciles a commit-pending staged payload after store restart', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const filename = join(directory, 'payload-restart.sqlite');
+    const clock = new AxManualEventClock(1_000);
+    const initial = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    await initial.enqueue(storeRequest('payload-restart', clock.now()));
+    const claimed = (await initial.claim('worker-a', clock.now(), 100))!;
+    await initial.close();
+
+    const stageId = 'event-payload-stage:restart';
+    const run: AxEventRun = {
+      id: 'payload-restart-run',
+      deliveryId: claimed.id,
+      routeId: claimed.routeId,
+      instanceKey: claimed.instanceKey,
+      claimedBy: claimed.claimedBy,
+      status: 'succeeded',
+      attempt: 1,
+      startedAt: clock.now(),
+      finishedAt: clock.now(),
+      outputRef: 'payload://restart',
+      fencingToken: claimed.fencingToken,
+    };
+    const seeded = new Database(filename);
+    seeded
+      .prepare(
+        `INSERT INTO event_runs(id, delivery_id, run_json, updated_at, finished_at)
+         VALUES(?,?,?,?,?)`
+      )
+      .run(
+        run.id,
+        run.deliveryId,
+        JSON.stringify(run),
+        clock.now(),
+        clock.now()
+      );
+    seeded
+      .prepare(
+        `INSERT INTO event_payload_stages(
+           stage_id, run_id, delivery_id, fencing_token, reference,
+           size_bytes, expires_at, state, created_at, updated_at
+         ) VALUES(?,?,?,?,?,?,?,?,?,?)`
+      )
+      .run(
+        stageId,
+        run.id,
+        run.deliveryId,
+        run.fencingToken,
+        run.outputRef,
+        128,
+        clock.now() + 1_000,
+        'commit_pending',
+        clock.now(),
+        clock.now()
+      );
+    seeded.close();
+
+    const commits: string[] = [];
+    const restarted = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+      payloadStaging,
+      payloadStore: {
+        stage: async () => ({ reference: 'payload://restart' }),
+        commit: async (id) => {
+          commits.push(id);
+        },
+        abort: async () => {},
+        put: async () => 'payload://legacy-unused',
+        get: async () => ({ output: { recovered: true } }),
+        delete: async () => {},
+      },
+    });
+    await expect(restarted.getRun(run.id)).resolves.toEqual(
+      expect.objectContaining({ output: { recovered: true } })
+    );
+    expect(commits).toEqual([stageId]);
+    clock.advanceBy(101);
+    let targetCalls = 0;
+    let sinkCalls = 0;
+    const signature = s('trigger?:string -> recovered:boolean');
+    const program = {
+      getId: () => 'payload-restart-target',
+      getSignature: () => signature,
+      forward: async () => {
+        targetCalls++;
+        return { recovered: false };
+      },
+      streamingForward: async function* () {},
+    } as unknown as AxProgrammable<any, any>;
+    const runtime = new AxEventRuntime({
+      store: restarted,
+      programStateStore: restarted,
+      coordination: 'multi-worker',
+      workerConcurrency: 1,
+      leaseMs: 100,
+      heartbeatMs: 25,
+      routes: [
+        eventRoute({
+          id: 'route',
+          match: { types: ['effect.test'] },
+          action: 'wake',
+          target: eventTarget({
+            id: 'target',
+            ai: {} as never,
+            program,
+            mapInput: () => ({}),
+            retrySafety: 'idempotent',
+            sinks: [
+              {
+                id: 'recovered-sink',
+                write: (output) => {
+                  sinkCalls++;
+                  expect(output).toEqual({ recovered: true });
+                },
+              },
+            ],
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    for (let index = 0; index < 1_000; index++) {
+      if ((await restarted.getDelivery(claimed.id))?.status === 'succeeded') {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    expect(targetCalls).toBe(0);
+    expect(sinkCalls).toBe(1);
+    expect(await restarted.getDelivery(claimed.id)).toEqual(
+      expect.objectContaining({
+        status: 'succeeded',
+        fencingToken: 2,
+        runId: run.id,
+      })
+    );
+    await runtime.close({ drain: false });
+  });
+
+  it('migrates schema-v5 resume runs into exclusive delivery admissions', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const filename = join(directory, 'continuation-admission-v5.sqlite');
+    const clock = new AxManualEventClock(1_000);
+    const initial = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    const receipt = await initial.enqueue({
+      ingress: {
+        event: {
+          specversion: '1.0',
+          id: 'legacy-resume',
+          source: 'test://sqlite-effects',
+          type: 'legacy.resume',
+        },
+        identity: {},
+        trust: 'authenticated',
+      },
+      deliveries: [
+        {
+          routeId: 'legacy-resume-route',
+          action: 'resume',
+          targetId: 'legacy-resume-target',
+          instanceKey: 'legacy-delivery-instance',
+          sizeBytes: 128,
+          retrySafety: 'idempotent',
+          ordering: 'strict',
+        },
+      ],
+      acceptedAt: clock.now(),
+      publishTimeoutMs: 1_000,
+    });
+    const claimed = (await initial.claim('worker-a', clock.now(), 100))!;
+    const continuation: AxEventContinuation = {
+      id: 'legacy-admitted-continuation',
+      targetId: 'legacy-resume-target',
+      routeId: 'legacy-start-route',
+      instanceKey: 'legacy-original-instance',
+      identityScope: claimed.identityScope,
+      correlation: [{ kind: 'job', value: 'legacy-job' }],
+      createdAt: clock.now(),
+      metadata: { migrated: true },
+    };
+    await initial.registerContinuation(continuation);
+    const run: AxEventRun = {
+      id: 'legacy-resume-run',
+      deliveryId: claimed.id,
+      routeId: claimed.routeId,
+      targetId: continuation.targetId,
+      instanceKey: continuation.instanceKey,
+      admittedContinuation: continuation,
+      claimedBy: claimed.claimedBy,
+      fencingToken: claimed.fencingToken,
+      status: 'running',
+      attempt: 1,
+      startedAt: clock.now(),
+    };
+    await initial.saveDelivery({
+      ...claimed,
+      status: 'running',
+      attempt: 1,
+      runId: run.id,
+    });
+    await initial.saveRun(run);
+    await initial.saveDelivery({
+      ...claimed,
+      status: 'failed',
+      attempt: 1,
+      runId: run.id,
+    });
+    await initial.redriveDelivery(claimed.id, clock.now());
+    const pendingReceipt = await initial.enqueue({
+      ingress: {
+        event: {
+          specversion: '1.0',
+          id: 'never-invoked-resume',
+          source: 'test://sqlite-effects',
+          type: 'legacy.resume.pending',
+        },
+        identity: {},
+        trust: 'authenticated',
+      },
+      deliveries: [
+        {
+          routeId: 'pending-resume-route',
+          action: 'resume',
+          targetId: 'pending-resume-target',
+          instanceKey: 'pending-resume-instance',
+          sizeBytes: 128,
+          retrySafety: 'idempotent',
+          ordering: 'strict',
+        },
+      ],
+      acceptedAt: clock.now(),
+      publishTimeoutMs: 1_000,
+    });
+    const pendingContinuation: AxEventContinuation = {
+      id: 'pending-admitted-continuation',
+      targetId: 'pending-resume-target',
+      routeId: 'pending-start-route',
+      instanceKey: 'pending-original-instance',
+      identityScope: 'anonymous',
+      correlation: [{ kind: 'job', value: 'pending-job' }],
+      createdAt: clock.now(),
+    };
+    await initial.registerContinuation(pendingContinuation);
+    await initial.close();
+
+    const legacy = new Database(filename);
+    legacy.exec(`
+      DROP INDEX event_continuation_admission;
+      ALTER TABLE event_continuations DROP COLUMN admitted_delivery_id;
+      ALTER TABLE event_deliveries DROP COLUMN admitted_continuation_json;
+      PRAGMA user_version = 5;
+    `);
+    legacy.close();
+
+    const migrated = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    expect(await migrated.getDelivery(receipt.deliveryIds[0]!)).toEqual(
+      expect.objectContaining({ admittedContinuation: continuation })
+    );
+    const takeover = (await migrated.claim('worker-b', clock.now(), 100))!;
+    await expect(
+      migrated.admitContinuation(
+        takeover.id,
+        takeover.claimedBy!,
+        takeover.fencingToken!,
+        continuation.identityScope,
+        continuation.correlation[0]!,
+        clock.now()
+      )
+    ).resolves.toEqual(continuation);
+    await migrated.saveDelivery({ ...takeover, status: 'succeeded' });
+    expect(
+      (await migrated.getDelivery(pendingReceipt.deliveryIds[0]!))
+        ?.admittedContinuation
+    ).toBeUndefined();
+    const pendingClaim = (await migrated.claim('worker-b', clock.now(), 100))!;
+    expect(pendingClaim.id).toBe(pendingReceipt.deliveryIds[0]);
+    await expect(
+      migrated.admitContinuation(
+        pendingClaim.id,
+        pendingClaim.claimedBy!,
+        pendingClaim.fencingToken!,
+        pendingContinuation.identityScope,
+        pendingContinuation.correlation[0]!,
+        clock.now()
+      )
+    ).resolves.toEqual(pendingContinuation);
+    expect(migrated.capabilities.conformance.schemaVersion).toBe(7);
+    await migrated.close();
+  });
+
+  it('classifies row-bearing effect and verifier lineages by shape, not user_version', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    for (const lineage of [
+      'fingerprint',
+      'payload',
+      'admission',
+      'verifier',
+    ] as const) {
+      const filename = join(directory, `${lineage}.sqlite`);
+      const clock = new AxManualEventClock(1_000);
+      const initial = new AxSQLiteEventStore({
         filename,
+        clock,
         retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
       });
-      const legacyDb = (store as any).db;
-      if (version === 1) {
-        legacyDb.exec(`
+      const receipt = await initial.enqueue(
+        storeRequest(`lineage-${lineage}`, clock.now())
+      );
+      const claimed = (await initial.claim(
+        'lineage-worker',
+        clock.now(),
+        100
+      ))!;
+      await initial.declareEffect(
+        {
+          id: `lineage-${lineage}-effect`,
+          deliveryId: claimed.id,
+          runId: `lineage-${lineage}-run`,
+          identityScope: claimed.identityScope,
+          operation: 'lineage.write',
+          idempotencyKey: `lineage-${lineage}-key`,
+          replaySafety: 'idempotent',
+          createdAt: clock.now(),
+        },
+        { deliveryId: claimed.id, fencingToken: claimed.fencingToken! }
+      );
+      await initial.close();
+
+      const legacy = new Database(filename);
+      if (lineage !== 'verifier') {
+        legacy.exec(`
           DROP TABLE event_verifier_transitions;
           DROP TABLE event_store_metadata;
         `);
-      } else {
-        legacyDb.exec('DROP TABLE event_store_metadata;');
       }
-      legacyDb.pragma(`user_version = ${version}`);
-      await store.close();
+      if (lineage === 'fingerprint') {
+        legacy.exec('DROP TABLE event_payload_stages;');
+      }
+      if (lineage === 'fingerprint' || lineage === 'payload') {
+        legacy.exec(`
+          DROP INDEX event_continuation_admission;
+          ALTER TABLE event_continuations DROP COLUMN admitted_delivery_id;
+          ALTER TABLE event_deliveries DROP COLUMN admitted_continuation_json;
+        `);
+      } else if (lineage === 'verifier') {
+        legacy.exec(`
+          DROP TABLE event_effects;
+          DROP TABLE event_payload_stages;
+          DROP INDEX event_continuation_admission;
+          ALTER TABLE event_continuations DROP COLUMN admitted_delivery_id;
+          ALTER TABLE event_deliveries DROP COLUMN admitted_continuation_json;
+          ALTER TABLE event_dedupe DROP COLUMN ingress_fingerprint;
+          ALTER TABLE event_dedupe DROP COLUMN ingress_json;
+        `);
+      }
+      legacy.pragma(`user_version = ${lineage === 'payload' ? 1 : 6}`);
+      legacy.close();
 
-      store = new AxSQLiteEventStore({
+      const migrated = new AxSQLiteEventStore({
         filename,
+        clock,
         retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
       });
-      const migratedDb = (store as any).db;
-      expect(store.capabilities.conformance.schemaVersion).toBe(4);
-      expect(store.capabilities.verifierTransitions).toBe(
-        'axevent-verifier-transition-v2'
+      expect(await migrated.getDelivery(receipt.deliveryIds[0]!)).toEqual(
+        expect.objectContaining({ id: receipt.deliveryIds[0] })
       );
-      expect(migratedDb.pragma('user_version', { simple: true })).toBe(4);
+      expect(migrated.capabilities).toEqual(
+        expect.objectContaining({
+          effectLedger: true,
+          verifierTransitions: 'axevent-verifier-transition-v2',
+          conformance: expect.objectContaining({ schemaVersion: 7 }),
+        })
+      );
+      if (lineage === 'verifier') {
+        expect(await migrated.listEffects(receipt.deliveryIds[0]!)).toEqual([]);
+      } else {
+        expect(await migrated.listEffects(receipt.deliveryIds[0]!)).toEqual([
+          expect.objectContaining({ id: `lineage-${lineage}-effect` }),
+        ]);
+      }
+      await migrated.close();
+      const verified = new Database(filename);
+      expect(verified.pragma('user_version', { simple: true })).toBe(7);
       expect(
-        migratedDb
+        verified
           .prepare(
-            `SELECT name FROM sqlite_master
-             WHERE type='table' AND name IN
-               ('event_verifier_transitions','event_store_metadata')
+            `SELECT name FROM sqlite_master WHERE type='table' AND name IN
+             ('event_effects','event_payload_stages','event_verifier_transitions','event_store_metadata')
              ORDER BY name`
           )
           .all()
       ).toEqual([
+        { name: 'event_effects' },
+        { name: 'event_payload_stages' },
         { name: 'event_store_metadata' },
         { name: 'event_verifier_transitions' },
       ]);
+      verified.close();
+    }
+  });
+
+  it('normalizes row-bearing verifier-v2 and verifier-v3 journals idempotently', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    for (const lineage of ['legacy-v2', 'compact-v3'] as const) {
+      const filename = join(directory, `${lineage}.sqlite`);
+      const initial = new AxSQLiteEventStore({
+        filename,
+        retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+      });
+      await initial.enqueue(storeRequest(`${lineage}-core`, 1_000));
+      const childDeliveryId =
+        lineage === 'legacy-v2'
+          ? 'legacy-verifier-child'
+          : 'compact-verifier-child';
+      const childReceipt = await initial.enqueue(
+        storeRequest(childDeliveryId, 1_000)
+      );
+      const originalChild = (await initial.getDelivery(
+        childReceipt.deliveryIds[0]!
+      ))!;
+      const initialDb = (initial as any).db as Database.Database;
+      initialDb
+        .prepare('UPDATE event_deliveries SET id=? WHERE id=?')
+        .run(childDeliveryId, originalChild.id);
+      initialDb
+        .prepare(`UPDATE event_dedupe SET delivery_ids_json=? WHERE event_id=?`)
+        .run(JSON.stringify([childDeliveryId]), childDeliveryId);
+      await initial.close();
+      const fixture = new Database(filename);
+      fixture.exec('DROP TABLE event_store_metadata;');
+      if (lineage === 'legacy-v2') {
+        fixture.exec(`
+          DROP TABLE event_verifier_transitions;
+          CREATE TABLE event_verifier_transitions (
+            operation_id TEXT PRIMARY KEY,
+            request_json TEXT NOT NULL,
+            record_json TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+          );
+        `);
+        const child = { ...originalChild, id: childDeliveryId };
+        fixture
+          .prepare(`INSERT INTO event_verifier_transitions VALUES(?,?,?,?)`)
+          .run(
+            'legacy-verifier-operation',
+            JSON.stringify({ operationId: 'legacy-verifier-operation' }),
+            JSON.stringify({
+              receipt: {
+                eventId: childDeliveryId,
+                accepted: true,
+                duplicate: false,
+                durability: 'persistent',
+                deliveryIds: [child.id],
+              },
+              child,
+            }),
+            1_000
+          );
+      } else {
+        fixture
+          .prepare(`INSERT INTO event_verifier_transitions VALUES(?,?,?,?,?,?)`)
+          .run(
+            'compact-verifier-operation',
+            'request-commitment',
+            JSON.stringify({
+              eventId: childDeliveryId,
+              accepted: true,
+              duplicate: false,
+              durability: 'persistent',
+              deliveryIds: [childDeliveryId],
+            }),
+            childDeliveryId,
+            'child-commitment',
+            1_000
+          );
+      }
+      fixture.pragma(`user_version = ${lineage === 'legacy-v2' ? 4 : 2}`);
+      fixture.close();
+
+      let migrated = new AxSQLiteEventStore({
+        filename,
+        retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+      });
+      const operationId =
+        lineage === 'legacy-v2'
+          ? 'legacy-verifier-operation'
+          : 'compact-verifier-operation';
+      const migratedDb = (migrated as any).db as Database.Database;
+      expect(
+        migratedDb
+          .prepare(
+            `SELECT child_delivery_id, receipt_json
+             FROM event_verifier_transitions WHERE operation_id=?`
+          )
+          .get(operationId)
+      ).toEqual(
+        expect.objectContaining({
+          child_delivery_id:
+            lineage === 'legacy-v2'
+              ? 'legacy-verifier-child'
+              : 'compact-verifier-child',
+          receipt_json: expect.stringContaining('"accepted":true'),
+        })
+      );
       expect(
         migratedDb
           .prepare(
@@ -116,48 +1647,1532 @@ describe('AxSQLiteEventStore', () => {
           )
           .get()
       ).toBeUndefined();
-      await store.close();
+      await migrated.close();
+      const expectedHash = sqliteLogicalHash(filename);
+      migrated = new AxSQLiteEventStore({
+        filename,
+        retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+      });
+      await migrated.close();
+      expect(sqliteLogicalHash(filename)).toBe(expectedHash);
     }
   });
 
-  it('records oversized output failure without dispatching sinks or rerunning', async () => {
+  it('rejects future and partial schemas without mutating schema or version', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
     directories.push(directory);
-    const store = new AxSQLiteEventStore({
-      filename: join(directory, 'runtime.sqlite'),
+    for (const malformed of ['future', 'partial'] as const) {
+      const filename = join(directory, `${malformed}.sqlite`);
+      const initial = new AxSQLiteEventStore({
+        filename,
+        retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+      });
+      await initial.enqueue(storeRequest(`malformed-${malformed}`, Date.now()));
+      await initial.close();
+      const fixture = new Database(filename);
+      if (malformed === 'future') {
+        fixture.pragma('user_version = 8');
+      } else {
+        fixture.exec('DROP INDEX event_payload_stage_run;');
+        fixture.pragma('user_version = 5');
+      }
+      const beforeVersion = fixture.pragma('user_version', {
+        simple: true,
+      });
+      const beforeSchema = fixture
+        .prepare(
+          `SELECT type, name, sql FROM sqlite_master
+           WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name`
+        )
+        .all();
+      fixture.close();
+
+      expect(
+        () =>
+          new AxSQLiteEventStore({
+            filename,
+            retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+          })
+      ).toThrow(
+        malformed === 'future' ? 'Unsupported' : 'payload staging schema'
+      );
+      const after = new Database(filename);
+      expect(after.pragma('user_version', { simple: true })).toBe(
+        beforeVersion
+      );
+      expect(
+        after
+          .prepare(
+            `SELECT type, name, sql FROM sqlite_master
+             WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name`
+          )
+          .all()
+      ).toEqual(beforeSchema);
+      after.close();
+    }
+  });
+
+  it('rolls back every migration phase when legacy row normalization fails', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const filename = join(directory, 'rollback.sqlite');
+    const clock = new AxManualEventClock(1_000);
+    const initial = new AxSQLiteEventStore({
+      filename,
+      clock,
       retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
-      maxInlinePayloadBytes: 512,
     });
-    let calls = 0;
-    let sinkCalls = 0;
-    const signature = s('trigger?:string -> resultText:string');
+    await initial.enqueue(storeRequest('rollback', clock.now()));
+    const claimed = (await initial.claim('rollback-worker', clock.now(), 100))!;
+    await initial.declareEffect(
+      {
+        id: 'rollback-effect',
+        deliveryId: claimed.id,
+        runId: 'rollback-run',
+        identityScope: claimed.identityScope,
+        operation: 'rollback.write',
+        idempotencyKey: 'rollback-key',
+        replaySafety: 'idempotent',
+        createdAt: clock.now(),
+      },
+      { deliveryId: claimed.id, fencingToken: claimed.fencingToken! }
+    );
+    await initial.close();
+    const legacy = new Database(filename);
+    legacy.exec(`
+      DROP TABLE event_verifier_transitions;
+      DROP TABLE event_store_metadata;
+      DROP TABLE event_payload_stages;
+      DROP INDEX event_continuation_admission;
+      ALTER TABLE event_continuations DROP COLUMN admitted_delivery_id;
+      ALTER TABLE event_deliveries DROP COLUMN admitted_continuation_json;
+      ALTER TABLE event_dedupe DROP COLUMN ingress_fingerprint;
+      ALTER TABLE event_dedupe DROP COLUMN ingress_json;
+      UPDATE event_effects SET effect_json='not-json';
+      PRAGMA user_version = 2;
+    `);
+    const beforeSchema = legacy
+      .prepare(
+        `SELECT type, name, sql FROM sqlite_master
+         WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name`
+      )
+      .all();
+    legacy.close();
+
+    expect(
+      () =>
+        new AxSQLiteEventStore({
+          filename,
+          clock,
+          retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+        })
+    ).toThrow();
+    const after = new Database(filename);
+    expect(after.pragma('user_version', { simple: true })).toBe(2);
+    expect(
+      after
+        .prepare(
+          `SELECT type, name, sql FROM sqlite_master
+           WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name`
+        )
+        .all()
+    ).toEqual(beforeSchema);
+    expect(
+      (after.pragma('table_info(event_dedupe)') as Array<{ name: string }>).map(
+        ({ name }) => name
+      )
+    ).not.toContain('ingress_fingerprint');
+    after.close();
+  });
+
+  it('rolls back a late final assertion after every v7 migration phase', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const filename = join(directory, 'late-rollback.sqlite');
+    const initial = new AxSQLiteEventStore({
+      filename,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    await initial.enqueue(storeRequest('late-rollback', 1_000));
+    await initial.close();
+    const legacy = new Database(filename);
+    legacy.exec(`
+      DROP TABLE event_effects;
+      DROP TABLE event_payload_stages;
+      DROP INDEX event_continuation_admission;
+      ALTER TABLE event_continuations DROP COLUMN admitted_delivery_id;
+      ALTER TABLE event_deliveries DROP COLUMN admitted_continuation_json;
+      ALTER TABLE event_dedupe DROP COLUMN ingress_fingerprint;
+      ALTER TABLE event_dedupe DROP COLUMN ingress_json;
+      DROP TABLE event_store_metadata;
+      INSERT INTO event_verifier_transitions VALUES(
+        'late-verifier-operation',
+        'request-commitment',
+        'not-json',
+        'late-verifier-child',
+        'child-commitment',
+        1000
+      );
+      PRAGMA user_version = 3;
+    `);
+    const beforeSchema = legacy
+      .prepare(
+        `SELECT type, name, sql FROM sqlite_master
+         WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name`
+      )
+      .all();
+    legacy.close();
+
+    expect(
+      () =>
+        new AxSQLiteEventStore({
+          filename,
+          retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+        })
+    ).toThrow('malformed verifier data');
+    const after = new Database(filename);
+    expect(after.pragma('user_version', { simple: true })).toBe(3);
+    expect(
+      after
+        .prepare(
+          `SELECT type, name, sql FROM sqlite_master
+           WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name`
+        )
+        .all()
+    ).toEqual(beforeSchema);
+    expect(
+      after
+        .prepare(
+          `SELECT name FROM sqlite_master WHERE type='table' AND name IN
+           ('event_effects','event_payload_stages','event_store_metadata')`
+        )
+        .all()
+    ).toEqual([]);
+    after.close();
+  });
+
+  it('is logically hash-idempotent across repeated v7 reopen migrations', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const filename = join(directory, 'idempotent.sqlite');
+    const clock = new AxManualEventClock(1_000);
+    let store = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    await store.enqueue(storeRequest('idempotent', clock.now()));
+    const claimed = (await store.claim('idempotent-worker', clock.now(), 100))!;
+    await store.declareEffect(
+      {
+        id: 'idempotent-effect',
+        deliveryId: claimed.id,
+        runId: 'idempotent-run',
+        identityScope: claimed.identityScope,
+        operation: 'idempotent.write',
+        idempotencyKey: 'idempotent-key',
+        replaySafety: 'idempotent',
+        createdAt: clock.now(),
+      },
+      { deliveryId: claimed.id, fencingToken: claimed.fencingToken! }
+    );
+    await store.close();
+    const expectedHash = sqliteLogicalHash(filename);
+    for (let reopen = 0; reopen < 3; reopen++) {
+      store = new AxSQLiteEventStore({
+        filename,
+        clock,
+        retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+      });
+      await store.close();
+      expect(sqliteLogicalHash(filename)).toBe(expectedHash);
+    }
+  });
+
+  it('preserves canonical ingress fingerprints and effect digests on v7 reopen', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const filename = join(directory, 'canonical-identities.sqlite');
+    const clock = new AxManualEventClock(1_000);
+    let store = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    await store.enqueue(storeRequest('canonical-identities', clock.now()));
+    const claimed = (await store.claim('identity-worker', clock.now(), 100))!;
+    await store.declareEffect(
+      {
+        id: 'canonical-identity-effect',
+        deliveryId: claimed.id,
+        runId: 'canonical-identity-run',
+        identityScope: claimed.identityScope,
+        operation: 'canonical.write',
+        idempotencyKey: 'canonical-key',
+        replaySafety: 'idempotent',
+        createdAt: clock.now(),
+      },
+      { deliveryId: claimed.id, fencingToken: claimed.fencingToken! }
+    );
+    await store.close();
+    const before = sqliteLogicalHash(filename);
+
+    store = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    await store.close();
+    expect(sqliteLogicalHash(filename)).toBe(before);
+  });
+
+  it.each(['fingerprint', 'effect-digest'] as const)(
+    'rejects a conflicting authoritative %s without mutating v7 data',
+    async (conflict) => {
+      const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+      directories.push(directory);
+      const filename = join(directory, `${conflict}.sqlite`);
+      const clock = new AxManualEventClock(1_000);
+      const store = new AxSQLiteEventStore({
+        filename,
+        clock,
+        retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+      });
+      await store.enqueue(storeRequest(conflict, clock.now()));
+      const claimed = (await store.claim('conflict-worker', clock.now(), 100))!;
+      await store.declareEffect(
+        {
+          id: `${conflict}-effect`,
+          deliveryId: claimed.id,
+          runId: `${conflict}-run`,
+          identityScope: claimed.identityScope,
+          operation: 'conflict.write',
+          idempotencyKey: `${conflict}-key`,
+          replaySafety: 'idempotent',
+          createdAt: clock.now(),
+        },
+        { deliveryId: claimed.id, fencingToken: claimed.fencingToken! }
+      );
+      await store.close();
+      const fixture = new Database(filename);
+      if (conflict === 'fingerprint') {
+        fixture
+          .prepare(`UPDATE event_dedupe SET ingress_fingerprint='wrong'`)
+          .run();
+      } else {
+        const row = fixture
+          .prepare('SELECT id, effect_json FROM event_effects')
+          .get() as { id: string; effect_json: string };
+        const effect = JSON.parse(row.effect_json);
+        effect.requestDigest = 'wrong';
+        fixture
+          .prepare('UPDATE event_effects SET effect_json=? WHERE id=?')
+          .run(JSON.stringify(effect), row.id);
+      }
+      fixture.close();
+      const before = sqliteLogicalHash(filename);
+
+      expect(
+        () =>
+          new AxSQLiteEventStore({
+            filename,
+            clock,
+            retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+          })
+      ).toThrow(conflict === 'fingerprint' ? 'fingerprint' : 'digest');
+      expect(sqliteLogicalHash(filename)).toBe(before);
+    }
+  );
+
+  it.each(['empty', 'child', 'event'] as const)(
+    'rejects a verifier receipt with a mismatched %s binding without mutation',
+    async (mismatch) => {
+      const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+      directories.push(directory);
+      const filename = join(directory, `receipt-${mismatch}.sqlite`);
+      const store = new AxSQLiteEventStore({
+        filename,
+        retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+      });
+      const receipt = await store.enqueue(
+        storeRequest(`receipt-${mismatch}-event`, 1_000)
+      );
+      await store.close();
+      const childDeliveryId = receipt.deliveryIds[0]!;
+      const validReceipt = {
+        eventId: `receipt-${mismatch}-event`,
+        accepted: true,
+        duplicate: false,
+        durability: 'persistent',
+        deliveryIds: [childDeliveryId],
+      };
+      const malformed =
+        mismatch === 'empty'
+          ? {}
+          : mismatch === 'child'
+            ? { ...validReceipt, deliveryIds: ['unrelated-child'] }
+            : { ...validReceipt, eventId: 'unrelated-event' };
+      const fixture = new Database(filename);
+      fixture
+        .prepare(`INSERT INTO event_verifier_transitions VALUES(?,?,?,?,?,?)`)
+        .run(
+          `receipt-${mismatch}-operation`,
+          'request-commitment',
+          JSON.stringify(malformed),
+          childDeliveryId,
+          'child-commitment',
+          1_000
+        );
+      fixture.close();
+      const before = sqliteLogicalHash(filename);
+
+      expect(
+        () =>
+          new AxSQLiteEventStore({
+            filename,
+            retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+          })
+      ).toThrow('receipt is malformed');
+      expect(sqliteLogicalHash(filename)).toBe(before);
+    }
+  );
+
+  it('retains verifier confirmation after the child delivery payload is pruned', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const filename = join(directory, 'verifier-child-retention.sqlite');
+    const clock = new AxManualEventClock(1_000);
+    const retention = {
+      eventAndResultMs: 10,
+      runMetadataAndDeadLettersMs: 1_000,
+      completedContinuationsMs: 1_000,
+      settledEffectsMs: 10,
+    };
+    let store = new AxSQLiteEventStore({ filename, clock, retention });
+    await store.enqueue(storeRequest('retained-verifier-parent', clock.now()));
+    const parent = (await store.claim(
+      'retained-verifier-worker',
+      clock.now(),
+      100
+    ))!;
+    const run: AxEventRun = {
+      id: 'retained-verifier-run',
+      deliveryId: parent.id,
+      routeId: parent.routeId,
+      targetId: parent.targetId,
+      instanceKey: parent.instanceKey,
+      claimedBy: parent.claimedBy,
+      fencingToken: parent.fencingToken,
+      status: 'waiting_event',
+      attempt: 1,
+      startedAt: clock.now(),
+      finishedAt: clock.now(),
+    };
+    await store.saveDelivery({
+      ...parent,
+      status: 'running',
+      runId: run.id,
+      invocationStarted: true,
+    });
+    await store.saveRun({ ...run, status: 'running', finishedAt: undefined });
+    const request = {
+      operationId: 'retained-verifier-operation',
+      childDeliveryId: 'retained-verifier-child',
+      parent: {
+        delivery: {
+          ...parent,
+          status: 'waiting_event' as const,
+          runId: run.id,
+          invocationStarted: true,
+        },
+        run,
+        expectedFencingToken: parent.fencingToken!,
+      },
+      continuation: {
+        id: 'retained-verifier-continuation',
+        targetId: 'target',
+        routeId: 'route',
+        instanceKey: parent.instanceKey,
+        identityScope: parent.identityScope,
+        correlation: [{ kind: 'verifier', value: 'retained' }],
+        createdAt: clock.now(),
+      },
+      child: storeRequest('retained-verifier-event', clock.now()),
+    };
+    await expect(store.transitionVerifier(request)).resolves.toEqual(
+      expect.objectContaining({
+        eventId: 'retained-verifier-event',
+        deliveryIds: [request.childDeliveryId],
+      })
+    );
+    const child = (await store.claim(
+      'retained-child-worker',
+      clock.now(),
+      100
+    ))!;
+    expect(child.id).toBe(request.childDeliveryId);
+    await store.saveDelivery({ ...child, status: 'succeeded' });
+    await store.close();
+
+    clock.advanceBy(11);
+    store = new AxSQLiteEventStore({ filename, clock, retention });
+    await store.close();
+    store = new AxSQLiteEventStore({ filename, clock, retention });
+    expect(await store.getDelivery(request.childDeliveryId)).toBeUndefined();
+    await expect(store.confirmVerifierTransition(request)).resolves.toEqual(
+      expect.objectContaining({
+        eventId: 'retained-verifier-event',
+        deliveryIds: [request.childDeliveryId],
+      })
+    );
+    await expect(store.transitionVerifier(request)).resolves.toEqual(
+      expect.objectContaining({
+        duplicate: true,
+        deliveryIds: [request.childDeliveryId],
+      })
+    );
+    await store.close();
+  });
+
+  it.each(['malformed', 'delivery-mismatch', 'owner-mismatch'] as const)(
+    'rejects a %s immutable admission snapshot without mutation',
+    async (mismatch) => {
+      const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+      directories.push(directory);
+      const filename = join(directory, `admission-${mismatch}.sqlite`);
+      const clock = new AxManualEventClock(1_000);
+      const store = new AxSQLiteEventStore({
+        filename,
+        clock,
+        retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+      });
+      await store.enqueue({
+        ...storeRequest(`admission-${mismatch}`, clock.now()),
+        deliveries: [
+          {
+            routeId: 'route',
+            action: 'resume',
+            targetId: 'target',
+            instanceKey: `admission-${mismatch}`,
+            sizeBytes: 128,
+            retrySafety: 'idempotent',
+            ordering: 'strict',
+          },
+        ],
+      });
+      const claimed = (await store.claim(
+        'admission-worker',
+        clock.now(),
+        100
+      ))!;
+      const continuation: AxEventContinuation = {
+        id: `admission-${mismatch}-continuation`,
+        targetId: 'target',
+        routeId: 'origin-route',
+        instanceKey: 'origin-instance',
+        identityScope: claimed.identityScope,
+        correlation: [{ kind: 'admission', value: mismatch }],
+        createdAt: clock.now(),
+      };
+      await store.registerContinuation(continuation);
+      await store.admitContinuation(
+        claimed.id,
+        claimed.claimedBy!,
+        claimed.fencingToken!,
+        continuation.identityScope,
+        continuation.correlation[0]!,
+        clock.now()
+      );
+      await store.close();
+      const fixture = new Database(filename);
+      if (mismatch === 'malformed') {
+        fixture
+          .prepare(
+            `UPDATE event_deliveries SET admitted_continuation_json='{}'
+             WHERE id=?`
+          )
+          .run(claimed.id);
+      } else if (mismatch === 'delivery-mismatch') {
+        fixture
+          .prepare(
+            `UPDATE event_deliveries SET admitted_continuation_json=? WHERE id=?`
+          )
+          .run(
+            JSON.stringify({ ...continuation, targetId: 'other-target' }),
+            claimed.id
+          );
+      } else {
+        fixture
+          .prepare(
+            `UPDATE event_continuations SET admitted_delivery_id=NULL WHERE id=?`
+          )
+          .run(continuation.id);
+      }
+      fixture.close();
+      const before = sqliteLogicalHash(filename);
+
+      expect(
+        () =>
+          new AxSQLiteEventStore({
+            filename,
+            clock,
+            retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+          })
+      ).toThrow(/admission|continuation admission/);
+      expect(sqliteLogicalHash(filename)).toBe(before);
+    }
+  );
+
+  it('accepts a valid immutable admission after its completed continuation is pruned', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const filename = join(directory, 'admission-pruned.sqlite');
+    const clock = new AxManualEventClock(1_000);
+    let store = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    await store.enqueue({
+      ...storeRequest('admission-pruned', clock.now()),
+      deliveries: [
+        {
+          routeId: 'route',
+          action: 'resume',
+          targetId: 'target',
+          instanceKey: 'admission-pruned',
+          sizeBytes: 128,
+          retrySafety: 'idempotent',
+          ordering: 'strict',
+        },
+      ],
+    });
+    const claimed = (await store.claim('pruned-worker', clock.now(), 100))!;
+    const continuation: AxEventContinuation = {
+      id: 'admission-pruned-continuation',
+      targetId: 'target',
+      routeId: 'origin-route',
+      instanceKey: 'origin-instance',
+      identityScope: claimed.identityScope,
+      correlation: [{ kind: 'admission', value: 'pruned' }],
+      createdAt: clock.now(),
+    };
+    await store.registerContinuation(continuation);
+    await store.admitContinuation(
+      claimed.id,
+      claimed.claimedBy!,
+      claimed.fencingToken!,
+      continuation.identityScope,
+      continuation.correlation[0]!,
+      clock.now()
+    );
+    await store.close();
+    const fixture = new Database(filename);
+    fixture
+      .prepare('DELETE FROM event_continuations WHERE id=?')
+      .run(continuation.id);
+    fixture.close();
+
+    store = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    expect(await store.getDelivery(claimed.id)).toEqual(
+      expect.objectContaining({ admittedContinuation: continuation })
+    );
+    await store.close();
+  });
+
+  it('completes the verifier migration WAL cleanup handshake after commit', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const filename = join(directory, 'wal-cleanup.sqlite');
+    const initial = new AxSQLiteEventStore({
+      filename,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    await initial.close();
+    const sensitive = 'verifier-v2-sensitive-migration-row';
+    const legacy = new Database(filename);
+    legacy.pragma('secure_delete = ON');
+    legacy.exec(`
+      CREATE TABLE migration_crash_sentinel(value TEXT NOT NULL);
+      INSERT INTO migration_crash_sentinel(value) VALUES('${sensitive}');
+      DROP TABLE migration_crash_sentinel;
+      INSERT OR REPLACE INTO event_store_metadata(metadata_key, metadata_value)
+      VALUES('verifier-v2-cleanup-pending', '1');
+    `);
+    expect(
+      readFileSync(`${filename}-wal`).includes(Buffer.from(sensitive))
+    ).toBe(true);
+
+    const cleanup = new AxSQLiteEventStore({
+      filename,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    expect(
+      (cleanup as any).db
+        .prepare(
+          `SELECT 1 FROM event_store_metadata
+           WHERE metadata_key='verifier-v2-cleanup-pending'`
+        )
+        .get()
+    ).toBeUndefined();
+    await cleanup.close();
+    legacy.close();
+    for (const entry of readdirSync(directory)) {
+      expect(
+        readFileSync(join(directory, entry)).includes(Buffer.from(sensitive))
+      ).toBe(false);
+    }
+  });
+
+  it('atomically fences ordinary, verifier, and resume completion on nonterminal effects', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const clock = new AxManualEventClock(1_000);
+    const store = new AxSQLiteEventStore({
+      filename: join(directory, 'effect-fences.sqlite'),
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    const receipt = await store.enqueue(
+      storeRequest('effect-fence', clock.now())
+    );
+    const claimed = (await store.claim('effect-worker', clock.now(), 100))!;
+    await store.saveDelivery({
+      ...claimed,
+      status: 'running',
+      invocationStarted: true,
+    });
+    await store.declareEffect(
+      {
+        id: 'effect-fence-intent',
+        deliveryId: claimed.id,
+        runId: 'effect-fence-run',
+        identityScope: claimed.identityScope,
+        operation: 'effect-fence.write',
+        idempotencyKey: 'effect-fence-key',
+        replaySafety: 'idempotent',
+        createdAt: clock.now(),
+      },
+      { deliveryId: claimed.id, fencingToken: claimed.fencingToken! }
+    );
+    for (const status of ['succeeded', 'waiting_event'] as const) {
+      await expect(store.saveDelivery({ ...claimed, status })).rejects.toThrow(
+        'nonterminal effect'
+      );
+      expect(await store.getDelivery(receipt.deliveryIds[0]!)).toEqual(
+        expect.objectContaining({ status: 'running' })
+      );
+    }
+
+    const verifierRequest = {
+      operationId: 'effect-fence-transition',
+      childDeliveryId: 'effect-fence-child',
+      parent: {
+        delivery: {
+          ...claimed,
+          status: 'waiting_event' as const,
+          runId: 'effect-fence-run',
+        },
+        run: {
+          id: 'effect-fence-run',
+          deliveryId: claimed.id,
+          routeId: claimed.routeId,
+          targetId: claimed.targetId,
+          instanceKey: claimed.instanceKey,
+          claimedBy: claimed.claimedBy,
+          fencingToken: claimed.fencingToken,
+          status: 'waiting_event' as const,
+          attempt: 1,
+          startedAt: clock.now(),
+          finishedAt: clock.now(),
+        },
+        expectedFencingToken: claimed.fencingToken!,
+      },
+      child: storeRequest('effect-fence-child', clock.now()),
+      continuation: {
+        id: 'effect-fence-continuation',
+        targetId: 'target',
+        routeId: 'route',
+        instanceKey: 'effect-fence-child',
+        identityScope: claimed.identityScope,
+        correlation: [{ kind: 'effect', value: 'child' }],
+        createdAt: clock.now(),
+      },
+    };
+    await expect(store.transitionVerifier(verifierRequest)).rejects.toThrow(
+      'nonterminal effect'
+    );
+    expect(await store.getDelivery('effect-fence-child')).toBeUndefined();
+    expect(
+      await store.confirmVerifierTransition(verifierRequest)
+    ).toBeUndefined();
+
+    const continuation: AxEventContinuation = {
+      id: 'resume-effect-continuation',
+      targetId: 'target',
+      routeId: 'route',
+      instanceKey: 'resume-effect',
+      identityScope: claimed.identityScope,
+      correlation: [{ kind: 'resume-effect', value: 'one' }],
+      createdAt: clock.now(),
+    };
+    await store.registerContinuation(continuation);
+    const resumeReceipt = await store.enqueue({
+      ...storeRequest('resume-effect', clock.now()),
+      deliveries: [
+        {
+          routeId: 'route',
+          action: 'resume',
+          targetId: 'target',
+          instanceKey: 'resume-effect',
+          sizeBytes: 128,
+          retrySafety: 'effect-aware',
+          ordering: 'strict',
+        },
+      ],
+    });
+    const resume = (await store.claim('resume-worker', clock.now(), 100))!;
+    expect(resume.id).toBe(resumeReceipt.deliveryIds[0]);
+    const admitted = await store.admitContinuation(
+      resume.id,
+      resume.claimedBy!,
+      resume.fencingToken!,
+      continuation.identityScope,
+      continuation.correlation[0]!,
+      clock.now()
+    );
+    await store.declareEffect(
+      {
+        id: 'resume-effect-intent',
+        deliveryId: resume.id,
+        runId: 'resume-effect-run',
+        identityScope: resume.identityScope,
+        operation: 'resume-effect.write',
+        idempotencyKey: 'resume-effect-key',
+        replaySafety: 'idempotent',
+        createdAt: clock.now(),
+      },
+      { deliveryId: resume.id, fencingToken: resume.fencingToken! }
+    );
+    await expect(
+      store.saveDeliveryAndCompleteContinuation({
+        ...resume,
+        admittedContinuation: admitted,
+        status: 'succeeded',
+      })
+    ).rejects.toThrow('nonterminal effect');
+    expect(
+      await store.findContinuation(
+        continuation.identityScope,
+        continuation.correlation[0]!,
+        clock.now()
+      )
+    ).toEqual(continuation);
+    expect(await store.getDelivery(resume.id)).toEqual(
+      expect.objectContaining({ status: 'claimed' })
+    );
+    await store.close();
+  });
+
+  it('rejects cross-continuation verifier consumption with zero SQLite writes', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const filename = join(directory, 'verifier-cross-consumption.sqlite');
+    const clock = new AxManualEventClock(1_000);
+    const store = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    await store.enqueue({
+      ...storeRequest('sqlite-consumption-parent', clock.now()),
+      deliveries: [
+        {
+          routeId: 'route',
+          action: 'resume',
+          targetId: 'target',
+          instanceKey: 'sqlite-consumption-parent',
+          sizeBytes: 128,
+          retrySafety: 'idempotent',
+          ordering: 'strict',
+        },
+      ],
+    });
+    const parent = (await store.claim('sqlite-worker', clock.now(), 100))!;
+    const admitted: AxEventContinuation = {
+      id: 'sqlite-admitted-continuation',
+      targetId: 'target',
+      routeId: 'origin-route',
+      instanceKey: 'origin-instance',
+      identityScope: parent.identityScope,
+      correlation: [{ kind: 'job', value: 'admitted' }],
+      createdAt: clock.now(),
+    };
+    const unrelated: AxEventContinuation = {
+      ...admitted,
+      id: 'sqlite-unrelated-continuation',
+      correlation: [{ kind: 'job', value: 'unrelated' }],
+    };
+    await store.registerContinuation(admitted);
+    await store.registerContinuation(unrelated);
+    await store.admitContinuation(
+      parent.id,
+      parent.claimedBy!,
+      parent.fencingToken!,
+      admitted.identityScope,
+      admitted.correlation[0]!,
+      clock.now()
+    );
+    const admittedParent = (await store.getDelivery(parent.id))!;
+    const run: AxEventRun = {
+      id: 'sqlite-consumption-run',
+      deliveryId: parent.id,
+      routeId: parent.routeId,
+      targetId: parent.targetId,
+      instanceKey: parent.instanceKey,
+      admittedContinuation: admitted,
+      claimedBy: parent.claimedBy,
+      fencingToken: parent.fencingToken,
+      status: 'waiting_event',
+      attempt: 1,
+      startedAt: clock.now(),
+    };
+    const baseRequest = {
+      operationId: 'sqlite-consumption-operation',
+      childDeliveryId: 'sqlite-consumption-child',
+      parent: {
+        delivery: {
+          ...admittedParent,
+          status: 'waiting_event' as const,
+          runId: run.id,
+        },
+        run,
+        expectedFencingToken: parent.fencingToken!,
+      },
+      continuation: {
+        id: 'sqlite-next-continuation',
+        targetId: 'target',
+        routeId: 'route',
+        instanceKey: parent.instanceKey,
+        identityScope: parent.identityScope,
+        correlation: [{ kind: 'verifier', value: 'next' }],
+        createdAt: clock.now(),
+      },
+      child: storeRequest('sqlite-consumption-child-event', clock.now()),
+    };
+    const db = (store as any).db as Database.Database;
+    const before = db.serialize();
+
+    for (const consumeContinuationId of [undefined, unrelated.id]) {
+      await expect(
+        store.transitionVerifier({
+          ...baseRequest,
+          ...(consumeContinuationId ? { consumeContinuationId } : {}),
+        })
+      ).rejects.toThrow(/must consume|cannot consume/);
+      expect(db.serialize()).toEqual(before);
+    }
+    await store.enqueue(
+      storeRequest('sqlite-no-admission-parent', clock.now())
+    );
+    const noAdmissionParent = (await store.claim(
+      'sqlite-worker',
+      clock.now(),
+      100
+    ))!;
+    const noAdmissionRun: AxEventRun = {
+      id: 'sqlite-no-admission-run',
+      deliveryId: noAdmissionParent.id,
+      routeId: noAdmissionParent.routeId,
+      targetId: noAdmissionParent.targetId,
+      instanceKey: noAdmissionParent.instanceKey,
+      claimedBy: noAdmissionParent.claimedBy,
+      fencingToken: noAdmissionParent.fencingToken,
+      status: 'waiting_event',
+      attempt: 1,
+      startedAt: clock.now(),
+    };
+    const beforeNoAdmission = db.serialize();
+    await expect(
+      store.transitionVerifier({
+        ...baseRequest,
+        operationId: 'sqlite-no-admission-operation',
+        childDeliveryId: 'sqlite-no-admission-child',
+        parent: {
+          delivery: {
+            ...noAdmissionParent,
+            status: 'waiting_event',
+            runId: noAdmissionRun.id,
+          },
+          run: noAdmissionRun,
+          expectedFencingToken: noAdmissionParent.fencingToken!,
+        },
+        consumeContinuationId: unrelated.id,
+      })
+    ).rejects.toThrow('cannot consume');
+    expect(db.serialize()).toEqual(beforeNoAdmission);
+    expect(
+      await store.getDelivery(baseRequest.childDeliveryId)
+    ).toBeUndefined();
+    expect(
+      await store.findContinuation(
+        admitted.identityScope,
+        admitted.correlation[0]!,
+        clock.now()
+      )
+    ).toEqual(admitted);
+    expect(
+      await store.findContinuation(
+        unrelated.identityScope,
+        unrelated.correlation[0]!,
+        clock.now()
+      )
+    ).toEqual(unrelated);
+    await store.close();
+  });
+
+  it('exclusively admits a continuation across concurrent SQLite runtimes', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const filename = join(directory, 'continuation-admission-race.sqlite');
+    const firstStore = new AxSQLiteEventStore({
+      filename,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    const secondStore = new AxSQLiteEventStore({
+      filename,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    const continuation: AxEventContinuation = {
+      id: 'sqlite-exclusive-continuation',
+      targetId: 'sqlite-exclusive-target',
+      routeId: 'sqlite-exclusive-start',
+      instanceKey: 'sqlite-exclusive-instance',
+      identityScope: 'anonymous',
+      correlation: [{ kind: 'job', value: 'sqlite-exclusive-job' }],
+      createdAt: Date.now(),
+      metadata: { oneShot: true },
+    };
+    await firstStore.registerContinuation(continuation);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let targetStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      targetStarted = resolve;
+    });
+    const admissions: string[] = [];
+    let targetCalls = 0;
+    const signature = s('trigger?:string -> handled:boolean');
     const program = {
-      getId: () => 'large-output',
+      getId: () => 'sqlite-exclusive-program',
+      getSignature: () => signature,
+      forward: async (_ai: unknown, _input: unknown, options: any) => {
+        targetCalls++;
+        admissions.push(options.eventContext.continuation.id);
+        targetStarted();
+        await gate;
+        return { handled: true };
+      },
+      streamingForward: async function* () {},
+    } as unknown as AxProgrammable<any, any>;
+    const target = eventTarget({
+      id: continuation.targetId,
+      ai: {} as never,
+      program,
+      mapInput: () => ({}),
+      retrySafety: 'idempotent',
+    });
+    const route = eventRoute({
+      id: 'sqlite-exclusive-resume',
+      match: { types: ['sqlite.exclusive.resume'] },
+      action: 'resume',
+      ordering: 'relaxed',
+      correlation: () => continuation.correlation[0]!,
+      target,
+    });
+    const firstRuntime = new AxEventRuntime({
+      store: firstStore,
+      programStateStore: firstStore,
+      coordination: 'multi-worker',
+      workerConcurrency: 1,
+      leaseMs: 500,
+      heartbeatMs: 100,
+      routes: [route],
+    });
+    const secondRuntime = new AxEventRuntime({
+      store: secondStore,
+      programStateStore: secondStore,
+      coordination: 'multi-worker',
+      workerConcurrency: 1,
+      leaseMs: 500,
+      heartbeatMs: 100,
+      routes: [route],
+    });
+    await Promise.all([firstRuntime.start(), secondRuntime.start()]);
+    const first = await firstRuntime.publish({
+      event: {
+        specversion: '1.0',
+        id: 'sqlite-exclusive-1',
+        source: 'test://sqlite-effects',
+        type: 'sqlite.exclusive.resume',
+      },
+      trust: 'authenticated',
+    });
+    const second = await firstRuntime.publish({
+      event: {
+        specversion: '1.0',
+        id: 'sqlite-exclusive-2',
+        source: 'test://sqlite-effects',
+        type: 'sqlite.exclusive.resume',
+      },
+      trust: 'authenticated',
+    });
+    await started;
+    const deliveryIds = [...first.deliveryIds, ...second.deliveryIds];
+    for (let index = 0; index < 100; index++) {
+      const statuses = await Promise.all(
+        deliveryIds.map(
+          async (id) => (await firstStore.getDelivery(id))?.status
+        )
+      );
+      if (statuses.includes('dead_lettered')) break;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    expect(targetCalls).toBe(1);
+    expect(admissions).toEqual([continuation.id]);
+    release();
+    await firstRuntime.waitForIdle(2_000);
+    const statuses = await Promise.all(
+      deliveryIds.map(async (id) => (await firstStore.getDelivery(id))?.status)
+    );
+    expect(statuses.sort()).toEqual(['dead_lettered', 'succeeded']);
+    await Promise.all([
+      firstRuntime.close({ drain: false }),
+      secondRuntime.close({ drain: false }),
+    ]);
+  });
+
+  it('rolls back resume completion when atomic continuation completion fails', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const filename = join(directory, 'atomic-resume-completion.sqlite');
+    const clock = new AxManualEventClock(1_000);
+    const store = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    const continuation: AxEventContinuation = {
+      id: 'sqlite-atomic-resume-continuation',
+      targetId: 'sqlite-atomic-resume-target',
+      routeId: 'sqlite-atomic-resume-start',
+      instanceKey: 'sqlite-atomic-resume-instance',
+      identityScope: 'anonymous',
+      correlation: [{ kind: 'job', value: 'sqlite-atomic-resume-job' }],
+      createdAt: clock.now(),
+    };
+    await store.registerContinuation(continuation);
+    const db = (store as unknown as { db: Database.Database }).db;
+    db.exec(`
+      CREATE TRIGGER fail_atomic_resume_completion
+      BEFORE UPDATE OF completed_at ON event_continuations
+      WHEN NEW.id='sqlite-atomic-resume-continuation'
+      BEGIN
+        SELECT RAISE(ABORT, 'injected atomic continuation failure');
+      END;
+    `);
+    let targetCalls = 0;
+    const signature = s('trigger?:string -> handled:boolean');
+    const program = {
+      getId: () => 'sqlite-atomic-resume-program',
       getSignature: () => signature,
       forward: async () => {
-        calls++;
-        return { value: 'x'.repeat(2_000) };
+        targetCalls++;
+        return { handled: true };
       },
       streamingForward: async function* () {},
     } as unknown as AxProgrammable<any, any>;
     const runtime = new AxEventRuntime({
+      clock,
       store,
       programStateStore: store,
       coordination: 'multi-worker',
+      workerConcurrency: 1,
+      leaseMs: 100,
+      heartbeatMs: 25,
       routes: [
         eventRoute({
-          id: 'large-output-route',
-          match: { types: ['large.output'] },
-          action: 'wake',
+          id: 'sqlite-atomic-resume',
+          match: { types: ['sqlite.atomic.resume'] },
+          action: 'resume',
+          correlation: () => continuation.correlation[0]!,
           target: eventTarget({
-            id: 'large-output-target',
+            id: continuation.targetId,
+            ai: {} as never,
+            program,
+            mapInput: () => ({}),
+            retrySafety: 'idempotent',
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    const receipt = await runtime.publish({
+      event: {
+        specversion: '1.0',
+        id: 'sqlite-atomic-resume-1',
+        source: 'test://sqlite-effects',
+        type: 'sqlite.atomic.resume',
+      },
+      trust: 'authenticated',
+    });
+    clock.advanceBy(25);
+    let failedDelivery = await store.getDelivery(receipt.deliveryIds[0]!);
+    for (let index = 0; index < 100; index++) {
+      failedDelivery = await store.getDelivery(receipt.deliveryIds[0]!);
+      const run = failedDelivery?.runId
+        ? await store.getRun(failedDelivery.runId)
+        : undefined;
+      if (failedDelivery?.status === 'running' && run?.status === 'succeeded') {
+        break;
+      }
+      await Promise.resolve();
+    }
+    expect(failedDelivery?.status).toBe('running');
+    expect(targetCalls).toBe(1);
+    await expect(
+      store.findContinuation(
+        continuation.identityScope,
+        continuation.correlation[0]!,
+        clock.now()
+      )
+    ).resolves.toEqual(continuation);
+
+    db.exec('DROP TRIGGER fail_atomic_resume_completion');
+    clock.advanceBy(101);
+    for (let index = 0; index < 20; index++) {
+      if (
+        (await store.getDelivery(receipt.deliveryIds[0]!))?.status ===
+        'succeeded'
+      ) {
+        break;
+      }
+      clock.advanceBy(25);
+      await Promise.resolve();
+    }
+    expect(targetCalls).toBe(1);
+    expect((await store.getDelivery(receipt.deliveryIds[0]!))?.status).toBe(
+      'succeeded'
+    );
+    await expect(
+      store.findContinuation(
+        continuation.identityScope,
+        continuation.correlation[0]!,
+        clock.now()
+      )
+    ).resolves.toBeUndefined();
+    await runtime.close({ drain: false });
+  });
+
+  it('recovers the persisted continuation admission after correlation reuse', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const filename = join(directory, 'continuation-admission.sqlite');
+    const clock = new AxManualEventClock(1_000);
+    const initial = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    const receipt = await initial.enqueue({
+      ingress: {
+        event: {
+          specversion: '1.0',
+          id: 'resume-recovery',
+          source: 'test://sqlite-effects',
+          type: 'resume.recovery',
+        },
+        identity: {},
+        trust: 'authenticated',
+      },
+      deliveries: [
+        {
+          routeId: 'resume-route',
+          action: 'resume',
+          targetId: 'resume-target',
+          instanceKey: 'delivery-instance',
+          sizeBytes: 128,
+          retrySafety: 'idempotent',
+          ordering: 'strict',
+        },
+      ],
+      acceptedAt: clock.now(),
+      publishTimeoutMs: 1_000,
+    });
+    const claimed = (await initial.claim('worker-a', clock.now(), 100))!;
+    const admitted: AxEventContinuation = {
+      id: 'admitted-continuation',
+      targetId: 'resume-target',
+      routeId: 'start-route',
+      instanceKey: 'original-instance',
+      identityScope: 'anonymous',
+      correlation: [{ kind: 'job', value: 'job-42' }],
+      createdAt: clock.now(),
+      expiresAt: clock.now() + 50,
+      metadata: { admission: 'original' },
+    };
+    await initial.registerContinuation(admitted);
+    const exclusiveAdmission = await initial.admitContinuation(
+      claimed.id,
+      claimed.claimedBy!,
+      claimed.fencingToken!,
+      admitted.identityScope,
+      admitted.correlation[0]!,
+      clock.now()
+    );
+    expect(exclusiveAdmission).toEqual(admitted);
+    const admittedClaim = (await initial.getDelivery(claimed.id))!;
+    const run: AxEventRun = {
+      id: 'resume-recovery-run',
+      deliveryId: claimed.id,
+      routeId: claimed.routeId,
+      targetId: admitted.targetId,
+      instanceKey: admitted.instanceKey,
+      admittedContinuation: admitted,
+      claimedBy: claimed.claimedBy,
+      fencingToken: claimed.fencingToken,
+      status: 'succeeded',
+      attempt: 1,
+      startedAt: clock.now(),
+      finishedAt: clock.now(),
+      output: { handled: true },
+    };
+    await initial.saveDelivery({
+      ...admittedClaim,
+      status: 'running',
+      attempt: 1,
+      runId: run.id,
+      invocationStarted: true,
+    });
+    await initial.saveRun(run);
+    await initial.close();
+
+    clock.advanceBy(51);
+    const restarted = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    await expect(
+      restarted.findContinuation(
+        admitted.identityScope,
+        admitted.correlation[0]!,
+        clock.now()
+      )
+    ).resolves.toBeUndefined();
+    const replacement: AxEventContinuation = {
+      id: 'replacement-continuation',
+      targetId: admitted.targetId,
+      routeId: 'replacement-route',
+      instanceKey: 'replacement-instance',
+      identityScope: admitted.identityScope,
+      correlation: admitted.correlation,
+      createdAt: clock.now(),
+      metadata: { admission: 'replacement' },
+    };
+    await restarted.registerContinuation(replacement);
+    clock.advanceBy(50);
+
+    let targetCalls = 0;
+    let sinkContinuation: Readonly<AxEventContinuation> | undefined;
+    let sinkInstanceKey: string | undefined;
+    const signature = s('trigger?:string -> handled:boolean');
+    const program = {
+      getId: () => 'resume-recovery-target',
+      getSignature: () => signature,
+      forward: async () => {
+        targetCalls++;
+        return { handled: false };
+      },
+      streamingForward: async function* () {},
+    } as unknown as AxProgrammable<any, any>;
+    const runtime = new AxEventRuntime({
+      clock,
+      store: restarted,
+      programStateStore: restarted,
+      coordination: 'multi-worker',
+      workerConcurrency: 1,
+      leaseMs: 100,
+      heartbeatMs: 25,
+      routes: [
+        eventRoute({
+          id: 'resume-route',
+          match: { types: ['resume.recovery'] },
+          action: 'resume',
+          correlation: () => admitted.correlation[0]!,
+          target: eventTarget({
+            id: admitted.targetId,
             ai: {} as never,
             program,
             mapInput: () => ({}),
             retrySafety: 'idempotent',
             sinks: [
               {
-                id: 'must-not-run',
+                id: 'resume-recovery-sink',
+                write: (_output, context) => {
+                  sinkContinuation = context.eventContext.continuation;
+                  sinkInstanceKey = context.eventContext.instanceKey;
+                },
+              },
+            ],
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    for (let index = 0; index < 100; index++) {
+      if ((await restarted.getDelivery(claimed.id))?.status === 'succeeded') {
+        break;
+      }
+      await Promise.resolve();
+    }
+
+    expect(targetCalls).toBe(0);
+    expect(sinkContinuation).toEqual(admitted);
+    expect(sinkInstanceKey).toBe(admitted.instanceKey);
+    expect(await restarted.getDelivery(receipt.deliveryIds[0]!)).toEqual(
+      expect.objectContaining({
+        status: 'succeeded',
+        fencingToken: 2,
+        runId: run.id,
+      })
+    );
+    await expect(
+      restarted.findContinuation(
+        replacement.identityScope,
+        replacement.correlation[0]!,
+        clock.now()
+      )
+    ).resolves.toEqual(replacement);
+    await runtime.close({ drain: false });
+  });
+
+  it('quarantines an expired staging crash without replaying the completed target', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const filename = join(directory, 'payload-staging-crash.sqlite');
+    const clock = new AxManualEventClock(1_000);
+    const initial = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    await initial.enqueue(storeRequest('payload-staging-crash', clock.now()));
+    const claimed = (await initial.claim('worker-a', clock.now(), 100))!;
+    const run: AxEventRun = {
+      id: 'payload-staging-crash-run',
+      deliveryId: claimed.id,
+      routeId: claimed.routeId,
+      targetId: claimed.targetId,
+      instanceKey: claimed.instanceKey,
+      claimedBy: claimed.claimedBy,
+      fencingToken: claimed.fencingToken,
+      status: 'running',
+      attempt: 1,
+      startedAt: clock.now(),
+    };
+    await initial.saveDelivery({
+      ...claimed,
+      status: 'running',
+      attempt: 1,
+      runId: run.id,
+      invocationStarted: true,
+    });
+    await initial.saveRun(run);
+    await initial.close();
+
+    const stageId = 'event-payload-stage:staging-crash';
+    const seeded = new Database(filename);
+    seeded
+      .prepare(
+        `INSERT INTO event_payload_stages(
+           stage_id, run_id, delivery_id, fencing_token, reference,
+           size_bytes, expires_at, state, created_at, updated_at
+         ) VALUES(?,?,?,?,?,?,?,?,?,?)`
+      )
+      .run(
+        stageId,
+        run.id,
+        run.deliveryId,
+        run.fencingToken,
+        null,
+        128,
+        clock.now() + 100,
+        'staging',
+        clock.now(),
+        clock.now()
+      );
+    seeded.close();
+
+    const aborted: string[] = [];
+    const restarted = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+      payloadStaging,
+      payloadStore: {
+        stage: async () => ({ reference: 'payload://unused' }),
+        commit: async () => {
+          throw new Error('staging must not commit');
+        },
+        abort: async (id) => {
+          aborted.push(id);
+        },
+        put: async () => 'payload://legacy-unused',
+        get: async () => undefined,
+        delete: async () => {},
+      },
+    });
+    let targetCalls = 0;
+    let sinkCalls = 0;
+    const signature = s('trigger?:string -> handled:boolean');
+    const program = {
+      getId: () => 'payload-staging-crash-target',
+      getSignature: () => signature,
+      forward: async () => {
+        targetCalls++;
+        return { handled: true };
+      },
+      streamingForward: async function* () {},
+    } as unknown as AxProgrammable<any, any>;
+    const runtime = new AxEventRuntime({
+      clock,
+      store: restarted,
+      programStateStore: restarted,
+      coordination: 'multi-worker',
+      workerConcurrency: 1,
+      leaseMs: 100,
+      heartbeatMs: 25,
+      routes: [
+        eventRoute({
+          id: 'route',
+          match: { types: ['effect.test'] },
+          action: 'wake',
+          target: eventTarget({
+            id: 'target',
+            ai: {} as never,
+            program,
+            mapInput: () => ({}),
+            retrySafety: 'idempotent',
+            sinks: [
+              {
+                id: 'staging-crash-sink',
                 write: () => {
                   sinkCalls++;
                 },
@@ -168,435 +3183,479 @@ describe('AxSQLiteEventStore', () => {
       ],
     });
     await runtime.start();
-    const receipt = await runtime.publish({
-      event: {
-        specversion: '1.0',
-        id: 'large-1',
-        source: 'test://sqlite',
-        type: 'large.output',
-      },
-      trust: 'trusted',
-    });
-    await runtime.waitForIdle();
-    const delivery = await store.getDelivery(receipt.deliveryIds[0]!);
-    expect(delivery?.status).toBe('output_persistence_failed');
-    expect(calls).toBe(1);
-    expect(sinkCalls).toBe(0);
-    await runtime.close({ drain: false });
-  });
-
-  it('persists bounded huge Unicode verifier failures and errors', async () => {
-    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
-    directories.push(directory);
-    const store = new AxSQLiteEventStore({
-      filename: join(directory, 'bounded-verifier.sqlite'),
-      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
-      maxInlinePayloadBytes: 8_192,
-    });
-    const huge = '🔥'.repeat(20_000);
-    const runIds = new Map<string, string>();
-    const signature = s('trigger?:string -> resultText:string');
-    const program = {
-      getId: () => 'bounded-verifier-output',
-      getSignature: () => signature,
-      forward: async () => ({ resultText: 'small' }),
-      streamingForward: async function* () {},
-    } as unknown as AxProgrammable<any, any>;
-    const runtime = new AxEventRuntime({
-      store,
-      workerConcurrency: 1,
-      routes: [
-        eventRoute({
-          id: 'bounded-verifier-route',
-          match: { types: ['bounded.verifier'] },
-          action: 'wake',
-          target: eventTarget({
-            id: 'bounded-verifier-target',
-            ai: {} as never,
-            program,
-            mapInput: () => ({}),
-            retrySafety: 'idempotent',
-            verifier: {
-              id: 'bounded-verifier',
-              maxRuns: 1,
-              fingerprint: () => huge,
-              verify: (_output, context) => {
-                runIds.set(
-                  context.eventContext.ingress.event.id,
-                  context.run.id
-                );
-                if (context.eventContext.ingress.event.id === 'huge-error') {
-                  throw new Error(huge);
-                }
-                return {
-                  status: 'fail',
-                  failure: { code: huge, evidence: huge },
-                };
-              },
-            },
-          }),
-        }),
-      ],
-    });
-    await runtime.start();
-    for (const id of ['huge-failure', 'huge-error']) {
-      await runtime.publish({
-        event: {
-          specversion: '1.0',
-          id,
-          source: 'test://sqlite',
-          type: 'bounded.verifier',
-        },
-      });
+    for (let index = 0; index < 10; index++) await Promise.resolve();
+    expect(targetCalls).toBe(0);
+    clock.advanceBy(101);
+    for (let index = 0; index < 100; index++) {
+      if (
+        (await restarted.getDelivery(claimed.id))?.status ===
+        'output_persistence_failed'
+      ) {
+        break;
+      }
+      if (index === 20) clock.advanceBy(1);
+      await Promise.resolve();
     }
-    await runtime.waitForIdle();
-    const [failure, error] = await Promise.all([
-      runtime.getRun(runIds.get('huge-failure')!),
-      runtime.getRun(runIds.get('huge-error')!),
-    ]);
-    expect(failure?.status).toBe('verification_failed');
-    expect(
-      Buffer.byteLength(failure!.verification!.failure!.code)
-    ).toBeLessThanOrEqual(256);
-    expect(
-      Buffer.byteLength(
-        JSON.stringify(failure!.verification!.failure!.evidence)
-      )
-    ).toBeLessThanOrEqual(4_096);
-    expect(error?.status).toBe('verification_failed');
-    expect(Buffer.byteLength(error!.verification!.error!)).toBeLessThanOrEqual(
-      1_024
+
+    expect(targetCalls).toBe(0);
+    expect(sinkCalls).toBe(0);
+    expect(aborted).toEqual([stageId]);
+    expect(await restarted.getDelivery(claimed.id)).toEqual(
+      expect.objectContaining({
+        status: 'output_persistence_failed',
+        fencingToken: 1,
+        runId: run.id,
+        invocationStarted: true,
+      })
     );
     await runtime.close({ drain: false });
+    const inspected = new Database(filename, { readonly: true });
+    expect(
+      inspected
+        .prepare('SELECT COUNT(*) AS count FROM event_payload_stages')
+        .get()
+    ).toEqual({ count: 0 });
+    inspected.close();
   });
 
-  it('does not install a verifier child when cancel wins a delayed SQLite transition', async () => {
+  it('isolates malformed expired payload rows from unrelated recovery and close', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
     directories.push(directory);
-    const backing = new AxSQLiteEventStore({
-      filename: join(directory, 'cancel-transition.sqlite'),
+    const filename = join(directory, 'payload-malformed-recovery.sqlite');
+    const clock = new AxManualEventClock(1_000);
+    const initial = new AxSQLiteEventStore({
+      filename,
+      clock,
       retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
     });
-    let releaseTransition!: () => void;
-    const transitionGate = new Promise<void>((resolve) => {
-      releaseTransition = resolve;
-    });
-    let transitionStarted!: () => void;
-    const transitionStart = new Promise<void>((resolve) => {
-      transitionStarted = resolve;
-    });
-    let runId = '';
-    let targetCalls = 0;
-    const store = new Proxy(backing, {
-      get(target, property, receiver) {
-        if (property === 'transitionVerifier') {
-          return async (
-            request: Parameters<typeof target.transitionVerifier>[0],
-            signal?: AbortSignal
-          ) => {
-            transitionStarted();
-            await transitionGate;
-            return target.transitionVerifier(request, signal);
-          };
-        }
-        const value = Reflect.get(target, property, receiver);
-        return typeof value === 'function' ? value.bind(target) : value;
-      },
-    });
-    const signature = s('goal:string, feedback?:json -> answer:string');
-    const program = {
-      getId: () => 'cancel-transition-program',
-      getSignature: () => signature,
-      forward: async () => {
-        targetCalls++;
-        return { answer: 'fix the tests' };
-      },
-      streamingForward: async function* () {},
-    } as unknown as AxProgrammable<any, any>;
-    const runtime = new AxEventRuntime({
-      store,
-      workerConcurrency: 1,
-      routes: [
-        eventRoute({
-          id: 'cancel-transition-route',
-          match: { types: ['goal.run'] },
-          action: 'wake',
-          target: eventTarget({
-            id: 'goal',
-            ai: {} as never,
-            program,
-            mapInput: () => ({ goal: 'fix the tests' }),
-            retrySafety: 'idempotent',
-            verifier: {
-              id: 'cancel-transition',
-              verify: (_output, context) => {
-                runId = context.run.id;
-                return {
-                  status: 'fail',
-                  failure: { code: 'retry' },
-                };
-              },
-            },
-          }),
-        }),
-      ],
-    });
-    await runtime.start();
-    const receipt = await runtime.publish({
-      event: {
-        specversion: '1.0',
-        id: 'cancel-sqlite-transition',
-        source: 'app://tests',
-        type: 'goal.run',
-        data: { goal: 'fix the tests' },
-      },
-      identity: { tenantId: 'tenant-1' },
-      trust: 'authenticated',
-    });
-    await transitionStart;
-    expect(runtime.cancelRun(runId, 'host abort')).toBe(true);
-    releaseTransition();
-    await runtime.waitForIdle();
-    expect((await runtime.getRun(runId))?.status).toBe('cancelled');
-    expect((await backing.getDelivery(receipt.deliveryIds[0]!))?.status).toBe(
-      'cancelled'
+    const malformedReceipt = await initial.enqueue(
+      storeRequest('payload-malformed-owner', clock.now())
     );
-    expect(targetCalls).toBe(1);
-    await runtime.close({ drain: false });
+    const unrelatedReceipt = await initial.enqueue(
+      storeRequest('payload-malformed-unrelated', clock.now())
+    );
+    const claimed = (await initial.claim('worker-a', clock.now(), 100))!;
+    const run: AxEventRun = {
+      id: 'payload-malformed-run',
+      deliveryId: claimed.id,
+      routeId: claimed.routeId,
+      instanceKey: claimed.instanceKey,
+      claimedBy: claimed.claimedBy,
+      fencingToken: claimed.fencingToken,
+      status: 'running',
+      attempt: 1,
+      startedAt: clock.now(),
+    };
+    await initial.saveDelivery({
+      ...claimed,
+      status: 'running',
+      attempt: 1,
+      runId: run.id,
+      invocationStarted: true,
+    });
+    await initial.saveRun(run);
+    await initial.close();
+
+    const stageId = 'event-payload-stage:malformed';
+    const seeded = new Database(filename);
+    seeded
+      .prepare('UPDATE event_runs SET run_json=? WHERE id=?')
+      .run('{malformed', run.id);
+    seeded
+      .prepare(
+        `INSERT INTO event_payload_stages(
+           stage_id, run_id, delivery_id, fencing_token, reference,
+           size_bytes, expires_at, state, created_at, updated_at
+         ) VALUES(?,?,?,?,?,?,?,?,?,?)`
+      )
+      .run(
+        stageId,
+        run.id,
+        run.deliveryId,
+        run.fencingToken,
+        null,
+        128,
+        clock.now() - 1,
+        'staging',
+        clock.now() - 10,
+        clock.now() - 10
+      );
+    seeded.close();
+
+    const aborted: string[] = [];
+    const restarted = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+      payloadStaging,
+      payloadStore: {
+        stage: async () => ({ reference: 'payload://unused' }),
+        commit: async () => {},
+        abort: async (id) => {
+          aborted.push(id);
+        },
+        put: async () => 'payload://legacy-unused',
+        get: async () => undefined,
+        delete: async () => {},
+      },
+    });
+    await expect(
+      restarted.getRun('unrelated-missing-run')
+    ).resolves.toBeUndefined();
+    const unrelated = await restarted.claim('worker-b', clock.now(), 100);
+    expect(unrelated?.id).toBe(unrelatedReceipt.deliveryIds[0]);
+    await restarted.saveDelivery({ ...unrelated!, status: 'succeeded' });
+    expect(
+      await restarted.getDelivery(malformedReceipt.deliveryIds[0]!)
+    ).toEqual(
+      expect.objectContaining({
+        status: 'output_persistence_failed',
+        runId: run.id,
+      })
+    );
+    expect(aborted).toEqual([stageId]);
+    await expect(restarted.close()).resolves.toBeUndefined();
   });
 
-  it('journals immutable transitions across repeated commit-ack loss', async () => {
+  it('quarantines failed payload recovery without poisoning unrelated claims', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
     directories.push(directory);
+    const filename = join(directory, 'payload-recovery-failure.sqlite');
+    const clock = new AxManualEventClock(1_000);
+    const initial = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    const blockedReceipt = await initial.enqueue(
+      storeRequest('payload-recovery-blocked', clock.now())
+    );
+    const blocked = (await initial.claim('worker-a', clock.now(), 100))!;
+    const unrelatedReceipt = await initial.enqueue(
+      storeRequest('payload-recovery-unrelated', clock.now())
+    );
+    await initial.close();
+
+    const run: AxEventRun = {
+      id: 'payload-recovery-blocked-run',
+      deliveryId: blocked.id,
+      routeId: blocked.routeId,
+      targetId: blocked.targetId,
+      instanceKey: blocked.instanceKey,
+      claimedBy: blocked.claimedBy,
+      status: 'succeeded',
+      attempt: 1,
+      startedAt: clock.now(),
+      finishedAt: clock.now(),
+      outputRef: 'payload://recovery-blocked',
+      fencingToken: blocked.fencingToken,
+    };
+    const seeded = new Database(filename);
+    seeded
+      .prepare(
+        `INSERT INTO event_runs(id, delivery_id, run_json, updated_at, finished_at)
+         VALUES(?,?,?,?,?)`
+      )
+      .run(
+        run.id,
+        run.deliveryId,
+        JSON.stringify(run),
+        clock.now(),
+        clock.now()
+      );
+    seeded
+      .prepare(
+        `INSERT INTO event_payload_stages(
+           stage_id, run_id, delivery_id, fencing_token, reference,
+           size_bytes, expires_at, state, created_at, updated_at
+         ) VALUES(?,?,?,?,?,?,?,?,?,?)`
+      )
+      .run(
+        'event-payload-stage:recovery-blocked',
+        run.id,
+        run.deliveryId,
+        run.fencingToken,
+        run.outputRef,
+        128,
+        clock.now() + 1_000,
+        'commit_pending',
+        clock.now(),
+        clock.now()
+      );
+    seeded.close();
+    clock.advanceBy(101);
+
+    let commitCalls = 0;
+    const restarted = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+      payloadStaging,
+      payloadStore: {
+        stage: async () => ({ reference: 'payload://unused' }),
+        commit: async () => {
+          commitCalls++;
+          throw new Error('payload provider unavailable');
+        },
+        abort: async () => {},
+        put: async () => 'payload://legacy-unused',
+        get: async () => {
+          throw new Error('uncommitted payload must not be read');
+        },
+        delete: async () => {},
+      },
+    });
+    await expect(restarted.getRun(run.id)).resolves.toEqual(
+      expect.objectContaining({
+        id: run.id,
+        status: 'succeeded',
+        outputRef: run.outputRef,
+      })
+    );
+    const claimed = await restarted.claim('worker-b', clock.now(), 100);
+    expect(claimed?.id).toBe(unrelatedReceipt.deliveryIds[0]);
+    expect(claimed?.id).not.toBe(blockedReceipt.deliveryIds[0]);
+    expect(commitCalls).toBeGreaterThanOrEqual(2);
+    await expect(restarted.close()).resolves.toBeUndefined();
+  });
+
+  it('releases committed staged ownership when result retention expires', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const filename = join(directory, 'payload-retention.sqlite');
+    const clock = new AxManualEventClock(1_000);
     const retention = {
       ...AX_SQLITE_EVENT_STANDARD_RETENTION,
-      eventAndResultMs: 1,
+      eventAndResultMs: 100,
     };
-    const filename = join(directory, 'transition-journal.sqlite');
-    let store = new AxSQLiteEventStore({
+    const values = new Map<string, unknown>();
+    const aborted: string[] = [];
+    const payloadStore: AxEventStagedPayloadStore = {
+      stage: async ({ stageId, value }) => {
+        values.set(stageId, value);
+        return { reference: `payload://${stageId}` };
+      },
+      commit: async () => {},
+      abort: async (stageId) => {
+        aborted.push(stageId);
+        values.delete(stageId);
+      },
+      put: async () => 'payload://legacy-unused',
+      get: async (reference) => values.get(reference.replace('payload://', '')),
+      delete: async () => {},
+    };
+    const initial = new AxSQLiteEventStore({
       filename,
+      clock,
       retention,
+      maxInlinePayloadBytes: 1,
+      payloadStaging,
+      payloadStore,
     });
-    const transition = store.transitionVerifier.bind(store);
-    const confirmTransition = store.confirmVerifierTransition.bind(store);
-    vi.spyOn(store, 'confirmVerifierTransition')
-      .mockResolvedValueOnce(undefined)
-      .mockImplementation(confirmTransition);
-    vi.spyOn(store, 'transitionVerifier').mockImplementation(
-      async (request) => {
-        await transition(request);
-        throw new Error('commit acknowledgement lost');
-      }
-    );
-    let attempts = 0;
-    const sensitive = 'sensitive-journal-payload-do-not-retain';
-    const verify = vi.fn(() =>
-      attempts++ === 0
-        ? {
-            status: 'fail' as const,
-            failure: { code: 'retry_once' },
-          }
-        : { status: 'pass' as const }
-    );
-    const signature = s('trigger?:string -> resultText:string');
-    const program = {
-      getId: () => 'journal-verifier-output',
-      getSignature: () => signature,
-      forward: async () => ({ resultText: sensitive }),
-      streamingForward: async function* () {},
-    } as unknown as AxProgrammable<any, any>;
-    const runtime = new AxEventRuntime({
-      store,
-      workerConcurrency: 1,
-      routes: [
-        eventRoute({
-          id: 'journal-verifier-route',
-          match: { types: ['journal.verifier'] },
-          action: 'wake',
-          target: eventTarget({
-            id: 'journal-verifier-target',
-            ai: {} as never,
-            program,
-            mapInput: () => ({}),
-            retrySafety: 'idempotent',
-            verifier: { id: 'journal-verifier', verify },
-          }),
-        }),
-      ],
+    await initial.enqueue(storeRequest('payload-retention', clock.now()));
+    const claimed = (await initial.claim('worker-a', clock.now(), 1_000))!;
+    const run: AxEventRun = {
+      id: 'payload-retention-run',
+      deliveryId: claimed.id,
+      routeId: claimed.routeId,
+      instanceKey: claimed.instanceKey,
+      claimedBy: claimed.claimedBy,
+      status: 'succeeded',
+      attempt: 1,
+      startedAt: clock.now(),
+      finishedAt: clock.now(),
+      output: { retained: true },
+      fencingToken: claimed.fencingToken,
+    };
+    await initial.saveRun(run);
+    await initial.saveDelivery({
+      ...claimed,
+      status: 'succeeded',
+      runId: run.id,
     });
-    await runtime.start();
-    await runtime.publish({
-      event: {
-        specversion: '1.0',
-        id: 'journal-event',
-        source: 'test://sqlite',
-        type: 'journal.verifier',
-        data: { sensitive },
-      },
-    });
-    await runtime.waitForIdle();
-    expect(verify).toHaveBeenCalledTimes(2);
-    expect(store.transitionVerifier).toHaveBeenCalledTimes(2);
-    const request = (store.transitionVerifier as any).mock.calls[0]![0];
-    expect((await confirmTransition(request))?.deliveryIds).toEqual([
-      request.childDeliveryId,
-    ]);
-    await expect(
-      transition({
-        ...request,
-        child: {
-          ...request.child,
-          acceptedAt: request.child.acceptedAt + 1,
-        },
-      })
-    ).rejects.toThrow('already owned');
-    await expect(
-      confirmTransition({
-        ...request,
-        parent: {
-          ...request.parent,
-          expectedFencingToken: request.parent.expectedFencingToken + 1,
-        },
-      })
-    ).rejects.toThrow('already owned');
-    const liveDb = (store as any).db;
-    const compactJournal = liveDb
-      .prepare(
-        `SELECT request_commitment, receipt_json, child_delivery_id,
-                child_commitment
-         FROM event_verifier_transitions WHERE operation_id=?`
-      )
-      .get(request.operationId);
-    expect(JSON.stringify(compactJournal)).not.toContain(sensitive);
+    await initial.close();
+    clock.advanceBy(101);
 
-    const receipt = await confirmTransition(request);
-    const persistedChild = await store.getDelivery(request.childDeliveryId);
-    liveDb
-      .prepare('UPDATE event_deliveries SET route_id=? WHERE id=?')
-      .run('corrupted-route', request.childDeliveryId);
-    await expect(confirmTransition(request)).rejects.toThrow(
-      'child is corrupt'
-    );
-    liveDb
-      .prepare('UPDATE event_deliveries SET route_id=? WHERE id=?')
-      .run(persistedChild!.routeId, request.childDeliveryId);
-    const legacyRecord = {
-      request,
-      receipt,
-      child: persistedChild,
-    };
-    const mismatchedRequest = {
-      ...request,
-      operationId: `${request.operationId}:mismatched-child`,
-      childDeliveryId: `${request.childDeliveryId}:mismatched-child`,
-    };
-    const mismatchedRecord = {
-      request: mismatchedRequest,
-      receipt: {
-        ...receipt,
-        deliveryIds: [mismatchedRequest.childDeliveryId],
-      },
-      child: {
-        ...persistedChild!,
-        id: mismatchedRequest.childDeliveryId,
-        routeId: 'legacy-mismatched-route',
-      },
-    };
-    liveDb.exec(`
-      DROP TABLE event_verifier_transitions;
-      DROP TABLE event_store_metadata;
-      CREATE TABLE event_verifier_transitions (
-        operation_id TEXT PRIMARY KEY,
-        request_json TEXT NOT NULL,
-        record_json TEXT NOT NULL,
-        created_at INTEGER NOT NULL
-      );
-      PRAGMA user_version = 2;
-    `);
-    const insertLegacy = liveDb.prepare(
-      `INSERT INTO event_verifier_transitions
-         (operation_id, request_json, record_json, created_at)
-         VALUES(?,?,?,?)`
-    );
-    insertLegacy.run(
-      request.operationId,
-      axEventCanonicalJson(request),
-      JSON.stringify(legacyRecord),
-      Date.now()
-    );
-    insertLegacy.run(
-      mismatchedRequest.operationId,
-      axEventCanonicalJson(mismatchedRequest),
-      JSON.stringify(mismatchedRecord),
-      Date.now()
-    );
-    await runtime.close({ drain: false });
-
-    await new Promise((resolve) => setTimeout(resolve, 5));
-    store = new AxSQLiteEventStore({
-      filename: join(directory, 'transition-journal.sqlite'),
+    const restarted = new AxSQLiteEventStore({
+      filename,
+      clock,
       retention,
+      maxInlinePayloadBytes: 1,
+      payloadStaging,
+      payloadStore,
     });
+    const retainedRun = await restarted.getRun(run.id);
+    expect(retainedRun).not.toHaveProperty('output');
+    expect(retainedRun).not.toHaveProperty('outputRef');
+    expect(aborted).toHaveLength(1);
+    const db = new Database(filename, { readonly: true });
     expect(
-      (await store.confirmVerifierTransition(request))?.deliveryIds
-    ).toEqual([request.childDeliveryId]);
-    await expect(
-      store.confirmVerifierTransition(mismatchedRequest)
-    ).rejects.toThrow('already owned');
-    const db = (store as any).db;
-    const retained = db
-      .prepare(
-        `SELECT request_commitment, receipt_json, child_delivery_id,
-                child_commitment
-         FROM event_verifier_transitions WHERE operation_id=?`
-      )
-      .get(request.operationId);
-    expect(JSON.stringify(retained)).not.toContain(sensitive);
-    expect(
-      JSON.stringify(
-        db.prepare('SELECT ingress_json FROM event_deliveries').all()
-      )
-    ).not.toContain(sensitive);
-    expect(
-      JSON.stringify(db.prepare('SELECT run_json FROM event_runs').all())
-    ).not.toContain(sensitive);
+      db.prepare('SELECT COUNT(*) AS count FROM event_payload_stages').get()
+    ).toEqual({ count: 0 });
+    db.close();
+    await restarted.close();
+  });
 
-    db.exec(`
-      CREATE TABLE migration_crash_sentinel(value TEXT NOT NULL);
-      INSERT INTO migration_crash_sentinel(value)
-      VALUES('${sensitive}');
-      DROP TABLE migration_crash_sentinel;
-      INSERT OR REPLACE INTO event_store_metadata(metadata_key, metadata_value)
-      VALUES('verifier-v2-cleanup-pending', '1');
-    `);
-    expect(
-      readFileSync(`${filename}-wal`).includes(Buffer.from(sensitive))
-    ).toBe(true);
-    const cleanupStore = new AxSQLiteEventStore({ filename, retention });
-    expect(
-      (await cleanupStore.confirmVerifierTransition(request))?.deliveryIds
-    ).toEqual([request.childDeliveryId]);
-    await cleanupStore.close();
-    const row = db
-      .prepare(
-        'SELECT receipt_json FROM event_verifier_transitions WHERE operation_id=?'
-      )
-      .get(request.operationId);
-    const corrupted = JSON.parse(row.receipt_json);
-    corrupted.deliveryIds = ['corrupted-child'];
-    db.prepare(
-      'UPDATE event_verifier_transitions SET receipt_json=? WHERE operation_id=?'
-    ).run(JSON.stringify(corrupted), request.operationId);
-    await expect(store.confirmVerifierTransition(request)).rejects.toThrow(
-      'already owned'
+  it('fails closed before fencing tokens leave the safe integer range', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const filename = join(directory, 'fencing-token-limit.sqlite');
+    const clock = new AxManualEventClock(1_000);
+    const initial = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    const receipt = await initial.enqueue(
+      storeRequest('fencing-token-limit', clock.now())
+    );
+    await initial.close();
+
+    const seeded = new Database(filename);
+    seeded
+      .prepare('UPDATE event_deliveries SET fencing_token=? WHERE id=?')
+      .run(Number.MAX_SAFE_INTEGER - 1, receipt.deliveryIds[0]);
+    seeded.close();
+
+    const store = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    const lastSafeClaim = await store.claim('worker-a', clock.now(), 100);
+    expect(lastSafeClaim?.fencingToken).toBe(Number.MAX_SAFE_INTEGER);
+    clock.advanceBy(101);
+    await expect(store.claim('worker-b', clock.now(), 100)).rejects.toThrow(
+      'Fencing token exhausted'
     );
     await store.close();
-    for (const entry of readdirSync(directory)) {
-      expect(
-        readFileSync(join(directory, entry)).includes(Buffer.from(sensitive))
-      ).toBe(false);
-    }
+
+    const terminal = new Database(filename);
+    terminal
+      .prepare(
+        `UPDATE event_deliveries
+         SET status='succeeded', claimed_by=NULL, lease_expires_at=NULL
+         WHERE id=?`
+      )
+      .run(receipt.deliveryIds[0]);
+    terminal.close();
+    const redrive = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    await expect(
+      redrive.redriveDelivery(receipt.deliveryIds[0]!, clock.now())
+    ).rejects.toThrow('Fencing token exhausted');
+    await redrive.close();
+
+    const unsafe = new Database(filename);
+    unsafe
+      .prepare(
+        `UPDATE event_deliveries
+         SET status='queued', fencing_token=?
+         WHERE id=?`
+      )
+      .run(BigInt(Number.MAX_SAFE_INTEGER) + 1n, receipt.deliveryIds[0]);
+    unsafe.close();
+    const rejected = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    await expect(rejected.claim('worker-c', clock.now(), 100)).rejects.toThrow(
+      'Unsafe fencing token'
+    );
+    await rejected.close();
   });
+
+  it.each(['rejection', 'timeout'] as const)(
+    'records staged payload %s without dispatching sinks or rerunning',
+    async (failureMode) => {
+      const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+      directories.push(directory);
+      const aborted: string[] = [];
+      const store = new AxSQLiteEventStore({
+        filename: join(directory, `runtime-${failureMode}.sqlite`),
+        retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+        maxInlinePayloadBytes: 512,
+        payloadStaging,
+        payloadStore: {
+          stage:
+            failureMode === 'rejection'
+              ? async () => {
+                  throw new Error('provider rejected upload');
+                }
+              : async () => new Promise<never>(() => {}),
+          commit: async () => {},
+          abort: async (stageId) => {
+            aborted.push(stageId);
+          },
+          put: async () => {
+            throw new Error('legacy put must not be called');
+          },
+          get: async () => undefined,
+          delete: async () => {},
+        },
+      });
+      let calls = 0;
+      let sinkCalls = 0;
+      const signature = s('trigger?:string -> resultText:string');
+      const program = {
+        getId: () => 'large-output',
+        getSignature: () => signature,
+        forward: async () => {
+          calls++;
+          return { value: 'x'.repeat(2_000) };
+        },
+        streamingForward: async function* () {},
+      } as unknown as AxProgrammable<any, any>;
+      const runtime = new AxEventRuntime({
+        store,
+        programStateStore: store,
+        coordination: 'multi-worker',
+        routes: [
+          eventRoute({
+            id: 'large-output-route',
+            match: { types: ['large.output'] },
+            action: 'wake',
+            target: eventTarget({
+              id: 'large-output-target',
+              ai: {} as never,
+              program,
+              mapInput: () => ({}),
+              retrySafety: 'idempotent',
+              sinks: [
+                {
+                  id: 'must-not-run',
+                  write: () => {
+                    sinkCalls++;
+                  },
+                },
+              ],
+            }),
+          }),
+        ],
+      });
+      await runtime.start();
+      const receipt = await runtime.publish({
+        event: {
+          specversion: '1.0',
+          id: `large-${failureMode}`,
+          source: 'test://sqlite',
+          type: 'large.output',
+        },
+        trust: 'trusted',
+      });
+      await runtime.waitForIdle();
+      const delivery = await store.getDelivery(receipt.deliveryIds[0]!);
+      expect(delivery?.status).toBe('output_persistence_failed');
+      expect(calls).toBe(1);
+      expect(sinkCalls).toBe(0);
+      expect(aborted).toHaveLength(1);
+      await runtime.close({ drain: false });
+    }
+  );
 
   it('persists output before isolated sink retries', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
@@ -664,8 +3723,17 @@ describe('AxSQLiteEventStore', () => {
     await runtime.waitForIdle();
     expect(modelCalls).toBe(1);
     expect(sinkCalls).toBe(2);
-    expect(await runtime.listDeadLetters()).toEqual([
-      expect.objectContaining({ kind: 'sink', sinkId: 'failing-sink' }),
+    const [deadLetter] = await runtime.listDeadLetters();
+    expect(deadLetter).toEqual(
+      expect.objectContaining({ kind: 'sink', sinkId: 'failing-sink' })
+    );
+    await expect(runtime.redrive(deadLetter!.id)).rejects.toThrow(
+      'sink unavailable'
+    );
+    expect(modelCalls).toBe(1);
+    expect(sinkCalls).toBe(3);
+    await expect(runtime.listDeadLetters()).resolves.toEqual([
+      expect.objectContaining({ id: deadLetter!.id }),
     ]);
     await runtime.close({ drain: false });
   });

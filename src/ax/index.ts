@@ -1236,6 +1236,17 @@ import {
   type AxEventDeadLetter,
   type AxEventDelivery,
   type AxEventDeliveryStatus,
+  type AxEventEffect,
+  type AxEventEffectCreateRequest,
+  type AxEventEffectFence,
+  type AxEventEffectIntent,
+  type AxEventEffectResolution,
+  type AxEventEffectResolver,
+  type AxEventEffectResolverContext,
+  type AxEventEffectSettlement,
+  type AxEventEffectStatus,
+  type AxEventEffectStore,
+  type AxEventEffectTransition,
   type AxEventEnqueueRequest,
   type AxEventEnvelope,
   type AxEventIdentity,
@@ -1249,9 +1260,11 @@ import {
   type AxEventInvalidator,
   type AxEventMatcher,
   AxEventOutcomeUnknownError,
+  AxEventOutputPersistenceError,
   type AxEventPath,
   type AxEventPathRoot,
   type AxEventPathSegment,
+  type AxEventPayloadStageRequest,
   type AxEventPayloadStore,
   type AxEventProgramStateAdapter,
   type AxEventPublishReceipt,
@@ -1267,6 +1280,7 @@ import {
   type AxEventSource,
   type AxEventSourceContext,
   type AxEventSourceHandle,
+  type AxEventStagedPayloadStore,
   type AxEventStore,
   type AxEventStoreCapabilities,
   type AxEventTarget,
@@ -1285,21 +1299,28 @@ import {
   type AxProgramStateEnvelope,
   type AxProgramStateStore,
   AxSystemEventClock,
+  axIsEventOutputPersistenceError,
 } from './event/types.js';
 import {
   AxUCPWebhookEventSource,
   type AxUCPWebhookEventSourceOptions,
 } from './event/ucpSource.js';
 import {
+  axApplyEventEffectTransition,
   axEventCanonicalDigest,
   axEventCanonicalJson,
+  axEventContinuationFingerprint,
+  axEventEffectRequestDigest,
+  axEventEffectRequestFingerprint,
   axEventErrorMessage,
   axEventId,
   axEventIdentityScope,
+  axEventIngressFingerprint,
   axEventMatches,
   axEventScopedCorrelationKey,
   axEventScopedDedupeKey,
   axEventSizeBytes,
+  axValidateEventEffectCreateRequest,
   axValidateEventEnvelope,
 } from './event/util.js';
 import type { AxFlowStateDependencyAnalysis } from './flow/dependencyAnalyzer.js';
@@ -1712,6 +1733,7 @@ export { AxEventComponentTransitionError };
 export { AxEventContinuationNotFoundError };
 export { AxEventInputError };
 export { AxEventOutcomeUnknownError };
+export { AxEventOutputPersistenceError };
 export { AxEventRouteBuilder };
 export { AxEventRuntime };
 export { AxEventTargetBuilder };
@@ -1818,6 +1840,7 @@ export { axAIWebLLMCreativeConfig };
 export { axAIWebLLMDefaultConfig };
 export { axAnalyzeChatPromptRequirements };
 export { axAnalyzeRequestRequirements };
+export { axApplyEventEffectTransition };
 export { axApplyMCPAuthentication };
 export { axApplyOpenAIChatAudioRequest };
 export { axAttachCausalCandidateEvidence };
@@ -1863,9 +1886,13 @@ export { axErasePreferenceEvidence };
 export { axEventCanonicalDigest };
 export { axEventCanonicalJson };
 export { axEventComponentManager };
+export { axEventContinuationFingerprint };
+export { axEventEffectRequestDigest };
+export { axEventEffectRequestFingerprint };
 export { axEventErrorMessage };
 export { axEventId };
 export { axEventIdentityScope };
+export { axEventIngressFingerprint };
 export { axEventMatches };
 export { axEventScopedCorrelationKey };
 export { axEventScopedDedupeKey };
@@ -1887,6 +1914,7 @@ export { axGetSupportedAIModels };
 export { axGlobals };
 export { axGoogleGeminiLiveAudioDefaults };
 export { axIsAudioOutputEnabled };
+export { axIsEventOutputPersistenceError };
 export { axIsGeminiLiveAudioModel };
 export { axIsGrokVoiceModel };
 export { axIsOpenAIChatAudioModel };
@@ -1975,6 +2003,7 @@ export { axUpdateOptimizerMetricsConfig };
 export { axValidateCapabilityGrant };
 export { axValidateChatRequestMessage };
 export { axValidateChatResponseResult };
+export { axValidateEventEffectCreateRequest };
 export { axValidateEventEnvelope };
 export { axValidateGeminiLiveAudioInput };
 export { axValidateProviderCapabilities };
@@ -2479,6 +2508,17 @@ export type { AxEventCorrelationKey };
 export type { AxEventDeadLetter };
 export type { AxEventDelivery };
 export type { AxEventDeliveryStatus };
+export type { AxEventEffect };
+export type { AxEventEffectCreateRequest };
+export type { AxEventEffectFence };
+export type { AxEventEffectIntent };
+export type { AxEventEffectResolution };
+export type { AxEventEffectResolver };
+export type { AxEventEffectResolverContext };
+export type { AxEventEffectSettlement };
+export type { AxEventEffectStatus };
+export type { AxEventEffectStore };
+export type { AxEventEffectTransition };
 export type { AxEventEnqueueRequest };
 export type { AxEventEnvelope };
 export type { AxEventIdentity };
@@ -2493,6 +2533,7 @@ export type { AxEventMatcher };
 export type { AxEventPath };
 export type { AxEventPathRoot };
 export type { AxEventPathSegment };
+export type { AxEventPayloadStageRequest };
 export type { AxEventPayloadStore };
 export type { AxEventProgramStateAdapter };
 export type { AxEventPublishReceipt };
@@ -2508,6 +2549,7 @@ export type { AxEventSinkContext };
 export type { AxEventSource };
 export type { AxEventSourceContext };
 export type { AxEventSourceHandle };
+export type { AxEventStagedPayloadStore };
 export type { AxEventStore };
 export type { AxEventStoreCapabilities };
 export type { AxEventStoreConformanceFactory };

@@ -26,6 +26,7 @@
     "authority:eval": "node --import=tsx scripts/authority-boundary-eval.ts",
     "event:demand:eval": "node --import=tsx scripts/eval-demand-boundary.ts",
     "mcp:interop:production": "node --env-file=.env --import=tsx scripts/mcp-interop-production.ts",
+    "event:effects:eval": "node --import=tsx scripts/event-effects-fault-eval.ts",
     "axir": "node scripts/run-axir.mjs",
     "axir:backlog": "node scripts/axir-backlog.mjs",
     "axir:backlog:check": "node scripts/axir-backlog.mjs check-pr",

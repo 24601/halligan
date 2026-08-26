@@ -147,9 +147,19 @@ the event's correlation value to find and restore the owner.
 {{eventResumeExample}}
 
 Continuation matching is **identity-scoped**: a correlation value for one
-tenant cannot resume another tenant's run. Consumption is atomic, so two
-workers cannot fire the same continuation twice. A missing, ambiguous, or
+tenant cannot resume another tenant's run. Admission is one fenced store
+transaction that binds the continuation exclusively to a delivery, so two
+workers cannot fire the same one-shot continuation. A missing, ambiguous, or
 expired continuation becomes a dead letter; it never turns into fresh work.
+The binding is also snapshotted on the run before invocation. Retry, delivery
+redrive, sink redrive, and recovery validate and use only that immutable
+continuation, target, and instance, so expiry and correlation-key reuse cannot
+retarget persisted output or consume a replacement. Stores without atomic
+admission/completion and malformed legacy bindings fail closed. Successful
+resume terminalization saves the delivery and consumes/de-keys its admitted
+continuation in one fenced transaction, so a completion fault cannot leave a
+successful delivery holding the correlation key. A never-invoked legacy resume
+delivery performs its first atomic admission under the combined migration.
 
 Targets may use separate `wakeInput` and `resumeInput` plans because the first
 event and the returning event often carry different shapes. The action-specific
@@ -187,8 +197,35 @@ persistence, and recovery for cooperating processes sharing one local SQLite
 file. A **lease** gives one worker temporary ownership of a delivery. A
 monotonically increasing **fencing token** prevents an older, stalled worker
 from writing after a newer worker takes over. Do not place this store on a
-network filesystem. Any other persistent or multi-worker store must pass the
+network filesystem. Runtime and store lease checks must use one clock domain:
+the runtime adopts an exposed store clock when omitted and rejects a different
+explicit clock. Any other persistent or multi-worker store must pass the
 event-store conformance kit before advertising those capabilities.
+
+Oversized output uses an explicit staged-payload ownership protocol. SQLite
+reserves a bounded stage ID before upload, rechecks the active lease before
+committing the run, and reconciles pending commits after restart. Every
+unresolved stage state blocks claim. Expired staging or abort ownership
+marks the fenced delivery terminal before cleanup, and malformed rows are isolated
+without stopping unrelated work. Aborting a
+stale stage releases only that stage's ownership, not a possibly shared content
+reference. Legacy `put/delete` payload stores therefore fail closed before
+upload. Count, byte, payload-size, TTL, and operation-time limits are required;
+this is recoverable coordination, not an atomic commit across SQLite and the
+payload provider. Recovery atomically binds committed payload ownership to the
+existing nonterminal `finalizing` run; lease takeover then performs sink-only
+resume without invoking the target. The run becomes `succeeded` only when every
+sink-created effect is receipt-complete (`succeeded` or `failed`); `intent`,
+`dispatched`, and `parked` block successful completion. Resume-route sink
+contexts preserve the admitted continuation snapshot and its original
+target/instance binding. Failed provider
+reconciliation quarantines that delivery without blocking unrelated claims.
+
+Combined SQLite schema v7 migration classifies the actual verifier and effect
+lineages under one immediate transaction, preserves their rows, installs and
+validates the complete journal/metadata, effect/fingerprint, payload-stage, and
+admission schema, and only then records version 7. The SQLite event store does
+not persist advisory demand-boundary records or temporal interaction timelines.
 
 The runtime persists output before dispatching sinks. Sink retries use the
 stable `(runId, sinkId)` key and redrive only the failed sink; they never repeat
@@ -199,13 +236,57 @@ instead of being replayed blindly.
 Delivery is strictly ordered per target instance by default. Use `debounceMs`
 to delay a route and add `coalesce: 'latest'` only when replacing intermediate
 events is correct for that route. Declare `retrySafety: 'idempotent'` only when
-stable delivery keys protect every possible side effect.
+stable delivery keys protect every possible side effect. Declare
+`retrySafety: 'effect-aware'` only when every external effect is explicitly
+wrapped by the ledger.
+
+### Classify Explicit External Effects
+
+TypeScript application and tool code can wrap an external operation with the
+effect ledger carried by `eventContext`: persist `declareEffect(...)` before
+I/O, call `markEffectDispatched(...)` immediately before crossing the external
+boundary, and write a conclusive success/failure receipt with
+`settleEffect(...)`. After restart, intent is not dispatched, a dispatch without
+settlement is indeterminate, settlement is completed, and a parked effect
+blocks automatic dispatch. Only `succeeded` and `failed` are receipt-complete;
+`intent`, `dispatched`, and `parked` block successful run/delivery completion.
+The ledger and exclusive admission are additive to host authority, verifier
+transitions, and trusted component lifecycle ownership. Unknown target recovery
+continues to use `outcome_unknown`.
+
+The bounded, redacted effect metadata is a request descriptor. Ax persists a
+digest of its canonical bytes with operation, idempotency key, and replay
+safety, and rejects identity reuse when that descriptor changes.
+
+Recovery may replay only an effect explicitly declared idempotent with a key
+the external provider enforces. A host `effectResolver` can instead query the
+domain system and return a conclusive outcome or prove that dispatch did not
+happen. Resolver execution is timeout- and abort-bounded; timeout parks even if
+host code ignores abort. Unknown non-idempotent outcomes park for review. Ax
+cannot intercept arbitrary I/O, make a provider honor a key, or promise
+exactly-once side effects. Generated-language effect-ledger parity is tracked
+separately and is not implied by the existing single-worker event capability.
 
 `cancelRun(runId)` aborts an active program and its nested calls. `close()`
-stops sources, drains by default, and then aborts remaining workers; caller-owned
-protocol clients must still be closed by the caller. For deterministic tests,
-`AxManualEventClock` advances retries, debounce windows, and continuation
-expiry without waiting for wall-clock time.
+stops sources, drains by default, and then aborts remaining workers. One timeout
+on a native timer, independent of a manual event clock, bounds the overall
+returned shutdown promise, and concurrent calls join it. Ax best-effort requests
+`return()` on active stream iterators, ignores cancellation failures, and
+suppresses post-abort chunks,
+but timed-out host work may continue and perform later side effects because Ax
+cannot terminate JavaScript. Ax revokes runtime-owned persistence, sink
+dispatch, effect calls, continuation registration, and claim heartbeat after
+abort/store shutdown. In-flight publishes recheck the composed shutdown signal
+after asynchronous route callbacks and before abort-aware enqueue. In-flight
+claim renewals are tracked within the same deadline; built-in stores recheck
+abort and their closed epoch immediately before mutation. After workers settle
+or the deadline expires, Ax
+independently attempts best-effort store close; a permanently hung worker
+cannot prevent that attempt, and a store-close rejection does not reject
+`close()`.
+Caller-owned protocol clients must still be closed by the caller. For
+deterministic tests, `AxManualEventClock` advances retries,
+debounce windows, and continuation expiry without waiting for wall-clock time.
 
 ## Temporal Interaction Records (TypeScript)
 
