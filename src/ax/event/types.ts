@@ -163,6 +163,34 @@ export class AxEventInputError extends Error {
   }
 }
 
+export class AxEventOutputPersistenceError extends Error {
+  readonly code = 'output_persistence_failed';
+
+  constructor(
+    message: string,
+    readonly phase: 'preflight' | 'stage' | 'commit' | 'recovery',
+    options?: ErrorOptions
+  ) {
+    super(`output_persistence_failed: ${message}`, options);
+    this.name = 'AxEventOutputPersistenceError';
+  }
+}
+
+/** Cross-realm guard for stores loaded through another package instance. */
+export function axIsEventOutputPersistenceError(
+  error: unknown
+): error is AxEventOutputPersistenceError {
+  if (!error || typeof error !== 'object') return false;
+  const candidate = error as { code?: unknown; phase?: unknown };
+  return (
+    candidate.code === 'output_persistence_failed' &&
+    (candidate.phase === 'preflight' ||
+      candidate.phase === 'stage' ||
+      candidate.phase === 'commit' ||
+      candidate.phase === 'recovery')
+  );
+}
+
 export type AxEventRouteAction = 'observe' | 'invalidate' | 'resume' | 'wake';
 
 export interface AxEventMatcher {
@@ -723,6 +751,32 @@ export interface AxEventPayloadStore {
   put(key: string, value: unknown): Promise<string>;
   get(reference: string): Promise<unknown>;
   delete(reference: string): Promise<void>;
+}
+
+export interface AxEventPayloadStageRequest {
+  /** Host-assigned operation identity; reuse must be idempotent for the same payload. */
+  stageId: string;
+  key: string;
+  value: unknown;
+  sizeBytes: number;
+  /** Uncommitted ownership must be reclaimed by this time. */
+  expiresAt: number;
+  signal: AbortSignal;
+}
+
+/**
+ * Optional bounded ownership protocol for payloads that cannot be stored inline.
+ *
+ * Distinct stage IDs may resolve to one shared content reference. abort() releases
+ * only the named stage's ownership and must remain safe after an uncertain commit.
+ * All operations are idempotent; an aborted stage can never be resurrected.
+ */
+export interface AxEventStagedPayloadStore extends AxEventPayloadStore {
+  stage(
+    request: Readonly<AxEventPayloadStageRequest>
+  ): Promise<Readonly<{ reference: string }>>;
+  commit(stageId: string, signal: AbortSignal): Promise<void>;
+  abort(stageId: string, signal: AbortSignal): Promise<void>;
 }
 
 export interface AxEventCloseOptions {

@@ -129,6 +129,15 @@ from writing after a newer worker takes over. Do not place this store on a
 network filesystem. Any other persistent or multi-worker store must pass the
 event-store conformance kit before advertising those capabilities.
 
+Oversized output uses an explicit staged-payload ownership protocol. SQLite
+reserves a bounded stage ID before upload, rechecks the active lease before
+committing the run, and reconciles pending commits after restart. Aborting a
+stale stage releases only that stage's ownership, not a possibly shared content
+reference. Legacy `put/delete` payload stores therefore fail closed before
+upload. Count, byte, payload-size, TTL, and operation-time limits are required;
+this is recoverable coordination, not an atomic commit across SQLite and the
+payload provider.
+
 The runtime persists output before dispatching sinks. Sink retries use the
 stable `(runId, sinkId)` key and redrive only the failed sink; they never repeat
 a completed model call. If a worker crashes after a side effect may have
@@ -167,9 +176,10 @@ separately and is not implied by the existing single-worker event capability.
 
 `cancelRun(runId)` aborts an active program and its nested calls. `close()`
 stops sources, drains by default, and then aborts remaining workers. Its timeout
-also bounds a source handle that ignores abort, though Ax cannot terminate that
-host JavaScript. Caller-owned protocol clients must still be closed by the
-caller. For deterministic tests, `AxManualEventClock` advances retries,
+only bounds when shutdown returns: a source that ignores abort may keep running
+and perform later side effects because Ax cannot terminate host JavaScript.
+Caller-owned protocol clients must still be closed by the caller. For
+deterministic tests, `AxManualEventClock` advances retries,
 debounce windows, and continuation expiry without waiting for wall-clock time.
 
 ## Generated Languages

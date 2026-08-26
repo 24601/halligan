@@ -12,9 +12,11 @@ import {
   type AxEventEffectStore,
   type AxEventEffectTransition,
   type AxEventEnqueueRequest,
+  AxEventOutputPersistenceError,
   type AxEventPayloadStore,
   type AxEventPublishReceipt,
   type AxEventRun,
+  type AxEventStagedPayloadStore,
   type AxEventStore,
   type AxProgramStateEnvelope,
   type AxProgramStateStore,
@@ -26,11 +28,12 @@ import {
   axEventIngressFingerprint,
   axEventScopedCorrelationKey,
   axEventScopedDedupeKey,
+  axIsEventOutputPersistenceError,
   axValidateEventEffectCreateRequest,
 } from '@ax-llm/ax';
 import Database from 'better-sqlite3';
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 const MULTI_WORKER_CONFORMANCE = 'axevent-store-v4';
 const MAX_FENCING_TOKEN = Number.MAX_SAFE_INTEGER;
 const LEGACY_UNVERIFIABLE_INGRESS_PREFIX = 'legacy-unverifiable:';
@@ -70,7 +73,17 @@ export interface AxSQLiteEventStoreOptions {
   maxEventBytes?: number;
   maxInlinePayloadBytes?: number;
   payloadStore?: AxEventPayloadStore;
+  /** Required to offload payloads; legacy put/delete stores remain read-only. */
+  payloadStaging?: Readonly<AxSQLiteEventPayloadStagingPolicy>;
   retention: Readonly<AxSQLiteEventRetention>;
+}
+
+export interface AxSQLiteEventPayloadStagingPolicy {
+  maxOutstandingCount: number;
+  maxOutstandingBytes: number;
+  maxPayloadBytes: number;
+  stageTtlMs: number;
+  persistenceTimeoutMs: number;
 }
 
 type DeliveryRow = {
@@ -97,6 +110,17 @@ type DeliveryRow = {
   invocation_started: number;
 };
 
+type PayloadStageRow = {
+  stage_id: string;
+  run_id: string;
+  delivery_id: string;
+  fencing_token: number;
+  reference: string | null;
+  size_bytes: number;
+  expires_at: number;
+  state: 'staging' | 'commit_pending' | 'committed' | 'abort_pending';
+};
+
 export class AxSQLiteEventStore
   implements AxEventStore, AxEventEffectStore, AxProgramStateStore
 {
@@ -120,6 +144,8 @@ export class AxSQLiteEventStore
   private readonly maxPendingBytes: number;
   private readonly maxEventBytes: number;
   private readonly maxInlinePayloadBytes: number;
+  private readonly payloadStaging?: Readonly<AxSQLiteEventPayloadStagingPolicy>;
+  private closed = false;
 
   constructor(private readonly options: Readonly<AxSQLiteEventStoreOptions>) {
     if (!options.retention) {
@@ -131,6 +157,8 @@ export class AxSQLiteEventStore
     this.maxEventBytes = options.maxEventBytes ?? 16 * 1024 * 1024;
     this.maxInlinePayloadBytes =
       options.maxInlinePayloadBytes ?? 16 * 1024 * 1024;
+    this.payloadStaging = options.payloadStaging;
+    if (this.payloadStaging) this.validatePayloadStaging(this.payloadStaging);
     this.db = new Database(options.filename);
     this.db.pragma(`busy_timeout = ${options.busyTimeoutMs ?? 5_000}`);
     this.db.pragma('journal_mode = WAL');
@@ -165,6 +193,7 @@ export class AxSQLiteEventStore
     now: number,
     leaseMs = 30_000
   ): Promise<AxEventDelivery | undefined> {
+    await this.reconcilePayloadStages();
     return this.db.transaction((): AxEventDelivery | undefined => {
       const row = this.db
         .prepare(
@@ -286,6 +315,7 @@ export class AxSQLiteEventStore
       throw new Error(`Stale event claim for ${run.deliveryId}`);
     }
     this.assertSafeFencingToken(run.deliveryId, run.fencingToken);
+    await this.reconcilePayloadStages();
     this.db
       .transaction(() =>
         this.assertActiveClaim(
@@ -295,28 +325,24 @@ export class AxSQLiteEventStore
         )
       )
       .immediate();
-    let stored: AxEventRun = structuredClone(run);
+    const stored: AxEventRun = structuredClone(run);
     const hasPayload = run.output !== undefined || run.chunks !== undefined;
     const payload = { output: run.output, chunks: run.chunks };
-    if (
-      hasPayload &&
-      Buffer.byteLength(JSON.stringify(payload)) > this.maxInlinePayloadBytes
-    ) {
-      if (!this.options.payloadStore) {
-        throw new Error(
-          `output_persistence_failed: run ${run.id} exceeded ${this.maxInlinePayloadBytes} inline bytes`
+    let payloadBytes = 0;
+    if (hasPayload) {
+      try {
+        payloadBytes = Buffer.byteLength(JSON.stringify(payload));
+      } catch (error) {
+        throw new AxEventOutputPersistenceError(
+          `run ${run.id} output is not JSON-serializable`,
+          'preflight',
+          { cause: error }
         );
       }
-      const outputRef = await this.options.payloadStore.put(
-        `event-run:${run.id}:${run.fencingToken}:${randomUUID()}`,
-        payload
-      );
-      stored = {
-        ...stored,
-        output: undefined,
-        chunks: undefined,
-        outputRef,
-      };
+    }
+    if (hasPayload && payloadBytes > this.maxInlinePayloadBytes) {
+      await this.saveStagedRun(run, payload, payloadBytes);
+      return;
     }
     this.db
       .transaction(() => {
@@ -342,9 +368,11 @@ export class AxSQLiteEventStore
           );
       })
       .immediate();
+    await this.abortSupersededPayloadStages(run.id);
   }
 
   async getRun(runId: string): Promise<Readonly<AxEventRun> | undefined> {
+    await this.reconcilePayloadStages();
     const row = this.db
       .prepare('SELECT run_json FROM event_runs WHERE id=?')
       .get(runId) as { run_json: string } | undefined;
@@ -710,7 +738,477 @@ export class AxSQLiteEventStore
   }
 
   async close(): Promise<void> {
+    if (this.closed) return;
+    await this.reconcilePayloadStages();
     this.db.close();
+    this.closed = true;
+  }
+
+  private async saveStagedRun(
+    run: Readonly<AxEventRun>,
+    payload: unknown,
+    payloadBytes: number
+  ): Promise<void> {
+    const payloadStore = this.stagedPayloadStore('preflight');
+    const policy = this.payloadStaging!;
+    if (payloadBytes > policy.maxPayloadBytes) {
+      throw new AxEventOutputPersistenceError(
+        `run ${run.id} is ${payloadBytes} bytes; staged maximum is ${policy.maxPayloadBytes}`,
+        'preflight'
+      );
+    }
+    this.assertPayloadLeaseBudget(
+      run.deliveryId,
+      run.claimedBy!,
+      run.fencingToken!,
+      policy.persistenceTimeoutMs * 2
+    );
+
+    const now = this.clock.now();
+    const stageId = `event-payload-stage:${randomUUID()}`;
+    const expiresAt = now + policy.stageTtlMs;
+    this.db
+      .transaction(() => {
+        this.assertActiveClaim(
+          run.deliveryId,
+          run.claimedBy!,
+          run.fencingToken!
+        );
+        const outstanding = this.db
+          .prepare(
+            `SELECT COUNT(*) AS count, COALESCE(SUM(size_bytes), 0) AS bytes
+             FROM event_payload_stages WHERE state != 'committed'`
+          )
+          .get() as { count: number; bytes: number };
+        if (
+          outstanding.count >= policy.maxOutstandingCount ||
+          outstanding.bytes + payloadBytes > policy.maxOutstandingBytes
+        ) {
+          throw new AxEventOutputPersistenceError(
+            `staged payload capacity is exhausted (${outstanding.count}/${policy.maxOutstandingCount} stages, ${outstanding.bytes}/${policy.maxOutstandingBytes} bytes)`,
+            'preflight'
+          );
+        }
+        this.db
+          .prepare(
+            `INSERT INTO event_payload_stages(
+               stage_id, run_id, delivery_id, fencing_token, reference,
+               size_bytes, expires_at, state, created_at, updated_at
+             ) VALUES(?,?,?,?,NULL,?,?, 'staging',?,?)`
+          )
+          .run(
+            stageId,
+            run.id,
+            run.deliveryId,
+            run.fencingToken,
+            payloadBytes,
+            expiresAt,
+            now,
+            now
+          );
+      })
+      .immediate();
+
+    let reference: string;
+    try {
+      const staged = await this.withPayloadDeadline(
+        'stage',
+        policy.persistenceTimeoutMs,
+        (signal) =>
+          payloadStore.stage({
+            stageId,
+            key: `event-run:${run.id}:${run.fencingToken}`,
+            value: payload,
+            sizeBytes: payloadBytes,
+            expiresAt,
+            signal,
+          })
+      );
+      if (!staged.reference.trim()) {
+        throw new Error('payload stage returned an empty reference');
+      }
+      reference = staged.reference;
+    } catch (error) {
+      this.markPayloadStageAbortPending(stageId);
+      await this.abortPayloadStage(stageId, payloadStore);
+      throw this.outputPersistenceError('stage', run.id, error);
+    }
+
+    try {
+      this.db
+        .transaction(() => {
+          this.assertActiveClaim(
+            run.deliveryId,
+            run.claimedBy!,
+            run.fencingToken!
+          );
+          const stored: AxEventRun = {
+            ...structuredClone(run),
+            output: undefined,
+            chunks: undefined,
+            outputRef: reference,
+          };
+          this.db
+            .prepare(
+              `INSERT INTO event_runs(id, delivery_id, run_json, updated_at, finished_at)
+               VALUES(?,?,?,?,?)
+               ON CONFLICT(id) DO UPDATE SET
+                 run_json=excluded.run_json, updated_at=excluded.updated_at,
+                 finished_at=excluded.finished_at`
+            )
+            .run(
+              run.id,
+              run.deliveryId,
+              JSON.stringify(stored),
+              this.clock.now(),
+              run.finishedAt ?? null
+            );
+          const updated = this.db
+            .prepare(
+              `UPDATE event_payload_stages
+               SET reference=?, state='commit_pending', updated_at=?
+               WHERE stage_id=? AND state='staging'`
+            )
+            .run(reference, this.clock.now(), stageId);
+          if (updated.changes !== 1) {
+            throw new Error(`Payload stage reservation was lost for ${run.id}`);
+          }
+        })
+        .immediate();
+    } catch (error) {
+      this.markPayloadStageAbortPending(stageId);
+      await this.abortPayloadStage(stageId, payloadStore);
+      throw error;
+    }
+
+    try {
+      await this.withPayloadDeadline(
+        'commit',
+        policy.persistenceTimeoutMs,
+        (signal) => payloadStore.commit(stageId, signal)
+      );
+    } catch (error) {
+      const failure = this.outputPersistenceError('commit', run.id, error);
+      this.db
+        .transaction(() => {
+          const failed: AxEventRun = {
+            ...structuredClone(run),
+            output: undefined,
+            chunks: undefined,
+            outputRef: undefined,
+            status: 'output_persistence_failed',
+            finishedAt: this.clock.now(),
+            error: failure.message.slice(0, 1_024),
+          };
+          this.db
+            .prepare(
+              `UPDATE event_runs SET run_json=?, updated_at=?, finished_at=?
+               WHERE id=?`
+            )
+            .run(
+              JSON.stringify(failed),
+              this.clock.now(),
+              failed.finishedAt,
+              run.id
+            );
+          this.db
+            .prepare(
+              `UPDATE event_payload_stages
+               SET state='abort_pending', updated_at=? WHERE run_id=?`
+            )
+            .run(this.clock.now(), run.id);
+        })
+        .immediate();
+      await this.abortSupersededPayloadStages(run.id);
+      throw failure;
+    }
+
+    this.db
+      .transaction(() => {
+        this.db
+          .prepare(
+            `UPDATE event_payload_stages SET state='abort_pending', updated_at=?
+             WHERE run_id=? AND stage_id!=? AND state='committed'`
+          )
+          .run(this.clock.now(), run.id, stageId);
+        const updated = this.db
+          .prepare(
+            `UPDATE event_payload_stages SET state='committed', updated_at=?
+             WHERE stage_id=? AND state='commit_pending'`
+          )
+          .run(this.clock.now(), stageId);
+        const current = this.db
+          .prepare('SELECT state FROM event_payload_stages WHERE stage_id=?')
+          .get(stageId) as { state: PayloadStageRow['state'] } | undefined;
+        if (updated.changes !== 1 && current?.state !== 'committed') {
+          throw new AxEventOutputPersistenceError(
+            `payload stage commit acknowledgement was lost for run ${run.id}`,
+            'commit'
+          );
+        }
+      })
+      .immediate();
+    await this.abortSupersededPayloadStages(run.id, stageId);
+  }
+
+  private async reconcilePayloadStages(): Promise<void> {
+    const rows = this.db
+      .prepare(
+        `SELECT stage_id, run_id, delivery_id, fencing_token, reference,
+                size_bytes, expires_at, state
+         FROM event_payload_stages WHERE state != 'committed'
+         ORDER BY created_at`
+      )
+      .all() as PayloadStageRow[];
+    if (!rows.length) return;
+    const payloadStore = this.stagedPayloadStore('recovery');
+    for (const row of rows) {
+      if (row.state === 'staging') {
+        if (row.expires_at > this.clock.now()) continue;
+        this.markPayloadStageAbortPending(row.stage_id);
+        await this.abortPayloadStage(row.stage_id, payloadStore);
+        continue;
+      }
+      if (row.state === 'abort_pending') {
+        await this.abortPayloadStage(row.stage_id, payloadStore);
+        continue;
+      }
+      if (row.expires_at <= this.clock.now()) {
+        this.expirePayloadStage(row);
+        await this.abortPayloadStage(row.stage_id, payloadStore);
+        continue;
+      }
+      try {
+        await this.withPayloadDeadline(
+          'recovery',
+          this.payloadStaging!.persistenceTimeoutMs,
+          (signal) => payloadStore.commit(row.stage_id, signal)
+        );
+      } catch (error) {
+        throw this.outputPersistenceError('recovery', row.run_id, error);
+      }
+      this.db
+        .transaction(() => {
+          this.db
+            .prepare(
+              `UPDATE event_payload_stages SET state='abort_pending', updated_at=?
+               WHERE run_id=? AND stage_id!=? AND state='committed'`
+            )
+            .run(this.clock.now(), row.run_id, row.stage_id);
+          this.db
+            .prepare(
+              `UPDATE event_payload_stages SET state='committed', updated_at=?
+               WHERE stage_id=? AND state='commit_pending'`
+            )
+            .run(this.clock.now(), row.stage_id);
+        })
+        .immediate();
+    }
+    await this.abortSupersededPayloadStages();
+  }
+
+  private expirePayloadStage(row: Readonly<PayloadStageRow>): void {
+    const message = `output_persistence_failed: staged payload expired before recovery for run ${row.run_id}`;
+    this.db
+      .transaction(() => {
+        const runRow = this.db
+          .prepare('SELECT run_json FROM event_runs WHERE id=?')
+          .get(row.run_id) as { run_json: string } | undefined;
+        if (runRow) {
+          const run = JSON.parse(runRow.run_json) as AxEventRun;
+          const failed: AxEventRun = {
+            ...run,
+            output: undefined,
+            chunks: undefined,
+            outputRef: undefined,
+            status: 'output_persistence_failed',
+            finishedAt: this.clock.now(),
+            error: message,
+          };
+          this.db
+            .prepare(
+              `UPDATE event_runs SET run_json=?, updated_at=?, finished_at=?
+               WHERE id=?`
+            )
+            .run(
+              JSON.stringify(failed),
+              this.clock.now(),
+              failed.finishedAt,
+              row.run_id
+            );
+        }
+        this.db
+          .prepare(
+            `UPDATE event_deliveries
+             SET status='output_persistence_failed', error=?
+             WHERE id=? AND fencing_token=? AND status IN ('claimed','running')`
+          )
+          .run(message, row.delivery_id, row.fencing_token);
+        this.db
+          .prepare(
+            `UPDATE event_payload_stages SET state='abort_pending', updated_at=?
+             WHERE stage_id=?`
+          )
+          .run(this.clock.now(), row.stage_id);
+      })
+      .immediate();
+  }
+
+  private async abortSupersededPayloadStages(
+    runId?: string,
+    exceptStageId?: string
+  ): Promise<void> {
+    if (runId) {
+      this.db
+        .prepare(
+          `UPDATE event_payload_stages SET state='abort_pending', updated_at=?
+           WHERE run_id=? AND state='committed'
+             AND (? IS NULL OR stage_id!=?)`
+        )
+        .run(
+          this.clock.now(),
+          runId,
+          exceptStageId ?? null,
+          exceptStageId ?? null
+        );
+    }
+    const rows = this.db
+      .prepare(
+        `SELECT stage_id FROM event_payload_stages
+         WHERE state='abort_pending' ORDER BY created_at`
+      )
+      .all() as { stage_id: string }[];
+    if (!rows.length) return;
+    const payloadStore = this.stagedPayloadStore('recovery');
+    for (const row of rows) {
+      await this.abortPayloadStage(row.stage_id, payloadStore);
+    }
+  }
+
+  private markPayloadStageAbortPending(stageId: string): void {
+    this.db
+      .prepare(
+        `UPDATE event_payload_stages SET state='abort_pending', updated_at=?
+         WHERE stage_id=? AND state!='committed'`
+      )
+      .run(this.clock.now(), stageId);
+  }
+
+  private async abortPayloadStage(
+    stageId: string,
+    payloadStore: AxEventStagedPayloadStore
+  ): Promise<void> {
+    try {
+      await this.withPayloadDeadline(
+        'recovery',
+        this.payloadStaging!.persistenceTimeoutMs,
+        (signal) => payloadStore.abort(stageId, signal)
+      );
+    } catch {
+      return;
+    }
+    this.db
+      .prepare(
+        `DELETE FROM event_payload_stages
+         WHERE stage_id=? AND state='abort_pending'`
+      )
+      .run(stageId);
+  }
+
+  private stagedPayloadStore(
+    phase: 'preflight' | 'recovery'
+  ): AxEventStagedPayloadStore {
+    const store = this.options.payloadStore as
+      | Partial<AxEventStagedPayloadStore>
+      | undefined;
+    if (
+      !store ||
+      typeof store.stage !== 'function' ||
+      typeof store.commit !== 'function' ||
+      typeof store.abort !== 'function' ||
+      !this.payloadStaging
+    ) {
+      throw new AxEventOutputPersistenceError(
+        'oversized payloads require an AxEventStagedPayloadStore and explicit payloadStaging policy',
+        phase
+      );
+    }
+    return store as AxEventStagedPayloadStore;
+  }
+
+  private assertPayloadLeaseBudget(
+    deliveryId: string,
+    claimedBy: string,
+    fencingToken: number,
+    requiredMs: number
+  ): void {
+    const row = this.db
+      .prepare(
+        `SELECT lease_expires_at FROM event_deliveries
+         WHERE id=? AND claimed_by=? AND fencing_token=?
+           AND status IN ('claimed','running') AND lease_expires_at > ?`
+      )
+      .get(deliveryId, claimedBy, fencingToken, this.clock.now()) as
+      | { lease_expires_at: number }
+      | undefined;
+    if (!row || row.lease_expires_at - this.clock.now() < requiredMs) {
+      throw new AxEventOutputPersistenceError(
+        `claim lease cannot cover bounded payload persistence for run delivery ${deliveryId}`,
+        'preflight'
+      );
+    }
+  }
+
+  private async withPayloadDeadline<T>(
+    phase: 'stage' | 'commit' | 'recovery',
+    timeoutMs: number,
+    operation: (signal: AbortSignal) => Promise<T>
+  ): Promise<T> {
+    const controller = new AbortController();
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        operation(controller.signal),
+        new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(() => {
+            controller.abort(`Event payload ${phase} timed out`);
+            reject(new Error(`Event payload ${phase} timed out`));
+          }, timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+  }
+
+  private outputPersistenceError(
+    phase: 'stage' | 'commit' | 'recovery',
+    runId: string,
+    cause: unknown
+  ): AxEventOutputPersistenceError {
+    if (axIsEventOutputPersistenceError(cause)) return cause;
+    return new AxEventOutputPersistenceError(
+      `payload ${phase} failed for run ${runId}`,
+      phase,
+      { cause }
+    );
+  }
+
+  private validatePayloadStaging(
+    policy: Readonly<AxSQLiteEventPayloadStagingPolicy>
+  ): void {
+    for (const [name, value] of Object.entries(policy)) {
+      if (!Number.isSafeInteger(value) || value <= 0) {
+        throw new Error(
+          `AxSQLiteEventStore payloadStaging.${name} must be a positive safe integer`
+        );
+      }
+    }
+    if (policy.stageTtlMs <= policy.persistenceTimeoutMs * 2) {
+      throw new Error(
+        'AxSQLiteEventStore payloadStaging.stageTtlMs must exceed two persistence timeouts'
+      );
+    }
   }
 
   private tryEnqueue(
@@ -1052,7 +1550,21 @@ export class AxSQLiteEventStore
           UNIQUE(delivery_id, operation, idempotency_key)
         );
         CREATE INDEX event_effects_delivery ON event_effects(delivery_id, status, created_at);
-        PRAGMA user_version = 4;
+        CREATE TABLE IF NOT EXISTS event_payload_stages (
+          stage_id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL,
+          delivery_id TEXT NOT NULL,
+          fencing_token INTEGER NOT NULL,
+          reference TEXT,
+          size_bytes INTEGER NOT NULL,
+          expires_at INTEGER NOT NULL,
+          state TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS event_payload_stage_state ON event_payload_stages(state, expires_at);
+        CREATE INDEX IF NOT EXISTS event_payload_stage_run ON event_payload_stages(run_id);
+        PRAGMA user_version = 5;
       `)
         )
         .immediate();
@@ -1084,6 +1596,24 @@ export class AxSQLiteEventStore
     if (version === 2) {
       this.db
         .transaction(() => {
+          this.db
+            .prepare(
+              `DELETE FROM event_dedupe
+               WHERE created_at < ?
+                 AND NOT EXISTS (
+                   SELECT 1 FROM json_each(event_dedupe.delivery_ids_json) ids
+                   JOIN event_deliveries d ON d.id=ids.value
+                   WHERE d.status NOT IN (${TERMINAL.map(() => '?').join(',')})
+                 )
+                 AND NOT EXISTS (
+                   SELECT 1 FROM json_each(event_dedupe.delivery_ids_json) ids
+                   JOIN event_effects e ON e.delivery_id=ids.value
+                 )`
+            )
+            .run(
+              this.clock.now() - this.options.retention.eventAndResultMs,
+              ...TERMINAL
+            );
           const columns = new Set(
             (
               this.db.pragma('table_info(event_dedupe)') as {
@@ -1198,6 +1728,30 @@ export class AxSQLiteEventStore
           this.db.pragma('user_version = 4');
         })
         .immediate();
+      version = 4;
+    }
+    if (version === 4) {
+      this.db
+        .transaction(() =>
+          this.db.exec(`
+        CREATE TABLE IF NOT EXISTS event_payload_stages (
+          stage_id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL,
+          delivery_id TEXT NOT NULL,
+          fencing_token INTEGER NOT NULL,
+          reference TEXT,
+          size_bytes INTEGER NOT NULL,
+          expires_at INTEGER NOT NULL,
+          state TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS event_payload_stage_state ON event_payload_stages(state, expires_at);
+        CREATE INDEX IF NOT EXISTS event_payload_stage_run ON event_payload_stages(run_id);
+        PRAGMA user_version = 5;
+      `)
+        )
+        .immediate();
     }
   }
 
@@ -1223,8 +1777,17 @@ export class AxSQLiteEventStore
         .run(eventCutoff);
       this.db
         .prepare(
+          `UPDATE event_payload_stages SET state='abort_pending', updated_at=?
+           WHERE state='committed' AND run_id IN (
+             SELECT id FROM event_runs
+             WHERE finished_at IS NOT NULL AND finished_at < ?
+           )`
+        )
+        .run(now, eventCutoff);
+      this.db
+        .prepare(
           `UPDATE event_runs
-           SET run_json=json_remove(run_json, '$.output', '$.chunks')
+           SET run_json=json_remove(run_json, '$.output', '$.chunks', '$.outputRef')
            WHERE finished_at IS NOT NULL AND finished_at < ?`
         )
         .run(eventCutoff);

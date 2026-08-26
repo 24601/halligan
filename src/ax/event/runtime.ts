@@ -43,6 +43,7 @@ import {
   type AxEventTarget,
   type AxProgramStateEnvelope,
   AxSystemEventClock,
+  axIsEventOutputPersistenceError,
 } from './types.js';
 import {
   axEventErrorMessage,
@@ -831,7 +832,7 @@ export class AxEventRuntime {
           });
           return;
         }
-        if (axEventErrorMessage(error).includes('output_persistence_failed')) {
+        if (axIsEventOutputPersistenceError(error)) {
           run = {
             ...run,
             output: undefined,

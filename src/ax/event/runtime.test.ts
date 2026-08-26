@@ -117,6 +117,69 @@ describe('AxEventRuntime', () => {
     await runtime.close();
   });
 
+  it('classifies output persistence failures across package realms by discriminant', async () => {
+    const backing = new AxInMemoryEventStore();
+    let completedWrites = 0;
+    let sinkCalls = 0;
+    const store = new Proxy(backing, {
+      get(target, property) {
+        if (property === 'saveRun') {
+          return async (run: Parameters<typeof backing.saveRun>[0]) => {
+            if (run.status === 'succeeded' && run.output !== undefined) {
+              completedWrites++;
+              throw {
+                name: 'AxEventOutputPersistenceError',
+                code: 'output_persistence_failed',
+                phase: 'stage',
+                message: 'foreign package instance rejected payload',
+              };
+            }
+            return backing.saveRun(run);
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const runtime = new AxEventRuntime({
+      store,
+      routes: [
+        eventRoute({
+          id: 'foreign-output-error-route',
+          match: { types: ['foreign.output.error'] },
+          action: 'wake',
+          target: eventTarget({
+            id: 'foreign-output-error-target',
+            ai,
+            program: program(() => ({ handled: true })),
+            mapInput: () => ({}),
+            retrySafety: 'idempotent',
+            sinks: [
+              {
+                id: 'must-not-run',
+                write: () => {
+                  sinkCalls++;
+                },
+              },
+            ],
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    const receipt = await runtime.publish(
+      ingress('foreign-output-error', 'foreign.output.error')
+    );
+    await runtime.waitForIdle();
+
+    expect(completedWrites).toBe(1);
+    expect(sinkCalls).toBe(0);
+    expect((await backing.getDelivery(receipt.deliveryIds[0]!))?.status).toBe(
+      'output_persistence_failed'
+    );
+    await runtime.close({ drain: false });
+  });
+
   it('scopes dedupe by verified identity and rejects anonymous auth routes', async () => {
     const runtime = new AxEventRuntime({
       routes: [
@@ -442,8 +505,9 @@ describe('AxEventRuntime', () => {
     await runtime.close({ drain: false });
   });
 
-  it('bounds source shutdown when a handle ignores its abort signal', async () => {
+  it('bounds only the return from a source close that later performs side effects', async () => {
     let sourceSignal: AbortSignal | undefined;
+    let lateSideEffects = 0;
     const runtime = new AxEventRuntime({
       routes: [],
       sources: [
@@ -451,17 +515,28 @@ describe('AxEventRuntime', () => {
           id: 'hung-close',
           start: (context) => {
             sourceSignal = context.signal;
-            return { close: () => new Promise<void>(() => {}) };
+            return {
+              close: () =>
+                new Promise<void>((resolve) => {
+                  setTimeout(() => {
+                    lateSideEffects++;
+                    resolve();
+                  }, 40);
+                }),
+            };
           },
         },
       ],
     });
     await runtime.start();
     const startedAt = Date.now();
-    await runtime.close({ drain: false, timeoutMs: 20 });
+    await runtime.close({ drain: false, timeoutMs: 10 });
 
     expect(Date.now() - startedAt).toBeLessThan(1_000);
     expect(sourceSignal?.aborted).toBe(true);
+    expect(lateSideEffects).toBe(0);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(lateSideEffects).toBe(1);
   });
 
   it('refuses durable sources on the volatile store by default', async () => {

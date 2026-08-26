@@ -69,6 +69,7 @@ export type {
   AxEventPath,
   AxEventPathRoot,
   AxEventPathSegment,
+  AxEventPayloadStageRequest,
   AxEventPayloadStore,
   AxEventProgramStateAdapter,
   AxEventPublishReceipt,
@@ -83,6 +84,7 @@ export type {
   AxEventSource,
   AxEventSourceContext,
   AxEventSourceHandle,
+  AxEventStagedPayloadStore,
   AxEventStore,
   AxEventStoreCapabilities,
   AxEventTarget,
@@ -97,8 +99,10 @@ export {
   AxEventContinuationNotFoundError,
   AxEventInputError,
   AxEventOutcomeUnknownError,
+  AxEventOutputPersistenceError,
   AxManualEventClock,
   AxSystemEventClock,
+  axIsEventOutputPersistenceError,
 } from './types.js';
 export type { AxUCPWebhookEventSourceOptions } from './ucpSource.js';
 export { AxUCPWebhookEventSource } from './ucpSource.js';

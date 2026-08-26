@@ -3,11 +3,14 @@ import { AxSignature } from '../dsp/sig.js';
 import type { AxProgrammable } from '../dsp/types.js';
 import { AxInMemoryEventStore } from './memoryStore.js';
 import { AxEventRuntime, eventRoute, eventTarget } from './runtime.js';
-import type {
-  AxEventContext,
-  AxEventEffectResolution,
-  AxEventIngress,
-  AxEventStore,
+import {
+  type AxEventContext,
+  type AxEventDelivery,
+  type AxEventEffectResolution,
+  type AxEventIngress,
+  type AxEventRun,
+  type AxEventStore,
+  AxManualEventClock,
 } from './types.js';
 
 const ai = {} as never;
@@ -621,5 +624,115 @@ describe('AxEventRuntime effects', () => {
       }),
     ]);
     await runtime.close();
+  });
+
+  it('fails closed on unsafe, stale, expired, and exhausted in-memory fences', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const store = new AxInMemoryEventStore({ clock });
+    const receipt = await store.enqueue({
+      ingress: ingress('memory-fence-parity'),
+      deliveries: [
+        {
+          routeId: 'effect-route',
+          action: 'wake',
+          targetId: 'effect-target',
+          instanceKey: 'memory-fence-parity',
+          sizeBytes: 1,
+          retrySafety: 'effect-aware',
+          ordering: 'strict',
+        },
+      ],
+      acceptedAt: clock.now(),
+      publishTimeoutMs: 100,
+    });
+    const deliveryId = receipt.deliveryIds[0]!;
+    const claimed = (await store.claim('worker-a', clock.now(), 100))!;
+    const runs = (token: number): AxEventRun => ({
+      id: `run-${token}`,
+      deliveryId,
+      routeId: claimed.routeId,
+      targetId: claimed.targetId,
+      instanceKey: claimed.instanceKey,
+      claimedBy: 'worker-a',
+      status: 'running',
+      attempt: 1,
+      startedAt: clock.now(),
+      fencingToken: token,
+    });
+    const deliveries = (
+      store as unknown as { deliveries: Map<string, AxEventDelivery> }
+    ).deliveries;
+
+    const negative = { ...claimed, fencingToken: -1 };
+    deliveries.set(deliveryId, negative);
+    await expect(store.saveDelivery(negative)).rejects.toThrow(
+      'Unsafe fencing token'
+    );
+    await expect(store.saveRun(runs(-9))).rejects.toThrow(
+      'Unsafe fencing token'
+    );
+    await expect(
+      store.saveRun(runs(Number.MAX_SAFE_INTEGER + 1))
+    ).rejects.toThrow('Unsafe fencing token');
+    await expect(
+      store.renewClaim(deliveryId, 'worker-a', -1, clock.now() + 100)
+    ).rejects.toThrow('Unsafe fencing token');
+    await expect(
+      store.declareEffect(
+        {
+          id: 'effect-negative-fence',
+          deliveryId,
+          runId: 'run-negative',
+          identityScope: claimed.identityScope,
+          operation: 'unsafe.write',
+          idempotencyKey: 'unsafe-key',
+          createdAt: clock.now(),
+        },
+        { deliveryId, fencingToken: -1 }
+      )
+    ).rejects.toThrow('Unsafe fencing token');
+
+    deliveries.set(deliveryId, claimed);
+    clock.advanceBy(101);
+    await expect(store.saveDelivery(claimed)).rejects.toThrow(
+      'Stale or expired event claim'
+    );
+    await expect(store.saveRun(runs(claimed.fencingToken!))).rejects.toThrow(
+      'Stale or expired event claim'
+    );
+
+    deliveries.set(deliveryId, {
+      ...claimed,
+      status: 'queued',
+      fencingToken: -9,
+      availableAt: clock.now(),
+      claimedBy: undefined,
+      leaseExpiresAt: undefined,
+    });
+    await expect(store.claim('worker-b', clock.now(), 100)).rejects.toThrow(
+      'Unsafe fencing token'
+    );
+    deliveries.set(deliveryId, {
+      ...claimed,
+      status: 'succeeded',
+      fencingToken: Number.MAX_SAFE_INTEGER,
+    });
+    await expect(store.saveRun(runs(Number.MAX_SAFE_INTEGER))).rejects.toThrow(
+      'Stale or expired event claim'
+    );
+    await expect(
+      store.redriveDelivery(deliveryId, clock.now())
+    ).rejects.toThrow('Fencing token exhausted');
+    deliveries.set(deliveryId, {
+      ...claimed,
+      status: 'queued',
+      fencingToken: Number.MAX_SAFE_INTEGER,
+      availableAt: clock.now(),
+      claimedBy: undefined,
+      leaseExpiresAt: undefined,
+    });
+    await expect(store.claim('worker-b', clock.now(), 100)).rejects.toThrow(
+      'Fencing token exhausted'
+    );
   });
 });

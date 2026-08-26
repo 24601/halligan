@@ -99,7 +99,9 @@ await source.publish({ event, identity, trust: 'authenticated' });
   events is part of the route's declared policy.
 - Observe source failures with `onSourceError`.
 - `close({ timeoutMs })` bounds both source-handle shutdown and drain waiting.
-  Host close code may continue if it ignores abort; Ax ignores its late result.
+  This is return-bounded only. Host close code may continue and perform later
+  side effects if it ignores abort; use cooperative abort or a host revocation
+  check before writes.
 - The in-memory store is volatile and single-process.
 - For cooperating Node processes on one local disk, use
   `AxSQLiteEventStore` from `@ax-llm/ax-tools/event/sqlite` with explicit
@@ -151,11 +153,17 @@ also reject concurrent mutation from a stale same-claim caller.
 
 The SQLite store also binds retained event dedupe identities to canonical
 envelopes, requires the current owner/token and an unexpired active lease for
-delivery/run writes, and revalidates after awaited payload persistence. It does
-not delete a stale payload reference because content-addressed stores may share
-that reference with a winner; use only ownership-aware external garbage
-collection. Fencing fails closed at the JavaScript safe-integer limit rather
-than wrapping.
+delivery/run writes, and revalidates after awaited payload staging. Oversized
+outputs require `AxEventStagedPayloadStore` plus explicit count, byte, payload,
+TTL, and timeout limits. Host-assigned stage IDs make abort ownership-specific
+even when content references are shared; restart reconciles `commit_pending`
+before claims and run reads. Legacy `put/delete` stores are never uploaded to
+because they cannot safely reclaim a stale shared reference. Staging failure is
+typed `AxEventOutputPersistenceError` and never repeats the completed target
+call; runtime classification uses its `code`/`phase` discriminants across
+package realms, not `instanceof`. This is bounded recovery across two stores,
+not an atomic cross-store commit. Fencing fails closed at the JavaScript
+safe-integer limit rather than wrapping.
 
 ## MCP Adapter
 

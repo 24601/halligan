@@ -347,7 +347,10 @@ memory and SQLite stores do.
 `cancelRun(runId)` aborts the active program and its nested calls. `close()`
 stops sources, drains by default, then aborts remaining workers. The close
 `timeoutMs` also bounds source-handle shutdown when host code ignores its abort
-signal; Ax ignores a late close result but cannot terminate that JavaScript.
+signal. This bounds when `close()` returns only: Ax ignores a late close result
+but cannot terminate that JavaScript, revoke capabilities it already captured,
+or prevent its later side effects. Source implementations must cooperate with
+abort or use a host-owned revocation/epoch check before external writes.
 Caller-owned protocol clients remain caller-owned. Background source failures
 are supervised through `onSourceError`; they are never thrown from an
 unobserved callback.
@@ -383,12 +386,16 @@ It uses WAL transactions, busy timeouts, leases, monotonically increasing
 fencing tokens, state compare-and-set, and output persistence before sinks.
 Delivery and run writes require the exact current owner/token, an active
 claimed/running status, and an unexpired lease in the write transaction. Runs
-that offload payloads revalidate those conditions after the awaited payload
-write and before the run-row transaction. A stale writer is rejected, but its
-returned payload reference is retained: `AxEventPayloadStore` may deduplicate
-different keys to one reference, so deleting without a conditional ownership
-API could delete a winner's committed payload. Hosts may garbage-collect only
-references they can prove are unreferenced. Fencing tokens fail closed before
+that offload payloads use `AxEventStagedPayloadStore`, not legacy
+`AxEventPayloadStore.put`. The host reserves a unique stage ID before upload,
+revalidates ownership after staging, journals `commit_pending` with the run,
+then idempotently commits that stage. Restart reconciles the journal before a
+claim or run read. `abort(stageId)` releases only that writer's ownership, so a
+stale writer cannot delete a winner even when both stages resolve to the same
+content-addressed reference. Provider implementations must enforce idempotent
+stage/commit/abort, automatic expiry, and the rule that abort stays safe after
+an uncertain commit; an aborted stage must never be resurrected by late host
+code. Fencing tokens fail closed before
 leaving JavaScript's safe-integer range; the delivery identity must be rotated
 instead of wrapping or reusing a token. Its claim is limited to cooperating
 Node processes sharing one local SQLite file; do not deploy it on a network
@@ -400,20 +407,37 @@ completed continuations for seven days and run metadata/dead letters for 30
 days. Settled effects default to 30 days; unresolved intent, dispatched, and
 parked effects prevent their owning delivery from being pruned. Configured
 settled-effect retention is raised to the delivery redrive horizon when needed.
-Schema v1 databases migrate in place to schema v4 with an empty effect ledger.
+Committed payload ownership is released by stage ID when result retention
+expires. Schema v1 databases migrate in place to schema v5 with empty effect
+and payload-stage ledgers.
 Schema v2 databases backfill request digests and canonical ingress fingerprints
 from ingress retained independently in the dedupe row, falling back to a
 surviving delivery. If neither exists, migration writes a non-null unverifiable
 tombstone. Because equality is then unknowable, every replay for that identity
 fails closed without creating a delivery until normal dedupe retention removes
-the row; it does not bind an arbitrary first replay. Schema v3 fingerprints
+the row; it does not bind an arbitrary first replay. Expired zero-route rows
+are removed before migration rather than rematerialized; dedupe retention is a
+privacy/replay horizon, so the same scoped event identity is accepted as new
+after that horizon. Schema v3 fingerprints
 remain authoritative, while schema v4 retains ingress independently for
-zero-route records. A duplicate scoped event id with a changed envelope is
+zero-route records and schema v5 adds bounded payload-stage recovery. A
+duplicate scoped event id with a changed envelope is
 otherwise rejected while its dedupe record is retained. Legacy retention
 objects default effect retention to run-metadata retention. Inline payloads
-default to 16 MiB. Larger outputs require an `AxEventPayloadStore`; otherwise
-the run records `output_persistence_failed`, does not dispatch sinks, and never
-repeats the completed model call.
+default to 16 MiB. Larger outputs require an `AxEventStagedPayloadStore` and an
+explicit `payloadStaging` policy with positive `maxOutstandingCount`,
+`maxOutstandingBytes`, `maxPayloadBytes`, `stageTtlMs`, and
+`persistenceTimeoutMs`. The stage TTL must exceed two persistence timeouts, and
+the current claim lease must cover both operations. Missing capability,
+exhausted capacity, insufficient lease budget, timeout, or provider rejection
+fails before sink dispatch as typed `AxEventOutputPersistenceError`; the
+runtime recognizes its stable `code` and `phase` discriminants across package
+copies/JavaScript realms rather than relying on `instanceof`. The completed
+model call is never repeated. SQLite bounds outstanding uncommitted
+objects to the configured count, bytes, and TTL. Cross-system SQLite/payload
+commit is not atomic: between the run-row transaction and provider commit the
+journal is `commit_pending`; recovery retries it, and expiry fails closed as
+`output_persistence_failed` rather than replaying the target.
 
 ### Fault-injection evaluation
 
@@ -439,7 +463,10 @@ The focused adversarial command additionally covers changed-request reuse,
 canonical key reordering, resolver timeout and shutdown when the resolver
 ignores abort, a source handle that ignores shutdown, current-owner checks,
 lease expiry without takeover, a content-addressed payload collision during
-takeover, zero-route migration/replay, and fencing-token exhaustion.
+takeover, ownership-isolated stage abort, rejected and non-cooperative payload
+staging, store-restart commit reconciliation, zero-route migration/replay and
+expiry, in-memory/SQLite negative and stale fence parity, and fencing-token
+exhaustion.
 
 One orb run measured 0.452 ms baseline versus 1.137 ms with intent, dispatch,
 and settlement writes (+0.685 ms mean), and approximately 737 bytes per settled

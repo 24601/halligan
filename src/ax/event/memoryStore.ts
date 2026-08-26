@@ -37,6 +37,8 @@ export interface AxInMemoryEventStoreOptions {
 
 type Waiter = { resolve: () => void; reject: (error: unknown) => void };
 
+const MAX_FENCING_TOKEN = Number.MAX_SAFE_INTEGER;
+
 export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
   readonly capabilities = {
     durability: 'volatile',
@@ -197,11 +199,13 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
       if (!delivery || delivery.status !== 'queued') continue;
       if (delivery.availableAt > now) continue;
       if (this.hasEarlierInstanceWork(delivery)) continue;
+      const fencingToken = delivery.fencingToken ?? 0;
+      this.assertFencingTokenCanAdvance(delivery.id, fencingToken);
       const claimed: AxEventDelivery = {
         ...delivery,
         status: 'claimed',
         claimedBy: workerId,
-        fencingToken: (delivery.fencingToken ?? 0) + 1,
+        fencingToken: fencingToken + 1,
         leaseExpiresAt: now + leaseMs,
       };
       this.deliveries.set(id, claimed);
@@ -216,11 +220,17 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
     fencingToken: number,
     leaseExpiresAt: number
   ): Promise<void> {
+    this.assertSafeFencingToken(deliveryId, fencingToken);
     const delivery = this.deliveries.get(deliveryId);
+    const now = this.clock.now();
     if (
       !delivery ||
       delivery.claimedBy !== workerId ||
-      delivery.fencingToken !== fencingToken
+      delivery.fencingToken !== fencingToken ||
+      (delivery.status !== 'claimed' && delivery.status !== 'running') ||
+      delivery.leaseExpiresAt === undefined ||
+      delivery.leaseExpiresAt <= now ||
+      leaseExpiresAt <= now
     ) {
       throw new Error(`Stale event claim for ${deliveryId}`);
     }
@@ -235,6 +245,11 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
   }
 
   async saveDelivery(delivery: Readonly<AxEventDelivery>): Promise<void> {
+    this.assertActiveClaim(
+      delivery.id,
+      delivery.claimedBy,
+      delivery.fencingToken
+    );
     const previous = this.deliveries.get(delivery.id);
     this.deliveries.set(delivery.id, structuredClone(delivery));
     if (
@@ -250,6 +265,7 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
   }
 
   async saveRun(run: Readonly<AxEventRun>): Promise<void> {
+    this.assertActiveClaim(run.deliveryId, run.claimedBy, run.fencingToken);
     this.runs.set(run.id, structuredClone(run));
   }
 
@@ -428,6 +444,8 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
     if (!this.isTerminal(delivery.status)) {
       throw new Error(`Event delivery ${deliveryId} is not terminal`);
     }
+    const fencingToken = delivery.fencingToken ?? 0;
+    this.assertFencingTokenCanAdvance(delivery.id, fencingToken);
     const redriven: AxEventDelivery = {
       ...delivery,
       status: 'queued',
@@ -438,7 +456,7 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
       runId: undefined,
       leaseExpiresAt: undefined,
       invocationStarted: undefined,
-      fencingToken: (delivery.fencingToken ?? 0) + 1,
+      fencingToken: fencingToken + 1,
     };
     this.deliveries.set(deliveryId, redriven);
     this.pendingDeliveries++;
@@ -587,9 +605,12 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
   }
 
   private assertFence(fence: Readonly<AxEventEffectFence>): void {
+    this.assertSafeFencingToken(fence.deliveryId, fence.fencingToken);
     const delivery = this.deliveries.get(fence.deliveryId);
     if (
       !delivery ||
+      !Number.isSafeInteger(delivery.fencingToken) ||
+      delivery.fencingToken! < 0 ||
       delivery.fencingToken !== fence.fencingToken ||
       !delivery.claimedBy ||
       (delivery.status !== 'claimed' && delivery.status !== 'running') ||
@@ -598,6 +619,53 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
     ) {
       throw new Error(
         `Stale or expired fencing token for event delivery ${fence.deliveryId}`
+      );
+    }
+  }
+
+  private assertActiveClaim(
+    deliveryId: string,
+    claimedBy: string | undefined,
+    fencingToken: number | undefined
+  ): void {
+    if (!claimedBy || fencingToken === undefined) {
+      throw new Error(`Stale event claim for ${deliveryId}`);
+    }
+    this.assertSafeFencingToken(deliveryId, fencingToken);
+    const delivery = this.deliveries.get(deliveryId);
+    if (
+      !delivery ||
+      !Number.isSafeInteger(delivery.fencingToken) ||
+      delivery.fencingToken! < 0 ||
+      delivery.claimedBy !== claimedBy ||
+      delivery.fencingToken !== fencingToken ||
+      (delivery.status !== 'claimed' && delivery.status !== 'running') ||
+      delivery.leaseExpiresAt === undefined ||
+      delivery.leaseExpiresAt <= this.clock.now()
+    ) {
+      throw new Error(`Stale or expired event claim for ${deliveryId}`);
+    }
+  }
+
+  private assertSafeFencingToken(
+    deliveryId: string,
+    fencingToken: number
+  ): void {
+    if (!Number.isSafeInteger(fencingToken) || fencingToken < 0) {
+      throw new Error(
+        `Unsafe fencing token for event delivery ${deliveryId}; rotate the delivery identity`
+      );
+    }
+  }
+
+  private assertFencingTokenCanAdvance(
+    deliveryId: string,
+    fencingToken: number
+  ): void {
+    this.assertSafeFencingToken(deliveryId, fencingToken);
+    if (fencingToken >= MAX_FENCING_TOKEN) {
+      throw new Error(
+        `Fencing token exhausted for event delivery ${deliveryId}; rotate the delivery identity`
       );
     }
   }

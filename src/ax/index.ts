@@ -953,9 +953,11 @@ import {
   type AxEventInvalidator,
   type AxEventMatcher,
   AxEventOutcomeUnknownError,
+  AxEventOutputPersistenceError,
   type AxEventPath,
   type AxEventPathRoot,
   type AxEventPathSegment,
+  type AxEventPayloadStageRequest,
   type AxEventPayloadStore,
   type AxEventProgramStateAdapter,
   type AxEventPublishReceipt,
@@ -971,6 +973,7 @@ import {
   type AxEventSource,
   type AxEventSourceContext,
   type AxEventSourceHandle,
+  type AxEventStagedPayloadStore,
   type AxEventStore,
   type AxEventStoreCapabilities,
   type AxEventTarget,
@@ -981,6 +984,7 @@ import {
   type AxProgramStateEnvelope,
   type AxProgramStateStore,
   AxSystemEventClock,
+  axIsEventOutputPersistenceError,
 } from './event/types.js';
 import {
   AxUCPWebhookEventSource,
@@ -1392,6 +1396,7 @@ export { AxEventBackpressureError };
 export { AxEventContinuationNotFoundError };
 export { AxEventInputError };
 export { AxEventOutcomeUnknownError };
+export { AxEventOutputPersistenceError };
 export { AxEventRouteBuilder };
 export { AxEventRuntime };
 export { AxEventTargetBuilder };
@@ -1535,6 +1540,7 @@ export { axGetSupportedAIModels };
 export { axGlobals };
 export { axGoogleGeminiLiveAudioDefaults };
 export { axIsAudioOutputEnabled };
+export { axIsEventOutputPersistenceError };
 export { axIsGeminiLiveAudioModel };
 export { axIsGrokVoiceModel };
 export { axIsOpenAIChatAudioModel };
@@ -2038,6 +2044,7 @@ export type { AxEventMatcher };
 export type { AxEventPath };
 export type { AxEventPathRoot };
 export type { AxEventPathSegment };
+export type { AxEventPayloadStageRequest };
 export type { AxEventPayloadStore };
 export type { AxEventProgramStateAdapter };
 export type { AxEventPublishReceipt };
@@ -2053,6 +2060,7 @@ export type { AxEventSinkContext };
 export type { AxEventSource };
 export type { AxEventSourceContext };
 export type { AxEventSourceHandle };
+export type { AxEventStagedPayloadStore };
 export type { AxEventStore };
 export type { AxEventStoreCapabilities };
 export type { AxEventStoreConformanceFactory };
