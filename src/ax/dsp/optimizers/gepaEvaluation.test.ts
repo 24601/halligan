@@ -92,11 +92,13 @@ describe('evaluateGEPABatch', () => {
       maxMetricCalls: 10,
       state,
       applyConfig: () => {
+        throw new Error('must not apply an invalid source');
+      },
+      validateConfig: () => {
         throw new Error('Invalid program source JSON');
       },
       scalarize: (scores) => scalarizeGEPAScores(scores),
       captureTraces: true,
-      alignConfigErrors: true,
     });
 
     expect(forwards).toBe(0);
@@ -129,5 +131,29 @@ describe('evaluateGEPABatch', () => {
         scalarize: (scores) => scalarizeGEPAScores(scores),
       })
     ).rejects.toThrow('ordinary config error');
+  });
+
+  it('preserves ordinary config errors in a mixed program-source tree', async () => {
+    await expect(
+      evaluateGEPABatch({
+        program: {} as any,
+        ai: {} as AxAIService,
+        metricFn: async () => 1,
+        cfg: {
+          'root::program-source': '{valid}',
+          'root.child::instruction': 'candidate',
+        },
+        set: [{ id: '1' }] as any,
+        phase: 'mixed candidate',
+        sampleCount: 1,
+        maxMetricCalls: 10,
+        state: { totalCalls: 0, observedScoreKeys: new Set<string>() },
+        validateConfig: () => {},
+        applyConfig: () => {
+          throw new Error('ordinary mixed config error');
+        },
+        scalarize: (scores) => scalarizeGEPAScores(scores),
+      })
+    ).rejects.toThrow('ordinary mixed config error');
   });
 });

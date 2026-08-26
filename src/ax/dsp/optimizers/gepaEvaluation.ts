@@ -107,12 +107,11 @@ export async function evaluateGEPABatch<IN, OUT extends AxGenOut>(args: {
   maxMetricCalls: number;
   state: AxGEPAEvaluationState;
   applyConfig: (cfg: Readonly<Record<string, string>>) => void;
+  validateConfig?: (cfg: Readonly<Record<string, string>>) => void;
   scalarize: (scores: Readonly<Record<string, number>>) => number;
   verboseLog?: (message: string) => void;
   throwIfInsufficient?: boolean;
   captureTraces?: boolean;
-  /** Opt-in for components whose binding is part of candidate execution. */
-  alignConfigErrors?: boolean;
 }): Promise<AxGEPABatchEvaluation | undefined> {
   const requiredCalls = args.set.length;
   if (args.state.totalCalls + requiredCalls > args.maxMetricCalls) {
@@ -180,45 +179,61 @@ export async function evaluateGEPABatch<IN, OUT extends AxGenOut>(args: {
     error?: string;
   }> = [];
   for (const [index, ex] of args.set.entries()) {
-    if (!args.alignConfigErrors) args.applyConfig(args.cfg);
     let prediction: unknown;
     let scores: Record<string, number>;
     const calls: AxFunctionCallTrace[] = [];
+    let configError: string | undefined;
 
-    try {
-      if (args.alignConfigErrors) {
-        // Program-source binding belongs to the rollout. Malformed source must
-        // fail this aligned row, not score the previously bound implementation.
-        args.applyConfig(args.cfg);
+    if (args.validateConfig) {
+      try {
+        args.validateConfig(args.cfg);
+      } catch (error) {
+        configError = error instanceof Error ? error.message : String(error);
       }
-      prediction = await args.program.forward(
-        args.ai,
-        ex as IN,
-        {
-          sampleCount: args.sampleCount,
-          onFunctionCall: args.captureTraces
-            ? (call: Readonly<AxFunctionCallTrace>) => {
-                calls.push({ ...call });
-              }
-            : undefined,
-        } as any
-      );
-      scores = await normalizeGEPAScores(
-        args.metricFn,
-        prediction,
-        ex as AxExample
-      );
-      for (const key of Object.keys(scores))
-        args.state.observedScoreKeys.add(key);
-      if (args.captureTraces) trajectories.push({ calls, output: prediction });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      prediction = { error: message };
+    }
+
+    if (configError !== undefined) {
+      prediction = { error: configError };
       scores = zeroScoreVector(args.state.observedScoreKeys);
-      if (args.captureTraces) trajectories.push({ calls, error: message });
+      if (args.captureTraces) trajectories.push({ calls, error: configError });
       args.verboseLog?.(
-        `Evaluation failed during ${args.phase}; scoring this example as zero. Error: ${message}`
+        `Evaluation failed during ${args.phase}; scoring this example as zero. Error: ${configError}`
       );
+    } else {
+      // Applying ordinary components remains a configuration operation: those
+      // errors must propagate rather than become candidate rollout scores.
+      args.applyConfig(args.cfg);
+      try {
+        prediction = await args.program.forward(
+          args.ai,
+          ex as IN,
+          {
+            sampleCount: args.sampleCount,
+            onFunctionCall: args.captureTraces
+              ? (call: Readonly<AxFunctionCallTrace>) => {
+                  calls.push({ ...call });
+                }
+              : undefined,
+          } as any
+        );
+        scores = await normalizeGEPAScores(
+          args.metricFn,
+          prediction,
+          ex as AxExample
+        );
+        for (const key of Object.keys(scores))
+          args.state.observedScoreKeys.add(key);
+        if (args.captureTraces)
+          trajectories.push({ calls, output: prediction });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        prediction = { error: message };
+        scores = zeroScoreVector(args.state.observedScoreKeys);
+        if (args.captureTraces) trajectories.push({ calls, error: message });
+        args.verboseLog?.(
+          `Evaluation failed during ${args.phase}; scoring this example as zero. Error: ${message}`
+        );
+      }
     }
 
     args.state.totalCalls += 1;

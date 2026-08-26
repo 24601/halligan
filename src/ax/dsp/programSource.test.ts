@@ -239,6 +239,68 @@ describe('AxProgramSource', () => {
     ).rejects.toThrow(/Expected 'answer'.*string/i);
   });
 
+  it('requires required outputs to be own properties', () => {
+    expect(() =>
+      programSource('question:string -> toString:string', {
+        source: source([{ op: 'return', outputs: {} }]),
+      })
+    ).toThrow(/missing required output 'toString'/);
+  });
+
+  it('omits explicitly undefined optional inputs from the runtime snapshot', async () => {
+    const program = programSource(
+      'question:string, note?:string -> answer:string',
+      { source: source([returnAnswer(ref('inputs.question'))]) }
+    );
+
+    await expect(
+      program.forward({} as never, { question: 'ok', note: undefined })
+    ).resolves.toEqual({ answer: 'ok' });
+  });
+
+  it('exposes only detached declared data inputs to the runtime', async () => {
+    let runtimeInputs: unknown;
+    const runtime: AxCodeRuntime = {
+      language: 'JavaScript',
+      getUsageInstructions: () => '',
+      createSession: (globals) => {
+        runtimeInputs = globals.__axProgramSourceInputs;
+        return {
+          execute: async () => ({ answer: 'ok' }),
+          patchGlobals: async () => {},
+          close: () => {},
+        };
+      },
+    };
+    const program = programSource('question:string -> answer:string', {
+      source: source([returnAnswer(literal('ok'))]),
+      runtime: compatibleRuntime(runtime),
+    });
+    const callerInput = { question: 'q', secret: 'must not cross' };
+
+    await expect(program.forward({} as never, callerInput)).resolves.toEqual({
+      answer: 'ok',
+    });
+    expect(runtimeInputs).toEqual({ question: 'q' });
+    expect(runtimeInputs).not.toBe(callerInput);
+    expect(() =>
+      program.setProgramSource(source([returnAnswer(ref('inputs.secret'))]))
+    ).toThrow(/unknown input field 'secret'/);
+
+    let getterCalls = 0;
+    const accessorInput = Object.defineProperty({}, 'question', {
+      enumerable: true,
+      get: () => {
+        getterCalls += 1;
+        return 'must not run';
+      },
+    });
+    await expect(
+      program.forward({} as never, accessorInput as { question: string })
+    ).rejects.toThrow(/must be an enumerable data property/);
+    expect(getterCalls).toBe(0);
+  });
+
   it('executes only explicitly declared tools and emits direct-tool traces', async () => {
     let calls = 0;
     const traces: unknown[] = [];
@@ -288,6 +350,105 @@ describe('AxProgramSource', () => {
         source([returnAnswer(literal('nope'))], ['tool:not_available'])
       )
     ).toThrow(/not allowed by the host/);
+  });
+
+  it('does not let throwing trace callbacks corrupt direct-tool execution', async () => {
+    let traceCalls = 0;
+    const program = programSource('question:string -> answer:string', {
+      source: source(
+        [
+          {
+            op: 'tool',
+            name: 'echo',
+            as: 'echoed',
+            args: {
+              op: 'object',
+              entries: { value: ref('inputs.question') },
+            },
+          },
+          returnAnswer(ref('echoed.answer')),
+        ],
+        ['tool:echo']
+      ),
+      tools: [echoTool()],
+    });
+
+    await expect(
+      program.forward(
+        {} as never,
+        { question: 'safe' },
+        {
+          onFunctionCall: () => {
+            traceCalls += 1;
+            throw new Error('tracer unavailable');
+          },
+        }
+      )
+    ).resolves.toEqual({ answer: 'safe' });
+    expect(traceCalls).toBe(1);
+  });
+
+  it('dispatches parameter-less predictor tools without passing host options as arguments', async () => {
+    let chatCalls = 0;
+    let toolCalls = 0;
+    const ai = new AxMockAIService({
+      features: { functions: true, streaming: false },
+      chatResponse: async () => {
+        chatCalls += 1;
+        if (chatCalls === 1) {
+          return {
+            results: [
+              {
+                index: 0,
+                functionCalls: [
+                  {
+                    id: 'ping-1',
+                    type: 'function',
+                    function: { name: 'ping', params: '{}' },
+                  },
+                ],
+                finishReason: 'stop',
+              },
+            ],
+          } as AxChatResponse;
+        }
+        return {
+          results: [
+            { index: 0, content: 'Answer: pong', finishReason: 'stop' },
+          ],
+        } as AxChatResponse;
+      },
+    });
+    const ping: AxFunction = {
+      name: 'ping',
+      description: 'Return pong without parameters.',
+      returns: { type: 'object' },
+      func: () => {
+        toolCalls += 1;
+        return { answer: 'pong' };
+      },
+    };
+    const program = programSource('question:string -> answer:string', {
+      source: source(
+        [
+          {
+            op: 'predict',
+            as: 'result',
+            signature: '$program',
+            tools: ['ping'],
+            input: ref('inputs'),
+          },
+          returnAnswer(ref('result.answer')),
+        ],
+        ['predict', 'tool:ping']
+      ),
+      tools: [ping],
+    });
+
+    await expect(program.forward(ai, { question: 'q' })).resolves.toEqual({
+      answer: 'pong',
+    });
+    expect(toolCalls).toBe(1);
   });
 
   it('keeps optimizer source as inert data outside the runtime code string', async () => {

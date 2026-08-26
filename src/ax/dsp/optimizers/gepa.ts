@@ -321,9 +321,20 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       );
     }
     const componentSelector = new AxGEPAComponentSelector(targets);
-    const alignsConfigErrors = targets.some(
+    const alignedTargets = targets.filter(
       (target) => target.kind === 'program-source'
     );
+    const validateConfig =
+      alignedTargets.length > 0
+        ? (cfg: Readonly<Record<string, string>>): void => {
+            for (const target of alignedTargets) {
+              const value = cfg[target.id];
+              if (typeof value !== 'string' || !target.validate) continue;
+              const result = target.validate(value);
+              if (result !== true) throw new Error(result);
+            }
+          }
+        : undefined;
 
     const applyConfig = (cfg: Readonly<Record<string, string>>): void => {
       applyGEPAComponentConfig(program, cfg);
@@ -368,11 +379,11 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
         maxMetricCalls: rolloutBudgetPareto,
         state: evaluationState,
         applyConfig,
+        validateConfig,
         scalarize,
         verboseLog,
         throwIfInsufficient,
         captureTraces,
-        alignConfigErrors: alignsConfigErrors,
       });
       this.stats.totalCalls = bootstrapMetricCalls + evaluationState.totalCalls;
       return result;

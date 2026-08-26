@@ -92,10 +92,12 @@ Ax interpreter runs it in the default locked-down worker runtime with call,
 iteration, wall-clock, JSON value, and Node worker-resource budgets. Timed-out
 execution epochs reject late bridge results, while already-dispatched external
 effects remain host-owned. Parse/bind failures reject the candidate, runtime
-failures are scored against their aligned examples, and the immutable signature
-strictly validates final output fields. Predictor requests and selected host
-tool schemas are captured once as accessor-free bounded snapshots before budget
-consumption or AI/tool authority. Custom runtimes require explicit
+failures are scored against their aligned examples, and ordinary component
+apply errors still propagate in mixed trees. The immutable signature strictly
+validates final output fields. Only detached declared input data and bounded,
+accessor-free snapshots of predictor requests and selected host tool schemas
+cross their runtime boundaries before budget consumption or AI/tool authority.
+Custom runtimes require explicit
 JavaScript/protocol compatibility but remain trusted adapters. This experimental
 API is not yet part of the generated-language AxIR surface.
 

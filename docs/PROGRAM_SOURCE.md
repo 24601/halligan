@@ -104,11 +104,12 @@ another valid Ax string signature. It can add a local instruction and expose a
 subset of allowed tools. It cannot select a model or AI service. Every used
 predictor or tool must also appear in the document's explicit capability list.
 
-Binding enforces exact AST fields, known variables and tools, safe reference
-paths, required output names, source/statement/nesting limits, and local loop
-limits. Runtime output is then checked against the immutable outer signature:
-unknown fields are rejected, required fields must exist, and every value must
-match its Ax type and constraints.
+Binding enforces exact AST fields, known variables and tools, declared input
+field references, safe reference paths, required output names,
+source/statement/nesting limits, and local loop limits. Runtime output is then
+checked against the immutable outer signature: unknown fields are rejected,
+required fields must exist, and every value must match its Ax type and
+constraints.
 
 ## GEPA And Artifacts
 
@@ -123,10 +124,11 @@ they produce aligned zero-score rows instead of aborting the optimizer or
 scoring stale source. Runtime, tool, predictor, output, and budget errors are
 also aligned to the example that failed.
 
-Config-error alignment is enabled only when the discovered component tree
-contains `kind: "program-source"`. Ordinary GEPA trees retain their existing
-config-error behavior. This keeps the feature additive at Ax's upstream generic
-component boundary instead of redefining instruction/component semantics.
+Config-error alignment prevalidates only discovered `kind: "program-source"`
+components. Errors applying ordinary components still propagate, including in
+mixed trees that also contain program source. This keeps the feature additive
+at Ax's upstream generic component boundary instead of redefining
+instruction/component semantics.
 
 Program-source components coexist with ordinary instruction, description,
 tool, primitive, and descendant components in the same component map. Source
@@ -148,11 +150,15 @@ the source string in `componentMap`; use `axSerializeOptimizedProgram(...)` and
   imports, ambient globals, or mutable cross-call state.
 - Predictor, tool-call, executed-statement/loop, continuation-step, source-size,
   nesting, and wall-clock limits are enforced.
-- Inputs, complete predictor requests (signature/instruction/tool-name metadata,
-  input, and selected host tool descriptions/parameter/return schemas), tool
-  arguments/results, and final outputs must be plain acyclic JSON graphs within
-  configurable UTF-8 byte, depth, and per-container width limits. Defaults are
-  1,048,576 bytes, depth 24, and width 4,096.
+- Declared inputs, complete predictor requests (signature/instruction/tool-name
+  metadata, input, and selected host tool descriptions/parameter/return
+  schemas), tool arguments/results, and final outputs must be plain acyclic JSON
+  graphs within configurable UTF-8 byte, depth, and per-container width limits.
+  Undeclared caller properties never enter the runtime. Defaults are 1,048,576
+  bytes, depth 24, and width 4,096.
+- Ax captures declared input data properties by descriptor, omits explicitly
+  undefined optional fields, and passes only the detached bounded snapshot to
+  the runtime. Input accessors fail closed without being invoked.
 - Ax captures each runtime-supplied predictor request into a detached snapshot
   without invoking accessors, then resolves and snapshots the selected host tool
   metadata into the same bounded request envelope. Only those snapshots reach

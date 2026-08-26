@@ -496,6 +496,7 @@ const validateIdentifier = (value: unknown, path: string): string => {
 const validateReferencePath = (
   value: unknown,
   knownVariables: ReadonlySet<string>,
+  inputNames: ReadonlySet<string>,
   path: string
 ): void => {
   if (typeof value !== 'string' || value.length === 0) {
@@ -504,6 +505,13 @@ const validateReferencePath = (
   const segments = value.split('.');
   if (!knownVariables.has(segments[0]!)) {
     fail(path, `unknown root '${segments[0]}'`);
+  }
+  if (
+    segments[0] === 'inputs' &&
+    segments.length > 1 &&
+    !inputNames.has(segments[1]!)
+  ) {
+    fail(path, `unknown input field '${segments[1]}'`);
   }
   for (const segment of segments) {
     if (!IDENTIFIER.test(segment) || FORBIDDEN_PATH_SEGMENTS.has(segment)) {
@@ -515,6 +523,7 @@ const validateReferencePath = (
 function validateExpression(
   value: unknown,
   knownVariables: ReadonlySet<string>,
+  inputNames: ReadonlySet<string>,
   path: string,
   depth: number
 ): asserts value is AxProgramSourceExpression {
@@ -529,7 +538,12 @@ function validateExpression(
       return;
     case 'ref':
       exactKeys(value, ['op', 'path'], ['op', 'path'], path);
-      validateReferencePath(value.path, knownVariables, `${path}.path`);
+      validateReferencePath(
+        value.path,
+        knownVariables,
+        inputNames,
+        `${path}.path`
+      );
       return;
     case 'object': {
       exactKeys(value, ['op', 'entries'], ['op', 'entries'], path);
@@ -542,6 +556,7 @@ function validateExpression(
         validateExpression(
           expression,
           knownVariables,
+          inputNames,
           `${path}.entries.${key}`,
           depth + 1
         );
@@ -556,6 +571,7 @@ function validateExpression(
         validateExpression(
           expression,
           knownVariables,
+          inputNames,
           `${path}.items[${index}]`,
           depth + 1
         );
@@ -563,10 +579,17 @@ function validateExpression(
       return;
     case 'eq':
       exactKeys(value, ['op', 'left', 'right'], ['op', 'left', 'right'], path);
-      validateExpression(value.left, knownVariables, `${path}.left`, depth + 1);
+      validateExpression(
+        value.left,
+        knownVariables,
+        inputNames,
+        `${path}.left`,
+        depth + 1
+      );
       validateExpression(
         value.right,
         knownVariables,
+        inputNames,
         `${path}.right`,
         depth + 1
       );
@@ -581,17 +604,31 @@ function validateExpression(
       validateExpression(
         value.condition,
         knownVariables,
+        inputNames,
         `${path}.condition`,
         depth + 1
       );
-      validateExpression(value.then, knownVariables, `${path}.then`, depth + 1);
-      validateExpression(value.else, knownVariables, `${path}.else`, depth + 1);
+      validateExpression(
+        value.then,
+        knownVariables,
+        inputNames,
+        `${path}.then`,
+        depth + 1
+      );
+      validateExpression(
+        value.else,
+        knownVariables,
+        inputNames,
+        `${path}.else`,
+        depth + 1
+      );
       return;
     case 'not':
       exactKeys(value, ['op', 'value'], ['op', 'value'], path);
       validateExpression(
         value.value,
         knownVariables,
+        inputNames,
         `${path}.value`,
         depth + 1
       );
@@ -607,6 +644,7 @@ function validateExpression(
         validateExpression(
           expression,
           knownVariables,
+          inputNames,
           `${path}.values[${index}]`,
           depth + 1
         );
@@ -621,6 +659,7 @@ type BindContext = {
   capabilities: ReadonlySet<string>;
   tools: ReadonlyMap<string, AxFunction>;
   signature: Readonly<AxSignature>;
+  inputNames: ReadonlySet<string>;
   maxIterations: number;
   statementCount: number;
 };
@@ -719,6 +758,7 @@ const validateStatementList = (
         validateExpression(
           rawStatement.input,
           known,
+          context.inputNames,
           `${statementPath}.input`,
           depth + 1
         );
@@ -754,6 +794,7 @@ const validateStatementList = (
         validateExpression(
           rawStatement.args,
           known,
+          context.inputNames,
           `${statementPath}.args`,
           depth + 1
         );
@@ -770,6 +811,7 @@ const validateStatementList = (
         validateExpression(
           rawStatement.condition,
           known,
+          context.inputNames,
           `${statementPath}.condition`,
           depth + 1
         );
@@ -806,6 +848,7 @@ const validateStatementList = (
         validateExpression(
           rawStatement.items,
           known,
+          context.inputNames,
           `${statementPath}.items`,
           depth + 1
         );
@@ -838,6 +881,7 @@ const validateStatementList = (
         validateExpression(
           rawStatement.collect,
           bodyKnown,
+          context.inputNames,
           `${statementPath}.collect`,
           depth + 1
         );
@@ -872,6 +916,7 @@ const validateStatementList = (
           validateExpression(
             expression,
             known,
+            context.inputNames,
             `${statementPath}.outputs.${name}`,
             depth + 1
           );
@@ -977,6 +1022,9 @@ const bindProgramSource = (
       capabilities,
       tools: options.tools,
       signature: options.signature,
+      inputNames: new Set(
+        options.signature.getInputFields().map((field) => field.name)
+      ),
       maxIterations: options.maxIterations,
       statementCount: 0,
     },
@@ -1428,8 +1476,34 @@ export class AxProgramSource<
         `Aborted: ${options.abortSignal.reason ?? 'execution aborted'}`
       );
     }
+    const capturedInputs: Record<string, unknown> = {};
+    try {
+      for (const field of this.signature.getInputFields()) {
+        const descriptor = Object.getOwnPropertyDescriptor(values, field.name);
+        if (!descriptor) continue;
+        if (!descriptor.enumerable || !('value' in descriptor)) {
+          throw new AxProgramSourceError(
+            `Program source input field '${field.name}' must be an enumerable data property`
+          );
+        }
+        if (descriptor.value !== undefined) {
+          capturedInputs[field.name] = descriptor.value;
+        }
+      }
+    } catch (error) {
+      if (error instanceof AxProgramSourceError) throw error;
+      throw new AxProgramSourceError(
+        'Program source input could not be inspected',
+        { cause: error }
+      );
+    }
+    const snapshotInputs = snapshotSerializableValue(
+      capturedInputs,
+      this.valueLimits,
+      'Program source input'
+    );
     for (const field of this.signature.getInputFields()) {
-      const value = (values as Record<string, unknown>)[field.name];
+      const value = snapshotInputs[field.name];
       if (value === undefined || value === null) {
         if (!field.isOptional) {
           throw new AxProgramSourceError(
@@ -1440,16 +1514,6 @@ export class AxProgramSource<
       }
       validateValue(field, value as never);
     }
-    const snapshotInputs: Record<string, unknown> = {};
-    for (const field of this.signature.getInputFields()) {
-      const value = (values as Record<string, unknown>)[field.name];
-      if (value !== undefined) snapshotInputs[field.name] = value;
-    }
-    snapshotSerializableValue(
-      snapshotInputs,
-      this.valueLimits,
-      'Program source input'
-    );
 
     const epoch = ++this.nextSessionEpoch;
     const authorityStartedAt = Date.now();
@@ -1698,7 +1762,7 @@ export class AxProgramSource<
       session = this.runtime.createSession(
         {
           __axProgramSourceDocument: this.boundSource.document,
-          __axProgramSourceInputs: values,
+          __axProgramSourceInputs: snapshotInputs,
           __axProgramSourceMaxIterations: this.maxIterations,
           __axProgramSourcePredict: predict,
           __axProgramSourceTool: (name: string, args: unknown) =>
@@ -1742,7 +1806,7 @@ export class AxProgramSource<
         if (value === undefined || value === null) continue;
         validateValue(field, value as never);
       }
-      this.trace = { ...values, ...output } as OUT;
+      this.trace = { ...snapshotInputs, ...output } as OUT;
       return output as OUT;
     } finally {
       if (timeout !== undefined) clearTimeout(timeout);
