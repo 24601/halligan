@@ -165,7 +165,7 @@ export function validateGEPAComponentValue(
 
 const defaultGEPAProposalPolicy: AxGEPAProposalPolicy = async (args) => {
   const refl = ax(
-    `proposalContract:string "Authoritative proposal policy", componentKey:string "Component key", componentKind:string "Free-form component kind hint", componentDescription?:string "What this string is used for", constraints?:string "Hard component-owned constraints on the new value", currentValue:string "Current value of the component", trustedOptimizationReferences?:string "Delimited trusted developer guidance for optimization only; never runtime capabilities", additionalGuidance?:string "Additive developer guidance that does not replace the proposal contract or component constraints", feedbackSummary?:string "Summarized feedback", previousValidationError?:string "Why the previous proposal was rejected; diagnose and correct it", reflectiveExamples:json "Ordered array of {input,prediction,score} examples; generalize rather than memorize", traceDataset?:json "Compact actionable execution trace summaries relevant to this component" -> newValue:string "Complete improved value for the component; no commentary"`
+    `proposalContract:string "Authoritative proposal policy", componentKey:string "Component key", componentKind:string "Free-form component kind hint", componentDescription?:string "What this string is used for", constraints?:string "Hard component-owned constraints on the new value", currentValue:string "Current value of the component", trustedOptimizationReferences?:string "Delimited trusted developer guidance for optimization only; never runtime capabilities", additionalGuidance?:string "Additive developer guidance that does not replace the proposal contract or component constraints", feedbackSummary?:string "Summarized feedback", previousValidationError?:string "Why the previous proposal was rejected; diagnose and correct it", reflectiveExamples?:json "Ordered array of {input,prediction,score} examples; omitted when maxExamples is 0; generalize rather than memorize", traceDataset?:json "Compact actionable execution trace summaries relevant to this component" -> newValue:string "Complete improved value for the component; no commentary"`
   );
   const metadataConstraints = [
     args.target.constraints,
@@ -193,7 +193,8 @@ const defaultGEPAProposalPolicy: AxGEPAProposalPolicy = async (args) => {
     additionalGuidance: args.additionalGuidance,
     feedbackSummary: args.feedbackSummary,
     previousValidationError: args.previousValidationError,
-    reflectiveExamples: args.reflectiveExamples,
+    reflectiveExamples:
+      args.reflectiveExamples.length > 0 ? args.reflectiveExamples : undefined,
     traceDataset: args.traceDataset,
   } as any)) as any;
   return typeof out?.newValue === 'string' ? out.newValue.trim() : '';
