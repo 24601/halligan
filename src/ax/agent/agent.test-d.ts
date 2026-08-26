@@ -7,11 +7,13 @@ import {
   type AxAgentFunction,
   type AxAgentFunctionGroup,
   type AxAgentJudgeOutput,
+  type AxAgentPlaybookEvolveOptions,
   type AxAgentState,
   type AxAgentTestResult,
   type AxCodeRuntime,
   type AxFunction,
   type AxFunctionProvider,
+  type AxMetricResult,
   type AxRuntimeAdmissionReceipt,
   type AxRuntimeCapabilities,
   agent,
@@ -42,6 +44,15 @@ import {
   void _inspect;
   void _protocolVersion;
 }
+
+const structuredPlaybookMetricOptions: AxAgentPlaybookEvolveOptions = {
+  metric: async (): Promise<AxMetricResult<'quality'>> => ({
+    score: 0.8,
+    feedback: 'Available to GEPA; ignored by playbook evolution.',
+    scores: { quality: 1 },
+  }),
+};
+void structuredPlaybookMetricOptions;
 
 // Basic agent with string signature — forward() returns typed output
 {
@@ -326,6 +337,30 @@ import {
       onEarlyStop: () => {},
       judgeAI,
       judgeOptions: { model: 'override-judge-model' },
+    }
+  );
+}
+
+// Agent playbook strict promotion keeps taskId typed to the agent input
+{
+  const runtime = {} as AxCodeRuntime;
+  const ai = {} as import('../ai/types.js').AxAIService;
+  const a = agent('query:string -> answer:string', {
+    contextFields: [] as const,
+    runtime,
+    ai,
+  });
+
+  a.playbook().evolve(
+    {
+      train: [{ input: { query: 'train' }, criteria: 'Correct', id: 'train' }],
+      validation: [
+        { input: { query: 'held-out' }, criteria: 'Correct', id: 'held-out' },
+      ],
+    },
+    {
+      requireHeldOut: true,
+      taskId: (task) => task.input.query,
     }
   );
 }
@@ -983,5 +1018,40 @@ import {
     contextFields: [] as const,
     runtime,
     contextPolicy: { pruneUsedDocs: true },
+  });
+}
+
+// playbook retention policies preserve typed slice identities and thresholds
+{
+  const runtime = {} as AxCodeRuntime;
+  const a = agent('query:string -> answer:string', {
+    contextFields: [] as const,
+    runtime,
+  });
+  const task = {
+    id: 'refund-1',
+    input: { query: 'refund this order' },
+    criteria: 'refunds eligible orders',
+  };
+  const result = a.playbook().evolve([task], {
+    retentionPolicy: {
+      evaluatorId: 'refund-metric-v1',
+      slices: [{ name: 'refunds', version: '2026-08', tasks: [task] }],
+      minCurrentGain: 0.05,
+      maxWorstHistoricalLoss: 0.02,
+      maxMeanHistoricalLoss: 0.01,
+    },
+  });
+  void result;
+
+  a.playbook().evolve([task], {
+    retentionPolicy: {
+      evaluatorId: 'refund-metric-v1',
+      // @ts-expect-error retention slices require a caller-managed version
+      slices: [{ name: 'refunds', tasks: [task] }],
+      minCurrentGain: 0.05,
+      maxWorstHistoricalLoss: 0.02,
+      maxMeanHistoricalLoss: 0.01,
+    },
   });
 }

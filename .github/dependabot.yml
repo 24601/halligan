@@ -1,0 +1,64 @@
+version: 2
+updates:
+  # The root lockfile manages all npm workspaces under src/.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      development-dependencies:
+        dependency-type: development
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      github-actions:
+        patterns:
+          - '*'
+
+  - package-ecosystem: pip
+    directory: /packages/python
+    schedule:
+      interval: weekly
+      day: monday
+
+  - package-ecosystem: maven
+    directory: /packages/java
+    schedule:
+      interval: weekly
+      day: monday
+
+  - package-ecosystem: gomod
+    directory: /packages/go
+    schedule:
+      interval: weekly
+      day: monday
+
+  - package-ecosystem: cargo
+    directory: /packages/rust
+    schedule:
+      interval: weekly
+      day: monday
+
+  # These locked test fixtures have their own direct Rust dependencies.
+  - package-ecosystem: cargo
+    directory: /tools/axir/smoke/mcp-event
+    schedule:
+      interval: weekly
+      day: monday
+
+  - package-ecosystem: cargo
+    directory: /tools/axir/smoke/mcp-interop
+    schedule:
+      interval: weekly
+      day: monday
+
+  - package-ecosystem: cargo
+    directory: /tools/axir/smoke/mcp-oauth
+    schedule:
+      interval: weekly
+      day: monday

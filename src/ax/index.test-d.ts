@@ -12,17 +12,49 @@ import {
   type AxAIOpenAIResponsesConfig,
   type AxAIOpenAIResponsesRequest,
   type AxAIService,
+  type AxExecutableSkillArtifact,
+  type AxExecutableSkillSelection,
   type AxFunction,
   type AxFunctionHandler,
+  AxJSRuntime,
+  type AxJSRuntimeSpeculationEvent,
+  type AxMetricFn,
+  type AxMetricResult,
+  type AxMultiMetricFn,
   type AxParetoResult,
   type AxProgrammable,
   ax,
+  axExecutableSkillRef,
+  axSelectExecutableSkills,
   f,
   flow,
   fn,
   optimize,
+  react,
 } from './index.js';
 import type { Equal, Expect, Flatten } from './util/typetest.js';
+
+// === AxJSRuntime speculation public surface ===
+const speculationEvents: AxJSRuntimeSpeculationEvent[] = [];
+new AxJSRuntime({
+  speculation: {
+    callables: {
+      'tools.lookup': { purity: 'pure', deterministic: true },
+      llmQuery: { purity: 'pure', deterministic: false },
+    },
+    maxConcurrency: 4,
+    maxCallsPerExecution: 16,
+    onEvent: (event) => speculationEvents.push(event),
+  },
+});
+new AxJSRuntime({
+  speculation: {
+    callables: {
+      // @ts-expect-error speculation requires an explicit pure attestation
+      'tools.write': { purity: 'impure', deterministic: true },
+    },
+  },
+});
 
 // Extract (and flatten) the inferred field objects from an AxSignature so they
 // can be compared against plain object literals with Equal.
@@ -357,6 +389,27 @@ const optionalGenerator = ax(`
   void [_ok, _bad];
 }
 
+// react() preserves string-signature input/output inference and discriminates
+// successful structured output from complete null-shaped runtime failure.
+const reactProgram = react('question:string -> answer:string, score:number');
+type ReactResult = Awaited<ReturnType<typeof reactProgram.forward>>;
+type _reactSuccessOutput = Expect<
+  Equal<
+    Flatten<Extract<ReactResult, { success: true }>['output']>,
+    { answer: string; score: number }
+  >
+>;
+type _reactFailureOutput = Expect<
+  Equal<
+    Flatten<Extract<ReactResult, { success: false }>['output']>,
+    { answer: string | null; score: number | null }
+  >
+>;
+const reactAI = {} as AxAIService;
+void reactProgram.forward(reactAI, { question: 'typed' });
+// @ts-expect-error question must be a string
+void reactProgram.forward(reactAI, { question: 42 });
+
 // === fn() Function Builder Type Tests ===
 const calculatedTool = fn('calculate')
   .description('Evaluate a math expression')
@@ -528,6 +581,28 @@ const _optimizedProgrammable: Promise<
   maxMetricCalls: 2,
   bootstrap: { maxDemos: 1, qualityThreshold: 0.5 },
 });
+const qualitativeResult: AxMetricResult<'accuracy' | 'brevity'> = {
+  score: 0.8,
+  feedback: 'Ground the answer in the provided evidence.',
+  scores: { accuracy: 1, brevity: 0.5 },
+};
+const qualitativeMetric: AxMetricFn<any, 'accuracy' | 'brevity'> = () =>
+  qualitativeResult;
+const legacyScalarMetric: AxMetricFn = () => 1;
+const legacyMultiMetric: AxMultiMetricFn = () => ({
+  accuracy: 1,
+  brevity: 0.5,
+});
+void qualitativeMetric;
+void legacyScalarMetric;
+void legacyMultiMetric;
+
+const invalidQualitativeResult: AxMetricResult<'accuracy'> = {
+  score: 1,
+  // @ts-expect-error named objectives are constrained by AxMetricResult's generic
+  scores: { brevity: 1 },
+};
+void invalidQualitativeResult;
 
 // Test flow() with optional fields
 const optionalFlow = flow<{
@@ -577,3 +652,37 @@ const responsesConfigMaxEffort: AxAIOpenAIResponsesConfig<
   string
 >['reasoningEffort'] = 'max';
 void responsesConfigMaxEffort;
+
+// === Host-owned executable skill selection ===
+const executableSkill: AxExecutableSkillArtifact = {
+  id: 'report-export',
+  version: '2',
+  name: 'Report export',
+  description: 'Export an authorized report',
+  functionRef: 'functions/report-export/2',
+  verification: { mode: 'receiptless' },
+  requirements: { capabilities: ['report.read'] },
+};
+const executableSkillSelection: AxExecutableSkillSelection =
+  axSelectExecutableSkills(
+    [executableSkill],
+    {
+      admittedArtifacts: [axExecutableSkillRef(executableSkill)],
+      principal: 'principal:reporter',
+      audience: 'agent:reporting',
+      capabilities: ['report.read'],
+      now: '2026-08-25T00:00:00.000Z',
+      resolveFunction: () => ({
+        name: 'export_report',
+        description: 'Export report',
+        func: () => 'report',
+      }),
+    },
+    { query: 'export report', topK: 1 }
+  );
+const selectedExecutableFunction: AxAgentFunction | undefined =
+  executableSkillSelection.artifacts[0]?.function;
+void selectedExecutableFunction;
+
+// @ts-expect-error trusted principal, clock, admission, and resolver are mandatory
+axSelectExecutableSkills([executableSkill], { capabilities: ['report.read'] });

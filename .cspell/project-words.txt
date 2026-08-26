@@ -100,6 +100,7 @@ grault
 groq
 Groq
 guidel
+Halligan
 Hono
 huggingface
 hypervolume
@@ -244,6 +245,7 @@ Typesafe
 typetest
 typetests
 ulaw
+unawaited
 unminified
 unranked
 unscored
@@ -288,6 +290,7 @@ CIMD
 Coalescible
 datacontenttype
 dataschema
+disjointness
 dpop
 fanout
 Fmcp
@@ -329,9 +332,16 @@ nebius
 novita
 nscale
 ovhcloud
+overfit
 runpod
 sambanova
 scaleway
 siliconflow
+Subcall
+Subcalls
+subcall
+subcalls
 togethre
 vllm
+dhash
+luma

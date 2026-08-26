@@ -26,6 +26,12 @@ import {
   validateSerializableGlobals,
 } from './jsRuntimeSession.js';
 import {
+  type AxJSRuntimeSpeculationOptions,
+  JSRuntimeSpeculationTurn,
+  type NormalizedAxJSRuntimeSpeculationOptions,
+  normalizeJSRuntimeSpeculationOptions,
+} from './jsRuntimeSpeculation.js';
+import {
   canUseWebWorker,
   createBrowserWorker,
   createNodeWorker,
@@ -40,6 +46,13 @@ import { getWorkerSource } from './worker.js';
 
 export { AxJSRuntimePermission };
 export type { AxJSRuntimeNodePermissionAllowlist, AxJSRuntimeResourceLimits };
+export type {
+  AxJSRuntimeSpeculationEvent,
+  AxJSRuntimeSpeculationEventKind,
+  AxJSRuntimeSpeculationEventReason,
+  AxJSRuntimeSpeculationOptions,
+  AxJSRuntimeSpeculationPolicy,
+} from './jsRuntimeSpeculation.js';
 
 export type AxJSRuntimeOutputMode = 'return' | 'stdout';
 
@@ -65,6 +78,7 @@ const immutableRuntimeFieldNames = [
   'nodePermissionAllowlist',
   'resourceLimits',
   'allowDenoRemoteImport',
+  'speculation',
 ] as const;
 
 /**
@@ -91,6 +105,7 @@ export class AxJSRuntime implements AxCodeRuntime {
   private readonly nodePermissionAllowlist?: AxJSRuntimeNodePermissionAllowlist;
   private readonly resourceLimits?: AxJSRuntimeResourceLimits;
   private readonly allowDenoRemoteImport: boolean;
+  private readonly speculation?: NormalizedAxJSRuntimeSpeculationOptions;
 
   constructor(
     options?: Readonly<{
@@ -183,6 +198,12 @@ export class AxJSRuntime implements AxCodeRuntime {
        * loading is blocked at the runtime level.
        */
       allowDenoRemoteImport?: boolean;
+      /**
+       * Opt-in speculative programmatic tool calling for exact runtime paths.
+       * Only explicitly pure callables are eligible; unsupported code falls
+       * back to ordinary worker execution.
+       */
+      speculation?: AxJSRuntimeSpeculationOptions;
     }>
   ) {
     Object.defineProperties(this, {
@@ -255,6 +276,9 @@ export class AxJSRuntime implements AxCodeRuntime {
         })
       : undefined;
     this.allowDenoRemoteImport = options?.allowDenoRemoteImport ?? false;
+    this.speculation = normalizeJSRuntimeSpeculationOptions(
+      options?.speculation
+    );
     const granted = new Set(this.permissions);
     const permissionAuthority = (permission: AxJSRuntimePermission) =>
       granted.has(permission) ? 'unrestricted' : 'denied';
@@ -468,21 +492,31 @@ export class AxJSRuntime implements AxCodeRuntime {
     let isClosed = false;
 
     const timeout = this.timeout;
+    const speculationOptions = this.speculation;
     let nextFnRefId = 0;
     const shouldBubbleError = options?.shouldBubbleError;
     let bubbleError: unknown = null;
 
     // Convert nested function values into worker-callable references.
-    const { serializableGlobals, fnMap } = splitGlobalsForWorker(globals, {
-      nextFnId: () => ++nextFnRefId,
-    });
+    const { serializableGlobals, fnMap, fnPathToRef } = splitGlobalsForWorker(
+      globals,
+      {
+        nextFnId: () => ++nextFnRefId,
+      }
+    );
+    const refToFnPath = new Map<string, string>();
+    for (const [path, ref] of fnPathToRef) {
+      refToFnPath.set(ref, path);
+    }
     validateSerializableGlobals(serializableGlobals);
+    let activeSpeculationTurn: JSRuntimeSpeculationTurn | null = null;
 
     // Pending worker requests keyed by correlation ID.
     const pendingRequests = new Map<
       number,
       { resolve: (v: unknown) => void; reject: (e: Error) => void }
     >();
+    const inFlightHostCalls = new Set<Promise<unknown>>();
     let nextId = 0;
     type QueuedSessionOperation = {
       started: boolean;
@@ -558,8 +592,18 @@ export class AxJSRuntime implements AxCodeRuntime {
           });
           return;
         }
-        Promise.resolve()
-          .then(() => fn(...(typedMsg.args ?? [])))
+        const hostCall = Promise.resolve()
+          .then(async () => {
+            const args = typedMsg.args ?? [];
+            if (activeSpeculationTurn) {
+              const claim = await activeSpeculationTurn.claim(
+                typedMsg.name!,
+                args
+              );
+              if (claim.hit) return claim.value;
+            }
+            return fn(...args);
+          })
           .then((value) => {
             try {
               worker?.postMessage({
@@ -585,7 +629,11 @@ export class AxJSRuntime implements AxCodeRuntime {
               id: typedMsg.id,
               error: serializeError(err) as SerializedError,
             });
+          })
+          .finally(() => {
+            inFlightHostCalls.delete(hostCall);
           });
+        inFlightHostCalls.add(hostCall);
       }
     };
 
@@ -606,6 +654,8 @@ export class AxJSRuntime implements AxCodeRuntime {
     /** Permanently closes the session and rejects all pending executions. */
     const cleanup = () => {
       isClosed = true;
+      activeSpeculationTurn?.finish('execution-aborted');
+      activeSpeculationTurn = null;
       resetWorker();
       for (const operation of queuedOperations) {
         if (!operation.started && !operation.settled) {
@@ -986,15 +1036,54 @@ export class AxJSRuntime implements AxCodeRuntime {
           }
         }
 
-        return enqueueSessionRequest(options?.signal, () =>
-          dispatchWorkerRequest(
-            { type: 'execute', code },
-            {
-              signal: options?.signal,
-              timeoutMessage: 'Execution timed out',
+        if (!speculationOptions) {
+          return enqueueSessionRequest(options?.signal, () =>
+            dispatchWorkerRequest(
+              { type: 'execute', code },
+              {
+                signal: options?.signal,
+                timeoutMessage: 'Execution timed out',
+              }
+            )
+          );
+        }
+
+        return enqueueSessionRequest(options?.signal, async () => {
+          const speculationTurn = new JSRuntimeSpeculationTurn(
+            speculationOptions,
+            fnMap,
+            fnPathToRef,
+            refToFnPath
+          );
+          activeSpeculationTurn = speculationTurn;
+          speculationTurn.plan(code, serializableGlobals);
+          let completed = false;
+          try {
+            const value = await dispatchWorkerRequest(
+              { type: 'execute', code },
+              {
+                signal: options?.signal,
+                timeoutMessage: 'Execution timed out',
+              }
+            );
+            if (inFlightHostCalls.size > 0) {
+              await Promise.allSettled([...inFlightHostCalls]);
             }
-          )
-        );
+            completed = true;
+            return value;
+          } finally {
+            if (activeSpeculationTurn === speculationTurn) {
+              activeSpeculationTurn = null;
+            }
+            speculationTurn.finish(
+              completed
+                ? 'execution-complete'
+                : options?.signal?.aborted
+                  ? 'execution-aborted'
+                  : 'execution-failed'
+            );
+          }
+        });
       },
 
       inspectGlobals(options?: {
@@ -1055,10 +1144,13 @@ export class AxJSRuntime implements AxCodeRuntime {
           throw new Error('patchGlobals expects an object');
         }
 
-        const { serializableGlobals: serializablePatch, fnMap: patchFnMap } =
-          splitGlobalsForWorker(globals, {
-            nextFnId: () => ++nextFnRefId,
-          });
+        const {
+          serializableGlobals: serializablePatch,
+          fnMap: patchFnMap,
+          fnPathToRef: patchFnPathToRef,
+        } = splitGlobalsForWorker(globals, {
+          nextFnId: () => ++nextFnRefId,
+        });
         validateSerializableGlobals(serializablePatch);
 
         if (Object.keys(serializablePatch).length === 0) {
@@ -1078,8 +1170,23 @@ export class AxJSRuntime implements AxCodeRuntime {
         for (const [key, value] of Object.entries(serializablePatch)) {
           serializableGlobals[key] = value;
         }
+        const patchedRoots = Object.keys(serializablePatch);
+        for (const [path, ref] of [...fnPathToRef]) {
+          if (
+            patchedRoots.some(
+              (key) => path === key || path.startsWith(`${key}.`)
+            )
+          ) {
+            fnPathToRef.delete(path);
+            refToFnPath.delete(ref);
+          }
+        }
         for (const [key, fn] of patchFnMap.entries()) {
           fnMap.set(key, fn);
+        }
+        for (const [path, ref] of patchFnPathToRef) {
+          fnPathToRef.set(path, ref);
+          refToFnPath.set(ref, path);
         }
       },
 
@@ -1142,6 +1249,7 @@ export function axCreateJSRuntime(
     nodePermissionAllowlist?: AxJSRuntimeNodePermissionAllowlist;
     resourceLimits?: AxJSRuntimeResourceLimits;
     allowDenoRemoteImport?: boolean;
+    speculation?: AxJSRuntimeSpeculationOptions;
   }>
 ): AxJSRuntime {
   return new AxJSRuntime(options);

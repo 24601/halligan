@@ -215,6 +215,7 @@ describe('AxJSRuntime secure defaults', () => {
       'nodePermissionAllowlist',
       'resourceLimits',
       'allowDenoRemoteImport',
+      'speculation',
     ] as const;
     const ownStateFields = Object.keys(
       Object.getOwnPropertyDescriptors(runtime)
@@ -245,6 +246,43 @@ describe('AxJSRuntime secure defaults', () => {
       blockShadowRealm: true,
       lockWorkerIPC: true,
     });
+  });
+
+  it('snapshots and freezes speculative authority policy', () => {
+    const callables = {
+      'tools.read': { purity: 'pure' as const, deterministic: true },
+    };
+    const runtime = new AxJSRuntime({ speculation: { callables } });
+    callables['tools.read'].deterministic = false;
+    Object.assign(callables, {
+      'tools.unsafe': { purity: 'pure', deterministic: true },
+    });
+
+    const captured = runtime as unknown as {
+      speculation: {
+        callables: Record<
+          string,
+          Readonly<{ purity: 'pure'; deterministic: boolean }>
+        >;
+      };
+    };
+    expect(Object.isFrozen(captured.speculation)).toBe(true);
+    expect(Object.isFrozen(captured.speculation.callables)).toBe(true);
+    expect(captured.speculation.callables['tools.read']).toEqual({
+      purity: 'pure',
+      deterministic: true,
+    });
+    expect(Object.isFrozen(captured.speculation.callables['tools.read'])).toBe(
+      true
+    );
+    expect(captured.speculation.callables['tools.unsafe']).toBeUndefined();
+    expect(
+      Reflect.set(
+        captured.speculation.callables,
+        'tools.unsafe',
+        Object.freeze({ purity: 'pure', deterministic: true })
+      )
+    ).toBe(false);
   });
 });
 
