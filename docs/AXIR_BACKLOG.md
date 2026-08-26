@@ -32,6 +32,13 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
   - TS paths: `src/ax/ai/index.ts`, `src/ax/ai/visual`
   - Impact: TypeScript hosts can apply revision-, freshness-, authority-, change-, and rolling-budget-aware selection to host-captured visual observations; generated language packages do not yet expose the AxVisualObservation or AxFrameSampler policy.
   - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+- `axir-2026-08-25-port-structured-native-tool-aware-react-module` [axgen] Port structured native-tool-aware ReAct module
+  - Status: open
+  - Source PR: #10
+  - Source commit: `0c03834d19ec0bce695bc4d5a1310370ee4984f4`
+  - TS paths: `src/ax/dsp/react.test.ts`, `src/ax/dsp/react.ts`, `src/ax/mcp/execution.ts`
+  - Impact: TypeScript now exposes react() with native/prompt tool protocols, typed terminal submit, canonical resumable history, bounded parallel execution and compaction; generated Python/Java/C++/Go/Rust packages do not yet expose equivalent semantics.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 - `axir-2026-08-26-port-gepa-built-in-maxexamples-0-optional-reflectiveexamples` [axoptimize] Port GEPA built-in maxExamples 0 optional reflectiveExamples
   - Status: open
   - Source PR: #53
