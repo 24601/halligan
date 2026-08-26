@@ -206,6 +206,7 @@ export async function evaluateGEPABatch<IN, OUT extends AxGenOut>(args: {
   maxMetricCalls: number;
   state: AxGEPAEvaluationState;
   applyConfig: (cfg: Readonly<Record<string, string>>) => void;
+  validateConfig?: (cfg: Readonly<Record<string, string>>) => void;
   scalarize: (scores: Readonly<Record<string, number>>) => number;
   verboseLog?: (message: string) => void;
   throwIfInsufficient?: boolean;
@@ -313,53 +314,75 @@ export async function evaluateGEPABatch<IN, OUT extends AxGenOut>(args: {
       args.state.stopReason = 'aborted';
       return undefined;
     }
-    args.applyConfig(args.cfg);
     args.state.totalCalls += 1;
     let prediction: unknown;
     let scores: Record<string, number>;
     let metricScalar: number | undefined;
     let feedback: string | undefined;
     const calls: AxFunctionCallTrace[] = [];
+    let configError: string | undefined;
 
-    try {
-      prediction = await args.program.forward(
-        args.ai,
-        ex as IN,
-        {
-          sampleCount: args.sampleCount,
-          onFunctionCall: args.captureTraces
-            ? (call: Readonly<AxFunctionCallTrace>) => {
-                calls.push({ ...call });
-              }
-            : undefined,
-          abortSignal: args.abortSignal,
-        } as any
-      );
-      const metricResult = await normalizeGEPAMetricResult(
-        args.metricFn,
-        prediction,
-        ex as AxExample
-      );
-      scores = metricResult.scores;
-      metricScalar = metricResult.scalar;
-      feedback = metricResult.feedback;
-      for (const key of Object.keys(scores))
-        args.state.observedScoreKeys.add(key);
-      if (args.captureTraces) trajectories.push({ calls, output: prediction });
-    } catch (error) {
-      if (args.abortSignal?.aborted) {
-        args.state.stopReason = 'aborted';
-        return undefined;
+    if (args.validateConfig) {
+      try {
+        args.validateConfig(args.cfg);
+      } catch (error) {
+        configError = error instanceof Error ? error.message : String(error);
       }
-      const message = error instanceof Error ? error.message : String(error);
-      failures?.push({ kind: 'runtime', message });
-      prediction = { error: message };
+    }
+
+    if (configError !== undefined) {
+      prediction = { error: configError };
       scores = zeroScoreVector(args.state.observedScoreKeys);
       failedRows.add(index);
-      if (args.captureTraces) trajectories.push({ calls, error: message });
+      if (args.captureTraces) trajectories.push({ calls, error: configError });
       args.verboseLog?.(
-        `Evaluation failed during ${args.phase}; scoring this example as zero. Error: ${message}`
+        `Evaluation failed during ${args.phase}; scoring this example as zero. Error: ${configError}`
       );
+    } else {
+      // Applying ordinary components remains a configuration operation: those
+      // errors must propagate rather than become candidate rollout scores.
+      args.applyConfig(args.cfg);
+      try {
+        prediction = await args.program.forward(
+          args.ai,
+          ex as IN,
+          {
+            sampleCount: args.sampleCount,
+            onFunctionCall: args.captureTraces
+              ? (call: Readonly<AxFunctionCallTrace>) => {
+                  calls.push({ ...call });
+                }
+              : undefined,
+            abortSignal: args.abortSignal,
+          } as any
+        );
+        const metricResult = await normalizeGEPAMetricResult(
+          args.metricFn,
+          prediction,
+          ex as AxExample
+        );
+        scores = metricResult.scores;
+        metricScalar = metricResult.scalar;
+        feedback = metricResult.feedback;
+        for (const key of Object.keys(scores))
+          args.state.observedScoreKeys.add(key);
+        if (args.captureTraces)
+          trajectories.push({ calls, output: prediction });
+      } catch (error) {
+        if (args.abortSignal?.aborted) {
+          args.state.stopReason = 'aborted';
+          return undefined;
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        failures?.push({ kind: 'runtime', message });
+        prediction = { error: message };
+        scores = zeroScoreVector(args.state.observedScoreKeys);
+        failedRows.add(index);
+        if (args.captureTraces) trajectories.push({ calls, error: message });
+        args.verboseLog?.(
+          `Evaluation failed during ${args.phase}; scoring this example as zero. Error: ${message}`
+        );
+      }
     }
 
     const scalar = metricScalar ?? args.scalarize(scores);

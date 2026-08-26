@@ -400,6 +400,7 @@ async function adversarialBoundaryMatrix() {
   return {
     runtimeStartCloseOverlap: await runtimeStartCloseOverlapBoundary(),
     lateTeardownRegistration: await lateTeardownRegistrationBoundary(),
+    uncertainEffectOwnership: await uncertainEffectOwnershipBoundary(),
     inactiveReplacement: await inactiveReplacementBoundary(),
     partialDisposal: await partialDisposalBoundary(),
     dependencySnapshot: await dependencySnapshotBoundary(),
@@ -496,7 +497,7 @@ async function lateTeardownRegistrationBoundary() {
   ]);
   return {
     deactivationRejected: deactivation.status === 'rejected',
-    queuedActivationFulfilled: reactivation.status === 'fulfilled',
+    queuedActivationRejected: reactivation.status === 'rejected',
     activationCount: activations,
     queuedActivationOverlapped,
     lateDisposerInvocations,
@@ -504,6 +505,67 @@ async function lateTeardownRegistrationBoundary() {
       manager
         .inspect('boundary-late-registration')
         ?.diagnostics.some(({ code }) => code === 'late-disposer') ?? false,
+  };
+}
+
+async function uncertainEffectOwnershipBoundary() {
+  const run = async (failureMode: 'throwing' | 'timed-out') => {
+    let acquisitions = 0;
+    let disposerAttempts = 0;
+    let replacementActivations = 0;
+    const manager = new AxEventComponentManager();
+    await manager.define({
+      id: `boundary-${failureMode}-ownership`,
+      version: '1',
+      activate: (context) =>
+        context.acquire('socket', () => {
+          acquisitions++;
+          return {
+            value: acquisitions,
+            dispose: () => {
+              disposerAttempts++;
+              if (failureMode === 'throwing') {
+                throw new Error('socket close failed');
+              }
+              return new Promise<void>(() => undefined);
+            },
+          };
+        }),
+    });
+    await manager.activate();
+    await manager
+      .dispose(undefined, failureMode === 'timed-out' ? { timeoutMs: 5 } : {})
+      .catch(() => undefined);
+    const failedBeforeTransitions = manager.inspect()[0];
+    const [activation, replacement] = await Promise.allSettled([
+      manager.activate(),
+      manager.replace({
+        id: `boundary-${failureMode}-ownership`,
+        version: '2',
+        activate: () => {
+          replacementActivations++;
+        },
+      }),
+    ]);
+    const failedAfterTransitions = manager.inspect()[0];
+    return {
+      activationRejected: activation.status === 'rejected',
+      replacementRejected: replacement.status === 'rejected',
+      noSecondAcquisition: acquisitions === 1,
+      disposerInvokedOnce: disposerAttempts === 1,
+      replacementNotActivated: replacementActivations === 0,
+      failedEvidencePreserved:
+        failedBeforeTransitions?.state === 'failed' &&
+        failedBeforeTransitions.effects[0]?.state === 'failed' &&
+        failedAfterTransitions?.state === 'failed' &&
+        failedAfterTransitions.version === '1' &&
+        failedAfterTransitions.effects[0]?.state === 'failed',
+    };
+  };
+
+  return {
+    throwing: await run('throwing'),
+    timedOut: await run('timed-out'),
   };
 }
 
@@ -1029,11 +1091,19 @@ function assertManagedResults(result: typeof results): void {
     boundaries.runtimeStartCloseOverlap.lateHandleClosed !== true,
     boundaries.runtimeStartCloseOverlap.liveSources !== 0,
     boundaries.lateTeardownRegistration.deactivationRejected !== true,
-    boundaries.lateTeardownRegistration.queuedActivationFulfilled !== true,
-    boundaries.lateTeardownRegistration.activationCount !== 2,
+    boundaries.lateTeardownRegistration.queuedActivationRejected !== true,
+    boundaries.lateTeardownRegistration.activationCount !== 1,
     boundaries.lateTeardownRegistration.queuedActivationOverlapped !== false,
     boundaries.lateTeardownRegistration.lateDisposerInvocations !== 0,
     boundaries.lateTeardownRegistration.lateRegistrationDiagnosed !== true,
+    ...Object.values(boundaries.uncertainEffectOwnership).flatMap((value) => [
+      value.activationRejected !== true,
+      value.replacementRejected !== true,
+      value.noSecondAcquisition !== true,
+      value.disposerInvokedOnce !== true,
+      value.replacementNotActivated !== true,
+      value.failedEvidencePreserved !== true,
+    ]),
     boundaries.inactiveReplacement.definedCandidateActivations !== 0,
     boundaries.inactiveReplacement.definedReplacementState !== true,
     boundaries.inactiveReplacement.failedCandidateActivations !== 0,

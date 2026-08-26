@@ -273,6 +273,107 @@ mechanism/self-consistency measurements, not independent causal proof,
 population calibration, or evidence that the candidate or model quality
 improves in production.
 
+## Experimental Program-Source Optimization
+
+Use `programSource(signature, options)` when the complete implementation and
+control flow should be one GEPA component instead of only tuning instruction
+strings. It exposes `<program-id>::program-source` while preserving ordinary
+instruction, description, tool, primitive, and descendant components.
+
+```typescript
+import { optimize, programSource } from '@ax-llm/ax';
+
+const program = programSource(
+  'ticketText:string -> priority:class "urgent, normal", rationale:string',
+  {
+    tools: [classifyUrgency],
+    maxPredictorCalls: 4,
+    maxToolCalls: 2,
+    maxIterations: 48,
+  }
+);
+
+const result = await optimize(program, train, metric, {
+  studentAI,
+  teacherAI,
+  validationExamples: heldOut,
+  numTrials: 8,
+  maxMetricCalls: 80,
+  bootstrap: false,
+});
+program.applyOptimization(result.optimizedProgram!);
+```
+
+Critical rules:
+
+- The source format is the strict `ax-program-source/v1` JSON AST, not
+  JavaScript, TypeScript, or Python.
+- The seed is one `$program` predictor plus a typed return.
+- Allowed statements are `predict`, `tool`, `if`, `forEach`, and final
+  top-level `return`. Allowed expressions are `literal`, `ref`, `object`,
+  `array`, `eq`, `select`, `not`, `and`, `or`, and `concat`.
+- Every used predictor/tool capability must be declared in source and allowed
+  by the host constructor. Source cannot select models or acquire new tools.
+- Candidate constraints include the task, immutable signature, tool schemas,
+  complete grammar, and predictor/tool/iteration/continuation budgets.
+- Parse/bind errors reject the candidate. Runtime and strict typed-output
+  errors become aligned per-example zero scores during direct GEPA evaluation.
+  Only program-source validation errors receive config-error alignment;
+  ordinary component apply failures still propagate in mixed trees.
+- Declared input data properties, immutable predictor request snapshots
+  (metadata, input, and selected host tool descriptions/schemas), tool
+  arguments/results, and outputs must fit configurable JSON byte/depth/width
+  limits before host dispatch. Undeclared caller properties are excluded;
+  accessors and unstable Proxy inspection fail closed. Original runtime/tool
+  objects are not reread after capture. Static source limits are cumulative;
+  tighter bridge limits win. The default Node worker also has heap/stack
+  ceilings.
+- Timeout, abort, and close revoke the execution epoch. Late bridge completions
+  are rejected and recorded, but an already-dispatched external tool/provider
+  effect remains host-owned and cannot be undone by worker termination.
+- Custom runtimes require JavaScript plus the explicit
+  `ax-program-source-runtime/js-v1` protocol declaration. This is a compatibility
+  assertion, not proof of isolation, authority, persistence, or resource policy;
+  use the default runtime for the documented worker policy.
+- Save source state with `dumpState()` / `loadState()`, or preserve it inside a
+  normal serialized optimized artifact's `componentMap`.
+- Causal evidence attachment treats the program-source value as an opaque
+  `componentMap` string. Use the exact `<program-id>::program-source` component
+  ID and the optimizer candidate/lineage ID in the host-authored evidence
+  record. Serialization and replay preserve both; snapshot replacement swaps
+  the rewindable source string while retaining verified evidence history, and a
+  later settlement appends to that history without rewriting the prior record
+  or candidate identity.
+- Do not add host `eval`, `Function`, imports, filesystem, process, network, or
+  ambient globals to make a proposal work. Narrow the AST or use an explicit
+  host tool instead.
+
+Good fits are typed LM decomposition, bounded predictor/tool routing,
+deterministic branches, field assembly, and bounded list mapping. Unsupported
+cases include arbitrary computation/modules, recursion/unbounded loops,
+dynamic capabilities/models, persistent mutable source state, nested returns,
+and intermediate token streaming.
+
+The checked-in hill climb is deterministic zero-cost mechanism evidence: a
+train memorizer is rejected on validation data, a general tool source is
+promoted, a frozen final test is reported only after selection, and a redundant
+source is rejected against a perfect seed. Run:
+
+```bash
+node --import=tsx src/examples/program-source-evaluation.ts
+npx vitest run src/ax/dsp/programSource.test.ts src/ax/dsp/programSourceEvaluation.test.ts src/ax/dsp/optimizers/gepaEvaluation.test.ts
+```
+
+The optional paid smoke is bounded to one trial/eight metric calls and requires
+explicit acknowledgement:
+
+```bash
+OPENAI_APIKEY=... node --import=tsx src/examples/program-source-evaluation.ts --paid --ack-paid-calls
+```
+
+See `docs/PROGRAM_SOURCE.md` for the complete grammar, security boundary,
+supported task classes, exact evidence report, and limitations.
+
 ## Metric Selection
 
 Choose the evaluation path deliberately:

@@ -221,6 +221,17 @@ selection, Pareto acceptance, bootstrapping, selector state, metric budgets, and
 descendant component optimization. The optimizer contract itself remains
 engine-agnostic.
 
+TypeScript also has an experimental `programSource(...)` root. It exposes a
+complete implementation as one generic `program-source` component, but accepts
+only the validated `ax-program-source/v1` JSON control-flow grammar. Candidate
+source remains inert data; a fixed interpreter executes it in the default
+locked-down worker runtime. Execution epochs revoke late bridge results after
+timeout/abort, plain JSON values are byte/depth/width bounded, and the default
+Node worker has heap/stack ceilings. Custom runtimes require explicit JavaScript
+and protocol compatibility declarations but remain trusted adapters. See
+[`docs/PROGRAM_SOURCE.md`](./PROGRAM_SOURCE.md) for the grammar, security model,
+budgets, evaluation evidence, and unsupported cases.
+
 ## AxIR Generated Libraries
 
 AxIR makes Ax portable without freezing the TypeScript implementation into a
