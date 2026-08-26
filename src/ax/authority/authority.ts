@@ -404,11 +404,74 @@ function receiptMatches(
   );
 }
 
+async function raceHostCallback<T>(
+  callback: Promise<T>,
+  signal: AbortSignal | undefined,
+  timeoutMs: number,
+  onAbort?: (reason: unknown) => void
+): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  let rejectAbort!: (reason: unknown) => void;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    rejectAbort = reject;
+  });
+  const abort = () => {
+    const reason =
+      signal?.reason ??
+      new AxAuthorizationDeniedError('cancelled', 'Authorization cancelled');
+    onAbort?.(reason);
+    rejectAbort(
+      reason instanceof AxAuthorizationDeniedError
+        ? reason
+        : new AxAuthorizationDeniedError('cancelled', 'Authorization cancelled')
+    );
+  };
+  if (signal?.aborted) {
+    abort();
+  } else {
+    signal?.addEventListener('abort', abort, { once: true });
+  }
+  const timedOut = new Promise<never>((_resolve, reject) => {
+    timeout = setTimeout(() => {
+      const error = new AxAuthorizationDeniedError(
+        'timeout',
+        `Host authorization timed out after ${timeoutMs}ms`
+      );
+      onAbort?.(error);
+      reject(error);
+    }, timeoutMs);
+  });
+  void callback.catch(() => undefined);
+  try {
+    return await Promise.race([callback, aborted, timedOut]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+    signal?.removeEventListener('abort', abort);
+  }
+}
+
 async function audit(
   authority: Readonly<AxAuthorityContext>,
-  event: Readonly<AxAuthorizationAuditEvent>
+  event: Readonly<AxAuthorizationAuditEvent>,
+  signal?: AbortSignal
 ): Promise<void> {
-  await authority.onAudit?.(Object.freeze({ ...event }));
+  if (!authority.onAudit) return;
+  const timeoutMs =
+    authority.authorizeTimeoutMs ?? DEFAULT_AUTHORIZE_TIMEOUT_MS;
+  const callback = Promise.resolve().then(() =>
+    authority.onAudit?.(Object.freeze({ ...event }))
+  );
+  try {
+    await raceHostCallback(callback, signal, timeoutMs);
+  } catch (error) {
+    if (
+      error instanceof AxAuthorizationDeniedError &&
+      (error.code === 'cancelled' || error.code === 'timeout')
+    ) {
+      return;
+    }
+    throw error;
+  }
 }
 
 function cancelled(signal: AbortSignal | undefined): boolean {
@@ -536,15 +599,19 @@ export async function axAuthorize(
   const scopedResource = captureResource(resource, 'authorization resource');
   const now = snapshot.now?.() ?? Date.now();
   if (cancelled(signal)) {
-    await audit(snapshot, {
-      operation,
-      resourceType: scopedResource.type,
-      actorKind: snapshot.actor.kind,
-      decision: 'deny',
-      grantCount: 0,
-      at: now,
-      code: 'cancelled',
-    });
+    await audit(
+      snapshot,
+      {
+        operation,
+        resourceType: scopedResource.type,
+        actorKind: snapshot.actor.kind,
+        decision: 'deny',
+        grantCount: 0,
+        at: now,
+        code: 'cancelled',
+      },
+      signal
+    );
     throw new AxAuthorizationDeniedError(
       'cancelled',
       'Authorization cancelled'
@@ -552,15 +619,19 @@ export async function axAuthorize(
   }
   const grants = matchingGrants(snapshot, operation, scopedResource, now);
   if (!grants.length) {
-    await audit(snapshot, {
-      operation,
-      resourceType: scopedResource.type,
-      actorKind: snapshot.actor.kind,
-      decision: 'deny',
-      grantCount: 0,
-      at: now,
-      code: 'no_matching_grant',
-    });
+    await audit(
+      snapshot,
+      {
+        operation,
+        resourceType: scopedResource.type,
+        actorKind: snapshot.actor.kind,
+        decision: 'deny',
+        grantCount: 0,
+        at: now,
+        code: 'no_matching_grant',
+      },
+      signal
+    );
     throw new AxAuthorizationDeniedError(
       'no_matching_grant',
       `No active capability grant matches ${operation}`
@@ -591,15 +662,19 @@ export async function axAuthorize(
       error instanceof AxAuthorizationDeniedError &&
       (error.code === 'cancelled' || error.code === 'timeout')
     ) {
-      await audit(snapshot, {
-        operation,
-        resourceType: scopedResource.type,
-        actorKind: snapshot.actor.kind,
-        decision: 'deny',
-        grantCount: grants.length,
-        at: snapshot.now?.() ?? Date.now(),
-        code: error.code,
-      });
+      await audit(
+        snapshot,
+        {
+          operation,
+          resourceType: scopedResource.type,
+          actorKind: snapshot.actor.kind,
+          decision: 'deny',
+          grantCount: grants.length,
+          at: snapshot.now?.() ?? Date.now(),
+          code: error.code,
+        },
+        signal
+      );
     }
     throw error;
   }
@@ -624,15 +699,19 @@ export async function axAuthorize(
     )
   ) {
     const code = cancelled(signal) ? 'cancelled' : 'invalid_receipt';
-    await audit(snapshot, {
-      operation,
-      resourceType: scopedResource.type,
-      actorKind: snapshot.actor.kind,
-      decision: 'deny',
-      grantCount: grants.length,
-      at: finishedAt,
-      code,
-    });
+    await audit(
+      snapshot,
+      {
+        operation,
+        resourceType: scopedResource.type,
+        actorKind: snapshot.actor.kind,
+        decision: 'deny',
+        grantCount: grants.length,
+        at: finishedAt,
+        code,
+      },
+      signal
+    );
     throw new AxAuthorizationDeniedError(
       code,
       code === 'cancelled'
@@ -641,15 +720,19 @@ export async function axAuthorize(
     );
   }
   const decision = receipt.decision;
-  await audit(snapshot, {
-    operation,
-    resourceType: scopedResource.type,
-    actorKind: snapshot.actor.kind,
-    decision,
-    grantCount: receipt.grantIds.length,
-    at: finishedAt,
-    code: decision === 'allow' ? 'authorized' : 'host_denied',
-  });
+  await audit(
+    snapshot,
+    {
+      operation,
+      resourceType: scopedResource.type,
+      actorKind: snapshot.actor.kind,
+      decision,
+      grantCount: receipt.grantIds.length,
+      at: finishedAt,
+      code: decision === 'allow' ? 'authorized' : 'host_denied',
+    },
+    signal
+  );
   if (decision === 'deny') {
     throw new AxAuthorizationDeniedError(
       'host_denied',

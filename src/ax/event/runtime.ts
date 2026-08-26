@@ -141,6 +141,7 @@ export class AxEventRuntime {
   private readonly targetSources = new Map<string, AxEventTarget<any, any>>();
   private readonly singletonTargetInstances = new Map<string, string>();
   private readonly activeRuns = new Map<string, AbortController>();
+  private readonly activeRedrives = new Map<string, AbortController>();
   private readonly sourceHandles: AxEventSourceHandle[] = [];
   private readonly sourceController = new AbortController();
   private readonly workerController = new AbortController();
@@ -304,6 +305,7 @@ export class AxEventRuntime {
   }
 
   async redrive(deadLetterId: string): Promise<void> {
+    if (this.closing) throw new Error('AxEventRuntime is closing');
     const deadLetter = await this.store.getDeadLetter(deadLetterId);
     if (!deadLetter)
       throw new Error(`Unknown event dead letter: ${deadLetterId}`);
@@ -324,39 +326,55 @@ export class AxEventRuntime {
     if (!target || !sink) {
       throw new Error(`Sink ${deadLetter.sinkId} is no longer configured`);
     }
+    if (this.closing) throw new Error('AxEventRuntime is closing');
     const controller = new AbortController();
-    const authority = await this.resolveAuthority(
-      delivery.ingress,
-      controller.signal
-    );
-    const context = new AxRuntimeEventContext(
-      this.id,
-      run.id,
-      delivery.id,
-      delivery.routeId,
-      target.id,
-      delivery.instanceKey,
-      delivery.ingress,
-      delivery.ingress.identity ?? {},
-      delivery.ingress.trust ?? 'untrusted',
-      delivery.attempt,
-      delivery.id,
-      controller.signal,
-      authority
-    );
-    await this.authorizeEventOperation(
-      context,
-      'event.sink.write',
-      'event.sink',
-      sink.id
-    );
-    await sink.write(run.output, {
-      run,
-      eventContext: context,
-      idempotencyKey: `${run.id}:${sink.id}`,
-      signal: controller.signal,
-    });
-    await this.store.removeDeadLetter(deadLetterId);
+    this.activeRedrives.set(deadLetterId, controller);
+    try {
+      if (this.closing) throw new Error('AxEventRuntime is closing');
+      const authority = await this.resolveAuthority(
+        delivery.ingress,
+        AbortSignal.any([controller.signal, this.workerController.signal])
+      );
+      if (controller.signal.aborted || this.closing) {
+        throw new Error('AxEventRuntime is closing');
+      }
+      const context = new AxRuntimeEventContext(
+        this.id,
+        run.id,
+        delivery.id,
+        delivery.routeId,
+        target.id,
+        delivery.instanceKey,
+        delivery.ingress,
+        delivery.ingress.identity ?? {},
+        delivery.ingress.trust ?? 'untrusted',
+        delivery.attempt,
+        delivery.id,
+        controller.signal,
+        authority
+      );
+      await this.authorizeEventOperation(
+        context,
+        'event.sink.write',
+        'event.sink',
+        sink.id
+      );
+      if (controller.signal.aborted || this.closing) {
+        throw new Error('AxEventRuntime is closing');
+      }
+      await sink.write(run.output, {
+        run,
+        eventContext: context,
+        idempotencyKey: `${run.id}:${sink.id}`,
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted || this.closing) {
+        throw new Error('AxEventRuntime is closing');
+      }
+      await this.store.removeDeadLetter(deadLetterId);
+    } finally {
+      this.activeRedrives.delete(deadLetterId);
+    }
   }
 
   cancelRun(runId: string, reason = 'Cancelled by caller'): boolean {
@@ -395,6 +413,9 @@ export class AxEventRuntime {
     }
     this.workerController.abort('AxEventRuntime closed');
     for (const controller of this.activeRuns.values()) {
+      controller.abort('AxEventRuntime closed');
+    }
+    for (const controller of this.activeRedrives.values()) {
       controller.abort('AxEventRuntime closed');
     }
     await Promise.allSettled(this.workerPromises);
@@ -776,6 +797,17 @@ export class AxEventRuntime {
         }
       } catch (error) {
         if (controller.signal.aborted || this.workerController.signal.aborted) {
+          await this.store.saveDelivery({
+            ...claimed,
+            status: 'cancelled',
+            attempt,
+            runId,
+            error: axEventErrorMessage(
+              controller.signal.reason ??
+                this.workerController.signal.reason ??
+                error
+            ),
+          });
           return;
         }
         throw error;
