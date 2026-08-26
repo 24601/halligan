@@ -230,17 +230,34 @@ Runnable: [`src/examples/standard-schema.ts`](src/examples/standard-schema.ts).
 ### Tools (ReAct)
 
 ```typescript
-const assistant = ax("question:string -> answer:string", {
-  functions: [
-    { name: "getCurrentWeather", func: weatherAPI },
-    { name: "searchNews", func: newsAPI },
-  ],
+const getWeather = fn("getWeather")
+  .description("Get current weather for a city")
+  .arg("city", f.string())
+  .returns(f.string())
+  .handler(weatherAPI)
+  .build();
+
+const assistant = react("question:string -> answer:string", {
+  functions: [getWeather],
 });
 
-const { answer } = await assistant.forward(llm, {
-  question: "What's the weather in Tokyo and any news about it?",
+const result = await assistant.forward(llm, {
+  question: "What's the weather in Tokyo?",
 });
+
+if (result.success) console.log(result.output.answer);
 ```
+
+`react(...)` prefers provider-native calls and falls back to a strict prompt
+protocol for text-only models. It returns resumable canonical history and a
+structured failure with every output key preserved. Resume is fail-closed
+against tool-catalog, host-authority, and native replay-protocol changes; use
+versioned `historyAuthority` and `replayProfile` values for durable native
+cross-process history. The replay profile is the complete host-owned provider
+protocol identity; without one, native resume is scoped to the current provider
+object. See
+[`docs/REACT.md`](docs/REACT.md) for protocol, concurrency, compaction, provider
+coverage, and the reproducible native-vs-prompt evaluation.
 
 ### Multi-modal
 
@@ -525,6 +542,7 @@ const result = await optimizer.compile(
 | Context map | `contextMap`, `AxAgentContextMap` | persistent orientation cache for recurring long context |
 | Memories | `onMemoriesSearch`, `recall(...)` | vector/BM25-backed context loader |
 | Skills | `onSkillsSearch`, `consult(...)` | on-demand prompt-section loader |
+| Executable skill artifacts | `axSelectExecutableSkills` | host-owned compatibility, authority, receipt, and retirement gate for existing functions |
 | Sandboxed JS runtime | `AxJSRuntime`, `AxJSRuntimePermission` | TypeScript runtime for Node, Bun, Deno, browser |
 | Recursive runtime (RLM) | `agent({ runtime, contextFields })` | long-context REPL with checkpointed replay |
 | Deployment profiles | `ai({ name: ... })` | 46 named native, router/cloud, hosted-inference, and configurable-runtime deployments |
@@ -598,7 +616,7 @@ providers, and read credentials from `.env`. Internal generated-package fixtures
 remain under `packages/<language>/examples` for AxIR verification, but the public
 catalog and website are generated only from `src/examples/<language>/`.
 
-Highlights: `extract.ts`, `react.ts`, `agent.ts`, `streaming1.ts`, `multi-modal.ts`, `audio-chat.ts`, `audio-batch-and-agent.ts`, `interaction-timeline.ts`, `standard-schema.ts`, `rlm-memories-and-skills.ts`, `rlm-discovery.ts`, `gepa-flow.ts`, `openai-compatible.ts`, `ax-flow-enhanced-demo.ts`, `ax-flow-mermaid.ts`. [Browse all examples →](src/examples/)
+Highlights: `extract.ts`, `react.ts`, `agent.ts`, `streaming1.ts`, `multi-modal.ts`, `audio-chat.ts`, `audio-batch-and-agent.ts`, `interaction-timeline.ts`, `standard-schema.ts`, `rlm-memories-and-skills.ts`, `executable-skill-compatibility-eval.ts`, `rlm-discovery.ts`, `gepa-flow.ts`, `gepa-qualitative-feedback-live-eval.ts`, `openai-compatible.ts`, `ax-flow-enhanced-demo.ts`, `ax-flow-mermaid.ts`. [Browse all examples →](src/examples/)
 
 ## Community
 

@@ -33,6 +33,13 @@ program.applyOptimization(result.optimizedProgram)
 
 Generated language packages expose the optimizer surface available in their AxIR API, usually as an `AxGEPA` engine.
 
+TypeScript additionally has experimental `programSource(...)` support for
+whole-implementation proposals. Its source is a validated, capability-bounded
+JSON control-flow AST rather than executable host code. Runtime bridge values
+and execution epochs are bounded; custom runtimes require an explicit
+JavaScript/protocol compatibility declaration and remain trusted adapters. It
+is not yet available in the generated-language AxIR packages.
+
 ## Common Patterns
 
 - Start with deterministic eval fixtures for the metric.

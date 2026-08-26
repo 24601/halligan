@@ -177,6 +177,14 @@ worker threads; their hosts own timers, listener supervision, and other
 asynchronous loops. See
 [`docs/EVENT_RUNTIME.md`](./EVENT_RUNTIME.md).
 
+TypeScript also exposes `AxEventComponentManager` at this boundary for trusted
+process-local listener and adapter lifecycle. It owns dependency ordering,
+serialized transitions, scoped disposers, activation rollback, and
+manager-visible hot replacement; it is not a durable plugin loader or a claim
+that unmanaged external I/O is reversible. `AxEventRuntime` uses the same
+substrate for source handles without taking ownership of caller-created
+protocol clients. Generated-language parity is tracked in the AxIR backlog.
+
 MCP resource events use the same generic ingress. The endpoint initializes one
 live client catalog; `inspectCatalog()` exposes a cloned view, and a managed
 subscription policy selects only concrete resource URIs. AxIR owns deterministic
@@ -202,11 +210,27 @@ Multiple optimization strategies serve different needs:
 
 GEPA is one shipped optimizer engine. Top-level `optimize(...)` seeds GEPA with
 `AxBootstrapFewShot` demos first, then runs GEPA with internal bootstrap
-disabled and returns an artifact for the caller to apply. GEPA runs through the existing
+disabled and returns an artifact for the caller to apply. Metrics may return a
+number, a named score vector, or an `AxMetricResult` containing an explicit
+scalar score, bounded textual feedback, and named objective scores. The explicit
+score controls scalar acceptance while named scores feed Pareto selection;
+feedback stays aligned with evaluation rows and traces for reflection and is not
+persisted in optimized artifacts. GEPA runs through the existing
 `OptimizerEngine.optimize(request, evaluator)` boundary and owns reflection,
 selection, Pareto acceptance, bootstrapping, selector state, metric budgets, and
 descendant component optimization. The optimizer contract itself remains
 engine-agnostic.
+
+TypeScript also has an experimental `programSource(...)` root. It exposes a
+complete implementation as one generic `program-source` component, but accepts
+only the validated `ax-program-source/v1` JSON control-flow grammar. Candidate
+source remains inert data; a fixed interpreter executes it in the default
+locked-down worker runtime. Execution epochs revoke late bridge results after
+timeout/abort, plain JSON values are byte/depth/width bounded, and the default
+Node worker has heap/stack ceilings. Custom runtimes require explicit JavaScript
+and protocol compatibility declarations but remain trusted adapters. See
+[`docs/PROGRAM_SOURCE.md`](./PROGRAM_SOURCE.md) for the grammar, security model,
+budgets, evaluation evidence, and unsupported cases.
 
 ## AxIR Generated Libraries
 

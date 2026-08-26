@@ -2,12 +2,18 @@ import type { AxAIService } from '../ai/types.js';
 import type { AxExample, AxMetricFn, AxTypedExample } from './common_types.js';
 import type { AxGen } from './generate.js';
 import { AxACE } from './optimizers/ace.js';
-import { renderPlaybook } from './optimizers/acePlaybook.js';
+import {
+  type AxACEPlaybookRenderOptions,
+  renderPlaybook,
+} from './optimizers/acePlaybook.js';
 import type {
+  AxACEHostEvidence,
   AxACEOptimizationArtifact,
   AxACEPlaybook,
 } from './optimizers/aceTypes.js';
 import type { AxGenOut } from './types.js';
+
+export type { AxACEPlaybookRenderOptions } from './optimizers/acePlaybook.js';
 
 /**
  * Options for {@link playbook}.
@@ -35,6 +41,8 @@ export type AxPlaybookOptions = {
   allowDynamicSections?: boolean;
   /** Seed the playbook with existing content. */
   initialPlaybook?: AxACEPlaybook;
+  /** Optional host run identifier attached to offline provenance. */
+  sourceRunId?: string;
   /** Intensity preset applied at construction. */
   auto?: 'light' | 'medium' | 'heavy';
 };
@@ -60,6 +68,14 @@ export type AxPlaybookEvolveOptions = {
   auto?: 'light' | 'medium' | 'heavy';
 };
 
+function executableRenderOptions(
+  options: Readonly<AxACEPlaybookRenderOptions> | undefined
+): Readonly<AxACEPlaybookRenderOptions> | undefined {
+  if (!options) return undefined;
+  const { includeInactive: _inspectionOnly, ...executable } = options;
+  return executable;
+}
+
 /**
  * A live, evolving context playbook bound to a program.
  *
@@ -75,6 +91,7 @@ export class AxPlaybook<IN = any, OUT extends AxGenOut = AxGenOut> {
   private readonly baseInstruction: string | undefined;
   private started = false;
   private applyHook?: (rendered: string) => void;
+  private lastRenderOptions?: Readonly<AxACEPlaybookRenderOptions>;
 
   constructor(
     program: Readonly<AxGen<IN, OUT>>,
@@ -94,6 +111,7 @@ export class AxPlaybook<IN = any, OUT extends AxGenOut = AxGenOut> {
         maxSectionSize: options.maxSectionSize,
         allowDynamicSections: options.allowDynamicSections,
         initialPlaybook: options.initialPlaybook,
+        sourceRunId: options.sourceRunId,
       }
     );
     if (options.auto) {
@@ -132,6 +150,8 @@ export class AxPlaybook<IN = any, OUT extends AxGenOut = AxGenOut> {
       example: AxExample;
       prediction: unknown;
       feedback?: string;
+      /** Host-owned IDs, confidence, and verifier receipts. */
+      evidence?: AxACEHostEvidence;
     }>
   ): Promise<void> {
     if (!this.started) {
@@ -146,17 +166,47 @@ export class AxPlaybook<IN = any, OUT extends AxGenOut = AxGenOut> {
   }
 
   /** Render the current playbook into a program's context (defaults to the bound program). */
-  public applyTo(program?: Readonly<AxGen<IN, OUT>>): void {
+  public applyTo(
+    program?: Readonly<AxGen<IN, OUT>>,
+    renderOptions?: Readonly<AxACEPlaybookRenderOptions>
+  ): void {
+    const safeOptions = executableRenderOptions(renderOptions);
     if (program && program !== this.program) {
-      this.engine.applyCurrentState(program as AxGen<IN, OUT>);
+      this.engine.applyCurrentState(program as AxGen<IN, OUT>, safeOptions);
+      return;
+    }
+    if (renderOptions) {
+      this.lastRenderOptions = safeOptions;
+      const rendered = this.render(safeOptions);
+      if (this.applyHook) {
+        this.applyHook(rendered);
+      } else {
+        this.program.setDescription(
+          [this.baseInstruction?.trim() ?? '', rendered]
+            .filter((block) => block.trim().length > 0)
+            .join('\n\n')
+        );
+      }
       return;
     }
     this.inject();
   }
 
   /** The current playbook rendered as a markdown block. */
-  public render(): string {
-    return renderPlaybook(this.engine.getPlaybook());
+  public render(options?: Readonly<AxACEPlaybookRenderOptions>): string {
+    return renderPlaybook(this.engine.getPlaybook(), options);
+  }
+
+  /** Attach trusted host/evaluator evidence without invoking the LM. */
+  public recordEvidence(
+    bulletIds: readonly string[],
+    evidence: Readonly<AxACEHostEvidence>
+  ): readonly string[] {
+    const updated = this.engine.recordEvidence(bulletIds, evidence);
+    if (updated.length) {
+      this.inject();
+    }
+    return updated;
   }
 
   /** A serializable snapshot of the current playbook and its history. */
@@ -203,12 +253,20 @@ export class AxPlaybook<IN = any, OUT extends AxGenOut = AxGenOut> {
     this.applyHook = hook;
   }
 
+  /** @internal Retrieval options currently applied to the bound program. */
+  public _getRenderOptions(): Readonly<AxACEPlaybookRenderOptions> | undefined {
+    return this.lastRenderOptions;
+  }
+
   private inject(): void {
     if (this.applyHook) {
-      this.applyHook(this.render());
+      this.applyHook(this.render(this.lastRenderOptions));
       return;
     }
-    this.engine.applyCurrentState(this.program as AxGen<IN, OUT>);
+    this.engine.applyCurrentState(
+      this.program as AxGen<IN, OUT>,
+      this.lastRenderOptions
+    );
   }
 }
 

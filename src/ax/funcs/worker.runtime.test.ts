@@ -544,6 +544,50 @@ describe('axWorkerRuntime permission lockdown', () => {
     expect(result!.value).toBe('function');
   });
 
+  it('allows a WORKERS grant to spawn a fresh worker with unlocked effects', async () => {
+    const messages: unknown[] = [];
+    class UnlockedChildWorker {
+      readonly effects = 'network,storage,communication,timing,code-loading';
+    }
+    const sandbox: Record<string, unknown> = {
+      self: undefined as unknown,
+      postMessage: (msg: unknown) => messages.push(msg),
+      Worker: UnlockedChildWorker,
+      indexedDB: { open: () => undefined },
+      console,
+    };
+    sandbox.self = sandbox;
+    sandbox.globalThis = sandbox;
+
+    runInNewContext(makeSource(), sandbox);
+    const onmessage = sandbox.onmessage as (event: { data: unknown }) => void;
+    onmessage({
+      data: {
+        type: 'init',
+        permissions: ['workers'],
+        outputMode: 'return',
+      },
+    });
+    onmessage({
+      data: {
+        type: 'execute',
+        id: 1,
+        code: 'return new Worker("child.js").effects',
+      },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const result = messages.find(
+      (message) =>
+        (message as Record<string, unknown>).type === 'result' &&
+        (message as Record<string, unknown>).id === 1
+    ) as Record<string, unknown> | undefined;
+    expect(result?.value).toBe(
+      'network,storage,communication,timing,code-loading'
+    );
+  });
+
   it('excludes lockdown-created inherited globals from snapshots', async () => {
     const messages: unknown[] = [];
     const inheritedGlobals = {

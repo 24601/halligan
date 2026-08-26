@@ -1,10 +1,54 @@
 export type {
+  AxEventComponentAcquisition,
+  AxEventComponentActivationContext,
+  AxEventComponentDefinition,
+  AxEventComponentDiagnostic,
+  AxEventComponentDiagnosticCode,
+  AxEventComponentDisposer,
+  AxEventComponentEffectInspection,
+  AxEventComponentInspection,
+  AxEventComponentManagerOptions,
+  AxEventComponentState,
+  AxEventComponentTransitionOptions,
+} from './components.js';
+export {
+  AxEventComponentLeakError,
+  AxEventComponentManager,
+  AxEventComponentTransitionError,
+  axEventComponentManager,
+} from './components.js';
+export type {
   AxEventStoreConformanceFactory,
   AxEventStoreConformanceFactoryOptions,
   AxEventStoreConformanceInstance,
   AxEventStoreConformanceReport,
 } from './conformance.js';
 export { runAxEventStoreConformance } from './conformance.js';
+export type {
+  AxDemandAppendResult,
+  AxDemandBoundaryOptions,
+  AxDemandCalibration,
+  AxDemandDetection,
+  AxDemandDetector,
+  AxDemandDisposition,
+  AxDemandGrantState,
+  AxDemandGrantValidationContext,
+  AxDemandObservation,
+  AxDemandOutcome,
+  AxDemandPolicy,
+  AxDemandProposal,
+  AxDemandProvenance,
+  AxDemandReceipt,
+  AxDemandRecord,
+  AxDemandScope,
+  AxDemandStore,
+  AxInMemoryDemandStoreOptions,
+} from './demand.js';
+export {
+  AxDemandBoundary,
+  AxInMemoryDemandStore,
+  axDemandEventObserver,
+} from './demand.js';
 export {
   AxEventRouteBuilder,
   AxEventTargetBuilder,
@@ -69,6 +113,7 @@ export type {
   AxEventCloseOptions,
   AxEventContext,
   AxEventContinuation,
+  AxEventContinuationEnqueueRequest,
   AxEventContinuationRegistration,
   AxEventCorrelationKey,
   AxEventDeadLetter,
@@ -107,6 +152,14 @@ export type {
   AxEventTargetInputContext,
   AxEventTrust,
   AxEventValue,
+  AxEventVerificationResult,
+  AxEventVerificationStatus,
+  AxEventVerificationUsage,
+  AxEventVerifierContext,
+  AxEventVerifierPolicy,
+  AxEventVerifierResult,
+  AxEventVerifierTransitionRecord,
+  AxEventVerifierTransitionRequest,
   AxProgramStateEnvelope,
   AxProgramStateStore,
 } from './types.js';
@@ -120,3 +173,4 @@ export {
 } from './types.js';
 export type { AxUCPWebhookEventSourceOptions } from './ucpSource.js';
 export { AxUCPWebhookEventSource } from './ucpSource.js';
+export { axEventCanonicalJson } from './util.js';

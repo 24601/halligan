@@ -82,9 +82,40 @@ Normalize scores to `0..1` when possible. Keep objective names stable across cal
 
 Bootstrap demos are useful for small starter sets because they seed the model with concrete successful examples before GEPA mutates instructions/components. TypeScript `optimize(...)` composes the practical bootstrap-plus-GEPA path. Generated languages expose the optimizer primitives supported by their AxIR contract.
 
+## Experimental Whole-Program Source
+
+TypeScript also exposes `programSource(...)` for experiments where GEPA should
+replace the complete implementation and control flow, not only an instruction.
+Candidate source is a strict `ax-program-source/v1` JSON AST with explicit
+predictor/tool capabilities. It is never evaluated as host JavaScript: a fixed
+Ax interpreter runs it in the default locked-down worker runtime with call,
+iteration, wall-clock, JSON value, and Node worker-resource budgets. Timed-out
+execution epochs reject late bridge results, while already-dispatched external
+effects remain host-owned. Parse/bind failures reject the candidate, runtime
+failures are scored against their aligned examples, and ordinary component
+apply errors still propagate in mixed trees. The immutable signature strictly
+validates final output fields. Only detached declared input data and bounded,
+accessor-free snapshots of predictor requests and selected host tool schemas
+cross their runtime boundaries before budget consumption or AI/tool authority.
+Custom runtimes require explicit
+JavaScript/protocol compatibility but remain trusted adapters. This experimental
+API is not yet part of the generated-language AxIR surface.
+
+See the
+[program-source design and bounded evaluation](https://github.com/ax-llm/ax/blob/main/docs/PROGRAM_SOURCE.md)
+and the
+[provider-backed TypeScript example](https://github.com/ax-llm/ax/blob/main/src/examples/typescript/optimization/program-source.ts).
+
 ## Artifacts
 
 Optimization output is model-adjacent configuration. Save it, version it, record the examples and metrics used, and apply it through the program or agent API rather than manually patching instructions.
+
+For program-source candidates, the complete JSON source remains an opaque
+`componentMap` string. Host-authored causal evidence may reference that exact
+component and candidate identity without taking ownership of the source:
+serialization/replay preserve both, rollback replaces the rewindable source
+snapshot while retaining verified evidence history, and settlement appends a
+new receipt-backed record without mutating prior evidence.
 
 {{optimizeArtifactExample}}
 

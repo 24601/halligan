@@ -12,6 +12,7 @@ import type {
   AxCostTrackerOptions,
   AxExample,
   AxMetricFn,
+  AxMetricResult,
   AxMultiMetricFn,
   AxOptimizationCheckpoint,
   AxOptimizationProgress,
@@ -22,6 +23,18 @@ import type {
 import { AxGen } from './generate.js';
 import { axGlobals } from './globals.js';
 import { axDefaultOptimizerLogger } from './optimizerLogging.js';
+import {
+  type AxCausalCandidateEvidenceManifest,
+  type AxCausalCandidateEvidenceOptions,
+  type AxCausalCandidateEvidenceRecord,
+  type AxCausalEvidenceAuthorityVerifier,
+  axCloneCausalCandidateEvidenceManifest,
+  axCreateCausalCandidateEvidenceManifest,
+} from './optimizers/causalCandidateEvidence.js';
+import {
+  type AxGEPACandidateLineageManifest,
+  cloneAndFreezeGEPACandidateLineageManifest,
+} from './optimizers/gepaLineage.js';
 import type { AxGEPAComponentBanditState } from './optimizers/gepaSelection.js';
 import type { AxOptimizerLoggerFunction } from './optimizerTypes.js';
 import type { AxGenOut, AxProgramDemos } from './types.js';
@@ -32,6 +45,36 @@ import type { AxGenOut, AxProgramDemos } from './types.js';
 // Logger utilities are now exported from ./loggers.js
 
 // Multi-objective metric function for Pareto optimization
+
+const metricObjectiveScores = (
+  result: Record<string, number> | AxMetricResult
+): Record<string, number> => {
+  const structured =
+    typeof result.score === 'number' &&
+    (typeof result.feedback === 'string' ||
+      (result.scores !== null && typeof result.scores === 'object'));
+  if (structured) {
+    const scores: Record<string, number> = {};
+    if (result.scores && typeof result.scores === 'object') {
+      for (const [key, value] of Object.entries(result.scores)) {
+        if (typeof value === 'number' && Number.isFinite(value)) {
+          scores[key] = value;
+        }
+      }
+    }
+    if (Object.keys(scores).length === 0 && Number.isFinite(result.score)) {
+      scores.score = result.score;
+    }
+    return scores;
+  }
+  const scores: Record<string, number> = {};
+  for (const [key, value] of Object.entries(result)) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      scores[key] = value;
+    }
+  }
+  return scores;
+};
 
 // Common types moved to ./common_types.ts
 
@@ -820,6 +863,9 @@ export interface AxOptimizedProgram<OUT = any> {
    */
   componentMap?: Record<string, string>;
   selectorState?: Record<string, AxGEPAComponentBanditState>;
+  /** Optional host-authored causal claim and evaluation receipts for candidates. */
+  causalCandidateEvidence?: AxCausalCandidateEvidenceManifest;
+  candidateLineage?: AxGEPACandidateLineageManifest;
   demos?: AxProgramDemos<any, OUT>[];
 
   // Model configuration
@@ -855,6 +901,8 @@ export type AxSerializedOptimizedProgram<OUT = any> = Omit<
   'applyTo'
 >;
 
+const causalEvidenceAlreadyIssued = Symbol();
+
 // Concrete implementation of AxOptimizedProgram
 export class AxOptimizedProgramImpl<OUT = any>
   implements AxOptimizedProgram<OUT>
@@ -863,6 +911,8 @@ export class AxOptimizedProgramImpl<OUT = any>
   public readonly stats: AxOptimizationStats;
   public readonly componentMap?: Record<string, string>;
   public readonly selectorState?: Record<string, AxGEPAComponentBanditState>;
+  public readonly causalCandidateEvidence?: AxCausalCandidateEvidenceManifest;
+  public declare readonly candidateLineage?: AxGEPACandidateLineageManifest;
   public readonly demos?: AxProgramDemos<any, OUT>[];
   public readonly examples?: AxExample[];
   public readonly modelConfig?: {
@@ -889,6 +939,10 @@ export class AxOptimizedProgramImpl<OUT = any>
     stats: AxOptimizationStats;
     componentMap?: Record<string, string>;
     selectorState?: Record<string, AxGEPAComponentBanditState>;
+    causalCandidateEvidence?: AxCausalCandidateEvidenceManifest;
+    causalEvidenceVerifier?: AxCausalEvidenceAuthorityVerifier;
+    causalEvidenceAlreadyIssued?: symbol;
+    candidateLineage?: AxGEPACandidateLineageManifest;
     demos?: AxProgramDemos<any, OUT>[];
     examples?: AxExample[];
     modelConfig?: AxOptimizedProgram<OUT>['modelConfig'];
@@ -905,6 +959,22 @@ export class AxOptimizedProgramImpl<OUT = any>
     this.stats = config.stats;
     this.componentMap = config.componentMap;
     this.selectorState = config.selectorState;
+    if (config.candidateLineage) {
+      this.candidateLineage = cloneAndFreezeGEPACandidateLineageManifest(
+        config.candidateLineage
+      );
+    }
+    if (config.causalCandidateEvidence && !config.causalEvidenceVerifier) {
+      throw new Error('causal evidence verifier is required');
+    }
+    this.causalCandidateEvidence = config.causalCandidateEvidence
+      ? config.causalEvidenceAlreadyIssued === causalEvidenceAlreadyIssued
+        ? config.causalCandidateEvidence
+        : axCloneCausalCandidateEvidenceManifest(
+            config.causalCandidateEvidence,
+            config.causalEvidenceVerifier!
+          )
+      : undefined;
     this.demos = config.demos;
     this.examples = config.examples;
     this.modelConfig = config.modelConfig;
@@ -932,11 +1002,105 @@ export function axSerializeOptimizedProgram<OUT = any>(
 }
 
 export function axDeserializeOptimizedProgram<OUT = any>(
-  serialized: Readonly<AxSerializedOptimizedProgram<OUT>>
+  serialized: Readonly<AxSerializedOptimizedProgram<OUT>>,
+  options?: Readonly<{
+    causalEvidenceVerifier?: AxCausalEvidenceAuthorityVerifier;
+  }>
 ): AxOptimizedProgramImpl<OUT> {
-  return new AxOptimizedProgramImpl<OUT>(
-    axSerializeOptimizedProgram(serialized as AxOptimizedProgram<OUT>)
+  return new AxOptimizedProgramImpl<OUT>({
+    ...axSerializeOptimizedProgram(serialized as AxOptimizedProgram<OUT>),
+    causalEvidenceVerifier: options?.causalEvidenceVerifier,
+  });
+}
+
+/** Return a new optimized artifact with bounded host-authored causal evidence attached. */
+export function axAttachCausalCandidateEvidence<OUT = any>(
+  optimizedProgram: Readonly<AxOptimizedProgram<OUT>>,
+  records: readonly Readonly<AxCausalCandidateEvidenceRecord>[],
+  options: Readonly<AxCausalCandidateEvidenceOptions>
+): AxOptimizedProgramImpl<OUT> {
+  const serialized = axSerializeOptimizedProgram(optimizedProgram);
+  const existing = optimizedProgram.causalCandidateEvidence;
+  if (existing?.omittedRecordCount) {
+    throw new Error('cannot append to truncated causal candidate evidence');
+  }
+  const inheritedOptions:
+    | Pick<
+        AxCausalCandidateEvidenceOptions,
+        | 'maxRecords'
+        | 'maxArtifactBytes'
+        | 'includeEvidenceSummaries'
+        | 'maxSummaryChars'
+      >
+    | undefined = existing
+    ? {
+        maxRecords: existing.maxRecords,
+        maxArtifactBytes: existing.maxArtifactBytes,
+        includeEvidenceSummaries:
+          existing.privacy.evidenceSummaries === 'bounded',
+        maxSummaryChars: existing.privacy.maxSummaryChars,
+      }
+    : undefined;
+  const effectiveOptions: AxCausalCandidateEvidenceOptions = {
+    ...options,
+    maxRecords: options.maxRecords ?? inheritedOptions?.maxRecords,
+    maxArtifactBytes:
+      options.maxArtifactBytes ?? inheritedOptions?.maxArtifactBytes,
+    includeEvidenceSummaries:
+      options.includeEvidenceSummaries ??
+      inheritedOptions?.includeEvidenceSummaries,
+    maxSummaryChars:
+      options.maxSummaryChars ?? inheritedOptions?.maxSummaryChars,
+  };
+  if (
+    existing &&
+    JSON.stringify({
+      ...inheritedOptions,
+      maxRecords: effectiveOptions.maxRecords,
+      maxArtifactBytes: effectiveOptions.maxArtifactBytes,
+      includeEvidenceSummaries: effectiveOptions.includeEvidenceSummaries,
+      maxSummaryChars: effectiveOptions.maxSummaryChars,
+    }) !== JSON.stringify(inheritedOptions)
+  ) {
+    throw new Error('cannot change causal evidence retention while appending');
+  }
+  const manifest = axCreateCausalCandidateEvidenceManifest(
+    [...(existing?.records ?? []), ...records],
+    effectiveOptions,
+    existing?.receipts
   );
+  if (manifest.omittedRecordCount > 0) {
+    throw new Error('causal evidence append exceeds configured retention');
+  }
+  return new AxOptimizedProgramImpl<OUT>({
+    ...serialized,
+    causalCandidateEvidence: manifest,
+    causalEvidenceVerifier: options.verifyAuthority,
+    causalEvidenceAlreadyIssued,
+  });
+}
+
+/** Replace the rewindable candidate snapshot while preserving append-only evidence. */
+export function axReplaceOptimizedProgramSnapshot<OUT = any>(
+  current: Readonly<AxOptimizedProgram<OUT>>,
+  replacement: Readonly<AxOptimizedProgram<OUT>>,
+  causalEvidenceVerifier: AxCausalEvidenceAuthorityVerifier
+): AxOptimizedProgramImpl<OUT> {
+  const history = current.causalCandidateEvidence;
+  const replacementHistory = replacement.causalCandidateEvidence;
+  if (
+    replacementHistory &&
+    JSON.stringify(replacementHistory) !== JSON.stringify(history)
+  ) {
+    throw new Error(
+      'replacement snapshot has divergent causal evidence history'
+    );
+  }
+  return new AxOptimizedProgramImpl<OUT>({
+    ...axSerializeOptimizedProgram(replacement),
+    causalCandidateEvidence: history,
+    causalEvidenceVerifier,
+  });
 }
 
 // Pareto optimization result for multi-objective optimization
@@ -1804,10 +1968,12 @@ export abstract class AxBaseOptimizer implements AxOptimizer {
       this.getAIService(false, options),
       sampleExample as any
     );
-    const sampleScores = await metricFn({
-      prediction: samplePrediction,
-      example: sampleExample,
-    });
+    const sampleScores = metricObjectiveScores(
+      await metricFn({
+        prediction: samplePrediction,
+        example: sampleExample,
+      })
+    );
     const objectives = Object.keys(sampleScores);
 
     // if (options?.verbose) {
@@ -1832,7 +1998,9 @@ export abstract class AxBaseOptimizer implements AxOptimizer {
 
       // Create a weighted single-objective metric
       const weightedMetric: AxMetricFn = async ({ prediction, example }) => {
-        const scores = await metricFn({ prediction, example });
+        const scores = metricObjectiveScores(
+          await metricFn({ prediction, example })
+        );
         let weightedScore = 0;
         for (const [objective, score] of Object.entries(scores)) {
           weightedScore += score * (weights[objective] || 0);
@@ -1907,10 +2075,12 @@ export abstract class AxBaseOptimizer implements AxOptimizer {
       this.getAIService(false, options),
       sampleExample as any
     );
-    const sampleScores = await metricFn({
-      prediction: samplePrediction,
-      example: sampleExample,
-    });
+    const sampleScores = metricObjectiveScores(
+      await metricFn({
+        prediction: samplePrediction,
+        example: sampleExample,
+      })
+    );
     const objectives = Object.keys(sampleScores);
 
     // For each objective, optimize it while constraining others
@@ -1924,7 +2094,9 @@ export abstract class AxBaseOptimizer implements AxOptimizer {
 
       // Create a constraint-based metric
       const constraintMetric: AxMetricFn = async ({ prediction, example }) => {
-        const scores = await metricFn({ prediction, example });
+        const scores = metricObjectiveScores(
+          await metricFn({ prediction, example })
+        );
 
         // Primary objective score
         const primaryScore = scores[primaryObjective] || 0;
@@ -2064,7 +2236,9 @@ export abstract class AxBaseOptimizer implements AxOptimizer {
           this.studentAI,
           example as IN
         );
-        const scores = await metricFn({ prediction, example });
+        const scores = metricObjectiveScores(
+          await metricFn({ prediction, example })
+        );
 
         // Collect scores for each objective
         for (const [objective, score] of Object.entries(scores)) {
