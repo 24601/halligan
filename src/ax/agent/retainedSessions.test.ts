@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { AxMockAIService } from '../ai/mock/api.js';
 import type { AxAIService } from '../ai/types.js';
-import type { AxAgentUsage } from '../dsp/types.js';
+import { AxSignature } from '../dsp/sig.js';
+import type { AxAgentUsage, AxProgrammable } from '../dsp/types.js';
+import { AxInMemoryEventStore } from '../event/memoryStore.js';
+import { AxEventRuntime, eventRoute, eventTarget } from '../event/runtime.js';
+import type { AxEventIngress } from '../event/types.js';
 import { agent } from './AxAgent.js';
 import type { AxAgentState } from './agentInternal/agentStateTypes.js';
 import {
@@ -38,6 +42,39 @@ type WorkOutput = {
 };
 
 const unusedAI = {} as AxAIService;
+
+function retainedEventProgram(
+  forward: (
+    input: Record<string, unknown>,
+    options?: Record<string, unknown>
+  ) => unknown | Promise<unknown>
+): AxProgrammable<Record<string, unknown>, Record<string, unknown>> {
+  const signature = new AxSignature('phase:string -> phaseResult:string');
+  return {
+    getId: () => 'retained-event-program',
+    getSignature: () => signature,
+    forward: (_ai, input, options) =>
+      Promise.resolve(forward(input, options as Record<string, unknown>)),
+    streamingForward: async function* () {},
+  } as AxProgrammable<Record<string, unknown>, Record<string, unknown>>;
+}
+
+function retainedIngress(
+  id: string,
+  type: string,
+  correlation?: Readonly<{ kind: string; value: string }>
+): AxEventIngress {
+  return {
+    event: {
+      specversion: '1.0',
+      id,
+      source: 'app://retained-session-tests',
+      type,
+      data: { phase: type },
+    },
+    ...(correlation ? { correlation: [correlation] } : {}),
+  };
+}
 
 function state(history: readonly string[]): AxAgentState {
   return {
@@ -1651,6 +1688,55 @@ describe('retained child agent sessions', () => {
     expect((await root.inspectRoot()).status).toBe('cancelled');
   });
 
+  it('detaches the parent abort listener after explicit root cancellation', async () => {
+    const controller = new AbortController();
+    const signal = controller.signal;
+    const addEventListener = signal.addEventListener.bind(signal);
+    const removeEventListener = signal.removeEventListener.bind(signal);
+    let adds = 0;
+    let removes = 0;
+    Object.defineProperties(signal, {
+      addEventListener: {
+        configurable: true,
+        value: ((...args: Parameters<AbortSignal['addEventListener']>) => {
+          adds++;
+          return addEventListener(...args);
+        }) as AbortSignal['addEventListener'],
+      },
+      removeEventListener: {
+        configurable: true,
+        value: ((...args: Parameters<AbortSignal['removeEventListener']>) => {
+          removes++;
+          return removeEventListener(...args);
+        }) as AbortSignal['removeEventListener'],
+      },
+    });
+    let cancelledEvents = 0;
+    const sessions = new AxAgentSessionHost({
+      ai: unusedAI,
+      registrations: registrations(),
+      onEvent: (event) => {
+        if (event.type === 'cancelled') cancelledEvents++;
+      },
+    });
+    const root = await sessions.createRoot({
+      authorizedChildren: ['worker'],
+      abortSignal: signal,
+    });
+    const handle = await root.spawn('worker', { value: 'complete-first' });
+    await completed(root, handle);
+    await root.cancel();
+    const revision = (await sessions.snapshot(root.sessionId)).revision;
+    const events = cancelledEvents;
+
+    expect(adds).toBe(1);
+    expect(removes).toBe(1);
+    controller.abort('late parent abort');
+    await delay(0);
+    expect((await sessions.snapshot(root.sessionId)).revision).toBe(revision);
+    expect(cancelledEvents).toBe(events);
+  });
+
   it('rejects forged and disposed handles without resurrecting sessions', async () => {
     const sessions = host();
     const root = await sessions.createRoot({
@@ -1682,16 +1768,25 @@ describe('retained child agent sessions', () => {
     const functions = root.functions({ eventContinuations: true });
     const spawn = functions.find((fn) => fn.name === 'spawn')!;
     let registration: unknown;
+    const eventContext = {
+      registerContinuation(value: unknown) {
+        registration = value;
+        return 'continuation';
+      },
+      afterContinuationsRegistered(callback: () => void | Promise<void>) {
+        void callback();
+      },
+    } as never;
+    await expect(
+      spawn.func(
+        { agent: 'privileged', input: { value: 'denied' } },
+        { eventContext }
+      )
+    ).rejects.toBeInstanceOf(AxAgentSessionAuthorizationError);
+    expect(registration).toBeUndefined();
     const handle = await spawn.func(
       { agent: 'worker', input: { value: 'event' } },
-      {
-        eventContext: {
-          registerContinuation(value) {
-            registration = value;
-            return 'continuation';
-          },
-        } as never,
-      }
+      { eventContext }
     );
     await completed(root, handle);
     expect(registration).toEqual({
@@ -1747,6 +1842,47 @@ class PausingDurableStore extends DurableMemoryStore {
       await pause.release;
     }
     return saved;
+  }
+}
+
+class FaultInjectingDurableStore extends DurableMemoryStore {
+  private loadFailures = 0;
+  private completionSaveFailures = 0;
+  private recoverySaveFailures = 0;
+
+  failNextLoad(): void {
+    this.loadFailures++;
+  }
+
+  failNextCompletionAndRecoverySave(): void {
+    this.completionSaveFailures++;
+    this.recoverySaveFailures++;
+  }
+
+  override async load(rootId: string) {
+    if (this.loadFailures > 0) {
+      this.loadFailures--;
+      throw new Error('injected pre-claim load failure');
+    }
+    return super.load(rootId);
+  }
+
+  override async save(
+    snapshot: Parameters<AxAgentSessionStore['save']>[0],
+    expectedRevision: number | undefined
+  ) {
+    const statuses = Object.values(snapshot.sessions).flatMap((record) =>
+      record.mailbox.map((message) => message.status)
+    );
+    if (this.completionSaveFailures > 0 && statuses.includes('completed')) {
+      this.completionSaveFailures--;
+      throw new Error('injected completion save failure');
+    }
+    if (this.recoverySaveFailures > 0 && statuses.includes('outcome_unknown')) {
+      this.recoverySaveFailures--;
+      throw new Error('injected recovery save failure');
+    }
+    return super.save(snapshot, expectedRevision);
   }
 }
 
@@ -1833,11 +1969,15 @@ describe('retained session crash recovery adapters', () => {
       authorizedChildren: ['worker'],
     });
     const functions = root.functions({ eventContinuations: true });
+    let scheduled: Promise<void> | undefined;
     const extra = {
       eventContext: {
         registerContinuation() {
           order.push('continuation');
           return 'continuation';
+        },
+        afterContinuationsRegistered(callback: () => void | Promise<void>) {
+          scheduled = Promise.resolve(callback());
         },
       } as never,
     };
@@ -1846,16 +1986,116 @@ describe('retained session crash recovery adapters', () => {
       { agent: 'worker', input: { value: 'first' } },
       extra
     );
+    await scheduled;
     expect(order).toEqual(['continuation', 'terminal']);
 
     order.length = 0;
+    scheduled = undefined;
     const send = functions.find((fn) => fn.name === 'send')!;
     await send.func(
       { handle, mode: 'follow-up', input: { value: 'second' } },
       extra
     );
+    await scheduled;
     expect(order).toEqual(['continuation', 'terminal']);
   });
+
+  it.each(['spawn', 'send'] as const)(
+    'persists the event continuation before inline %s terminal publication',
+    async (operation) => {
+      const store = new AxInMemoryEventStore();
+      const runtimeRef: { value?: AxEventRuntime } = {};
+      let terminalSequence = 0;
+      const sessions = new AxAgentSessionHost({
+        ai: unusedAI,
+        registrations: registrations(),
+        scheduler: new InlineScheduler(),
+        onEvent: async (event) => {
+          if (event.type !== 'completed' || !runtimeRef.value) return;
+          terminalSequence++;
+          await runtimeRef.value.publish(
+            retainedIngress(
+              `retained-terminal-${operation}-${terminalSequence}`,
+              'retained.completed',
+              event.correlation
+            )
+          );
+        },
+      });
+      const root = await sessions.createRoot({
+        authorizedChildren: ['worker'],
+      });
+      const existing =
+        operation === 'send'
+          ? await root.spawn('worker', { value: 'existing' })
+          : undefined;
+      const retainedFunction = root
+        .functions({ eventContinuations: true })
+        .find((fn) => fn.name === operation)!;
+      let resumed = 0;
+      const target = eventTarget({
+        id: `retained-${operation}-target`,
+        ai: unusedAI,
+        program: retainedEventProgram(async (_input, options) => {
+          if (resumed > 0) return { phaseResult: 'already-resumed' };
+          const eventContext = options?.eventContext as never;
+          if (terminalSequence === 0) {
+            if (operation === 'spawn') {
+              await retainedFunction.func(
+                { agent: 'worker', input: { value: 'spawned' } },
+                { eventContext }
+              );
+            } else {
+              await retainedFunction.func(
+                {
+                  handle: existing!,
+                  mode: 'follow-up',
+                  input: { value: 'sent' },
+                },
+                { eventContext }
+              );
+            }
+            return { phaseResult: 'waiting' };
+          }
+          resumed++;
+          return { phaseResult: 'resumed' };
+        }),
+        mapInput: (ingress) => ({ phase: ingress.event.type }),
+        retrySafety: 'idempotent',
+      });
+      const runtime = new AxEventRuntime({
+        store,
+        workerConcurrency: 2,
+        routes: [
+          eventRoute({
+            id: `retained-${operation}-wake`,
+            match: { types: ['retained.started'] },
+            action: 'wake',
+            target,
+            ordering: 'relaxed',
+          }),
+          eventRoute({
+            id: `retained-${operation}-resume`,
+            match: { types: ['retained.completed'] },
+            action: 'resume',
+            target,
+            ordering: 'relaxed',
+          }),
+        ],
+      });
+      runtimeRef.value = runtime;
+      await runtime.start();
+      await runtime.publish(
+        retainedIngress(`retained-start-${operation}`, 'retained.started')
+      );
+      await runtime.waitForIdle();
+
+      expect(resumed).toBe(1);
+      expect(await runtime.listDeadLetters()).toEqual([]);
+      await runtime.close();
+      await sessions.close();
+    }
+  );
 
   it('cancels the recovered durable root when its creation signal aborts', async () => {
     const controller = new AbortController();
@@ -1873,6 +2113,151 @@ describe('retained session crash recovery adapters', () => {
       (view) => view.status === 'cancelled'
     );
     expect(cancelled.status).toBe('cancelled');
+  });
+
+  it('aborts and drains revoked same-host attempts before replacement dispatch', async () => {
+    const scheduler = new ManualScheduler();
+    const store = new DurableMemoryStore();
+    let active = 0;
+    let maxActive = 0;
+    let firstSignal: AbortSignal | undefined;
+    const effects: string[] = [];
+    const sessions = new AxAgentSessionHost({
+      ai: unusedAI,
+      store,
+      scheduler,
+      limits: { maxConcurrency: 1 },
+      registrations: [
+        {
+          key: 'stop-ignoring',
+          create: () => ({
+            async forward(
+              _ai: Readonly<AxAIService>,
+              input: WorkInput,
+              options?: Readonly<{ abortSignal?: AbortSignal }>
+            ) {
+              active++;
+              maxActive = Math.max(maxActive, active);
+              if (input.value === 'first') firstSignal = options?.abortSignal;
+              try {
+                await delay(input.delayMs ?? 0, options?.abortSignal);
+                effects.push(`${input.value}-effect`);
+                return {
+                  value: input.value,
+                  count: 1,
+                  history: [input.value],
+                };
+              } finally {
+                active--;
+              }
+            },
+            getState: () => undefined,
+            setState: () => {},
+            getUsage: () => ({ actor: [], responder: [] }),
+            resetUsage: () => {},
+            stop: () => {},
+          }),
+        },
+      ],
+    });
+    const root = await sessions.createRoot({
+      authorizedChildren: ['stop-ignoring'],
+    });
+    const handle = await root.spawn('stop-ignoring', {
+      value: 'first',
+      delayMs: 10_000,
+    });
+    const revoked = scheduler.runOne();
+    await waitFor(
+      () => root.inspect(handle),
+      (view) => view.status === 'running' && firstSignal !== undefined
+    );
+    await root.send(handle, { value: 'second' }, 'follow-up');
+
+    await sessions.recover(root.sessionId);
+    const recoveredRoot = await sessions.restoreRoot(root.sessionId);
+    const recoveredHandle = await refreshDirectHandle(recoveredRoot, handle.id);
+    expect(firstSignal?.aborted).toBe(true);
+    expect(
+      (await recoveredRoot.inspect(recoveredHandle)).mailbox[0]?.status
+    ).toBe('outcome_unknown');
+
+    await scheduler.runAll();
+    await revoked;
+    const completedReplacement = await completed(
+      recoveredRoot,
+      recoveredHandle
+    );
+    expect(completedReplacement.mailbox[0]?.status).toBe('outcome_unknown');
+    expect(completedReplacement.latestResult).toMatchObject({
+      value: 'second',
+    });
+    expect(effects).toEqual(['second-effect']);
+    expect(maxActive).toBe(1);
+  });
+
+  it('retries a definite pre-claim load failure without recovering running siblings', async () => {
+    const scheduler = new ManualScheduler();
+    const store = new FaultInjectingDurableStore();
+    const sessions = host({
+      store,
+      scheduler,
+      limits: { maxConcurrency: 2 },
+    });
+    const root = await sessions.createRoot({
+      authorizedChildren: ['worker'],
+    });
+    const running = await root.spawn('worker', {
+      value: 'valid-running-sibling',
+      delayMs: 10_000,
+    });
+    const pending = await root.spawn('worker', { value: 'retry-pre-claim' });
+    const runningAttempt = scheduler.runOne();
+    await waitFor(
+      () => root.inspect(running),
+      (view) => view.status === 'running'
+    );
+
+    store.failNextLoad();
+    await scheduler.runOne();
+    const snapshot = await sessions.snapshot(root.sessionId);
+    expect(snapshot.root.epoch).toBe(1);
+    expect(snapshot.sessions[running.id]?.mailbox[0]?.status).toBe('running');
+    expect(snapshot.sessions[pending.id]?.mailbox[0]?.status).toBe('pending');
+    expect(scheduler.queuedJobs()).toEqual([
+      expect.objectContaining({ sessionId: pending.id, epoch: 1 }),
+    ]);
+
+    await root.cancel();
+    await runningAttempt;
+  });
+
+  it('keeps a failed post-claim recovery retryable until the orphan is fenced', async () => {
+    const scheduler = new ManualScheduler();
+    const store = new FaultInjectingDurableStore();
+    const sessions = host({ store, scheduler });
+    const root = await sessions.createRoot({
+      authorizedChildren: ['worker'],
+    });
+    const handle = await root.spawn('worker', { value: 'uncertain-save' });
+    store.failNextCompletionAndRecoverySave();
+
+    await scheduler.runOne();
+    const orphaned = await sessions.snapshot(root.sessionId);
+    expect(orphaned.sessions[handle.id]?.mailbox[0]?.status).toBe('running');
+    expect(orphaned.sessions[handle.id]?.activeMessageId).toBeDefined();
+    expect(scheduler.queuedJobs()).toEqual([
+      expect.objectContaining({ sessionId: handle.id, epoch: 1 }),
+    ]);
+
+    await scheduler.runAll();
+    const fenced = await sessions.snapshot(root.sessionId);
+    expect(fenced.root.epoch).toBe(2);
+    expect(fenced.sessions[handle.id]?.activeMessageId).toBeUndefined();
+    expect(fenced.sessions[handle.id]?.mailbox[0]?.status).toBe(
+      'outcome_unknown'
+    );
+    expect(scheduler.queuedJobs()).toEqual([]);
   });
 
   it('runs a queued steer before earlier pending follow-ups', async () => {

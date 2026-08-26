@@ -110,6 +110,12 @@ scope, persistence, expiry, and target restoration; the session host owns the
 child lifecycle and mailbox. The in-memory adapters on either side remain
 volatile.
 
+The retained session functions defer scheduler dispatch until AxEventRuntime
+has persisted the staged continuation. This is required even when the retained
+scheduler dispatches inline: registering the callback before scheduling is not
+enough because `registerContinuation(...)` is staged until the parent target
+returns.
+
 Recovery advances the retained tree's ownership epoch. Event handlers must
 restore the root and refresh the correlated child's handle before operating on
 it; a continuation may keep the stable child ID for correlation, but not an old

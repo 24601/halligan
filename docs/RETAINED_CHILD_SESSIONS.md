@@ -272,6 +272,11 @@ application-owned event source with that correlation and route them to
 `resume`; the event runtime remains the owner of continuation persistence,
 identity scope, and target state.
 
+With event continuations enabled, admitted work is not scheduled until the
+event runtime has durably registered the continuation. This ordering also
+holds for inline schedulers, so an immediate terminal notification cannot race
+ahead of continuation ownership and become a lost wake-up.
+
 The session host does not couple itself to a daemon or silently create an event
 runtime.
 

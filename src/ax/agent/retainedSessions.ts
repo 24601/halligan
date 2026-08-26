@@ -1434,6 +1434,13 @@ type LiveAgent = {
   registration: AxAgentSessionRegistration;
 };
 
+type ActiveAttempt = {
+  controller: AbortController;
+  rootId: string;
+  settled: Promise<void>;
+  settle: () => void;
+};
+
 export class AxAgentSessionHost {
   private readonly registrations = new Map<
     string,
@@ -1446,11 +1453,13 @@ export class AxAgentSessionHost {
   private readonly now: () => number;
   private readonly onEvent?: AxAgentSessionHostOptions['onEvent'];
   private readonly liveAgents = new Map<string, LiveAgent>();
-  private readonly controllers = new Map<string, AbortController>();
+  private readonly activeAttempts = new Map<string, ActiveAttempt>();
   private readonly rootAbortListeners = new Map<
     string,
     { signal: AbortSignal; listener: () => void }
   >();
+  private readonly rootDrains = new Map<string, Promise<void>>();
+  private readonly recoveryJobs = new Set<string>();
   private readonly ownedEpochs = new Map<string, number>();
   private detachScheduler?: () => void;
   private closed = false;
@@ -1483,12 +1492,8 @@ export class AxAgentSessionHost {
     const detach = this.scheduler.attach(async (job) => {
       try {
         await this.dispatch(job);
-      } catch (error) {
-        try {
-          await this.recover(job.rootId);
-        } catch {
-          void error;
-        }
+      } catch {
+        await this.reconcileDispatchFailure(job);
       }
     });
     if (typeof detach === 'function') this.detachScheduler = detach;
@@ -1625,9 +1630,11 @@ export class AxAgentSessionHost {
         };
       });
       this.ownedEpochs.set(id, outcome.epoch);
+      const drain = this.beginRootDrain(id);
       for (const sessionId of outcome.sessionIds) {
         this.stopLiveAgent(sessionId);
       }
+      await drain;
       for (const record of outcome.interrupted) {
         await this.emit('interrupted', record);
       }
@@ -1644,8 +1651,8 @@ export class AxAgentSessionHost {
     }
     this.rootAbortListeners.clear();
     if (options.abort) {
-      for (const controller of this.controllers.values()) {
-        controller.abort('Retained agent session host closed');
+      for (const attempt of this.activeAttempts.values()) {
+        attempt.controller.abort('Retained agent session host closed');
       }
       for (const sessionId of this.liveAgents.keys()) {
         this.stopLiveAgent(sessionId);
@@ -1680,7 +1687,10 @@ export class AxAgentSessionHost {
     parentEpoch: number,
     registrationKey: string,
     input: unknown,
-    onAdmitted?: (handle: Readonly<AxAgentSessionHandle>) => void
+    onAdmitted?: (
+      handle: Readonly<AxAgentSessionHandle>,
+      schedule: () => Promise<void>
+    ) => 'deferred' | undefined
   ): Promise<AxAgentSessionHandle> {
     this.assertOpen();
     const clonedInput = cloneStructured(input);
@@ -1763,9 +1773,13 @@ export class AxAgentSessionHost {
         };
       }
     );
-    onAdmitted?.(admitted.handle);
-    await this.enqueueSafely(admitted.record, admitted.message);
-    await this.emit('queued', admitted.record, admitted.message.id);
+    const schedule = async () => {
+      await this.enqueueSafely(admitted.record, admitted.message);
+      await this.emit('queued', admitted.record, admitted.message.id);
+    };
+    if (onAdmitted?.(admitted.handle, schedule) !== 'deferred') {
+      await schedule();
+    }
     return cloneStructured(admitted.handle);
   }
 
@@ -1828,7 +1842,7 @@ export class AxAgentSessionHost {
     handle: Readonly<AxAgentSessionHandle>,
     input: unknown,
     mode: AxAgentSessionMessageMode,
-    onAdmitted?: () => void
+    onAdmitted?: (schedule: () => Promise<void>) => 'deferred' | undefined
   ): Promise<AxAgentSessionSendReceipt> {
     this.assertOpen();
     if (mode !== 'steer' && mode !== 'follow-up') {
@@ -1890,21 +1904,23 @@ export class AxAgentSessionHost {
       };
     });
 
-    onAdmitted?.();
     let interruptAccepted: boolean | undefined;
-    if (result.activeJobId) {
-      interruptAccepted = await this.cancelScheduledJob(
-        result.activeJobId,
-        'Retained child steered by parent'
-      );
-    }
-    if (!result.hasActiveMessage) {
-      await this.scheduleReady(handle.rootId, parentEpoch);
-    }
-    await this.emit('queued', result.record, result.receipt.messageId);
+    const schedule = async () => {
+      if (result.activeJobId) {
+        interruptAccepted = await this.cancelScheduledJob(
+          result.activeJobId,
+          'Retained child steered by parent'
+        );
+      }
+      if (!result.hasActiveMessage) {
+        await this.scheduleReady(handle.rootId, parentEpoch);
+      }
+      await this.emit('queued', result.record, result.receipt.messageId);
+    };
+    if (onAdmitted?.(schedule) !== 'deferred') await schedule();
     return {
       ...result.receipt,
-      ...(result.activeJobId ? { interruptAccepted } : {}),
+      ...(interruptAccepted !== undefined ? { interruptAccepted } : {}),
     };
   }
 
@@ -1921,9 +1937,13 @@ export class AxAgentSessionHost {
       const targetId = handle
         ? this.assertHandle(snapshot, sessionId, handle).handle.id
         : sessionId;
-      return this.cancelInSnapshot(snapshot, targetId);
+      return {
+        ...this.cancelInSnapshot(snapshot, targetId),
+        rootCancelled: targetId === snapshot.root.id,
+      };
     });
     await this.finishCancellation(outcome);
+    if (outcome.rootCancelled) this.detachRootAbortListener(root.root.id);
   }
 
   private async cancelRoot(rootId: string): Promise<void> {
@@ -1932,6 +1952,7 @@ export class AxAgentSessionHost {
       this.cancelInSnapshot(snapshot, snapshot.root.id)
     );
     await this.finishCancellation(outcome);
+    this.detachRootAbortListener(rootId);
   }
 
   private async finishCancellation(
@@ -2060,12 +2081,15 @@ export class AxAgentSessionHost {
     } as const;
     const registerContinuation = (
       extra: Parameters<AxFunction['func']>[1],
-      handle: Readonly<AxAgentSessionHandle>
+      handle: Readonly<AxAgentSessionHandle>,
+      schedule: () => Promise<void>
     ) => {
       if (!options.eventContinuations || !extra?.eventContext) return;
       extra.eventContext.registerContinuation({
         correlation: [AxAgentSessionHost.continuationKey(handle)],
       });
+      extra.eventContext.afterContinuationsRegistered(schedule);
+      return 'deferred' as const;
     };
     return [
       {
@@ -2096,7 +2120,7 @@ export class AxAgentSessionHost {
             epoch,
             args.agent,
             args.input,
-            (handle) => registerContinuation(extra, handle)
+            (handle, schedule) => registerContinuation(extra, handle, schedule)
           );
         },
       },
@@ -2157,7 +2181,7 @@ export class AxAgentSessionHost {
             args.handle,
             args.input,
             args.mode,
-            () => registerContinuation(extra, args.handle)
+            (schedule) => registerContinuation(extra, args.handle, schedule)
           );
         },
       },
@@ -2193,15 +2217,24 @@ export class AxAgentSessionHost {
   private async dispatch(job: Readonly<AxAgentSessionJob>): Promise<void> {
     if (this.closed) return;
     if (this.ownedEpochs.get(job.rootId) !== job.epoch) return;
-    if (this.controllers.has(job.id)) return;
+    await this.rootDrains.get(job.rootId);
+    if (this.closed) return;
+    if (this.ownedEpochs.get(job.rootId) !== job.epoch) return;
+    if (this.activeAttempts.has(job.id)) return;
     const controller = new AbortController();
-    this.controllers.set(job.id, controller);
+    let settle!: () => void;
+    const settled = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
+    const attempt = { controller, rootId: job.rootId, settled, settle };
+    this.activeAttempts.set(job.id, attempt);
     try {
       await this.dispatchControlled(job, controller);
     } finally {
-      if (this.controllers.get(job.id) === controller) {
-        this.controllers.delete(job.id);
+      if (this.activeAttempts.get(job.id) === attempt) {
+        this.activeAttempts.delete(job.id);
       }
+      settle();
     }
   }
 
@@ -2210,6 +2243,7 @@ export class AxAgentSessionHost {
     controller: AbortController
   ): Promise<void> {
     const attemptId = randomUUID();
+    const recoveryJob = this.recoveryJobs.has(job.id);
     const claimed = await this.mutateAtEpoch(
       job.rootId,
       job.epoch,
@@ -2218,9 +2252,17 @@ export class AxAgentSessionHost {
         const message = record?.mailbox.find(
           (item) => item.id === job.messageId
         );
-        if (!record || !message || message.status !== 'pending') {
+        if (!record || !message) {
           return SKIP_MUTATION;
         }
+        if (
+          message.status === 'running' &&
+          message.jobId === job.id &&
+          recoveryJob
+        ) {
+          return { orphaned: true as const };
+        }
+        if (message.status !== 'pending') return SKIP_MUTATION;
         if (message.jobId !== job.id) return SKIP_MUTATION;
         if (record.activeMessageId) return SKIP_MUTATION;
         if (this.nextPending(record)?.id !== message.id) return SKIP_MUTATION;
@@ -2246,12 +2288,19 @@ export class AxAgentSessionHost {
         record.updatedAt = this.now();
         delete record.lastError;
         return {
+          orphaned: false as const,
           record: cloneStructured(record),
           message: cloneStructured(message),
         };
       }
     );
     if (!claimed) return;
+    if (claimed.orphaned) {
+      this.recoveryJobs.delete(job.id);
+      throw new Error(
+        'Retained agent dispatch found an orphaned durable claim'
+      );
+    }
     await this.emit('running', claimed.record, claimed.message.id);
 
     let live: LiveAgent | undefined;
@@ -2476,6 +2525,34 @@ export class AxAgentSessionHost {
     }
   }
 
+  private async reconcileDispatchFailure(
+    job: Readonly<AxAgentSessionJob>
+  ): Promise<void> {
+    let retry = false;
+    try {
+      const snapshot = await this.requireRoot(job.rootId);
+      if (snapshot.root.epoch !== job.epoch) return;
+      const message = snapshot.sessions[job.sessionId]?.mailbox.find(
+        (item) => item.id === job.messageId
+      );
+      if (!message || message.jobId !== job.id) return;
+      if (message.status === 'running') {
+        try {
+          await this.recover(job.rootId);
+          return;
+        } catch {
+          this.recoveryJobs.add(job.id);
+          retry = true;
+        }
+      } else if (message.status === 'pending') {
+        retry = true;
+      }
+    } catch {
+      retry = true;
+    }
+    if (retry && !this.closed) await this.scheduler.enqueue(job);
+  }
+
   private async liveAgent(record: Readonly<AxAgentSessionRecord>) {
     const cache = this.usesLiveAgentCache();
     const existing = cache ? this.liveAgents.get(record.handle.id) : undefined;
@@ -2631,14 +2708,38 @@ export class AxAgentSessionHost {
     return { jobs, affected };
   }
 
+  private beginRootDrain(rootId: string): Promise<void> {
+    const attempts = [...this.activeAttempts.values()].filter(
+      (attempt) => attempt.rootId === rootId
+    );
+    for (const attempt of attempts) {
+      attempt.controller.abort('Retained agent session authority recovered');
+    }
+    const drain = Promise.all(attempts.map((attempt) => attempt.settled)).then(
+      () => undefined
+    );
+    this.rootDrains.set(rootId, drain);
+    void drain.finally(() => {
+      if (this.rootDrains.get(rootId) === drain) this.rootDrains.delete(rootId);
+    });
+    return drain;
+  }
+
+  private detachRootAbortListener(rootId: string): void {
+    const binding = this.rootAbortListeners.get(rootId);
+    if (!binding) return;
+    binding.signal.removeEventListener('abort', binding.listener);
+    this.rootAbortListeners.delete(rootId);
+  }
+
   private async cancelScheduledJob(
     jobId: string,
     reason: string
   ): Promise<boolean> {
     let accepted = false;
-    const controller = this.controllers.get(jobId);
-    if (controller) {
-      controller.abort(reason);
+    const attempt = this.activeAttempts.get(jobId);
+    if (attempt) {
+      attempt.controller.abort(reason);
       accepted = true;
     }
     try {

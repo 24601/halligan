@@ -209,6 +209,8 @@ export interface AxEventContext {
   registerContinuation(
     registration: Readonly<AxEventContinuationRegistration>
   ): string;
+  /** Run work only after this invocation's continuations are durably registered. */
+  afterContinuationsRegistered(callback: () => void | Promise<void>): void;
 }
 
 export type AxEventInheritance = 'all' | 'none';

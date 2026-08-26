@@ -24,6 +24,12 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
   - TS paths: `src/ax/agent/retainedSessions.ts`, `src/ax/agent/retainedSessions.test.ts`, `src/ax/agent/retainedSessions.test-d.ts`, `src/ax/agent/benchmarks/retainedSessions.eval.ts`, `src/ax/agent/index.ts`
   - Impact: TypeScript now exposes an opt-in AxAgentSessionHost for authorized factory-created AxAgent children with immediate stable handles, retained mailbox/state/artifacts, follow-up versus steer semantics, CAS-fenced host store and scheduler adapters, crash recovery, cancellation, tree budgets, and descendant usage attribution. AxIR and generated Python/Java/C++/Go/Rust packages have only synchronous child-agent functions and event-run continuations, so they lack this retained session lifecycle and security boundary.
   - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+- `axir-2026-08-26-port-post-registration-event-continuation-callbacks` [axprogram] Port post-registration event continuation callbacks
+  - Status: open
+  - Source commit: `ea3c3402eba063239e48fa132e0472dc3f908c96`
+  - TS paths: `src/ax/event/runtime.ts`, `src/ax/event/types.ts`
+  - Impact: TypeScript event targets can defer retained-session scheduler dispatch until staged continuations are durably registered, preventing inline terminal events from racing continuation ownership. Generated runtimes persist continuations only after invocation and do not expose or execute this post-registration callback boundary.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 
 ## Done
 
