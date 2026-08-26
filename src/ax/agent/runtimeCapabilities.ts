@@ -66,6 +66,11 @@ export interface AxRuntimeCapabilitiesV1 extends AxIRRuntimeCapabilities {
   resources: Readonly<{
     timeoutMs?: number;
     timeoutEnforcement: AxRuntimeTimeoutEnforcement;
+    /**
+     * Host-admitted hard upper bound on total execution-boundary memory.
+     * Includes JS heaps, external/native allocations, ArrayBuffers, generated
+     * code, and stacks. Omit when no such total bound is enforced.
+     */
     memoryMb?: number;
   }>;
   authority: Readonly<{
@@ -98,6 +103,7 @@ export type AxRuntimeCapabilityRequirements = Readonly<{
   resources?: Readonly<{
     maxTimeoutMs?: number;
     timeoutEnforcement?: Exclude<AxRuntimeTimeoutEnforcement, 'none'>;
+    /** Partial engine-area limits do not satisfy this total-memory bound. */
     maxMemoryMb?: number;
   }>;
   /** Maximum host-admitted authority acceptable to the caller. */
@@ -345,7 +351,9 @@ function frozenResources(
 }
 
 function frozenProtocols(value: unknown): readonly AxRuntimeProtocol[] {
-  if (!Array.isArray(value)) return Object.freeze([]);
+  if (!Array.isArray(value)) {
+    throw new Error('capabilities.protocol.features must be a dense array');
+  }
   const length = ownDataValue(value, 'length', 'protocol.features');
   if (!Number.isSafeInteger(length) || (length as number) < 0) {
     throw new Error('protocol.features.length must be an own array length');
@@ -461,17 +469,43 @@ export function axNormalizeAxIRRuntimeCapabilities(
     abort?: boolean;
   }>
 ): Readonly<AxIRRuntimeCapabilities> {
-  return Object.freeze({
-    inspect: input.inspect ?? input.inspect_globals ?? false,
-    snapshot: input.snapshot ?? input.snapshot_globals ?? false,
-    patch: input.patch ?? input.patch_globals ?? false,
-    abort: input.abort ?? defaults.abort ?? false,
-    language: input.language ?? defaults.language,
-    usageInstructions:
-      input.usageInstructions ??
-      input.usage_instructions ??
-      defaults.usageInstructions,
-  });
+  return frozenNullRecord<AxIRRuntimeCapabilities>([
+    [
+      'inspect',
+      ownDataValue(input, 'inspect', 'axir') ??
+        ownDataValue(input, 'inspect_globals', 'axir') ??
+        false,
+    ],
+    [
+      'snapshot',
+      ownDataValue(input, 'snapshot', 'axir') ??
+        ownDataValue(input, 'snapshot_globals', 'axir') ??
+        false,
+    ],
+    [
+      'patch',
+      ownDataValue(input, 'patch', 'axir') ??
+        ownDataValue(input, 'patch_globals', 'axir') ??
+        false,
+    ],
+    [
+      'abort',
+      ownDataValue(input, 'abort', 'axir') ??
+        ownDataValue(defaults, 'abort', 'defaults') ??
+        false,
+    ],
+    [
+      'language',
+      ownDataValue(input, 'language', 'axir') ??
+        ownDataValue(defaults, 'language', 'defaults'),
+    ],
+    [
+      'usageInstructions',
+      ownDataValue(input, 'usageInstructions', 'axir') ??
+        ownDataValue(input, 'usage_instructions', 'axir') ??
+        ownDataValue(defaults, 'usageInstructions', 'defaults'),
+    ],
+  ]);
 }
 
 /** Drops v1 extension fields for generated AxIR adapters. */
@@ -1320,33 +1354,53 @@ export function axReportRuntimeCapabilityContradictions(
       contradictions.push(`${key} allowlist boundary was not observed`);
     }
   }
-  if (capabilities.resources.timeoutMs !== undefined) {
+  const declaredTimeoutMs = capabilities.resources.timeoutMs;
+  const declaredTimeoutEnforcement = capabilities.resources.timeoutEnforcement;
+  if (
+    declaredTimeoutMs !== undefined ||
+    declaredTimeoutEnforcement !== 'none'
+  ) {
     const timeout = observations.timeout;
     if (!timeout) {
-      contradictions.push('declared timeout bound was not observed');
+      if (declaredTimeoutMs !== undefined) {
+        contradictions.push('declared timeout bound was not observed');
+      }
+      if (declaredTimeoutEnforcement !== 'none') {
+        contradictions.push('declared timeout enforcement was not observed');
+      }
     } else {
       const validTimes =
         isFinitePositive(timeout.requestedMs) &&
         isFinitePositive(timeout.observedMs);
-      if (!validTimes || !timeoutEnforcements.has(timeout.enforcement)) {
+      const validEnforcement = timeoutEnforcements.has(timeout.enforcement);
+      if (
+        !validTimes ||
+        typeof timeout.interrupted !== 'boolean' ||
+        !validEnforcement
+      ) {
         failures.push('timeout observation is malformed');
       }
       if (
+        declaredTimeoutMs !== undefined &&
         validTimes &&
-        timeout.requestedMs < capabilities.resources.timeoutMs
+        timeout.requestedMs < declaredTimeoutMs
       ) {
         failures.push('timeout probe ended before the declared bound');
       }
       if (
-        !validTimes ||
-        !timeout.interrupted ||
-        timeout.observedMs > capabilities.resources.timeoutMs
+        declaredTimeoutMs !== undefined &&
+        (!validTimes ||
+          !timeout.interrupted ||
+          timeout.observedMs > declaredTimeoutMs)
       ) {
         contradictions.push('declared timeout bound was not observed');
       }
       if (
-        timeoutRank[timeout.enforcement] <
-        timeoutRank[capabilities.resources.timeoutEnforcement]
+        declaredTimeoutEnforcement !== 'none' &&
+        (!validEnforcement ||
+          !timeout.interrupted ||
+          timeoutRank[timeout.enforcement] <
+            timeoutRank[declaredTimeoutEnforcement])
       ) {
         contradictions.push('declared timeout enforcement was not observed');
       }
@@ -1359,12 +1413,21 @@ export function axReportRuntimeCapabilityContradictions(
       isFinitePositive(memory.limitMb) &&
       typeof memory.observedPeakMb === 'number' &&
       Number.isFinite(memory.observedPeakMb) &&
-      memory.observedPeakMb >= 0;
+      memory.observedPeakMb >= 0 &&
+      typeof memory.terminated === 'boolean';
     if (memory && !validMemory) {
       failures.push('memory observation is malformed');
     }
     if (
+      validMemory &&
+      !memory.terminated &&
+      memory.observedPeakMb <= capabilities.resources.memoryMb
+    ) {
+      failures.push('memory probe ended before the declared bound');
+    }
+    if (
       !validMemory ||
+      !memory.terminated ||
       memory.limitMb > capabilities.resources.memoryMb ||
       memory.observedPeakMb > capabilities.resources.memoryMb
     ) {

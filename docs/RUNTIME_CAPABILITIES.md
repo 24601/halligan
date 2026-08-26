@@ -23,6 +23,12 @@ of that existing vocabulary, not an alias for every generated target record.
 - filesystem, child-process, storage, communication, timing, worker,
   code-loading, native-addon, and WASI authority dimensions
 
+`resources.memoryMb` is a hard upper bound on total memory in the
+host-admitted execution boundary, including JS heaps, external/native
+allocations, `ArrayBuffer`s, generated code, and stacks. Omission means no
+admission-grade total bound is known; it does not mean zero. Partial JS-engine
+area limits do not satisfy `maxMemoryMb`.
+
 Use `axExtendAxIRRuntimeCapabilities(...)` and
 `axRuntimeCapabilitiesToAxIR(...)` at generated-adapter boundaries. This is a
 migration path, not a claim that the generated records already implement the
@@ -66,6 +72,13 @@ records, persistence records, and protocol records use the same frozen
 null-prototype boundary. Optional timeout and memory bounds are copied only
 from own data properties; ambient prototype values cannot become admitted
 bounds.
+
+Node `worker_threads.resourceLimits` constrain selected V8 areas only and
+explicitly exclude external data such as `ArrayBuffer`s. They are therefore
+not projected into `AxJSRuntime.capabilities.resources.memoryMb`. A host may
+admit `memoryMb` only when a separate execution boundary, such as a dedicated
+process or container limit, enforces the total-memory invariant. A
+`maxMemoryMb` requirement fails closed when that host evidence is absent.
 
 Admission additionally requires `createSession` and `getUsageInstructions` to
 be own data methods on the runtime. Optional `language`,
@@ -149,8 +162,11 @@ provenanced caller observations. It reports:
 
 Checks cover operation support, persistence/restart, platform, authority
 breadth and allowlist boundaries, timeout bound and enforcement, memory
-overshoot, protocol, and cleanup. These are bounded contradiction checks. Even
-executable probes cannot establish complete isolation.
+termination and overshoot, protocol, and cleanup. A timeout enforcement claim
+is checked even without a numeric timeout bound, and a benign memory probe
+that does not trigger termination cannot confirm a declared memory bound.
+These are bounded contradiction checks. Even executable probes cannot
+establish complete isolation.
 
 Adapter owners still own interpreter choice, process/container policy,
 permissions, cancellation, filesystem/network/module controls, package

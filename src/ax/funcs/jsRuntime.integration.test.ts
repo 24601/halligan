@@ -1248,10 +1248,41 @@ describe('AxJSRuntime sandbox hardening', () => {
       }
     });
 
-    it('useNodePermissionModel: false disables OS-level block', async () => {
+    it('does not widen OS access after permission input mutation', async () => {
+      const permissions: AxJSRuntimePermission[] = [];
+      const fsRead: string[] = [];
+      const nodePermissionAllowlist = { fsRead };
+      const runtime = new AxJSRuntime({
+        outputMode: 'return',
+        blockDynamicImport: false,
+        allowUnsafeNodeHostAccess: true,
+        freezeIntrinsics: false,
+        permissions,
+        nodePermissionAllowlist,
+      });
+      permissions.push(AxJSRuntimePermission.FILESYSTEM);
+      fsRead.push('*');
+
+      const session = runtime.createSession();
+      try {
+        const result = await session.execute(`
+          try {
+            const fs = await import('node:fs');
+            fs.readFileSync('/etc/hosts');
+            return 'NOT BLOCKED';
+          } catch (e) {
+            return e && e.code ? e.code : String(e).slice(0, 80);
+          }
+        `);
+        expect(result).toBe('ERR_ACCESS_DENIED');
+      } finally {
+        session.close();
+      }
+    });
+
+    it('unsafe host access reaches fs and child process when OS blocking is disabled', async () => {
       // When the permission model is explicitly disabled, fs reads are NOT
-      // kernel-blocked. The caller opts out of OS-layer defense (they still
-      // have the language-level defenses).
+      // kernel-blocked and ambient Node access can invoke child processes.
       const runtime = new AxJSRuntime({
         outputMode: 'return',
         blockDynamicImport: false,
@@ -1264,12 +1295,18 @@ describe('AxJSRuntime sandbox hardening', () => {
         const result = await session.execute(`
           try {
             const fs = await import('node:fs');
-            return typeof fs.readFileSync('/etc/hosts', 'utf8');
+            const childProcess = await import('node:child_process');
+            const child = childProcess.execFileSync(
+              process.execPath,
+              ['-e', 'process.stdout.write("child")'],
+              { encoding: 'utf8' }
+            );
+            return typeof fs.readFileSync('/etc/hosts', 'utf8') + ':' + child;
           } catch (e) {
             return e && e.code ? e.code : String(e).slice(0, 80);
           }
         `);
-        expect(result).toBe('string');
+        expect(result).toBe('string:child');
       } finally {
         session.close();
       }

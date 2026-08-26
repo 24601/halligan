@@ -180,6 +180,33 @@ describe('AxIR capability conversion', () => {
     });
   });
 
+  it.each([
+    ['missing', undefined],
+    ['object-shaped', { 0: { name: 'feature', version: '1' } }],
+    ['string-shaped', 'feature/1'],
+  ])('rejects %s protocol feature arrays', (_label, features) => {
+    const protocol = {
+      name: axCodeRuntimeProtocol,
+      version: axCodeRuntimeProtocolVersion,
+      ...(features === undefined ? {} : { features }),
+    };
+
+    expect(() => capabilities({ protocol: protocol as never })).toThrow(
+      /protocol\.features must be a dense array/
+    );
+  });
+
+  it('rejects inherited protocol feature arrays', () => {
+    const protocol = Object.assign(Object.create({ features: [] }), {
+      name: axCodeRuntimeProtocol,
+      version: axCodeRuntimeProtocolVersion,
+    });
+
+    expect(() => capabilities({ protocol })).toThrow(
+      /protocol\.features must be a dense array/
+    );
+  });
+
   it('normalizes divergent generated and Rust field names explicitly', () => {
     expect(
       axNormalizeAxIRRuntimeCapabilities(
@@ -199,6 +226,67 @@ describe('AxIR capability conversion', () => {
       language: 'JavaScript',
       usageInstructions: 'Rust adapter instructions.',
     });
+  });
+
+  it('ignores inherited AxIR fields and returns a canonical own-data record', () => {
+    let inheritedReads = 0;
+    const inherited = Object.create(null) as Record<string, unknown>;
+    for (const key of [
+      'inspect',
+      'inspect_globals',
+      'snapshot',
+      'language',
+      'usageInstructions',
+    ]) {
+      Object.defineProperty(inherited, key, {
+        configurable: true,
+        get() {
+          inheritedReads++;
+          return key === 'language' ? 'Polluted' : true;
+        },
+      });
+    }
+    const input = Object.assign(Object.create(inherited), {
+      patch_globals: true,
+    });
+    const defaults = Object.assign(Object.create({ abort: true }), {
+      language: 'JavaScript',
+      usageInstructions: 'Use JavaScript.',
+    });
+
+    const normalized = axNormalizeAxIRRuntimeCapabilities(input, defaults);
+
+    expect(inheritedReads).toBe(0);
+    expect(normalized).toEqual({
+      inspect: false,
+      snapshot: false,
+      patch: true,
+      abort: false,
+      language: 'JavaScript',
+      usageInstructions: 'Use JavaScript.',
+    });
+    expect(Object.getPrototypeOf(normalized)).toBeNull();
+    expect(Object.isFrozen(normalized)).toBe(true);
+  });
+
+  it('rejects own AxIR accessors without invoking them', () => {
+    let reads = 0;
+    const input = {} as Record<string, unknown>;
+    Object.defineProperty(input, 'inspect', {
+      enumerable: true,
+      get() {
+        reads++;
+        return true;
+      },
+    });
+
+    expect(() =>
+      axNormalizeAxIRRuntimeCapabilities(input, {
+        language: 'JavaScript',
+        usageInstructions: '',
+      })
+    ).toThrow(/axir\.inspect must be an own data property/);
+    expect(reads).toBe(0);
   });
 });
 
@@ -1016,6 +1104,78 @@ describe('axReportRuntimeCapabilityContradictions', () => {
       'timeout probe ended before the declared bound'
     );
     expect(report.isolationProven).toBe(false);
+  });
+
+  it('requires termination to observe a declared memory bound', () => {
+    const declaration = capabilities({
+      resources: { timeoutEnforcement: 'none', memoryMb: 32 },
+    });
+    const unterminated = axReportRuntimeCapabilityContradictions(
+      declaration,
+      observations({
+        memory: { limitMb: 32, observedPeakMb: 16, terminated: false },
+      })
+    );
+
+    expect(unterminated.consistent).toBe(false);
+    expect(unterminated.contradictions).toContain(
+      'declared memory bound was not observed'
+    );
+    expect(unterminated.failures).toContain(
+      'memory probe ended before the declared bound'
+    );
+
+    const terminated = axReportRuntimeCapabilityContradictions(
+      declaration,
+      observations({
+        memory: { limitMb: 32, observedPeakMb: 31, terminated: true },
+      })
+    );
+    expect(terminated.consistent).toBe(true);
+  });
+
+  it('checks timeout enforcement even without a numeric timeout bound', () => {
+    const declaration = capabilities({
+      resources: { timeoutEnforcement: 'hard' },
+    });
+    const missing = axReportRuntimeCapabilityContradictions(
+      declaration,
+      observations()
+    );
+    expect(missing.consistent).toBe(false);
+    expect(missing.contradictions).toEqual([
+      'declared timeout enforcement was not observed',
+    ]);
+
+    const unenforced = axReportRuntimeCapabilityContradictions(
+      declaration,
+      observations({
+        timeout: {
+          requestedMs: 100,
+          observedMs: 100,
+          interrupted: false,
+          enforcement: 'none',
+        },
+      })
+    );
+
+    expect(unenforced.consistent).toBe(false);
+    expect(unenforced.contradictions).toEqual([
+      'declared timeout enforcement was not observed',
+    ]);
+
+    const enforced = axReportRuntimeCapabilityContradictions(
+      declaration,
+      observations({
+        timeout: {
+          requestedMs: 100,
+          observedMs: 100,
+          interrupted: true,
+          enforcement: 'hard',
+        },
+      })
+    );
+    expect(enforced.consistent).toBe(true);
   });
 
   it('reports malformed envelopes, protocol mismatch, cleanup, and undeclared support', () => {

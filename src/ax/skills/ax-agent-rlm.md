@@ -319,7 +319,7 @@ Options quick reference:
 - `preventGlobalThisExtensions?: boolean`: default `false`; opt-in and breaks top-level persistence.
 - `useNodePermissionModel?: boolean | 'auto'`: default `'auto'`.
 - `nodePermissionAllowlist?: { fsRead?; fsWrite?; childProcess?; addons?; wasi? }`.
-- `resourceLimits?: { maxOldGenerationSizeMb?; maxYoungGenerationSizeMb?; codeRangeSizeMb?; stackSizeMb? }`.
+- `resourceLimits?: { maxOldGenerationSizeMb?; maxYoungGenerationSizeMb?; codeRangeSizeMb?; stackSizeMb? }`: Node V8 engine-area limits, not a total Worker memory/RSS bound; they are not published as `capabilities.resources.memoryMb`.
 - `allowDenoRemoteImport?: boolean`: default `false`.
 - `allowUnsafeNodeHostAccess?: boolean`: default `false`.
 
