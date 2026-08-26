@@ -1164,7 +1164,6 @@
       "verification": "TS-derived native-image routing fixture; five-language AxIR dev verifier; npm run axir:check-packages; go test ./internal/axir; focused TypeScript router tests"
     },
     {
-<<<<<<< HEAD
       "id": "axir-2026-08-25-port-trusted-event-component-lifecycle-manager",
       "status": "open",
       "title": "Port trusted event component lifecycle manager",
@@ -1174,7 +1173,16 @@
       "tsPaths": ["src/ax/event/components.ts"],
       "portableSurface": "axprogram",
       "impact": "TypeScript exposes a trusted process-local event integration manager with stable component IDs and versions, dependency ordering, scoped reverse disposers, transactional activation rollback, serialized transitions, cooperative abort, inspectable diagnostics, and manager-visible hot replacement. Generated Python, Java, C++, Go, and Rust event runtimes retain their existing source lifecycle but do not expose this generic host component API.",
-=======
+      "suggestedAxirWork": [
+        "Add or update the TS-derived conformance fixture.",
+        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
+        "Run npm run axir:conformance:check and npm run test:axir."
+      ],
+      "completedAt": null,
+      "completedByCommit": null,
+      "verification": null
+    },
+    {
       "id": "axir-2026-08-25-port-provider-neutral-visual-observation-sampling-policy",
       "status": "open",
       "title": "Port provider-neutral visual observation sampling policy",
@@ -1184,7 +1192,6 @@
       "tsPaths": ["src/ax/ai/index.ts", "src/ax/ai/visual"],
       "portableSurface": "axai",
       "impact": "TypeScript hosts can apply revision-, freshness-, authority-, change-, and rolling-budget-aware selection to host-captured visual observations; generated language packages do not yet expose the AxVisualObservation or AxFrameSampler policy.",
->>>>>>> origin/main
       "suggestedAxirWork": [
         "Add or update the TS-derived conformance fixture.",
         "Update AxIR/Core or descriptor data to match the portable TS behavior.",
