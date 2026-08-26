@@ -70,6 +70,10 @@ describe('GEPA candidate lineage payloads', () => {
       'token=super-secret',
       redactedOptions
     );
+    expect(redactedFailure).toEqual({
+      kind: 'runtime',
+      messageFingerprint: fingerprintGEPAValue('token=super-secret'),
+    });
     expect(JSON.stringify([redactedDelta, redactedFailure])).not.toContain(
       'secret'
     );
@@ -95,6 +99,7 @@ describe('GEPA candidate lineage payloads', () => {
       valueTruncated: true,
     });
     expect(optedInFailure).toMatchObject({
+      messageFingerprint: fingerprintGEPAValue('invalid secret'),
       message: 'invalid',
       messageTruncated: true,
     });

@@ -248,6 +248,8 @@ export async function evaluateGEPABatch<IN, OUT extends AxGenOut>(args: {
       );
       if (args.abortSignal?.aborted) {
         args.state.stopReason = 'aborted';
+        args.state.totalCalls += requiredCalls;
+        return undefined;
       }
       const rows: AxGEPABatchRow[] = [];
       for (const [index, ex] of args.set.entries()) {
@@ -305,15 +307,14 @@ export async function evaluateGEPABatch<IN, OUT extends AxGenOut>(args: {
     output?: unknown;
     error?: string;
   }> = [];
-  const batchCallsBefore = args.state.totalCalls;
   const failedRows = new Set<number>();
   for (const [index, ex] of args.set.entries()) {
     if (args.abortSignal?.aborted) {
       args.state.stopReason = 'aborted';
-      args.state.totalCalls = batchCallsBefore;
       return undefined;
     }
     args.applyConfig(args.cfg);
+    args.state.totalCalls += 1;
     let prediction: unknown;
     let scores: Record<string, number>;
     let metricScalar: number | undefined;
@@ -348,7 +349,6 @@ export async function evaluateGEPABatch<IN, OUT extends AxGenOut>(args: {
     } catch (error) {
       if (args.abortSignal?.aborted) {
         args.state.stopReason = 'aborted';
-        args.state.totalCalls = batchCallsBefore;
         return undefined;
       }
       const message = error instanceof Error ? error.message : String(error);
@@ -362,7 +362,6 @@ export async function evaluateGEPABatch<IN, OUT extends AxGenOut>(args: {
       );
     }
 
-    args.state.totalCalls += 1;
     const scalar = metricScalar ?? args.scalarize(scores);
     rows.push({
       input: ex as AxExample,

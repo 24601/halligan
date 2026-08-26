@@ -882,6 +882,12 @@ describe('AxGEPA Optimizer', () => {
       expect(manifest.records[0]?.id).toBe('c0');
       const last = manifest.records.at(-1);
       expect(last).toBeDefined();
+      const retained = new Set(manifest.records.map((record) => record.id));
+      for (const record of manifest.records) {
+        for (const parentId of record.parentIds) {
+          expect(retained.has(parentId)).toBe(true);
+        }
+      }
       if (manifest.selectedCandidateId) {
         expect(
           manifest.records.some(

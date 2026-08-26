@@ -2370,14 +2370,25 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
 }
 
 function chooseByteBoundDropIndex(
-  records: readonly { id: string }[],
+  records: readonly { id: string; parentIds: readonly string[] }[],
   selectedCandidateId: string | undefined
 ): number {
   if (records.length <= 1) return 0;
   const lastIndex = records.length - 1;
+  const retainedParentIds = new Set(
+    records.flatMap((record) => record.parentIds)
+  );
+  const isLeaf = (index: number): boolean =>
+    !retainedParentIds.has(records[index]!.id);
   for (let index = lastIndex - 1; index >= 1; index--) {
-    if (records[index]!.id !== selectedCandidateId) return index;
+    if (isLeaf(index) && records[index]!.id !== selectedCandidateId)
+      return index;
   }
-  if (records[lastIndex]!.id !== selectedCandidateId) return lastIndex;
-  return 0;
+  if (isLeaf(lastIndex) && records[lastIndex]!.id !== selectedCandidateId) {
+    return lastIndex;
+  }
+  for (let index = lastIndex; index >= 0; index--) {
+    if (isLeaf(index)) return index;
+  }
+  return lastIndex;
 }
