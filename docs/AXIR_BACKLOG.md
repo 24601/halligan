@@ -18,11 +18,23 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
 
 ## Open
 
+- `axir-2026-08-25-port-retained-asynchronous-child-agent-sessions` [axagent] Port retained asynchronous child agent sessions
+  - Status: open
+  - Source commit: `ca760294f5ea4f207052c39c2218e1195103bc2a`
+  - TS paths: `src/ax/agent/retainedSessions.ts`, `src/ax/agent/retainedSessions.test.ts`, `src/ax/agent/retainedSessions.test-d.ts`, `src/ax/agent/benchmarks/retainedSessions.eval.ts`, `src/ax/agent/index.ts`
+  - Impact: TypeScript now exposes an opt-in AxAgentSessionHost for authorized factory-created AxAgent children with immediate stable handles, retained mailbox/state/artifacts, follow-up versus steer semantics, CAS-fenced host store and scheduler adapters, crash recovery, cancellation, tree budgets, and descendant usage attribution. AxIR and generated Python/Java/C++/Go/Rust packages have only synchronous child-agent functions and event-run continuations, so they lack this retained session lifecycle and security boundary.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 - `axir-2026-08-25-port-host-owned-authority-boundary` [axai] Port host-owned authority boundary
   - Status: open
   - Source commit: `ca760294f5ea4f207052c39c2218e1195103bc2a`
   - TS paths: `src/ax/authority`, `src/ax/agent/agentInternal/coordinator.ts`, `src/ax/agent/agentInternal/initialization.ts`, `src/ax/agent/agentInternal/runtimeExecution.ts`, `src/ax/agent/agentInternal/runtimeGlobals.authority.test.ts`, `src/ax/agent/agentInternal/runtimeGlobals.ts`, `src/ax/ai/types.ts`, `src/ax/dsp/functions.test.ts`, `src/ax/dsp/functions.ts`, `src/ax/dsp/generate.authority.test.ts`, `src/ax/dsp/generate.ts`, `src/ax/dsp/response/finalize.ts`, `src/ax/dsp/response/nonStreaming.ts`, `src/ax/dsp/response/types.ts`, `src/ax/dsp/types.ts`, `src/ax/mcp/execution.ts`
   - Impact: Generated language backends need equivalent principal, scoped grant, receipt binding, event, tool, model-callable MCP/UCP runtime global, native DSP inheritance, and child attenuation behavior.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+- `axir-2026-08-26-port-post-registration-event-continuation-callbacks` [axprogram] Port post-registration event continuation callbacks
+  - Status: open
+  - Source commit: `ea3c3402eba063239e48fa132e0472dc3f908c96`
+  - TS paths: `src/ax/event/runtime.ts`, `src/ax/event/types.ts`
+  - Impact: TypeScript event targets can defer retained-session scheduler dispatch until staged continuations are durably registered, preventing inline terminal events from racing continuation ownership. Generated runtimes persist continuations only after invocation and do not expose or execute this post-registration callback boundary.
   - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 - `axir-2026-08-25-port-gepa-proposal-policy-guidance-and-references` [axoptimize] Port GEPA proposal-policy guidance and references
   - Status: open

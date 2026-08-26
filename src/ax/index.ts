@@ -203,6 +203,43 @@ import type {
   AxResolvedAgentPlaybookLearn,
 } from './agent/playbookConfig.js';
 import {
+  AxAgentSessionAuthorizationError,
+  AxAgentSessionClient,
+  AxAgentSessionConflictError,
+  type AxAgentSessionEvent,
+  type AxAgentSessionFactoryContext,
+  type AxAgentSessionFunctionOptions,
+  type AxAgentSessionHandle,
+  AxAgentSessionHost,
+  type AxAgentSessionHostOptions,
+  type AxAgentSessionJob,
+  AxAgentSessionLimitError,
+  type AxAgentSessionLimits,
+  type AxAgentSessionMessage,
+  type AxAgentSessionMessageMode,
+  type AxAgentSessionMessageStatus,
+  AxAgentSessionNotFoundError,
+  type AxAgentSessionRecord,
+  type AxAgentSessionRegistration,
+  type AxAgentSessionRegistrySnapshot,
+  type AxAgentSessionRestoreOptions,
+  AxAgentSessionResultNotReadyError,
+  type AxAgentSessionRootOptions,
+  type AxAgentSessionRootRecord,
+  type AxAgentSessionRootView,
+  type AxAgentSessionScheduler,
+  type AxAgentSessionSendReceipt,
+  AxAgentSessionSerializationError,
+  AxAgentSessionStaleHandleError,
+  type AxAgentSessionStatus,
+  type AxAgentSessionStatusView,
+  type AxAgentSessionStore,
+  type AxAgentSessionUsage,
+  AxInMemoryAgentSessionScheduler,
+  AxInMemoryAgentSessionStore,
+  type AxRetainedAgent,
+} from './agent/retainedSessions.js';
+import {
   type AxCodeRuntime,
   type AxCodeSession,
   type AxCodeSessionSnapshot,
@@ -1437,6 +1474,15 @@ export { AxAgentClarificationError };
 export { AxAgentContextMap };
 export { AxAgentPlaybook };
 export { AxAgentProtocolCompletionSignal };
+export { AxAgentSessionAuthorizationError };
+export { AxAgentSessionClient };
+export { AxAgentSessionConflictError };
+export { AxAgentSessionHost };
+export { AxAgentSessionLimitError };
+export { AxAgentSessionNotFoundError };
+export { AxAgentSessionResultNotReadyError };
+export { AxAgentSessionSerializationError };
+export { AxAgentSessionStaleHandleError };
 export { AxAgentSharedRuntimeSession };
 export { AxAssertionError };
 export { AxAuthorizationDeniedError };
@@ -1468,6 +1514,8 @@ export { AxGEPA };
 export { AxGEPAComponentSelector };
 export { AxGen };
 export { AxGenerateError };
+export { AxInMemoryAgentSessionScheduler };
+export { AxInMemoryAgentSessionStore };
 export { AxInMemoryBalancerStatsStore };
 export { AxInMemoryEventStore };
 export { AxInMemoryProgramStateStore };
@@ -1995,6 +2043,29 @@ export type { AxAgentRecursiveUsage };
 export type { AxAgentRuntimeCompletionState };
 export type { AxAgentRuntimeExecutionContext };
 export type { AxAgentRuntimeInputState };
+export type { AxAgentSessionEvent };
+export type { AxAgentSessionFactoryContext };
+export type { AxAgentSessionFunctionOptions };
+export type { AxAgentSessionHandle };
+export type { AxAgentSessionHostOptions };
+export type { AxAgentSessionJob };
+export type { AxAgentSessionLimits };
+export type { AxAgentSessionMessage };
+export type { AxAgentSessionMessageMode };
+export type { AxAgentSessionMessageStatus };
+export type { AxAgentSessionRecord };
+export type { AxAgentSessionRegistration };
+export type { AxAgentSessionRegistrySnapshot };
+export type { AxAgentSessionRestoreOptions };
+export type { AxAgentSessionRootOptions };
+export type { AxAgentSessionRootRecord };
+export type { AxAgentSessionRootView };
+export type { AxAgentSessionScheduler };
+export type { AxAgentSessionSendReceipt };
+export type { AxAgentSessionStatus };
+export type { AxAgentSessionStatusView };
+export type { AxAgentSessionStore };
+export type { AxAgentSessionUsage };
 export type { AxAgentSkillResult };
 export type { AxAgentSkillsPromptState };
 export type { AxAgentSkillsSearchFn };
@@ -2462,6 +2533,7 @@ export type { AxResourceScope };
 export type { AxResultPickerFunction };
 export type { AxResultPickerFunctionFieldResults };
 export type { AxResultPickerFunctionFunctionResults };
+export type { AxRetainedAgent };
 export type { AxRewardFn };
 export type { AxRewardFnArgs };
 export type { AxRolloutTrace };

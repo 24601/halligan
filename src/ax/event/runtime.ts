@@ -64,6 +64,9 @@ class AxRuntimeEventContext implements AxEventContext {
     id: string;
     value: Readonly<AxEventContinuationRegistration>;
   }> = [];
+  private readonly afterRegistrationCallbacks: Array<
+    () => void | Promise<void>
+  > = [];
 
   constructor(
     readonly runtimeId: string,
@@ -103,8 +106,19 @@ class AxRuntimeEventContext implements AxEventContext {
     return id;
   }
 
+  afterContinuationsRegistered(callback: () => void | Promise<void>): void {
+    this.afterRegistrationCallbacks.push(callback);
+  }
+
   takeRegistrations() {
     return this.registrations.splice(0, this.registrations.length);
+  }
+
+  takeAfterRegistrationCallbacks() {
+    return this.afterRegistrationCallbacks.splice(
+      0,
+      this.afterRegistrationCallbacks.length
+    );
   }
 }
 
@@ -700,6 +714,9 @@ export class AxEventRuntime {
             };
             await this.store.registerContinuation(value);
             continuations.push(value);
+          }
+          for (const callback of eventContext.takeAfterRegistrationCallbacks()) {
+            await callback();
           }
           const waiting = result.waiting || continuations.length > 0;
           run = {
