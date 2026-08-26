@@ -1,5 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import {
+  axCreateRuntimeAdmissionReceipt,
+  axRuntimeCapabilityRequirementsVersion,
+  axSelectCodeRuntime,
+} from '../agent/runtimeCapabilities.js';
 import { AxJSRuntime, AxJSRuntimePermission } from './jsRuntime.js';
 
 // --- Mock browser globals ---
@@ -91,9 +96,458 @@ describe('AxJSRuntime secure defaults', () => {
     const initMsg = mockPostMessage.mock.calls[0]![0];
     expect(initMsg.permissions).toEqual(['filesystem', 'child-process']);
   });
+
+  it('snapshots mutable security inputs before declaration and execution', () => {
+    const permissions: AxJSRuntimePermission[] = [];
+    const allowedModules: string[] = [];
+    const fsRead: string[] = [];
+    const fsWrite: string[] = [];
+    const nodePermissionAllowlist = {
+      fsRead,
+      fsWrite,
+      childProcess: false,
+      addons: false,
+      wasi: false,
+    };
+    const resourceLimits = {
+      maxOldGenerationSizeMb: 64,
+      maxYoungGenerationSizeMb: 16,
+      codeRangeSizeMb: 8,
+      stackSizeMb: 2,
+    };
+    const runtime = new AxJSRuntime({
+      permissions,
+      allowedModules,
+      nodePermissionAllowlist,
+      resourceLimits,
+    });
+
+    permissions.push(AxJSRuntimePermission.WORKERS);
+    allowedModules.push('node:fs');
+    fsRead.push('*');
+    fsWrite.push('*');
+    nodePermissionAllowlist.childProcess = true;
+    nodePermissionAllowlist.addons = true;
+    nodePermissionAllowlist.wasi = true;
+    resourceLimits.maxOldGenerationSizeMb = 1_024;
+    resourceLimits.maxYoungGenerationSizeMb = 1_024;
+    resourceLimits.codeRangeSizeMb = 1_024;
+    resourceLimits.stackSizeMb = 1_024;
+    runtime.createSession();
+
+    const initMsg = mockPostMessage.mock.calls[0]![0];
+    expect(initMsg.permissions).toEqual([]);
+    expect(initMsg.allowedModules).toEqual([]);
+    expect(runtime.capabilities.authority).toEqual({
+      host: 'denied',
+      modules: 'denied',
+      network: 'denied',
+      platform: {
+        filesystem: 'denied',
+        childProcess: 'denied',
+        storage: 'denied',
+        communication: 'denied',
+        timing: 'denied',
+        workers: 'denied',
+        codeLoading: 'denied',
+        nativeAddons: 'denied',
+        wasi: 'denied',
+      },
+    });
+
+    const captured = runtime as unknown as {
+      nodePermissionAllowlist: {
+        fsRead: readonly string[];
+        fsWrite: readonly string[];
+        childProcess: boolean;
+        addons: boolean;
+        wasi: boolean;
+      };
+      resourceLimits: {
+        maxOldGenerationSizeMb: number;
+        maxYoungGenerationSizeMb: number;
+        codeRangeSizeMb: number;
+        stackSizeMb: number;
+      };
+    };
+    expect(captured.nodePermissionAllowlist).toEqual({
+      fsRead: [],
+      fsWrite: [],
+      childProcess: false,
+      addons: false,
+      wasi: false,
+    });
+    expect(captured.resourceLimits).toEqual({
+      maxOldGenerationSizeMb: 64,
+      maxYoungGenerationSizeMb: 16,
+      codeRangeSizeMb: 8,
+      stackSizeMb: 2,
+    });
+    expect(Object.isFrozen(captured.nodePermissionAllowlist)).toBe(true);
+    expect(Object.isFrozen(captured.nodePermissionAllowlist.fsRead)).toBe(true);
+    expect(Object.isFrozen(captured.nodePermissionAllowlist.fsWrite)).toBe(
+      true
+    );
+    expect(Object.isFrozen(captured.resourceLimits)).toBe(true);
+  });
+
+  it('makes every execution-affecting field non-replaceable', () => {
+    const runtime = new AxJSRuntime();
+    const fields = [
+      'language',
+      'capabilities',
+      'createSession',
+      'getUsageInstructions',
+      'timeout',
+      'permissions',
+      'allowUnsafeNodeHostAccess',
+      'nodeWorkerPoolSize',
+      'debugNodeWorkerPool',
+      'outputMode',
+      'captureConsole',
+      'blockDynamicImport',
+      'allowedModules',
+      'freezeIntrinsics',
+      'blockShadowRealm',
+      'lockWorkerIPC',
+      'preventGlobalThisExtensions',
+      'useNodePermissionModel',
+      'nodePermissionAllowlist',
+      'resourceLimits',
+      'allowDenoRemoteImport',
+      'speculation',
+    ] as const;
+    const ownStateFields = Object.keys(
+      Object.getOwnPropertyDescriptors(runtime)
+    );
+    expect(ownStateFields.sort()).toEqual([...fields].sort());
+
+    for (const field of fields) {
+      expect(Object.getOwnPropertyDescriptor(runtime, field)).toMatchObject({
+        writable: false,
+        configurable: false,
+      });
+      expect(Reflect.set(runtime, field, Symbol('replacement'))).toBe(false);
+      expect(Reflect.deleteProperty(runtime, field)).toBe(false);
+      expect(() =>
+        Object.defineProperty(runtime, field, {
+          value: Symbol('replacement'),
+        })
+      ).toThrow(TypeError);
+    }
+
+    runtime.createSession();
+    expect(mockPostMessage.mock.calls[0]![0]).toMatchObject({
+      permissions: [],
+      allowUnsafeNodeHostAccess: false,
+      blockDynamicImport: true,
+      allowedModules: [],
+      freezeIntrinsics: true,
+      blockShadowRealm: true,
+      lockWorkerIPC: true,
+    });
+  });
+
+  it('snapshots and freezes speculative authority policy', () => {
+    const callables = {
+      'tools.read': { purity: 'pure' as const, deterministic: true },
+    };
+    const runtime = new AxJSRuntime({ speculation: { callables } });
+    callables['tools.read'].deterministic = false;
+    Object.assign(callables, {
+      'tools.unsafe': { purity: 'pure', deterministic: true },
+    });
+
+    const captured = runtime as unknown as {
+      speculation: {
+        callables: Record<
+          string,
+          Readonly<{ purity: 'pure'; deterministic: boolean }>
+        >;
+      };
+    };
+    expect(Object.isFrozen(captured.speculation)).toBe(true);
+    expect(Object.isFrozen(captured.speculation.callables)).toBe(true);
+    expect(captured.speculation.callables['tools.read']).toEqual({
+      purity: 'pure',
+      deterministic: true,
+    });
+    expect(Object.isFrozen(captured.speculation.callables['tools.read'])).toBe(
+      true
+    );
+    expect(captured.speculation.callables['tools.unsafe']).toBeUndefined();
+    expect(
+      Reflect.set(
+        captured.speculation.callables,
+        'tools.unsafe',
+        Object.freeze({ purity: 'pure', deterministic: true })
+      )
+    ).toBe(false);
+  });
 });
 
 describe('AxJSRuntime', () => {
+  it('locks exact base admission methods as own data properties', () => {
+    const runtime = new AxJSRuntime();
+    expect(
+      Object.getOwnPropertyDescriptor(runtime, 'createSession')
+    ).toMatchObject({
+      value: expect.any(Function),
+      writable: false,
+      configurable: false,
+    });
+    expect(
+      Object.getOwnPropertyDescriptor(runtime, 'getUsageInstructions')
+    ).toMatchObject({
+      value: expect.any(Function),
+      writable: false,
+      configurable: false,
+    });
+  });
+
+  it('does not dispatch through subclass prototype admission methods', () => {
+    let createSessionCalls = 0;
+    let usageInstructionCalls = 0;
+    class OverridingRuntime extends AxJSRuntime {
+      override createSession(): ReturnType<AxJSRuntime['createSession']> {
+        createSessionCalls++;
+        throw new Error('subclass createSession executed');
+      }
+
+      override getUsageInstructions(): string {
+        usageInstructionCalls++;
+        return 'subclass usage instructions';
+      }
+    }
+
+    const runtime = new OverridingRuntime();
+    expect(runtime.getUsageInstructions()).not.toBe(
+      'subclass usage instructions'
+    );
+    runtime.createSession();
+    expect(createSessionCalls).toBe(0);
+    expect(usageInstructionCalls).toBe(0);
+  });
+
+  it('fails closed when a subclass field tries to replace createSession', () => {
+    class FieldOverrideRuntime extends AxJSRuntime {
+      override createSession = () => {
+        throw new Error('subclass createSession executed');
+      };
+    }
+
+    expect(() => new FieldOverrideRuntime()).toThrow(TypeError);
+  });
+
+  it('keeps the default declaration denied and conservative', () => {
+    expect(new AxJSRuntime().capabilities.authority).toEqual({
+      host: 'denied',
+      modules: 'denied',
+      network: 'denied',
+      platform: {
+        filesystem: 'denied',
+        childProcess: 'denied',
+        storage: 'denied',
+        communication: 'denied',
+        timing: 'denied',
+        workers: 'denied',
+        codeLoading: 'denied',
+        nativeAddons: 'denied',
+        wasi: 'denied',
+      },
+    });
+  });
+
+  it('declares a frozen versioned AxIR superset without claiming certification', () => {
+    const runtime = new AxJSRuntime({
+      timeout: 250,
+      allowedModules: ['safe-module'],
+    });
+
+    expect(runtime.capabilities).toMatchObject({
+      schemaVersion: 'ax-runtime-capabilities/v1',
+      inspect: true,
+      snapshot: true,
+      patch: true,
+      abort: true,
+      language: 'JavaScript',
+      platform: 'node',
+      protocol: {
+        name: 'ax-code-runtime',
+        version: '1',
+        features: [],
+      },
+      persistence: { session: true, restart: false },
+      resources: {
+        timeoutMs: 250,
+        timeoutEnforcement: 'hard',
+      },
+      authority: {
+        host: 'allowlist',
+        modules: 'allowlist',
+        network: 'allowlist',
+        platform: {
+          filesystem: 'denied',
+          childProcess: 'denied',
+          storage: 'denied',
+          communication: 'denied',
+          timing: 'denied',
+          workers: 'denied',
+          codeLoading: 'allowlist',
+          nativeAddons: 'denied',
+          wasi: 'denied',
+        },
+      },
+    });
+    expect(runtime.capabilities.usageInstructions.length).toBeGreaterThan(0);
+    expect(Object.isFrozen(runtime.capabilities)).toBe(true);
+    expect(Object.isFrozen(runtime.capabilities.authority.platform)).toBe(true);
+  });
+
+  it('conservatively declares worker and code-loading authority', () => {
+    const runtime = new AxJSRuntime({
+      permissions: [AxJSRuntimePermission.WORKERS],
+    });
+
+    expect(runtime.capabilities.authority).toEqual({
+      host: 'unrestricted',
+      modules: 'unrestricted',
+      network: 'unrestricted',
+      platform: {
+        filesystem: 'denied',
+        childProcess: 'denied',
+        storage: 'unrestricted',
+        communication: 'unrestricted',
+        timing: 'unrestricted',
+        workers: 'unrestricted',
+        codeLoading: 'unrestricted',
+        nativeAddons: 'denied',
+        wasi: 'denied',
+      },
+    });
+
+    const admission = axCreateRuntimeAdmissionReceipt(runtime, {
+      evaluator: 'AxJSRuntime option audit',
+      source: 'host-policy',
+      authority: runtime.capabilities.authority,
+      resources: runtime.capabilities.resources,
+    });
+    expect(() =>
+      axSelectCodeRuntime(
+        [runtime],
+        {
+          schemaVersion: axRuntimeCapabilityRequirementsVersion,
+          authority: { platform: { storage: 'denied' } },
+        },
+        { admissions: [admission] }
+      )
+    ).toThrow(/storage authority no broader than denied/);
+  });
+
+  it.each([
+    AxJSRuntimePermission.FILESYSTEM,
+    AxJSRuntimePermission.CHILD_PROCESS,
+    AxJSRuntimePermission.STORAGE,
+    AxJSRuntimePermission.COMMUNICATION,
+    AxJSRuntimePermission.TIMING,
+  ])(
+    'never declares host denied with the %s privilege enabled',
+    (permission) => {
+      const runtime = new AxJSRuntime({ permissions: [permission] });
+      expect(runtime.capabilities.authority.host).toBe('unrestricted');
+    }
+  );
+
+  it('declares Node, browser, and Deno platform fixtures', () => {
+    const node = new AxJSRuntime({
+      permissions: [AxJSRuntimePermission.FILESYSTEM],
+    }).capabilities;
+    expect(node.platform).toBe('node');
+    expect(node.authority).toMatchObject({
+      host: 'unrestricted',
+      platform: { filesystem: 'unrestricted' },
+    });
+
+    vi.stubGlobal('process', undefined);
+    const browser = new AxJSRuntime({
+      permissions: [AxJSRuntimePermission.FILESYSTEM],
+    }).capabilities;
+    expect(browser.platform).toBe('browser');
+    expect(browser.authority).toMatchObject({
+      host: 'unrestricted',
+      platform: { filesystem: 'unrestricted' },
+    });
+
+    vi.stubGlobal('Deno', { version: { deno: '2.0.0' } });
+    const deno = new AxJSRuntime({
+      permissions: [AxJSRuntimePermission.FILESYSTEM],
+    }).capabilities;
+    expect(deno.platform).toBe('deno');
+    expect(deno.authority).toMatchObject({
+      host: 'unrestricted',
+      platform: { filesystem: 'unrestricted' },
+    });
+  });
+
+  it('declares explicitly enabled ambient authority', () => {
+    const runtime = new AxJSRuntime({
+      permissions: [AxJSRuntimePermission.NETWORK],
+      allowUnsafeNodeHostAccess: true,
+      blockDynamicImport: false,
+    });
+
+    expect(runtime.capabilities.authority).toEqual({
+      host: 'unrestricted',
+      modules: 'unrestricted',
+      network: 'unrestricted',
+      platform: {
+        filesystem: 'unrestricted',
+        childProcess: 'unrestricted',
+        storage: 'unrestricted',
+        communication: 'unrestricted',
+        timing: 'unrestricted',
+        workers: 'unrestricted',
+        codeLoading: 'unrestricted',
+        nativeAddons: 'unrestricted',
+        wasi: 'unrestricted',
+      },
+    });
+
+    const admission = axCreateRuntimeAdmissionReceipt(runtime, {
+      evaluator: 'AxJSRuntime option audit',
+      source: 'host-policy',
+      authority: runtime.capabilities.authority,
+      resources: runtime.capabilities.resources,
+    });
+    expect(() =>
+      axSelectCodeRuntime(
+        [runtime],
+        {
+          schemaVersion: axRuntimeCapabilityRequirementsVersion,
+          authority: {
+            platform: { filesystem: 'denied', childProcess: 'denied' },
+          },
+        },
+        { admissions: [admission] }
+      )
+    ).toThrow(/filesystem authority.*childProcess authority/s);
+  });
+
+  it('does not advertise V8 resource limits as a total memory bound', () => {
+    const runtime = new AxJSRuntime({
+      resourceLimits: {
+        maxOldGenerationSizeMb: 64,
+        maxYoungGenerationSizeMb: 16,
+        codeRangeSizeMb: 8,
+        stackSizeMb: 2,
+      },
+    });
+
+    expect(Object.hasOwn(runtime.capabilities.resources, 'memoryMb')).toBe(
+      false
+    );
+  });
+
   it('provides runtime usage instructions for RLM prompts', () => {
     const interp = new AxJSRuntime();
     const instructions = interp.getUsageInstructions();

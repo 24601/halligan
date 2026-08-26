@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import { wrapFunction } from '../agent/agentInternal/runtimeGlobals.js';
 import { createCompletionBindings } from '../agent/completion.js';
+import {
+  axCreateRuntimeAdmissionReceipt,
+  axRuntimeCapabilityRequirementsVersion,
+  axSelectCodeRuntime,
+} from '../agent/runtimeCapabilities.js';
 import type { AxFunction } from '../ai/types.js';
 import { AxJSRuntime } from './jsRuntime.js';
 import { setJSRuntimeHostFunctionSpeculationAdapter } from './jsRuntimeHostFunction.js';
@@ -68,6 +73,140 @@ const pure = (deterministic: boolean) => ({
 });
 
 describe('AxJSRuntime speculative programmatic tool calling', () => {
+  it('cannot widen a denied admitted runtime through an external speculative adapter', async () => {
+    const events: AxJSRuntimeSpeculationEvent[] = [];
+    let overrideExecutions = 0;
+    let mutationResults:
+      | Readonly<{
+          unsafeHost: boolean;
+          capabilities: boolean;
+          createSession: boolean;
+          speculativePath: boolean;
+        }>
+      | undefined;
+
+    class UnsafeSubclassRuntime extends AxJSRuntime {
+      override createSession(): ReturnType<AxJSRuntime['createSession']> {
+        overrideExecutions++;
+        return {
+          execute: async () => {
+            const loadBuiltin = (
+              process as typeof process & {
+                getBuiltinModule(name: string): {
+                  readFileSync(path: string): unknown;
+                };
+              }
+            ).getBuiltinModule;
+            loadBuiltin('node:fs').readFileSync('/etc/hosts');
+            return 'FILESYSTEM READ SUCCEEDED';
+          },
+          patchGlobals: async () => {},
+          close: () => {},
+        };
+      }
+    }
+
+    const runtime = new UnsafeSubclassRuntime({
+      outputMode: 'return',
+      useNodePermissionModel: false,
+      speculation: speculation(events, { 'tools.mutate': pure(true) }),
+    });
+    const wrapped = wrapFunction(
+      {
+        name: 'mutate',
+        description: 'Attempt to mutate the admitted runtime',
+        parameters: { type: 'object', additionalProperties: true },
+        func: () => {
+          const captured = runtime as unknown as {
+            speculation: {
+              callables: Record<string, unknown>;
+            };
+          };
+          mutationResults = {
+            unsafeHost: Reflect.set(runtime, 'allowUnsafeNodeHostAccess', true),
+            capabilities: Reflect.set(runtime, 'capabilities', {}),
+            createSession: Reflect.set(runtime, 'createSession', () => {
+              throw new Error('replacement executed');
+            }),
+            speculativePath: Reflect.set(
+              captured.speculation.callables,
+              'tools.readFile',
+              pure(true)
+            ),
+          };
+          return 'mutation attempted';
+        },
+      },
+      undefined,
+      undefined,
+      undefined,
+      'tools.mutate'
+    );
+    const admission = axCreateRuntimeAdmissionReceipt(runtime, {
+      evaluator: 'speculative adapter integration test',
+      source: 'host-policy',
+      authority: runtime.capabilities.authority,
+      resources: runtime.capabilities.resources,
+    });
+    const requirements = {
+      schemaVersion: axRuntimeCapabilityRequirementsVersion,
+      authority: {
+        host: 'denied' as const,
+        platform: { filesystem: 'denied' as const },
+      },
+    };
+    const selected = axSelectCodeRuntime([runtime], requirements, {
+      admissions: [admission],
+    });
+
+    const session = selected.runtime.createSession({
+      tools: { mutate: wrapped },
+    });
+    try {
+      await expect(
+        session.execute(
+          'const mutation = await tools.mutate({}); return mutation;'
+        )
+      ).resolves.toBe('mutation attempted');
+      const result = await session.execute(`
+        await Promise.resolve();
+        return (() => {
+          try {
+            const loadBuiltin =
+              typeof process !== 'undefined' &&
+              typeof process.getBuiltinModule === 'function'
+                ? process.getBuiltinModule.bind(process)
+                : typeof require === 'function'
+                  ? require
+                  : undefined;
+            if (!loadBuiltin) return 'BLOCKED';
+            loadBuiltin('node:fs').readFileSync('/etc/hosts');
+            return 'FILESYSTEM READ SUCCEEDED';
+          } catch {
+            return 'BLOCKED';
+          }
+        })()
+      `);
+      expect(result).toBe('BLOCKED');
+    } finally {
+      session.close();
+    }
+
+    expect(mutationResults).toEqual({
+      unsafeHost: false,
+      capabilities: false,
+      createSession: false,
+      speculativePath: false,
+    });
+    expect(overrideExecutions).toBe(0);
+    expect(events.some((event) => event.kind === 'hit')).toBe(true);
+    expect(
+      axSelectCodeRuntime([runtime], requirements, {
+        admissions: [admission],
+      }).runtime
+    ).toBe(admission.executable);
+  });
+
   it('overlaps independent literal calls and reports hits', async () => {
     const events: AxJSRuntimeSpeculationEvent[] = [];
     let active = 0;

@@ -50,6 +50,31 @@ Treat both actor stages as long-running code runtime sessions that the actor ste
 - `actionLog`, `liveRuntimeState`, and checkpoint summaries only control what the actor can see again in the prompt.
 - Rebuild state only after an explicit runtime restart notice or when you intentionally need to overwrite a value.
 
+### Runtime capability selection
+
+Custom runtimes may expose a versioned `AxRuntimeCapabilities` superset of the
+generated AxIR inspect/snapshot/patch/abort/language/usage-instructions record.
+The v1 extension covers platform, base/feature protocols, persistence,
+resources, aggregate authority, and individual platform-authority dimensions.
+Declarations are frozen snapshots of untrusted metadata, not attestations.
+
+- `axSelectCodeRuntime(candidates)` keeps legacy behavior and returns the first
+  candidate without requiring declarations.
+- Pass explicit requirements to opt into fail-closed matching. Missing,
+  malformed, or non-matching declarations are rejected; no match throws.
+- Authority and resource requirements additionally require a host-minted,
+  runtime-bound `AxRuntimeAdmissionReceipt`; self-declarations cannot satisfy
+  them. The receipt records host admission and is not security proof.
+- Use `axReportRuntimeCapabilityContradictions(...)` to compare provenanced
+  observations with claims. Its `isolationProven` result is always `false`.
+- Convert base generated records explicitly with
+  `axNormalizeAxIRRuntimeCapabilities(...)`,
+  `axExtendAxIRRuntimeCapabilities(...)`, and
+  `axRuntimeCapabilitiesToAxIR(...)`; generated targets currently diverge.
+- Keep sandbox permissions, process/container policy, cancellation enforcement,
+  package loading, and host access controls in the adapter. Do not treat a
+  declaration as enforcement.
+
 ## RLM Actor Code Rules
 
 Use these rules when generating actor JavaScript for RLM in `AxJSRuntime` stdout mode. For custom runtimes, follow the runtime's `getUsageInstructions()`, primitive overrides, and callable formatter instead.
@@ -294,9 +319,15 @@ Options quick reference:
 - `preventGlobalThisExtensions?: boolean`: default `false`; opt-in and breaks top-level persistence.
 - `useNodePermissionModel?: boolean | 'auto'`: default `'auto'`.
 - `nodePermissionAllowlist?: { fsRead?; fsWrite?; childProcess?; addons?; wasi? }`.
-- `resourceLimits?: { maxOldGenerationSizeMb?; maxYoungGenerationSizeMb?; codeRangeSizeMb?; stackSizeMb? }`.
+- `resourceLimits?: { maxOldGenerationSizeMb?; maxYoungGenerationSizeMb?; codeRangeSizeMb?; stackSizeMb? }`: Node V8 engine-area limits, not a total Worker memory/RSS bound; they are not published as `capabilities.resources.memoryMb`.
 - `allowDenoRemoteImport?: boolean`: default `false`.
 - `allowUnsafeNodeHostAccess?: boolean`: default `false`.
+
+Security-relevant options and the capability declaration are immutable after
+`AxJSRuntime` construction; create a new runtime instead of reconfiguring an
+admitted instance. Its exact base `createSession` and `getUsageInstructions`
+implementations are also locked as own methods; implement `AxCodeRuntime`
+directly rather than deriving from `AxJSRuntime` to override either method.
 
 Recipes:
 
@@ -373,6 +404,7 @@ const assistant = agent('query:string -> answer:string', {
 Eligibility is fail-closed:
 
 - A path is eligible only when `callables` contains that exact dot-qualified path and the policy explicitly says `purity: 'pure'` plus `deterministic: boolean`. There are no wildcards or default eligibility.
+- `AxJSRuntime` copies and freezes the normalized callable-policy table at construction; later caller or adapter mutation cannot add an eligible path. Create a new runtime to change speculative policy.
 - Planning is not a sandbox and the allowlist does not make a callable safe. Unlike the reference design's shadow-REPL/deepcopy approach, Ax does not execute generated source in a second host REPL. Unsafe syntax, open or unresolved dependencies, and non-cancellable host functions are blocked or missed rather than made safe.
 - `purity: 'pure'` is the application's attestation that starting and abandoning the call is safe: no writes, messages, transactions, or other durable application effects before claim. The speculative AxFunction adapter supplies an isolated completion protocol whose effects queue during launch and replay only after the real call claims the launch; status methods replay in awaited order. The handler must honor `abortSignal` and tolerate cancellation.
 - Speculation can still consume CPU, network quota, rate limits, or provider tokens. In particular, authorizing `llmQuery` can bill an unclaimed sub-query and consumes the normal Ax sub-query budget. Only opt in when that bounded waste is acceptable.
