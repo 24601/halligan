@@ -163,7 +163,7 @@ describe('ACE evidence-aware retrieval held-out fixture', () => {
       },
     ]);
     expect(JSON.stringify(evidenceAware)).not.toBe(JSON.stringify(before));
-    const rolledBack = clonePlaybook(before);
-    expect(JSON.stringify(rolledBack)).toBe(JSON.stringify(before));
+    Object.assign(evidenceAware, clonePlaybook(before));
+    expect(JSON.stringify(evidenceAware)).toBe(JSON.stringify(before));
   });
 });

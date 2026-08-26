@@ -24,8 +24,13 @@ interface ApplyOperationsOptions {
 export type AxACEPlaybookRenderOptions = {
   /** Runtime condition tokens used to satisfy applicability constraints. */
   conditions?: readonly string[];
-  /** Include expired, deprecated, superseded, and inapplicable bullets. */
+  /**
+   * Inspection only: include structurally valid expired, deprecated,
+   * superseded, and inapplicable bullets.
+   */
   includeInactive?: boolean;
+  /** @internal Ignore applicability while retaining lifecycle and expiry gates. */
+  includeInapplicable?: boolean;
   /** ISO timestamp used for deterministic expiry evaluation. Defaults to now. */
   now?: string;
 };
@@ -78,6 +83,30 @@ export function estimateTokenCount(text: string): number {
  * Returns the list of bullet ids that were added or updated for auditing.
  */
 export function applyCuratorOperations(
+  playbook: AxACEPlaybook,
+  operations: readonly AxACECuratorOperation[],
+  options?: Readonly<ApplyOperationsOptions>
+): {
+  updatedBulletIds: string[];
+  autoRemoved: AxACECuratorOperation[];
+  changes: AxACEBulletChange[];
+} {
+  assertPlaybookMutable(playbook);
+  for (const operation of operations) {
+    assertCuratorOperation(operation);
+  }
+  assertHostEvidence(options?.hostEvidence);
+
+  // Curator application is transactional. Persisted snapshots are caller-owned
+  // and may be malformed at runtime despite their TypeScript type; never expose
+  // a partially revised live playbook if validation or normalization fails.
+  const staged = clonePlaybook(playbook);
+  const result = applyCuratorOperationsInPlace(staged, operations, options);
+  replacePlaybook(playbook, staged);
+  return result;
+}
+
+function applyCuratorOperationsInPlace(
   playbook: AxACEPlaybook,
   operations: readonly AxACECuratorOperation[],
   options?: Readonly<ApplyOperationsOptions>
@@ -283,6 +312,7 @@ export function renderPlaybook(
     : '## Context Playbook\n';
 
   const sections = Object.entries(visibleSections)
+    .filter(([, bullets]) => bullets.length > 0)
     .map(([sectionName, bullets]) => {
       const body = bullets
         .map((bullet) => `- [${bullet.id}] ${bullet.content}`)
@@ -296,60 +326,43 @@ export function renderPlaybook(
   return `${header}\n${sections}`.trim();
 }
 
+/** @internal Build the safe playbook view supplied to executable ACE stages. */
+export function createExecutablePlaybookView(
+  playbook: Readonly<AxACEPlaybook>,
+  now?: string
+): AxACEPlaybook {
+  const view = clonePlaybook(playbook);
+  for (const [section, bullets] of Object.entries(view.sections)) {
+    view.sections[section] = bullets.filter((bullet) =>
+      isBulletApplicable(bullet, { includeInapplicable: true, now })
+    );
+  }
+  recomputePlaybookStats(view);
+  return view;
+}
+
 /** Determine whether a bullet is active and applicable for retrieval/rendering. */
 export function isBulletApplicable(
   bullet: Readonly<AxACEBullet>,
   options?: Readonly<AxACEPlaybookRenderOptions>
 ): boolean {
-  if (options?.includeInactive) {
-    return true;
+  if (
+    !isRecord(bullet) ||
+    typeof bullet.id !== 'string' ||
+    typeof bullet.section !== 'string' ||
+    typeof bullet.content !== 'string'
+  ) {
+    return false;
   }
 
   const evidence = bullet.evidence as unknown;
-  if (evidence !== undefined && !isRecord(evidence)) {
+  if (!isEvidenceStructurallyValid(evidence)) {
     return false;
   }
 
-  const lifecycle = evidence?.lifecycle;
-  if (lifecycle !== undefined && !isRecord(lifecycle)) {
-    return false;
-  }
-  if (
-    lifecycle?.status !== undefined &&
-    !['active', 'deprecated', 'superseded'].includes(lifecycle.status as string)
-  ) {
-    return false;
-  }
-  if (
-    lifecycle?.status === 'deprecated' ||
-    lifecycle?.status === 'superseded'
-  ) {
-    return false;
-  }
-  if (lifecycle?.expiresAt !== undefined) {
-    if (typeof lifecycle.expiresAt !== 'string') {
-      return false;
-    }
-    const expiry = Date.parse(lifecycle.expiresAt);
-    const now = Date.parse(options?.now ?? new Date().toISOString());
-    if (!Number.isFinite(expiry) || !Number.isFinite(now) || expiry <= now) {
-      return false;
-    }
-  }
-
-  const applicability = evidence?.applicability;
-  if (applicability === undefined) {
-    return true;
-  }
-  if (!isRecord(applicability)) {
-    return false;
-  }
-  const allOf = conditionList(applicability.allOf);
-  const anyOf = conditionList(applicability.anyOf);
-  const noneOf = conditionList(applicability.noneOf);
-  if (allOf === null || anyOf === null || noneOf === null) {
-    return false;
-  }
+  const typedEvidence = evidence as AxACEBulletEvidence | undefined;
+  const lifecycle = typedEvidence?.lifecycle;
+  const applicability = typedEvidence?.applicability;
   const runtimeConditions = options?.conditions;
   if (
     runtimeConditions !== undefined &&
@@ -358,6 +371,33 @@ export function isBulletApplicable(
   ) {
     return false;
   }
+
+  // Inspection can expose lifecycle-inactive records, but only after all
+  // retrieval-affecting and audit metadata has passed structural validation.
+  if (options?.includeInactive) {
+    return true;
+  }
+
+  if (
+    lifecycle?.status === 'deprecated' ||
+    lifecycle?.status === 'superseded'
+  ) {
+    return false;
+  }
+  if (lifecycle?.expiresAt !== undefined) {
+    const expiry = Date.parse(lifecycle.expiresAt);
+    const now = Date.parse(options?.now ?? new Date().toISOString());
+    if (!Number.isFinite(expiry) || !Number.isFinite(now) || expiry <= now) {
+      return false;
+    }
+  }
+
+  if (options?.includeInapplicable || applicability === undefined) {
+    return true;
+  }
+  const allOf = conditionList(applicability.allOf);
+  const anyOf = conditionList(applicability.anyOf);
+  const noneOf = conditionList(applicability.noneOf);
   const conditions = new Set(runtimeConditions ?? []);
   if (allOf?.some((condition) => !conditions.has(condition))) {
     return false;
@@ -383,6 +423,202 @@ function conditionList(value: unknown): string[] | undefined | null {
     value.every((condition) => typeof condition === 'string')
     ? value
     : null;
+}
+
+function isEvidenceStructurallyValid(value: unknown): boolean {
+  if (value === undefined) {
+    return true;
+  }
+  if (!isRecord(value)) {
+    return false;
+  }
+  if (
+    value.confidence !== undefined &&
+    (typeof value.confidence !== 'number' || !Number.isFinite(value.confidence))
+  ) {
+    return false;
+  }
+  if (
+    value.evidenceCount !== undefined &&
+    (typeof value.evidenceCount !== 'number' ||
+      !Number.isFinite(value.evidenceCount) ||
+      value.evidenceCount < 0)
+  ) {
+    return false;
+  }
+  if (!isApplicabilityStructurallyValid(value.applicability)) {
+    return false;
+  }
+  if (!isLifecycleStructurallyValid(value.lifecycle)) {
+    return false;
+  }
+  if (
+    value.provenance !== undefined &&
+    (!Array.isArray(value.provenance) ||
+      value.provenance.some(
+        (entry) =>
+          !isRecord(entry) ||
+          !['compile', 'online', 'agent-evolve', 'manual'].includes(
+            String(entry.source)
+          ) ||
+          (entry.sourceRunId !== undefined &&
+            typeof entry.sourceRunId !== 'string') ||
+          conditionList(entry.feedbackIds) === null
+      ))
+  ) {
+    return false;
+  }
+  if (
+    value.verification !== undefined &&
+    (!Array.isArray(value.verification) ||
+      value.verification.some(
+        (entry) =>
+          !isRecord(entry) ||
+          typeof entry.verifierId !== 'string' ||
+          !['passed', 'failed', 'unknown'].includes(String(entry.result)) ||
+          (entry.testId !== undefined && typeof entry.testId !== 'string') ||
+          (entry.timestamp !== undefined &&
+            typeof entry.timestamp !== 'string') ||
+          (entry.summary !== undefined && typeof entry.summary !== 'string')
+      ))
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function isApplicabilityStructurallyValid(value: unknown): boolean {
+  return (
+    value === undefined ||
+    (isRecord(value) &&
+      conditionList(value.allOf) !== null &&
+      conditionList(value.anyOf) !== null &&
+      conditionList(value.noneOf) !== null)
+  );
+}
+
+function isLifecycleStructurallyValid(value: unknown): boolean {
+  if (value === undefined) {
+    return true;
+  }
+  if (!isRecord(value)) {
+    return false;
+  }
+  if (
+    value.status !== undefined &&
+    !['active', 'deprecated', 'superseded'].includes(String(value.status))
+  ) {
+    return false;
+  }
+  for (const field of ['expiresAt', 'supersededBy', 'reason'] as const) {
+    if (value[field] !== undefined && typeof value[field] !== 'string') {
+      return false;
+    }
+  }
+  return (
+    value.expiresAt === undefined ||
+    (typeof value.expiresAt === 'string' &&
+      Number.isFinite(Date.parse(value.expiresAt)))
+  );
+}
+
+function assertPlaybookMutable(
+  playbook: unknown
+): asserts playbook is AxACEPlaybook {
+  if (!isRecord(playbook) || !isRecord(playbook.sections)) {
+    throw new TypeError('AxACE: playbook sections must be an object');
+  }
+  for (const [section, bullets] of Object.entries(playbook.sections)) {
+    if (!Array.isArray(bullets)) {
+      throw new TypeError(
+        `AxACE: playbook section ${section} must be an array`
+      );
+    }
+    for (const bullet of bullets) {
+      if (
+        !isRecord(bullet) ||
+        typeof bullet.id !== 'string' ||
+        typeof bullet.section !== 'string' ||
+        typeof bullet.content !== 'string' ||
+        !isEvidenceStructurallyValid(bullet.evidence) ||
+        (bullet.metadata !== undefined && !isRecord(bullet.metadata)) ||
+        (bullet.tags !== undefined && conditionList(bullet.tags) === null) ||
+        !isLineageStructurallyValid(bullet.lineage)
+      ) {
+        throw new TypeError(`AxACE: bullet in section ${section} is malformed`);
+      }
+    }
+  }
+}
+
+function isLineageStructurallyValid(value: unknown): boolean {
+  if (value === undefined) {
+    return true;
+  }
+  return (
+    isRecord(value) &&
+    (value.previousRevision === undefined ||
+      (typeof value.previousRevision === 'number' &&
+        Number.isFinite(value.previousRevision))) &&
+    conditionList(value.supersedes) !== null
+  );
+}
+
+function assertCuratorOperation(
+  operation: unknown
+): asserts operation is AxACECuratorOperation {
+  if (
+    !isRecord(operation) ||
+    !['ADD', 'UPDATE', 'REMOVE'].includes(String(operation.type)) ||
+    typeof operation.section !== 'string' ||
+    (operation.content !== undefined &&
+      typeof operation.content !== 'string') ||
+    (operation.bulletId !== undefined &&
+      typeof operation.bulletId !== 'string') ||
+    (operation.metadata !== undefined && !isRecord(operation.metadata)) ||
+    !isEvidenceStructurallyValid(operation.evidence) ||
+    conditionList(operation.supersedes) === null
+  ) {
+    throw new TypeError('AxACE: curator operation is malformed');
+  }
+}
+
+function assertHostEvidence(value: unknown): void {
+  if (value === undefined) {
+    return;
+  }
+  if (
+    !isRecord(value) ||
+    (value.source !== undefined &&
+      !['compile', 'online', 'agent-evolve', 'manual'].includes(
+        String(value.source)
+      )) ||
+    (value.sourceRunId !== undefined &&
+      typeof value.sourceRunId !== 'string') ||
+    conditionList(value.feedbackIds) === null ||
+    (value.evidenceCount !== undefined &&
+      (typeof value.evidenceCount !== 'number' ||
+        !Number.isFinite(value.evidenceCount) ||
+        value.evidenceCount < 0)) ||
+    (value.confidence !== undefined &&
+      (typeof value.confidence !== 'number' ||
+        !Number.isFinite(value.confidence))) ||
+    !isEvidenceStructurallyValid({ verification: value.verification })
+  ) {
+    throw new TypeError('AxACE: host evidence is malformed');
+  }
+}
+
+function replacePlaybook(target: AxACEPlaybook, source: AxACEPlaybook): void {
+  target.version = source.version;
+  target.sections = source.sections;
+  target.stats = source.stats;
+  target.updatedAt = source.updatedAt;
+  if (source.description === undefined) {
+    delete target.description;
+  } else {
+    target.description = source.description;
+  }
 }
 
 /**
@@ -486,6 +722,18 @@ export function dedupePlaybookByContent(
       const key = bullet.content.trim().toLowerCase();
       const existing = seen.get(key);
       if (existing) {
+        const isExplicitReplacement =
+          existing.evidence?.lifecycle?.status === 'superseded' &&
+          existing.evidence.lifecycle.supersededBy === bullet.id &&
+          bullet.lineage?.supersedes?.includes(existing.id);
+        if (isExplicitReplacement) {
+          // Exact-content replacement is still a lifecycle transition. Keep
+          // both records so the new id remains executable and every lineage,
+          // history, and receipt reference continues to resolve.
+          unique.push(bullet);
+          seen.set(key, bullet);
+          continue;
+        }
         survivingIds.set(bullet.id, existing.id);
         // Merge counters if they are near-identical
         existing.helpfulCount += bullet.helpfulCount;
@@ -551,10 +799,16 @@ function cloneBullet(bullet: Readonly<AxACEBullet>): AxACEBullet {
   return JSON.parse(JSON.stringify(bullet)) as AxACEBullet;
 }
 
-function normalizeStrings(values: readonly string[] | undefined): string[] {
+function normalizeStrings(values: unknown): string[] {
+  if (!Array.isArray(values)) {
+    return [];
+  }
   return [
     ...new Set(
-      (values ?? []).map((value) => value.trim()).filter((value) => value)
+      values
+        .filter((value): value is string => typeof value === 'string')
+        .map((value) => value.trim())
+        .filter((value) => value)
     ),
   ].sort();
 }

@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest';
 import {
   applyCuratorOperations,
   createEmptyPlaybook,
+  createExecutablePlaybookView,
+  dedupePlaybookByContent,
   generateBulletId,
   renderPlaybook,
 } from './acePlaybook.js';
@@ -328,6 +330,105 @@ describe('applyCuratorOperations', () => {
     const rendered = renderPlaybook(playbook, { now: 'not-a-date' });
     expect(rendered).not.toContain('Temporary future rule');
     expect(rendered).toContain('Non-expiring rule');
+  });
+
+  it('keeps inspection permissive only after structural validation', () => {
+    const playbook = makePlaybookWithSection('Guidelines', [
+      { id: 'malformed', content: 'Malformed scoped rule' },
+      { id: 'expired', content: 'Expired rule' },
+      { id: 'active', content: 'Active rule' },
+    ]);
+    (playbook.sections.Guidelines[0] as any).evidence = {
+      applicability: { allOf: 'tenant:paid' },
+    };
+    playbook.sections.Guidelines[1]!.evidence = {
+      lifecycle: { expiresAt: '2026-01-01T00:00:00.000Z' },
+    };
+
+    const inspection = renderPlaybook(playbook, {
+      includeInactive: true,
+      now: '2026-08-01T00:00:00.000Z',
+    });
+    expect(inspection).not.toContain('Malformed scoped rule');
+    expect(inspection).toContain('Expired rule');
+
+    const executable = createExecutablePlaybookView(
+      playbook,
+      '2026-08-01T00:00:00.000Z'
+    );
+    const prompt = renderPlaybook(executable, { includeInapplicable: true });
+    expect(prompt).toBe(
+      '## Context Playbook\n\n### Guidelines\n- [active] Active rule'
+    );
+    expect(executable.sections.Guidelines.map((bullet) => bullet.id)).toEqual([
+      'active',
+    ]);
+  });
+
+  it('preserves the exact live state when loaded evidence is malformed', () => {
+    const playbook = makePlaybookWithSection('Guidelines', [
+      { id: 'guide-1', content: 'Original guidance' },
+    ]);
+    (playbook.sections.Guidelines[0] as any).evidence = {
+      applicability: { allOf: 'tenant:paid' },
+    };
+    const before = JSON.stringify(playbook);
+
+    expect(() =>
+      applyCuratorOperations(playbook, [
+        {
+          type: 'UPDATE',
+          section: 'Guidelines',
+          bulletId: 'guide-1',
+          content: 'Mutated guidance',
+        },
+      ])
+    ).toThrow(/bullet.*malformed/);
+    expect(JSON.stringify(playbook)).toBe(before);
+    expect(playbook.sections.Guidelines[0]?.content).toBe('Original guidance');
+    expect(playbook.sections.Guidelines[0]).not.toHaveProperty('revision');
+  });
+
+  it('keeps an exact-content superseding replacement live and referentially intact', () => {
+    const playbook = makePlaybookWithSection('Guidelines', [
+      { id: 'old', content: 'Validate before applying.' },
+    ]);
+    const result = applyCuratorOperations(playbook, [
+      {
+        type: 'ADD',
+        section: 'Guidelines',
+        bulletId: 'new',
+        content: 'Validate before applying.',
+        supersedes: ['old'],
+      },
+    ]);
+    dedupePlaybookByContent(playbook, 0.95, result.updatedBulletIds);
+
+    expect(result.updatedBulletIds).toEqual(['new']);
+    expect(playbook.sections.Guidelines.map((bullet) => bullet.id)).toEqual([
+      'old',
+      'new',
+    ]);
+    expect(renderPlaybook(playbook)).toContain('[new]');
+    expect(renderPlaybook(playbook)).not.toContain('[old]');
+    expect(
+      playbook.sections.Guidelines.find((bullet) => bullet.id === 'old')
+        ?.evidence?.lifecycle
+    ).toEqual({ status: 'superseded', supersededBy: 'new' });
+    expect(
+      playbook.sections.Guidelines.find((bullet) => bullet.id === 'new')
+        ?.lineage
+    ).toEqual({ supersedes: ['old'] });
+    const ids = new Set(
+      playbook.sections.Guidelines.map((bullet) => bullet.id)
+    );
+    for (const bullet of playbook.sections.Guidelines) {
+      const supersededBy = bullet.evidence?.lifecycle?.supersededBy;
+      expect(supersededBy === undefined || ids.has(supersededBy)).toBe(true);
+      for (const id of bullet.lineage?.supersedes ?? []) {
+        expect(ids.has(id)).toBe(true);
+      }
+    }
   });
 
   it('serializes normalized evidence deterministically', () => {

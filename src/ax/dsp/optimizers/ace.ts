@@ -21,6 +21,7 @@ import {
   applyCuratorOperations,
   clonePlaybook,
   createEmptyPlaybook,
+  createExecutablePlaybookView,
   dedupePlaybookByContent,
   generateBulletId,
   renderPlaybook,
@@ -325,7 +326,7 @@ export class AxACEOptimizedProgram<
     const combinedInstruction = [
       originalDescription.trim(),
       '',
-      renderPlaybook(this.playbook, { includeInactive: true }),
+      renderPlaybook(this.playbook, { includeInapplicable: true }),
     ]
       .filter((block) => block && block.trim().length > 0)
       .join('\n\n');
@@ -515,7 +516,7 @@ export class AxACE extends AxBaseOptimizer {
           const composedInstruction = this.composeInstruction(
             baseInstruction ?? originalDescription,
             this.playbook,
-            { includeInactive: true }
+            { includeInapplicable: true }
           );
           (program as any).setDescription?.(composedInstruction);
 
@@ -774,12 +775,6 @@ export class AxACE extends AxBaseOptimizer {
           } as AxACECuratorOutput)
         : undefined;
 
-    if (reflection?.bulletTags) {
-      for (const tag of reflection.bulletTags) {
-        updateBulletFeedback(this.playbook, tag.id, tag.tag);
-      }
-    }
-
     let appliedDeltaIds: string[] = [];
     let changes: AxACEOptimizationArtifact['history'][number]['changes'];
     if (resolvedOperations.length > 0) {
@@ -808,6 +803,12 @@ export class AxACE extends AxBaseOptimizer {
         this.aceConfig.similarityThreshold,
         appliedDeltaIds
       );
+    }
+
+    if (reflection?.bulletTags) {
+      for (const tag of reflection.bulletTags) {
+        updateBulletFeedback(this.playbook, tag.id, tag.tag);
+      }
     }
 
     const feedbackEvent: AxACEFeedbackEvent = {
@@ -1252,10 +1253,80 @@ export class AxACE extends AxBaseOptimizer {
         const contentRaw = (entry as { content?: string }).content ?? '';
         const content = typeof contentRaw === 'string' ? contentRaw.trim() : '';
 
+        const metadataRaw = (entry as { metadata?: unknown }).metadata;
+        const metadata =
+          metadataRaw === undefined ||
+          metadataRaw === null ||
+          Array.isArray(metadataRaw) ||
+          typeof metadataRaw !== 'object'
+            ? undefined
+            : Object.keys(metadataRaw).length > 0
+              ? { ...(metadataRaw as Record<string, unknown>) }
+              : undefined;
+
+        const evidenceRaw = (entry as { evidence?: unknown }).evidence;
+        let evidence: AxACECuratorOperation['evidence'];
+        if (
+          evidenceRaw !== null &&
+          !Array.isArray(evidenceRaw) &&
+          typeof evidenceRaw === 'object'
+        ) {
+          const raw = evidenceRaw as Record<string, unknown>;
+          const confidence = raw.confidence;
+          const applicability = raw.applicability;
+          const lifecycle = raw.lifecycle;
+          const normalizedEvidence: NonNullable<
+            AxACECuratorOperation['evidence']
+          > = {
+            ...(typeof confidence === 'number' && Number.isFinite(confidence)
+              ? { confidence }
+              : {}),
+            ...(applicability !== null &&
+            !Array.isArray(applicability) &&
+            typeof applicability === 'object'
+              ? {
+                  applicability:
+                    this.normalizeCuratorApplicability(applicability),
+                }
+              : {}),
+            ...(lifecycle !== null &&
+            !Array.isArray(lifecycle) &&
+            typeof lifecycle === 'object'
+              ? { lifecycle: this.normalizeCuratorLifecycle(lifecycle) }
+              : {}),
+          };
+          if (
+            normalizedEvidence.applicability &&
+            Object.keys(normalizedEvidence.applicability).length === 0
+          ) {
+            delete normalizedEvidence.applicability;
+          }
+          if (
+            normalizedEvidence.lifecycle &&
+            Object.keys(normalizedEvidence.lifecycle).length === 0
+          ) {
+            delete normalizedEvidence.lifecycle;
+          }
+          if (Object.keys(normalizedEvidence).length > 0) {
+            evidence = normalizedEvidence;
+          }
+        }
+
+        const supersedesRaw = (entry as { supersedes?: unknown }).supersedes;
+        const supersedes = Array.isArray(supersedesRaw)
+          ? [
+              ...new Set(
+                supersedesRaw
+                  .filter((value): value is string => typeof value === 'string')
+                  .map((value) => value.trim())
+                  .filter(Boolean)
+              ),
+            ].sort()
+          : undefined;
         const hasMetadataUpdate =
-          entry.metadata != null ||
-          entry.evidence != null ||
-          entry.supersedes != null;
+          metadata !== undefined ||
+          evidence !== undefined ||
+          (supersedes?.length ?? 0) > 0;
         if (
           (type === 'ADD' && content.length === 0) ||
           (type === 'UPDATE' && content.length === 0 && !hasMetadataUpdate)
@@ -1278,7 +1349,13 @@ export class AxACE extends AxBaseOptimizer {
             ? bulletIdRaw.trim()
             : undefined;
 
-        const keyParts = [type, section, content, bulletId ?? ''];
+        const keyParts = [
+          type,
+          section,
+          content,
+          bulletId ?? '',
+          JSON.stringify({ metadata, evidence, supersedes }),
+        ];
         const key = keyParts.join(':');
         if (seen.has(key)) {
           continue;
@@ -1297,41 +1374,14 @@ export class AxACE extends AxBaseOptimizer {
           normalizedEntry.bulletId = bulletId;
         }
 
-        const metadataRaw = (entry as { metadata?: Record<string, unknown> })
-          .metadata;
-        if (metadataRaw && typeof metadataRaw === 'object') {
-          normalizedEntry.metadata = { ...metadataRaw };
+        if (metadata) {
+          normalizedEntry.metadata = metadata;
         }
-
-        const evidenceRaw = (entry as { evidence?: Record<string, unknown> })
-          .evidence;
-        if (evidenceRaw && typeof evidenceRaw === 'object') {
-          const confidence = evidenceRaw.confidence;
-          const applicability = evidenceRaw.applicability;
-          const lifecycle = evidenceRaw.lifecycle;
-          normalizedEntry.evidence = {
-            ...(typeof confidence === 'number' && Number.isFinite(confidence)
-              ? { confidence }
-              : {}),
-            ...(applicability && typeof applicability === 'object'
-              ? {
-                  applicability:
-                    this.normalizeCuratorApplicability(applicability),
-                }
-              : {}),
-            ...(lifecycle && typeof lifecycle === 'object'
-              ? {
-                  lifecycle: this.normalizeCuratorLifecycle(lifecycle),
-                }
-              : {}),
-          };
+        if (evidence) {
+          normalizedEntry.evidence = evidence;
         }
-
-        const supersedesRaw = (entry as { supersedes?: unknown }).supersedes;
-        if (Array.isArray(supersedesRaw)) {
-          normalizedEntry.supersedes = supersedesRaw.filter(
-            (value): value is string => typeof value === 'string'
-          );
+        if (supersedes?.length) {
+          normalizedEntry.supersedes = supersedes;
         }
 
         normalized.push(normalizedEntry);
@@ -1397,7 +1447,8 @@ export class AxACE extends AxBaseOptimizer {
       : undefined;
     return {
       ...(status ? { status } : {}),
-      ...(typeof raw.expiresAt === 'string'
+      ...(typeof raw.expiresAt === 'string' &&
+      Number.isFinite(Date.parse(raw.expiresAt))
         ? { expiresAt: raw.expiresAt }
         : {}),
       ...(typeof raw.supersededBy === 'string'
@@ -1467,6 +1518,7 @@ export class AxACE extends AxBaseOptimizer {
     const reflectorAI = this.teacherAI ?? this.studentAI;
 
     try {
+      const executablePlaybook = createExecutablePlaybookView(this.playbook);
       const signature = this.program?.getSignature();
       const inputFields = signature?.getInputFields() ?? [];
       const outputFields = signature?.getOutputFields() ?? [];
@@ -1478,8 +1530,10 @@ export class AxACE extends AxBaseOptimizer {
         generator_answer: this.stringifyBounded(generatorOutput.answer),
         generator_reasoning: generatorOutput.reasoning,
         playbook: JSON.stringify({
-          markdown: renderPlaybook(this.playbook, { includeInactive: true }),
-          structured: this.playbook,
+          markdown: renderPlaybook(executablePlaybook, {
+            includeInapplicable: true,
+          }),
+          structured: executablePlaybook,
         }),
         expected_answer:
           Object.keys(expectedAnswer).length > 0
@@ -1527,10 +1581,13 @@ export class AxACE extends AxBaseOptimizer {
     const questionContext = this.createQuestionContext(example, inputFields);
 
     try {
+      const executablePlaybook = createExecutablePlaybookView(playbook);
       const outputRaw = await curator.forward(curatorAI, {
         playbook: JSON.stringify({
-          markdown: renderPlaybook(playbook, { includeInactive: true }),
-          structured: playbook,
+          markdown: renderPlaybook(executablePlaybook, {
+            includeInapplicable: true,
+          }),
+          structured: executablePlaybook,
         }),
         reflection: JSON.stringify(reflection),
         question_context: this.stringifyBounded(questionContext),

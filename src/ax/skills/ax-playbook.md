@@ -126,6 +126,8 @@ pb.applyTo(program, {
 // Agent handles target their configured live stage directly.
 apb.applyTo({ conditions: ['tenant:paid', 'region:us'] });
 
+// Inspection can include valid expired/deprecated/superseded entries. Malformed
+// records are always withheld and executable ACE stages never use this bypass.
 const auditMarkdown = pb.render({ includeInactive: true });
 
 // Trusted host/evaluator authority: no curator/model call or cryptographic proof.
@@ -169,7 +171,10 @@ verification evidence. It cannot prove that guidance content is semantically
 correct, authenticate caller-supplied snapshots/receipts, detect missing
 preconditions, or replace representative held-out/live evaluation. Malformed
 persisted applicability/lifecycle metadata is preserved for exact rollback but
-the affected bullet fails closed during normal rendering. The durable JSON
+the affected bullet fails closed during normal and inspection rendering.
+`evidenceCount` is an additive update/receipt observation count, not a deduped or
+authoritative count of independent evidence; one verified evolution can add an
+update observation and a later verifier-receipt observation. The durable JSON
 grows, even though filtered prompts can shrink.
 
 ## Persist And Restore

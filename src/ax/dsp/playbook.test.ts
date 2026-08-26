@@ -122,9 +122,31 @@ describe('playbook handle', () => {
     expect(restored.render()).not.toContain('Malformed applicability');
     expect(restored.render()).not.toContain('Malformed lifecycle');
     expect(restored.render()).toContain('Valid legacy guidance');
-    expect(restored.render({ includeInactive: true })).toContain(
+    expect(restored.render({ includeInactive: true })).not.toContain(
       'Malformed applicability'
     );
+  });
+
+  it('rolls back malformed evidence updates without history or receipt changes', () => {
+    const content = buildPlaybook({ Guidelines: ['Original guidance'] });
+    const bulletId = content.sections.Guidelines[0]!.id;
+    (content.sections.Guidelines[0] as any).evidence = {
+      applicability: { allOf: 'tenant:paid' },
+    };
+    const pb = playbook(createProgram(), { studentAI: mockAI }).load({
+      playbook: content,
+      artifact: emptyArtifact(content),
+    });
+    const before = JSON.stringify(pb.getState());
+
+    expect(() =>
+      pb.recordEvidence([bulletId], {
+        source: 'manual',
+        feedbackIds: ['receipt-that-must-not-land'],
+      })
+    ).toThrow(/bullet.*malformed/);
+    expect(JSON.stringify(pb.getState())).toBe(before);
+    expect(pb.getState().artifact.history).toEqual([]);
   });
 
   it('records host evidence and restores it exactly on rollback load', () => {

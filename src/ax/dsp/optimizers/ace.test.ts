@@ -257,6 +257,38 @@ describe('AxACE curator no-op filtering', () => {
     });
   });
 
+  it('does not admit contentless updates from malformed metadata shapes', () => {
+    const optimizer = Object.create(AxACE.prototype) as AxACE;
+    const operations = (optimizer as any).normalizeCuratorOperations([
+      {
+        type: 'UPDATE',
+        section: 'Routing',
+        bulletId: 'routing-1',
+        metadata: [],
+      },
+      {
+        type: 'UPDATE',
+        section: 'Routing',
+        bulletId: 'routing-1',
+        evidence: { applicability: { allOf: 'tenant:paid' } },
+      },
+      {
+        type: 'UPDATE',
+        section: 'Routing',
+        bulletId: 'routing-1',
+        evidence: { lifecycle: { expiresAt: 'not-a-date' } },
+      },
+      {
+        type: 'UPDATE',
+        section: 'Routing',
+        bulletId: 'routing-1',
+        supersedes: { id: 'routing-0' },
+      },
+    ]);
+
+    expect(operations).toEqual([]);
+  });
+
   it('compile keeps only substantive curator bullets', async () => {
     const program = createACEProgram();
     vi.spyOn(program, 'forward').mockResolvedValue({ answer: 'prediction' });
@@ -322,6 +354,73 @@ describe('AxACE curator no-op filtering', () => {
 });
 
 describe('AxACE', () => {
+  it('keeps malformed and expired records out of every executable ACE prompt', async () => {
+    const initialPlaybook = buildPlaybook({
+      Guidance: ['Malformed rule', 'Expired rule', 'Scoped active rule'],
+    });
+    (initialPlaybook.sections.Guidance[0] as any).evidence = {
+      applicability: { allOf: 'tenant:paid' },
+    };
+    initialPlaybook.sections.Guidance[1]!.evidence = {
+      lifecycle: { expiresAt: '2000-01-01T00:00:00.000Z' },
+    };
+    initialPlaybook.sections.Guidance[2]!.evidence = {
+      applicability: { allOf: ['tenant:paid'] },
+    };
+
+    const program = createACEProgram();
+    let generatorPrompt = '';
+    vi.spyOn(program, 'forward').mockImplementation(async () => {
+      generatorPrompt = program.getSignature().getDescription() ?? '';
+      return { answer: 'prediction' };
+    });
+    const ace = new AxACE(
+      { studentAI: {} as any, teacherAI: {} as any },
+      { initialPlaybook, maxEpochs: 1, maxReflectorRounds: 1 }
+    );
+    const reflector = (ace as any).getOrCreateReflectorProgram();
+    const reflectorForward = vi
+      .spyOn(reflector, 'forward')
+      .mockResolvedValue(reflectionOutput);
+    const curator = (ace as any).getOrCreateCuratorProgram();
+    const curatorForward = vi.spyOn(curator, 'forward').mockResolvedValue({
+      reasoning: 'no change',
+      operations: [],
+    });
+
+    const result = await ace.compile(
+      program,
+      [
+        { question: 'q1', answer: 'a1' },
+        { question: 'q2', answer: 'a2' },
+      ],
+      () => 1
+    );
+
+    expect(generatorPrompt).toContain('Scoped active rule');
+    expect(generatorPrompt).not.toContain('Malformed rule');
+    expect(generatorPrompt).not.toContain('Expired rule');
+    for (const call of [
+      reflectorForward.mock.calls[0],
+      curatorForward.mock.calls[0],
+    ]) {
+      const payload = JSON.parse((call?.[1] as any).playbook);
+      expect(payload.markdown).toContain('Scoped active rule');
+      expect(payload.markdown).not.toContain('Malformed rule');
+      expect(payload.markdown).not.toContain('Expired rule');
+      expect(
+        payload.structured.sections.Guidance.map((entry: any) => entry.id)
+      ).toEqual(['guidance-2']);
+    }
+
+    const applied = createACEProgram();
+    result.optimizedProgram?.applyTo(applied);
+    const appliedPrompt = applied.getSignature().getDescription() ?? '';
+    expect(appliedPrompt).toContain('Scoped active rule');
+    expect(appliedPrompt).not.toContain('Malformed rule');
+    expect(appliedPrompt).not.toContain('Expired rule');
+  });
+
   it('runCurator should only receive input fields in question_context', async () => {
     const mockCuratorAI = {
       name: 'mockCurator',

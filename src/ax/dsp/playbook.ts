@@ -244,6 +244,11 @@ export class AxPlaybook<IN = any, OUT extends AxGenOut = AxGenOut> {
     this.applyHook = hook;
   }
 
+  /** @internal Retrieval options currently applied to the bound program. */
+  public _getRenderOptions(): Readonly<AxACEPlaybookRenderOptions> | undefined {
+    return this.lastRenderOptions;
+  }
+
   private inject(): void {
     if (this.applyHook) {
       this.applyHook(this.render(this.lastRenderOptions));

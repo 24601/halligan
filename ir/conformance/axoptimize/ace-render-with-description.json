@@ -1,5 +1,5 @@
 {
-  "expected_render": "## Context Playbook\nReusable tactics for math word problems.\n\n### strategies\n- [calc-00001] Break the problem into steps.\n- [calc-00002] Verify the final arithmetic.\n\n### pitfalls\n- [calc-00003] Do not skip unit checks.\n\n### scratch\n_(empty)_",
+  "expected_render": "## Context Playbook\nReusable tactics for math word problems.\n\n### strategies\n- [calc-00001] Break the problem into steps.\n- [calc-00002] Verify the final arithmetic.\n\n### pitfalls\n- [calc-00003] Do not skip unit checks.",
   "kind": "optimize",
   "name": "ace-render-with-description",
   "operation": "playbook-render",
