@@ -478,6 +478,15 @@ function missingAny(
 
 class MetadataLimitError extends Error {}
 
+function appendOwn<T>(values: T[], value: T): void {
+  Object.defineProperty(values, String(values.length), {
+    value,
+    enumerable: true,
+    configurable: true,
+    writable: true,
+  });
+}
+
 function materializeDetached(
   value: unknown,
   copies = new WeakMap<object, unknown>(),
@@ -539,13 +548,18 @@ function materializeDetached(
         throw new TypeError(
           'accessor and sparse array metadata is unsupported'
         );
-      copy[index] = materializeDetached(
-        descriptor.value,
-        copies,
-        visiting,
-        MAX_LIST_ENTRIES,
-        contextRoot
-      );
+      Object.defineProperty(copy, String(index), {
+        value: materializeDetached(
+          descriptor.value,
+          copies,
+          visiting,
+          MAX_LIST_ENTRIES,
+          contextRoot
+        ),
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
     }
     visiting.delete(objectValue);
     return Object.freeze(copy);
@@ -814,7 +828,7 @@ export function axSelectExecutableSkills(
 
   for (const value of catalogSnapshot) {
     if (!isValidArtifact(value)) {
-      inspection.push({
+      appendOwn(inspection, {
         eligible: false,
         selected: false,
         reasons: ['malformed'],
@@ -827,29 +841,30 @@ export function axSelectExecutableSkills(
     const reasons: AxExecutableSkillExclusionReason[] = [];
     const receipt = matchingReceipt(value, contextSnapshot, now);
 
-    if ((refCounts.get(key) ?? 0) > 1) reasons.push('duplicate_ref');
-    if (!admitted.has(key)) reasons.push('not_admitted');
-    if (value.lifecycle === 'inactive') reasons.push('inactive');
-    if (value.lifecycle === 'deprecated') reasons.push('deprecated');
-    if (value.lifecycle === 'retired') reasons.push('retired');
+    if ((refCounts.get(key) ?? 0) > 1) appendOwn(reasons, 'duplicate_ref');
+    if (!admitted.has(key)) appendOwn(reasons, 'not_admitted');
+    if (value.lifecycle === 'inactive') appendOwn(reasons, 'inactive');
+    if (value.lifecycle === 'deprecated') appendOwn(reasons, 'deprecated');
+    if (value.lifecycle === 'retired') appendOwn(reasons, 'retired');
     if (value.expiresAt && Date.parse(value.expiresAt) <= now)
-      reasons.push('expired');
+      appendOwn(reasons, 'expired');
     if (value.deprecatedAt && Date.parse(value.deprecatedAt) <= now)
-      reasons.push('deprecated');
-    if (value.supersededBy) reasons.push('superseded');
+      appendOwn(reasons, 'deprecated');
+    if (value.supersededBy) appendOwn(reasons, 'superseded');
     if (missingAny(requirements?.preconditions, preconditions))
-      reasons.push('missing_precondition');
-    if (missingAny(requirements?.tools, tools)) reasons.push('missing_tool');
+      appendOwn(reasons, 'missing_precondition');
+    if (missingAny(requirements?.tools, tools))
+      appendOwn(reasons, 'missing_tool');
     if (
       requirements?.environments?.length &&
       (!contextSnapshot.environment ||
         !requirements.environments.includes(contextSnapshot.environment))
     )
-      reasons.push('incompatible_environment');
+      appendOwn(reasons, 'incompatible_environment');
     if (missingAny(requirements?.protocols, protocols))
-      reasons.push('missing_protocol');
+      appendOwn(reasons, 'missing_protocol');
     if (missingAny(requirements?.capabilities, capabilities))
-      reasons.push('missing_capability');
+      appendOwn(reasons, 'missing_capability');
     if (
       requirements?.authorities?.some(
         (authority) =>
@@ -858,9 +873,9 @@ export function axSelectExecutableSkills(
           !authorities.has(authorityKey(authority))
       )
     )
-      reasons.push('missing_authority');
+      appendOwn(reasons, 'missing_authority');
     if (value.verification.mode === 'required' && !receipt)
-      reasons.push('missing_verification_receipt');
+      appendOwn(reasons, 'missing_verification_receipt');
 
     const entry: AxExecutableSkillInspection = {
       ref,
@@ -870,8 +885,8 @@ export function axSelectExecutableSkills(
       reasons: [...new Set(reasons)],
       ...(receipt ? { matchedVerifierReceiptRef: receipt.ref } : {}),
     };
-    inspection.push(entry);
-    valid.push({ artifact: value, inspection: entry, receipt });
+    appendOwn(inspection, entry);
+    appendOwn(valid, { artifact: value, inspection: entry, receipt });
   }
 
   const candidates = valid.filter((entry) => entry.inspection.eligible);
@@ -931,7 +946,8 @@ export function axSelectExecutableSkills(
   for (const [index, candidate] of selected.entries()) {
     const functionSnapshot = functionSnapshots[index]!;
     candidate.inspection.selected = true;
-    artifacts.push(
+    appendOwn(
+      artifacts,
       Object.freeze({
         artifact: candidate.artifact,
         function: functionSnapshot,

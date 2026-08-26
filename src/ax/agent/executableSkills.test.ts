@@ -873,6 +873,32 @@ describe('axSelectExecutableSkills', () => {
     expect(result.inspection[0]?.reasons).toEqual(['invalid_context']);
   });
 
+  it('does not invoke inherited numeric array setters while selecting', () => {
+    const target = artifact();
+    const catalog = [target];
+    const host = context(target);
+    const options = {};
+    const previous = Object.getOwnPropertyDescriptor(Array.prototype, '0');
+    let writes = 0;
+    Object.defineProperty(Array.prototype, '0', {
+      configurable: true,
+      set: () => {
+        writes++;
+      },
+    });
+    let result: ReturnType<typeof axSelectExecutableSkills>;
+
+    try {
+      result = axSelectExecutableSkills(catalog, host, options);
+    } finally {
+      if (previous) Object.defineProperty(Array.prototype, '0', previous);
+      else delete (Array.prototype as unknown as Record<string, unknown>)['0'];
+    }
+
+    expect(writes).toBe(0);
+    expect(result.artifacts).toHaveLength(1);
+  });
+
   it.each([
     ['preconditions', [], 'missing_precondition'],
     ['tools', [], 'missing_tool'],
