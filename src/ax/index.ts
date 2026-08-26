@@ -970,6 +970,25 @@ import {
 } from './dsp/playbook.js';
 import { AxProgram } from './dsp/program.js';
 import {
+  AxProgramSource,
+  AxProgramSourceBudgetError,
+  type AxProgramSourceCapability,
+  type AxProgramSourceDocument,
+  AxProgramSourceError,
+  type AxProgramSourceExpression,
+  type AxProgramSourceLateBridgeEvent,
+  type AxProgramSourceOptions,
+  type AxProgramSourceRuntime,
+  AxProgramSourceSessionExpiredError,
+  type AxProgramSourceState,
+  type AxProgramSourceStatement,
+  type AxProgramSourceValueLimits,
+  axProgramSourceDefaultNodeResourceLimits,
+  axProgramSourceRuntimeProtocol,
+  axProgramSourceVersion,
+  programSource,
+} from './dsp/programSource.js';
+import {
   type AxFieldTemplateFn,
   AxPromptTemplate,
   type AxPromptTemplateOptions,
@@ -1630,6 +1649,10 @@ export { AxMultiServiceRouter };
 export { AxOptimizedProgramImpl };
 export { AxPlaybook };
 export { AxProgram };
+export { AxProgramSource };
+export { AxProgramSourceBudgetError };
+export { AxProgramSourceError };
+export { AxProgramSourceSessionExpiredError };
 export { AxPromptTemplate };
 export { AxProviderRouter };
 export { AxPushEventSource };
@@ -1791,6 +1814,9 @@ export { axPlaybookFailureSection };
 export { axPreferenceEvidenceLimits };
 export { axPreferenceEvidenceToMemories };
 export { axProcessContentForProvider };
+export { axProgramSourceDefaultNodeResourceLimits };
+export { axProgramSourceRuntimeProtocol };
+export { axProgramSourceVersion };
 export { axReactCanonicalJSON };
 export { axReactSerializeHistory };
 export { axRenewPreferenceEvidence };
@@ -1838,6 +1864,7 @@ export { flow };
 export { fn };
 export { optimize };
 export { playbook };
+export { programSource };
 export { react };
 export { refine };
 export { runAxEventStoreConformance };
@@ -2651,6 +2678,15 @@ export type { AxProgramExamples };
 export type { AxProgramForwardOptions };
 export type { AxProgramForwardOptionsWithModels };
 export type { AxProgramOptions };
+export type { AxProgramSourceCapability };
+export type { AxProgramSourceDocument };
+export type { AxProgramSourceExpression };
+export type { AxProgramSourceLateBridgeEvent };
+export type { AxProgramSourceOptions };
+export type { AxProgramSourceRuntime };
+export type { AxProgramSourceState };
+export type { AxProgramSourceStatement };
+export type { AxProgramSourceValueLimits };
 export type { AxProgramStateEnvelope };
 export type { AxProgramStateStore };
 export type { AxProgramStreamingForwardOptions };
