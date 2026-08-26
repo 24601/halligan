@@ -95,7 +95,15 @@ export function createAxGenAdapter<IN, OUT extends AxGenOut>({
           const message = err instanceof Error ? err.message : String(err);
           outputs.push({ error: message });
           scores.push(0);
-          scoreVectors.push({ score: 0 });
+          const observedKeys = new Set<string>();
+          for (const vector of scoreVectors) {
+            for (const key of Object.keys(vector)) observedKeys.add(key);
+          }
+          scoreVectors.push(
+            observedKeys.size === 0
+              ? { score: 0 }
+              : Object.fromEntries([...observedKeys].map((key) => [key, 0]))
+          );
           feedback.push(undefined);
           if (captureTraces) trajectories.push({ calls, error: message });
         }

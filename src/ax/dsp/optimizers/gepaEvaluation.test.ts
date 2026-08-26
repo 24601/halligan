@@ -136,7 +136,52 @@ describe('evaluateGEPABatch', () => {
     });
 
     expect(result?.rows[0]?.scores).toEqual({ score: 0.25 });
+    expect(result?.rows[0]?.scalar).toBe(0.25);
     expect(state.totalCalls).toBe(1);
+  });
+
+  it('uses an adapter explicit scalar instead of re-scalarizing named objectives', async () => {
+    const state = { totalCalls: 0, observedScoreKeys: new Set<string>() };
+    const result = await evaluateGEPABatch({
+      program: {} as any,
+      ai: {} as AxAIService,
+      metricFn: async () => 0,
+      adapter: {
+        evaluate: async () => ({
+          outputs: [{ ok: true }],
+          scores: [0.4],
+          scoreVectors: [{ accuracy: 1, brevity: 1 }],
+          feedback: ['wrong format'],
+        }),
+        make_reflective_dataset: () => ({}),
+      },
+      cfg: {},
+      set: [{ id: '1' }] as any,
+      phase: 'adapter-explicit',
+      sampleCount: 1,
+      maxMetricCalls: 10,
+      state,
+      applyConfig: () => {},
+      scalarize: (scores) => scalarizeGEPAScores(scores),
+    });
+
+    expect(result?.rows[0]?.scores).toEqual({ accuracy: 1, brevity: 1 });
+    expect(result?.rows[0]?.scalar).toBe(0.4);
+    expect(result?.rows[0]?.feedback).toBe('wrong format');
+  });
+
+  it('keeps a legacy multi-objective vector that also has a string feedback field', async () => {
+    await expect(
+      normalizeGEPAScores(
+        async () => ({
+          accuracy: 1,
+          brevity: 0.5,
+          feedback: 'cite the source',
+        }),
+        {},
+        {}
+      )
+    ).resolves.toEqual({ accuracy: 1, brevity: 0.5 });
   });
 
   it('aligns structured feedback, scores, outputs, and traces across failures', async () => {

@@ -84,7 +84,7 @@ describe('createAxGenAdapter', () => {
     expect(batch.scores).toEqual([0.8, 0, 0.8]);
     expect(batch.scoreVectors).toEqual([
       { accuracy: 1, brevity: 0.25 },
-      { score: 0 },
+      { accuracy: 0, brevity: 0 },
       { accuracy: 1, brevity: 0.25 },
     ]);
     expect(batch.feedback).toEqual(['improve-a', undefined, 'improve-b']);

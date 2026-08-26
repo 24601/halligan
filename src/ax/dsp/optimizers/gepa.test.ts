@@ -21,7 +21,7 @@ const createSingleRootProgram = (
     },
     getSignature: () => ({
       getDescription: () => baseInstruction,
-      toString: () => `\"${baseInstruction}\" question:string -> answer:string`,
+      toString: () => `"${baseInstruction}" question:string -> answer:string`,
     }),
     namedProgramInstances: () => [{ id, program }],
     getOptimizableComponents: () => [
@@ -61,7 +61,7 @@ const createInstructionNode = (id: string, description: string) => {
     },
     getSignature: () => ({
       getDescription: () => description,
-      toString: () => `\"${description}\" input:string -> output:string`,
+      toString: () => `"${description}" input:string -> output:string`,
     }),
     getOptimizableComponents: () => [
       {
@@ -176,6 +176,55 @@ describe('AxGEPA Optimizer', () => {
           componentMap: { 'root::instruction': 'task' },
         }
       );
+    });
+
+    it('skips reflection when the explicit structured scalar is already perfect', async () => {
+      let reflections = 0;
+      const optimizer = new AxGEPA({
+        studentAI: {
+          chat: async () => {
+            reflections += 1;
+            throw new Error('teacher should not run');
+          },
+        } as any,
+        teacherAI: {
+          chat: async () => {
+            reflections += 1;
+            throw new Error('teacher should not run');
+          },
+        } as any,
+        numTrials: 1,
+      });
+      const program = createSingleRootProgram('task', async () => ({
+        answer: 'a',
+      }));
+
+      const result = await optimizer.compile(
+        program as any,
+        [{ question: 'q1' }, { question: 'q2' }],
+        async () => ({
+          score: 0.4,
+          feedback: 'wrong format',
+          scores: { accuracy: 1, brevity: 1 },
+        }),
+        {
+          maxMetricCalls: 8,
+          skipPerfectScore: true,
+          perfectScore: 0.4,
+          gepaAdapter: {
+            evaluate: async (batch: readonly unknown[]) => ({
+              outputs: batch.map(() => ({ answer: 'a' })),
+              scores: batch.map(() => 0.4),
+              scoreVectors: batch.map(() => ({ accuracy: 1, brevity: 1 })),
+              feedback: batch.map(() => 'wrong format'),
+            }),
+            make_reflective_dataset: () => ({}),
+          },
+        }
+      );
+
+      expect(result.bestScore).toBe(1);
+      expect(reflections).toBe(0);
     });
 
     it('carries evaluated metric feedback into component reflection tuples', async () => {

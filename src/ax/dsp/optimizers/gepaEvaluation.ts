@@ -64,19 +64,21 @@ export const normalizeGEPAMetricFeedback = (
   feedback: unknown
 ): string | undefined => {
   if (typeof feedback !== 'string') return undefined;
-  const sanitized = [...feedback.replace(/\r\n?/g, '\n')]
-    .filter((character) => {
-      const codePoint = character.codePointAt(0) ?? 0;
-      return (
-        character === '\n' ||
-        character === '\t' ||
-        (codePoint >= 32 && codePoint !== 127)
-      );
-    })
-    .join('')
-    .trim();
-  if (!sanitized) return undefined;
-  return sanitized.slice(0, MAX_METRIC_FEEDBACK_CHARS);
+  const characters: string[] = [];
+  const source = feedback.replace(/\r\n?/g, '\n');
+  for (const character of source) {
+    if (characters.length >= MAX_METRIC_FEEDBACK_CHARS) break;
+    const codePoint = character.codePointAt(0) ?? 0;
+    if (
+      character === '\n' ||
+      character === '\t' ||
+      (codePoint >= 32 && codePoint !== 127)
+    ) {
+      characters.push(character);
+    }
+  }
+  const sanitized = characters.join('').trim();
+  return sanitized || undefined;
 };
 
 type AxNormalizedGEPAMetricResult = {
@@ -99,8 +101,10 @@ export const normalizeGEPAMetricResult = async (
   if (!raw || typeof raw !== 'object') return { scores: {} };
 
   const structured =
-    typeof (raw as any).feedback === 'string' ||
-    ((raw as any).scores !== null && typeof (raw as any).scores === 'object');
+    typeof (raw as any).score === 'number' &&
+    (typeof (raw as any).feedback === 'string' ||
+      ((raw as any).scores !== null &&
+        typeof (raw as any).scores === 'object'));
   if (structured) {
     const scalar =
       typeof (raw as any).score === 'number' &&
@@ -210,7 +214,10 @@ export async function evaluateGEPABatch<IN, OUT extends AxGenOut>(args: {
             : zeroScoreVector(args.state.observedScoreKeys));
         for (const key of Object.keys(scores))
           args.state.observedScoreKeys.add(key);
-        const scalar = args.scalarize(scores);
+        const explicitScalar = evalBatch.scores[index];
+        const scalar = Number.isFinite(explicitScalar)
+          ? Number(explicitScalar)
+          : args.scalarize(scores);
         rows.push({
           input: ex as AxExample,
           prediction,

@@ -76,7 +76,11 @@ export async function runAgentEvalBatch<
           example: task as unknown as Parameters<AxMetricFn>[0]['example'],
         });
         const score =
-          typeof metricResult === 'number' ? metricResult : metricResult.score;
+          typeof metricResult === 'number'
+            ? metricResult
+            : typeof metricResult?.score === 'number'
+              ? metricResult.score
+              : 0;
         scores.push(Number.isFinite(score) ? score : 0);
         lastPrediction = prediction;
       } catch (err) {

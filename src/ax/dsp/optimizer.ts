@@ -37,13 +37,31 @@ import type { AxGenOut, AxProgramDemos } from './types.js';
 const metricObjectiveScores = (
   result: Record<string, number> | AxMetricResult
 ): Record<string, number> => {
-  if (result.scores !== null && typeof result.scores === 'object') {
-    return (result.scores as Record<string, number> | undefined) ?? {};
+  const structured =
+    typeof result.score === 'number' &&
+    (typeof result.feedback === 'string' ||
+      (result.scores !== null && typeof result.scores === 'object'));
+  if (structured) {
+    const scores: Record<string, number> = {};
+    if (result.scores && typeof result.scores === 'object') {
+      for (const [key, value] of Object.entries(result.scores)) {
+        if (typeof value === 'number' && Number.isFinite(value)) {
+          scores[key] = value;
+        }
+      }
+    }
+    if (Object.keys(scores).length === 0 && Number.isFinite(result.score)) {
+      scores.score = result.score;
+    }
+    return scores;
   }
-  if (typeof result.feedback === 'string') {
-    return Number.isFinite(result.score) ? { score: result.score } : {};
+  const scores: Record<string, number> = {};
+  for (const [key, value] of Object.entries(result)) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      scores[key] = value;
+    }
   }
-  return result as Record<string, number>;
+  return scores;
 };
 
 // Common types moved to ./common_types.ts
