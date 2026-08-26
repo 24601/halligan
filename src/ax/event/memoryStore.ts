@@ -201,13 +201,12 @@ export class AxInMemoryEventStore implements AxEventStore {
     request: Readonly<AxEventVerifierTransitionRequest>,
     signal?: AbortSignal
   ): Promise<AxEventPublishReceipt> {
-    if (signal?.aborted) {
-      throw signal.reason ?? new Error('Verifier transition cancelled');
-    }
+    this.assertVerifierTransitionNotCancelled(signal);
     const requestCommitment = await axEventCanonicalDigest(request);
     const childProjection = this.verifierChildProjection(request);
     const expectedChildCommitment =
       await axEventCanonicalDigest(childProjection);
+    this.assertVerifierTransitionNotCancelled(signal);
     const committed = this.verifierTransitions.get(request.operationId);
     if (committed) {
       this.assertVerifierTransition(
@@ -271,6 +270,7 @@ export class AxInMemoryEventStore implements AxEventStore {
       }
     }
 
+    this.assertVerifierTransitionNotCancelled(signal);
     const delivery: AxEventDelivery = {
       id: request.childDeliveryId,
       sequence: this.sequence + 1,
@@ -700,6 +700,12 @@ export class AxInMemoryEventStore implements AxEventStore {
       throw new Error(
         `Event continuation id is already owned: ${requested.id}`
       );
+    }
+  }
+
+  private assertVerifierTransitionNotCancelled(signal?: AbortSignal): void {
+    if (signal?.aborted) {
+      throw signal.reason ?? new Error('Verifier transition cancelled');
     }
   }
 

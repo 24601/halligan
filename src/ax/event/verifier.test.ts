@@ -13,6 +13,7 @@ import type {
   AxEventRun,
   AxEventVerifierPolicy,
 } from './types.js';
+import * as eventUtil from './util.js';
 
 const ai = {} as any;
 
@@ -696,6 +697,91 @@ describe('AxEventRuntime verifier continuation policy', () => {
     await runtime.close({ drain: false });
   });
 
+  it('does not install a verifier child when cancel is accepted during in-memory digest awaits', async () => {
+    const backing = new AxInMemoryEventStore();
+    let releaseDigest!: () => void;
+    const digestGate = new Promise<void>((resolve) => {
+      releaseDigest = resolve;
+    });
+    let digestStarted!: () => void;
+    const digestStart = new Promise<void>((resolve) => {
+      digestStarted = resolve;
+    });
+    let holdDigest = false;
+    const digest = eventUtil.axEventCanonicalDigest;
+    const digestSpy = vi
+      .spyOn(eventUtil, 'axEventCanonicalDigest')
+      .mockImplementation(async (value) => {
+        if (holdDigest) {
+          holdDigest = false;
+          digestStarted();
+          await digestGate;
+        }
+        return digest(value);
+      });
+    let enteredBacking = false;
+    let runId = '';
+    let targetCalls = 0;
+    const store = new Proxy(backing, {
+      get(target, property, receiver) {
+        if (property === 'transitionVerifier') {
+          return (
+            request: Parameters<typeof target.transitionVerifier>[0],
+            signal?: AbortSignal
+          ) => {
+            holdDigest = true;
+            const pending = target.transitionVerifier(request, signal);
+            enteredBacking = true;
+            return pending;
+          };
+        }
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    try {
+      const { runtime } = setup(
+        {
+          id: 'cancel-during-digest',
+          verify: (_output, context) => {
+            runId = context.run.id;
+            return {
+              status: 'fail',
+              failure: { code: 'retry' },
+            };
+          },
+        },
+        {
+          store,
+          forward: () => {
+            targetCalls++;
+            return { answer: 'fix the tests' };
+          },
+        }
+      );
+      await runtime.start();
+      const receipt = await runtime.publish(ingress('cancel-during-digest'));
+      await digestStart;
+      expect(enteredBacking).toBe(true);
+      expect(runtime.cancelRun(runId, 'host abort')).toBe(true);
+      releaseDigest();
+      await runtime.waitForIdle();
+      expect((await runtime.getRun(runId))?.status).toBe('cancelled');
+      expect((await backing.getDelivery(receipt.deliveryIds[0]!))?.status).toBe(
+        'cancelled'
+      );
+      expect(
+        await backing.getDelivery(
+          `verifier-delivery:${receipt.deliveryIds[0]!}:1`
+        )
+      ).toBeUndefined();
+      expect(targetCalls).toBe(1);
+      await runtime.close({ drain: false });
+    } finally {
+      digestSpy.mockRestore();
+    }
+  });
+
   it('restores a queued verifier continuation and policy state after restart', async () => {
     const store = new AxInMemoryEventStore();
     const stateStore = new AxInMemoryProgramStateStore();
@@ -711,8 +797,11 @@ describe('AxEventRuntime verifier continuation policy', () => {
       { store, stateStore }
     ).runtime;
     await first.start();
-    await first.publish(ingress());
+    const receipt = await first.publish(ingress());
     while (verify.mock.calls.length < 1)
+      await new Promise((r) => setTimeout(r, 1));
+    const childId = `verifier-delivery:${receipt.deliveryIds[0]!}:1`;
+    while (!(await store.getDelivery(childId)))
       await new Promise((r) => setTimeout(r, 1));
     await first.close({ drain: false });
 

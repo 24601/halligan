@@ -231,7 +231,9 @@ Limits are fail-closed. `maxRuns` permits that many verifier calls; token, cost,
 and wall-time limits stop before another verifier call once host-reported usage
 reaches the bound. Exhaustion, unchanged state, verifier error, and timeout end
 with run/delivery status `verification_failed` plus the precise typed
-verification status and reason. Abort remains `cancelled`. If a caller-supplied
+verification status and reason. Abort remains `cancelled`. An accepted
+`cancelRun` during an in-flight V2 transition rejects the store handoff after
+commitment awaits and does not install or run the child. If a caller-supplied
 fingerprint equals the fingerprint of the previous failure, the target's new
 output is persisted but the repeated verifier call and further loop are
 suppressed. Final sinks run only after a pass.

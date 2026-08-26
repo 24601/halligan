@@ -82,6 +82,8 @@ await source.publish({ event, identity, trust: 'authenticated' });
   exactly once.
 - Set explicit verifier run/token/wall-time/cost limits. Exhaustion, verifier
   error/timeout, and unchanged fingerprints fail closed; abort stays cancelled.
+  Accepted `cancelRun` during an in-flight V2 transition rejects the store
+  handoff after commitment awaits and does not install or run the child.
 - Host `usage`, `fingerprint`, and `verify` callbacks share timeout and abort
   handling. Outputless clarification waits bypass verification.
 - Compute verifier fingerprints from all relevant deterministic host state.
