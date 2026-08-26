@@ -203,6 +203,11 @@ export class AxSQLiteEventStore
              OR
              (d.status IN ('claimed','running') AND d.lease_expires_at <= ?)
            )
+           AND NOT EXISTS (
+             SELECT 1 FROM event_payload_stages payload
+             WHERE payload.delivery_id=d.id
+               AND payload.state='commit_pending'
+           )
            AND (
              d.ordering_mode = 'relaxed'
              OR NOT EXISTS (
@@ -341,6 +346,14 @@ export class AxSQLiteEventStore
       }
     }
     if (hasPayload && payloadBytes > this.maxInlinePayloadBytes) {
+      if (run.outputRef && this.hasCommittedPayload(run.id, run.outputRef)) {
+        try {
+          this.saveRunMetadataWithCommittedPayload(run);
+        } catch (error) {
+          throw this.outputPersistenceError('recovery', run.id, error);
+        }
+        return;
+      }
       await this.saveStagedRun(run, payload, payloadBytes);
       return;
     }
@@ -379,6 +392,13 @@ export class AxSQLiteEventStore
     if (!row) return;
     const run = JSON.parse(row.run_json) as AxEventRun;
     if (run.outputRef && this.options.payloadStore) {
+      const pending = this.db
+        .prepare(
+          `SELECT 1 FROM event_payload_stages
+           WHERE run_id=? AND reference=? AND state='commit_pending'`
+        )
+        .get(run.id, run.outputRef);
+      if (pending) return run;
       const payload = (await this.options.payloadStore.get(run.outputRef)) as {
         output?: unknown;
         chunks?: AxEventRun['chunks'];
@@ -829,8 +849,12 @@ export class AxSQLiteEventStore
       }
       reference = staged.reference;
     } catch (error) {
-      this.markPayloadStageAbortPending(stageId);
-      await this.abortPayloadStage(stageId, payloadStore);
+      try {
+        this.markPayloadStageAbortPending(stageId);
+        await this.abortPayloadStage(stageId, payloadStore);
+      } catch {
+        // The typed error below remains the stable runtime classification.
+      }
       throw this.outputPersistenceError('stage', run.id, error);
     }
 
@@ -876,9 +900,13 @@ export class AxSQLiteEventStore
         })
         .immediate();
     } catch (error) {
-      this.markPayloadStageAbortPending(stageId);
-      await this.abortPayloadStage(stageId, payloadStore);
-      throw error;
+      try {
+        this.markPayloadStageAbortPending(stageId);
+        await this.abortPayloadStage(stageId, payloadStore);
+      } catch {
+        // The typed error below remains the stable runtime classification.
+      }
+      throw this.outputPersistenceError('stage', run.id, error);
     }
 
     try {
@@ -888,67 +916,94 @@ export class AxSQLiteEventStore
         (signal) => payloadStore.commit(stageId, signal)
       );
     } catch (error) {
-      const failure = this.outputPersistenceError('commit', run.id, error);
-      this.db
-        .transaction(() => {
-          const failed: AxEventRun = {
-            ...structuredClone(run),
-            output: undefined,
-            chunks: undefined,
-            outputRef: undefined,
-            status: 'output_persistence_failed',
-            finishedAt: this.clock.now(),
-            error: failure.message.slice(0, 1_024),
-          };
-          this.db
-            .prepare(
-              `UPDATE event_runs SET run_json=?, updated_at=?, finished_at=?
-               WHERE id=?`
-            )
-            .run(
-              JSON.stringify(failed),
-              this.clock.now(),
-              failed.finishedAt,
-              run.id
-            );
-          this.db
-            .prepare(
-              `UPDATE event_payload_stages
-               SET state='abort_pending', updated_at=? WHERE run_id=?`
-            )
-            .run(this.clock.now(), run.id);
-        })
-        .immediate();
-      await this.abortSupersededPayloadStages(run.id);
-      throw failure;
+      // Provider commit may have completed even when its response is lost.
+      // Keep commit_pending and the succeeded run for fenced restart recovery.
+      throw this.outputPersistenceError('commit', run.id, error);
     }
 
+    try {
+      this.db
+        .transaction(() => {
+          this.assertActiveClaim(
+            run.deliveryId,
+            run.claimedBy!,
+            run.fencingToken!
+          );
+          this.db
+            .prepare(
+              `UPDATE event_payload_stages SET state='abort_pending', updated_at=?
+               WHERE run_id=? AND stage_id!=? AND state='committed'`
+            )
+            .run(this.clock.now(), run.id, stageId);
+          const updated = this.db
+            .prepare(
+              `UPDATE event_payload_stages SET state='committed', updated_at=?
+               WHERE stage_id=? AND state='commit_pending'`
+            )
+            .run(this.clock.now(), stageId);
+          const current = this.db
+            .prepare('SELECT state FROM event_payload_stages WHERE stage_id=?')
+            .get(stageId) as { state: PayloadStageRow['state'] } | undefined;
+          if (updated.changes !== 1 && current?.state !== 'committed') {
+            throw new Error(
+              `payload stage commit acknowledgement was lost for run ${run.id}`
+            );
+          }
+        })
+        .immediate();
+    } catch (error) {
+      throw this.outputPersistenceError('commit', run.id, error);
+    }
+    try {
+      await this.abortSupersededPayloadStages(run.id, stageId);
+    } catch (error) {
+      throw this.outputPersistenceError('commit', run.id, error);
+    }
+  }
+
+  private hasCommittedPayload(runId: string, reference: string): boolean {
+    return Boolean(
+      this.db
+        .prepare(
+          `SELECT 1 FROM event_payload_stages
+           WHERE run_id=? AND reference=? AND state='committed'`
+        )
+        .get(runId, reference)
+    );
+  }
+
+  private saveRunMetadataWithCommittedPayload(run: Readonly<AxEventRun>): void {
+    const stored: AxEventRun = {
+      ...structuredClone(run),
+      output: undefined,
+      chunks: undefined,
+    };
     this.db
       .transaction(() => {
+        this.assertActiveClaim(
+          run.deliveryId,
+          run.claimedBy!,
+          run.fencingToken!
+        );
+        if (
+          !run.outputRef ||
+          !this.hasCommittedPayload(run.id, run.outputRef)
+        ) {
+          throw new Error(`Committed payload ownership was lost for ${run.id}`);
+        }
         this.db
           .prepare(
-            `UPDATE event_payload_stages SET state='abort_pending', updated_at=?
-             WHERE run_id=? AND stage_id!=? AND state='committed'`
+            `UPDATE event_runs SET run_json=?, updated_at=?, finished_at=?
+             WHERE id=?`
           )
-          .run(this.clock.now(), run.id, stageId);
-        const updated = this.db
-          .prepare(
-            `UPDATE event_payload_stages SET state='committed', updated_at=?
-             WHERE stage_id=? AND state='commit_pending'`
-          )
-          .run(this.clock.now(), stageId);
-        const current = this.db
-          .prepare('SELECT state FROM event_payload_stages WHERE stage_id=?')
-          .get(stageId) as { state: PayloadStageRow['state'] } | undefined;
-        if (updated.changes !== 1 && current?.state !== 'committed') {
-          throw new AxEventOutputPersistenceError(
-            `payload stage commit acknowledgement was lost for run ${run.id}`,
-            'commit'
+          .run(
+            JSON.stringify(stored),
+            this.clock.now(),
+            run.finishedAt ?? null,
+            run.id
           );
-        }
       })
       .immediate();
-    await this.abortSupersededPayloadStages(run.id, stageId);
   }
 
   private async reconcilePayloadStages(): Promise<void> {
@@ -985,24 +1040,52 @@ export class AxSQLiteEventStore
           (signal) => payloadStore.commit(row.stage_id, signal)
         );
       } catch (error) {
-        throw this.outputPersistenceError('recovery', row.run_id, error);
+        // Leave commit_pending quarantined. Claim excludes this delivery, so a
+        // provider outage cannot poison unrelated work or replay the target.
+        void this.outputPersistenceError('recovery', row.run_id, error);
+        continue;
       }
-      this.db
-        .transaction(() => {
-          this.db
-            .prepare(
-              `UPDATE event_payload_stages SET state='abort_pending', updated_at=?
-               WHERE run_id=? AND stage_id!=? AND state='committed'`
-            )
-            .run(this.clock.now(), row.run_id, row.stage_id);
-          this.db
-            .prepare(
-              `UPDATE event_payload_stages SET state='committed', updated_at=?
-               WHERE stage_id=? AND state='commit_pending'`
-            )
-            .run(this.clock.now(), row.stage_id);
-        })
-        .immediate();
+      try {
+        this.db
+          .transaction(() => {
+            const runRow = this.db
+              .prepare('SELECT run_json FROM event_runs WHERE id=?')
+              .get(row.run_id) as { run_json: string } | undefined;
+            if (!runRow) {
+              throw new Error(`Missing staged event run ${row.run_id}`);
+            }
+            const run = JSON.parse(runRow.run_json) as AxEventRun;
+            if (run.status !== 'succeeded' || run.outputRef !== row.reference) {
+              throw new Error(`Invalid staged event run ${row.run_id}`);
+            }
+            this.db
+              .prepare(
+                `UPDATE event_payload_stages SET state='abort_pending', updated_at=?
+                 WHERE run_id=? AND stage_id!=? AND state='committed'`
+              )
+              .run(this.clock.now(), row.run_id, row.stage_id);
+            const updated = this.db
+              .prepare(
+                `UPDATE event_payload_stages SET state='committed', updated_at=?
+                 WHERE stage_id=? AND state='commit_pending'`
+              )
+              .run(this.clock.now(), row.stage_id);
+            if (updated.changes !== 1) return;
+            const deliveryUpdated = this.db
+              .prepare(
+                `UPDATE event_deliveries
+                 SET run_id=?, invocation_started=1
+                 WHERE id=? AND status IN ('claimed','running')`
+              )
+              .run(row.run_id, row.delivery_id);
+            if (deliveryUpdated.changes !== 1) {
+              throw new Error(
+                `Payload recovery could not bind run ${row.run_id} to delivery ${row.delivery_id}`
+              );
+            }
+          })
+          .immediate();
+      } catch {}
     }
     await this.abortSupersededPayloadStages();
   }

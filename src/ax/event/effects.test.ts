@@ -735,4 +735,45 @@ describe('AxEventRuntime effects', () => {
       'Fencing token exhausted'
     );
   });
+
+  it('reclaims an expired in-memory lease with a fresh fencing token', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const store = new AxInMemoryEventStore({ clock });
+    const receipt = await store.enqueue({
+      ingress: ingress('memory-expired-claim'),
+      deliveries: [
+        {
+          routeId: 'effect-route',
+          action: 'wake',
+          targetId: 'effect-target',
+          instanceKey: 'memory-expired-claim',
+          sizeBytes: 1,
+          retrySafety: 'effect-aware',
+          ordering: 'strict',
+        },
+      ],
+      acceptedAt: clock.now(),
+      publishTimeoutMs: 100,
+    });
+    const first = (await store.claim('worker-a', clock.now(), 100))!;
+    await store.saveDelivery({
+      ...first,
+      status: 'running',
+      invocationStarted: true,
+    });
+    clock.advanceBy(101);
+
+    const takeover = await store.claim('worker-b', clock.now(), 100);
+    expect(takeover).toEqual(
+      expect.objectContaining({
+        id: receipt.deliveryIds[0],
+        claimedBy: 'worker-b',
+        fencingToken: 2,
+        recoveredFromExpiredLease: true,
+      })
+    );
+    await expect(
+      store.saveDelivery({ ...first, status: 'succeeded' })
+    ).rejects.toThrow('Stale or expired event claim');
+  });
 });

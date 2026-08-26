@@ -196,8 +196,13 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
   ): Promise<AxEventDelivery | undefined> {
     for (const id of this.deliveryOrder) {
       const delivery = this.deliveries.get(id);
-      if (!delivery || delivery.status !== 'queued') continue;
-      if (delivery.availableAt > now) continue;
+      if (!delivery) continue;
+      const recovered =
+        (delivery.status === 'claimed' || delivery.status === 'running') &&
+        delivery.leaseExpiresAt !== undefined &&
+        delivery.leaseExpiresAt <= now;
+      if (delivery.status !== 'queued' && !recovered) continue;
+      if (delivery.status === 'queued' && delivery.availableAt > now) continue;
       if (this.hasEarlierInstanceWork(delivery)) continue;
       const fencingToken = delivery.fencingToken ?? 0;
       this.assertFencingTokenCanAdvance(delivery.id, fencingToken);
@@ -207,6 +212,7 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
         claimedBy: workerId,
         fencingToken: fencingToken + 1,
         leaseExpiresAt: now + leaseMs,
+        ...(recovered ? { recoveredFromExpiredLease: true } : {}),
       };
       this.deliveries.set(id, claimed);
       return structuredClone(claimed);

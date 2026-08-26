@@ -539,6 +539,96 @@ describe('AxEventRuntime', () => {
     expect(lateSideEffects).toBe(1);
   });
 
+  it('shares bounded close, requests stream return, and suppresses late chunks', async () => {
+    let releaseNext!: (value: {
+      done: false;
+      value: { version: number; index: number; delta: { handled: boolean } };
+    }) => void;
+    let nextStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      nextStarted = resolve;
+    });
+    let returnCalls = 0;
+    let lateChunkSinks = 0;
+    const signature = new AxSignature('eventId?:string -> handled:boolean');
+    const streamingProgram = {
+      getId: () => 'non-cooperative-stream',
+      getSignature: () => signature,
+      forward: async () => ({ handled: true }),
+      streamingForward: () => ({
+        [Symbol.asyncIterator]() {
+          return this;
+        },
+        next: () => {
+          nextStarted();
+          return new Promise<{
+            done: false;
+            value: {
+              version: number;
+              index: number;
+              delta: { handled: boolean };
+            };
+          }>((resolve) => {
+            releaseNext = resolve;
+          });
+        },
+        return: () => {
+          returnCalls++;
+          return new Promise<never>(() => {});
+        },
+      }),
+    } as unknown as AxProgrammable<any, any>;
+    const runtime = new AxEventRuntime({
+      workerConcurrency: 1,
+      routes: [
+        eventRoute({
+          id: 'stream-close',
+          match: { types: ['stream.close'] },
+          action: 'wake',
+          target: eventTarget({
+            id: 'stream-close-target',
+            ai,
+            program: streamingProgram,
+            execution: 'streaming',
+            mapInput: () => ({}),
+            retrySafety: 'idempotent',
+            sinks: [
+              {
+                id: 'late-chunk',
+                write: () => {},
+                writeChunk: () => {
+                  lateChunkSinks++;
+                },
+              },
+            ],
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    await runtime.publish(ingress('stream-close-1', 'stream.close'));
+    await started;
+
+    let repeatedCloseSettled = false;
+    const firstClose = runtime.close({ drain: false, timeoutMs: 20 });
+    const repeatedClose = runtime
+      .close({ drain: false, timeoutMs: 20 })
+      .then(() => {
+        repeatedCloseSettled = true;
+      });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(repeatedCloseSettled).toBe(false);
+    await Promise.all([firstClose, repeatedClose]);
+    expect(returnCalls).toBeGreaterThanOrEqual(1);
+
+    releaseNext({
+      done: false,
+      value: { version: 1, index: 0, delta: { handled: true } },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(lateChunkSinks).toBe(0);
+  });
+
   it('refuses durable sources on the volatile store by default', async () => {
     const source = new AxPushEventSource('queue', true);
     const runtime = new AxEventRuntime({ routes: [], sources: [source] });

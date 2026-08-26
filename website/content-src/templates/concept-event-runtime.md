@@ -136,7 +136,10 @@ stale stage releases only that stage's ownership, not a possibly shared content
 reference. Legacy `put/delete` payload stores therefore fail closed before
 upload. Count, byte, payload-size, TTL, and operation-time limits are required;
 this is recoverable coordination, not an atomic commit across SQLite and the
-payload provider.
+payload provider. Recovery atomically binds committed payload ownership to the
+existing succeeded run; lease takeover then performs sink-only resume without
+invoking the target. Failed provider reconciliation quarantines that delivery
+without blocking unrelated claims.
 
 The runtime persists output before dispatching sinks. Sink retries use the
 stable `(runId, sinkId)` key and redrive only the failed sink; they never repeat
@@ -175,9 +178,11 @@ exactly-once side effects. Generated-language effect-ledger parity is tracked
 separately and is not implied by the existing single-worker event capability.
 
 `cancelRun(runId)` aborts an active program and its nested calls. `close()`
-stops sources, drains by default, and then aborts remaining workers. Its timeout
-only bounds when shutdown returns: a source that ignores abort may keep running
-and perform later side effects because Ax cannot terminate host JavaScript.
+stops sources, drains by default, and then aborts remaining workers. One timeout
+bounds the overall returned shutdown promise, and concurrent calls join it. Ax
+requests `return()` on active stream iterators and suppresses post-abort chunks,
+but timed-out host work may continue and perform later side effects because Ax
+cannot terminate JavaScript.
 Caller-owned protocol clients must still be closed by the caller. For
 deterministic tests, `AxManualEventClock` advances retries,
 debounce windows, and continuation expiry without waiting for wall-clock time.

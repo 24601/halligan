@@ -98,10 +98,11 @@ await source.publish({ event, identity, trust: 'authenticated' });
 - Use `debounceMs` and `coalesce: 'latest'` only when replacing intermediate
   events is part of the route's declared policy.
 - Observe source failures with `onSourceError`.
-- `close({ timeoutMs })` bounds both source-handle shutdown and drain waiting.
-  This is return-bounded only. Host close code may continue and perform later
-  side effects if it ignores abort; use cooperative abort or a host revocation
-  check before writes.
+- `close({ timeoutMs })` uses one overall deadline for source close, drain,
+  workers, and store settlement; concurrent calls join one shutdown. Ax requests
+  `return()` on active streams and suppresses post-abort chunks. This is
+  return-bounded only: non-cooperative host work may continue and perform later
+  side effects; use cooperative abort or a host revocation check before writes.
 - The in-memory store is volatile and single-process.
 - For cooperating Node processes on one local disk, use
   `AxSQLiteEventStore` from `@ax-llm/ax-tools/event/sqlite` with explicit
@@ -157,7 +158,11 @@ delivery/run writes, and revalidates after awaited payload staging. Oversized
 outputs require `AxEventStagedPayloadStore` plus explicit count, byte, payload,
 TTL, and timeout limits. Host-assigned stage IDs make abort ownership-specific
 even when content references are shared; restart reconciles `commit_pending`
-before claims and run reads. Legacy `put/delete` stores are never uploaded to
+before claims and run reads. Recovery atomically binds the persisted succeeded
+run to the delivery, then takeover resumes final sinks only; target invocation
+is never repeated. Live commit acknowledgement requires the current unexpired
+owner/token. Failed reconciliation quarantines that delivery without stopping
+unrelated claims. Legacy `put/delete` stores are never uploaded to
 because they cannot safely reclaim a stale shared reference. Staging failure is
 typed `AxEventOutputPersistenceError` and never repeats the completed target
 call; runtime classification uses its `code`/`phase` discriminants across

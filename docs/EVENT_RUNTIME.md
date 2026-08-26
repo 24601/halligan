@@ -346,11 +346,15 @@ memory and SQLite stores do.
 
 `cancelRun(runId)` aborts the active program and its nested calls. `close()`
 stops sources, drains by default, then aborts remaining workers. The close
-`timeoutMs` also bounds source-handle shutdown when host code ignores its abort
-signal. This bounds when `close()` returns only: Ax ignores a late close result
-but cannot terminate that JavaScript, revoke capabilities it already captured,
-or prevent its later side effects. Source implementations must cooperate with
-abort or use a host-owned revocation/epoch check before external writes.
+`timeoutMs` is one overall return deadline for source close, optional drain,
+worker settlement, and store close. Concurrent/repeated calls join the same
+shutdown. Ax retains active stream iterators, requests `return()` after abort,
+and suppresses chunks that arrive after the abort signal. This bounds when
+`close()` returns only: Ax cannot terminate non-cooperative JavaScript, revoke
+capabilities it already captured, or prevent its later host side effects.
+Sources, iterators, tools, and stores must cooperate with abort or use a
+host-owned revocation/epoch check before external writes. Timed-out work and
+eventual best-effort store close may continue after the returned promise settles.
 Caller-owned protocol clients remain caller-owned. Background source failures
 are supervised through `onSourceError`; they are never thrown from an
 unobserved callback.
@@ -390,12 +394,19 @@ that offload payloads use `AxEventStagedPayloadStore`, not legacy
 `AxEventPayloadStore.put`. The host reserves a unique stage ID before upload,
 revalidates ownership after staging, journals `commit_pending` with the run,
 then idempotently commits that stage. Restart reconciles the journal before a
-claim or run read. `abort(stageId)` releases only that writer's ownership, so a
-stale writer cannot delete a winner even when both stages resolve to the same
-content-addressed reference. Provider implementations must enforce idempotent
-stage/commit/abort, automatic expiry, and the rule that abort stays safe after
-an uncertain commit; an aborted stage must never be resurrected by late host
-code. Fencing tokens fail closed before
+claim or run read. A successful recovery atomically commits the stage and binds
+the existing succeeded run to its delivery; lease takeover then dispatches only
+final sinks from that persisted output and never invokes the target again. A
+live provider-commit acknowledgement must still hold the exact active,
+unexpired owner/token. Stale acknowledgements and every failure after staging
+begins use structural output-persistence phases. Failed provider reconciliation
+leaves `commit_pending` quarantined from claim while unrelated deliveries keep
+running; expiry fails closed. `abort(stageId)` releases only that writer's
+ownership, so a stale writer cannot delete a winner even when both stages
+resolve to the same content-addressed reference. Provider implementations must
+enforce idempotent stage/commit/abort, automatic expiry, and the rule that abort
+stays safe after an uncertain commit; an aborted stage must never be
+resurrected by late host code. Fencing tokens fail closed before
 leaving JavaScript's safe-integer range; the delivery identity must be rotated
 instead of wrapping or reusing a token. Its claim is limited to cooperating
 Node processes sharing one local SQLite file; do not deploy it on a network
@@ -437,7 +448,9 @@ model call is never repeated. SQLite bounds outstanding uncommitted
 objects to the configured count, bytes, and TTL. Cross-system SQLite/payload
 commit is not atomic: between the run-row transaction and provider commit the
 journal is `commit_pending`; recovery retries it, and expiry fails closed as
-`output_persistence_failed` rather than replaying the target.
+`output_persistence_failed` rather than replaying the target. Until provider
+commit is acknowledged, the delivery is excluded from claim; after recovery it
+resumes from the persisted succeeded run in sink-only mode.
 
 ### Fault-injection evaluation
 

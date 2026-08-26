@@ -552,7 +552,10 @@ describe('AxSQLiteEventStore', () => {
     await peer.saveRun(winner);
     releasePayload();
 
-    await expect(saving).rejects.toThrow('Stale or expired event claim');
+    await expect(saving).rejects.toMatchObject({
+      code: 'output_persistence_failed',
+      phase: 'stage',
+    });
     expect(await first.getRun(run.id)).toBeUndefined();
     await expect(peer.getRun(winner.id)).resolves.toEqual(
       expect.objectContaining({ output: { winner: true } })
@@ -606,15 +609,148 @@ describe('AxSQLiteEventStore', () => {
       fencingToken: claimed!.fencingToken,
     };
 
-    await expect(store.saveRun(run)).rejects.toThrow(
-      'Stale or expired event claim'
-    );
+    await expect(store.saveRun(run)).rejects.toMatchObject({
+      code: 'output_persistence_failed',
+      phase: 'stage',
+    });
     await expect(
       store.saveDelivery({ ...claimed!, status: 'succeeded' })
     ).rejects.toThrow('Stale or expired event claim');
     expect(await store.getRun(run.id)).toBeUndefined();
     expect(aborted).toHaveLength(1);
     await store.close();
+  });
+
+  it('rejects a stale live commit acknowledgement after peer takeover', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const filename = join(directory, 'payload-commit-takeover.sqlite');
+    const clock = new AxManualEventClock(1_000);
+    let commitCalls = 0;
+    let takeover: Awaited<ReturnType<AxSQLiteEventStore['claim']>>;
+    const peerRef: { current?: AxSQLiteEventStore } = {};
+    const payloadStore: AxEventStagedPayloadStore = {
+      stage: async () => ({ reference: 'payload://commit-takeover' }),
+      commit: async () => {
+        commitCalls++;
+        if (commitCalls === 1) {
+          clock.advanceBy(101);
+          takeover = await peerRef.current!.claim('worker-b', clock.now(), 100);
+        }
+      },
+      abort: async () => {},
+      put: async () => 'payload://legacy-unused',
+      get: async () => ({ output: { persisted: true } }),
+      delete: async () => {},
+    };
+    const first = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+      maxInlinePayloadBytes: 1,
+      payloadStore,
+      payloadStaging,
+    });
+    const peer = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+      maxInlinePayloadBytes: 1,
+      payloadStore,
+      payloadStaging,
+    });
+    peerRef.current = peer;
+    await first.enqueue(storeRequest('payload-commit-takeover', clock.now()));
+    const claimed = (await first.claim('worker-a', clock.now(), 100))!;
+    await expect(
+      first.saveRun({
+        id: 'payload-commit-takeover-run',
+        deliveryId: claimed.id,
+        routeId: claimed.routeId,
+        instanceKey: claimed.instanceKey,
+        claimedBy: claimed.claimedBy,
+        status: 'succeeded',
+        attempt: 1,
+        startedAt: clock.now(),
+        finishedAt: clock.now(),
+        output: { persisted: true },
+        fencingToken: claimed.fencingToken,
+      })
+    ).rejects.toMatchObject({
+      code: 'output_persistence_failed',
+      phase: 'commit',
+    });
+    expect(takeover).toEqual(
+      expect.objectContaining({
+        id: claimed.id,
+        claimedBy: 'worker-b',
+        fencingToken: 2,
+        recoveredFromExpiredLease: true,
+        runId: 'payload-commit-takeover-run',
+      })
+    );
+    expect(commitCalls).toBe(2);
+    await first.close();
+    await peer.close();
+  });
+
+  it('types a database failure after provider commit and retains the journal', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const filename = join(directory, 'payload-post-commit-db-failure.sqlite');
+    const clock = new AxManualEventClock(1_000);
+    let providerCommitted = false;
+    const storeRef: { current?: AxSQLiteEventStore } = {};
+    const store = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+      maxInlinePayloadBytes: 1,
+      payloadStaging,
+      payloadStore: {
+        stage: async () => ({ reference: 'payload://post-commit' }),
+        commit: async () => {
+          providerCommitted = true;
+          (storeRef.current as unknown as { db: { close(): void } }).db.close();
+        },
+        abort: async () => {},
+        put: async () => 'payload://legacy-unused',
+        get: async () => ({ output: { persisted: true } }),
+        delete: async () => {},
+      },
+    });
+    storeRef.current = store;
+    await store.enqueue(storeRequest('payload-post-commit', clock.now()));
+    const claimed = (await store.claim('worker-a', clock.now(), 100))!;
+    await expect(
+      store.saveRun({
+        id: 'payload-post-commit-run',
+        deliveryId: claimed.id,
+        routeId: claimed.routeId,
+        instanceKey: claimed.instanceKey,
+        claimedBy: claimed.claimedBy,
+        status: 'succeeded',
+        attempt: 1,
+        startedAt: clock.now(),
+        finishedAt: clock.now(),
+        output: { persisted: true },
+        fencingToken: claimed.fencingToken,
+      })
+    ).rejects.toMatchObject({
+      code: 'output_persistence_failed',
+      phase: 'commit',
+    });
+    expect(providerCommitted).toBe(true);
+    const inspect = new Database(filename, { readonly: true });
+    expect(
+      inspect
+        .prepare(
+          `SELECT state FROM event_payload_stages
+           WHERE run_id='payload-post-commit-run'`
+        )
+        .get()
+    ).toEqual({ state: 'commit_pending' });
+    inspect.close();
   });
 
   it('fails before upload for legacy stores and insufficient lease budget', async () => {
@@ -800,7 +936,7 @@ describe('AxSQLiteEventStore', () => {
       retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
     });
     await initial.enqueue(storeRequest('payload-restart', clock.now()));
-    const claimed = (await initial.claim('worker-a', clock.now(), 1_000))!;
+    const claimed = (await initial.claim('worker-a', clock.now(), 100))!;
     await initial.close();
 
     const stageId = 'event-payload-stage:restart';
@@ -872,7 +1008,164 @@ describe('AxSQLiteEventStore', () => {
       expect.objectContaining({ output: { recovered: true } })
     );
     expect(commits).toEqual([stageId]);
-    await restarted.close();
+    clock.advanceBy(101);
+    let targetCalls = 0;
+    let sinkCalls = 0;
+    const signature = s('trigger?:string -> recovered:boolean');
+    const program = {
+      getId: () => 'payload-restart-target',
+      getSignature: () => signature,
+      forward: async () => {
+        targetCalls++;
+        return { recovered: false };
+      },
+      streamingForward: async function* () {},
+    } as unknown as AxProgrammable<any, any>;
+    const runtime = new AxEventRuntime({
+      store: restarted,
+      programStateStore: restarted,
+      coordination: 'multi-worker',
+      workerConcurrency: 1,
+      leaseMs: 100,
+      heartbeatMs: 25,
+      routes: [
+        eventRoute({
+          id: 'route',
+          match: { types: ['effect.test'] },
+          action: 'wake',
+          target: eventTarget({
+            id: 'target',
+            ai: {} as never,
+            program,
+            mapInput: () => ({}),
+            retrySafety: 'idempotent',
+            sinks: [
+              {
+                id: 'recovered-sink',
+                write: (output) => {
+                  sinkCalls++;
+                  expect(output).toEqual({ recovered: true });
+                },
+              },
+            ],
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    await runtime.waitForIdle();
+    expect(targetCalls).toBe(0);
+    expect(sinkCalls).toBe(1);
+    expect(await restarted.getDelivery(claimed.id)).toEqual(
+      expect.objectContaining({
+        status: 'succeeded',
+        fencingToken: 2,
+        runId: run.id,
+      })
+    );
+    await runtime.close({ drain: false });
+  });
+
+  it('quarantines failed payload recovery without poisoning unrelated claims', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const filename = join(directory, 'payload-recovery-failure.sqlite');
+    const clock = new AxManualEventClock(1_000);
+    const initial = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    const blockedReceipt = await initial.enqueue(
+      storeRequest('payload-recovery-blocked', clock.now())
+    );
+    const blocked = (await initial.claim('worker-a', clock.now(), 100))!;
+    const unrelatedReceipt = await initial.enqueue(
+      storeRequest('payload-recovery-unrelated', clock.now())
+    );
+    await initial.close();
+
+    const run: AxEventRun = {
+      id: 'payload-recovery-blocked-run',
+      deliveryId: blocked.id,
+      routeId: blocked.routeId,
+      targetId: blocked.targetId,
+      instanceKey: blocked.instanceKey,
+      claimedBy: blocked.claimedBy,
+      status: 'succeeded',
+      attempt: 1,
+      startedAt: clock.now(),
+      finishedAt: clock.now(),
+      outputRef: 'payload://recovery-blocked',
+      fencingToken: blocked.fencingToken,
+    };
+    const seeded = new Database(filename);
+    seeded
+      .prepare(
+        `INSERT INTO event_runs(id, delivery_id, run_json, updated_at, finished_at)
+         VALUES(?,?,?,?,?)`
+      )
+      .run(
+        run.id,
+        run.deliveryId,
+        JSON.stringify(run),
+        clock.now(),
+        clock.now()
+      );
+    seeded
+      .prepare(
+        `INSERT INTO event_payload_stages(
+           stage_id, run_id, delivery_id, fencing_token, reference,
+           size_bytes, expires_at, state, created_at, updated_at
+         ) VALUES(?,?,?,?,?,?,?,?,?,?)`
+      )
+      .run(
+        'event-payload-stage:recovery-blocked',
+        run.id,
+        run.deliveryId,
+        run.fencingToken,
+        run.outputRef,
+        128,
+        clock.now() + 1_000,
+        'commit_pending',
+        clock.now(),
+        clock.now()
+      );
+    seeded.close();
+    clock.advanceBy(101);
+
+    let commitCalls = 0;
+    const restarted = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+      payloadStaging,
+      payloadStore: {
+        stage: async () => ({ reference: 'payload://unused' }),
+        commit: async () => {
+          commitCalls++;
+          throw new Error('payload provider unavailable');
+        },
+        abort: async () => {},
+        put: async () => 'payload://legacy-unused',
+        get: async () => {
+          throw new Error('uncommitted payload must not be read');
+        },
+        delete: async () => {},
+      },
+    });
+    await expect(restarted.getRun(run.id)).resolves.toEqual(
+      expect.objectContaining({
+        id: run.id,
+        status: 'succeeded',
+        outputRef: run.outputRef,
+      })
+    );
+    const claimed = await restarted.claim('worker-b', clock.now(), 100);
+    expect(claimed?.id).toBe(unrelatedReceipt.deliveryIds[0]);
+    expect(claimed?.id).not.toBe(blockedReceipt.deliveryIds[0]);
+    expect(commitCalls).toBeGreaterThanOrEqual(2);
+    await expect(restarted.close()).resolves.toBeUndefined();
   });
 
   it('releases committed staged ownership when result retention expires', async () => {

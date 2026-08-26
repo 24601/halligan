@@ -221,12 +221,17 @@ export class AxEventRuntime {
   private readonly targetSources = new Map<string, AxEventTarget<any, any>>();
   private readonly singletonTargetInstances = new Map<string, string>();
   private readonly activeRuns = new Map<string, AbortController>();
+  private readonly activeStreamIterators = new Map<
+    string,
+    AsyncIterator<AxGenDeltaOut<unknown>>
+  >();
   private readonly sourceHandles: AxEventSourceHandle[] = [];
   private readonly sourceController = new AbortController();
   private readonly workerController = new AbortController();
   private workerPromises: Promise<void>[] = [];
   private started = false;
   private closing = false;
+  private closePromise?: Promise<void>;
 
   constructor(options: Readonly<AxEventRuntimeOptions>) {
     this.options = options;
@@ -480,13 +485,22 @@ export class AxEventRuntime {
   }
 
   async close(options: Readonly<AxEventCloseOptions> = {}): Promise<void> {
-    if (this.closing) return;
+    if (this.closePromise) return this.closePromise;
     const timeoutMs = options.timeoutMs ?? 30_000;
     if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
       throw new Error(
         'AxEventRuntime close timeoutMs must be finite and non-negative'
       );
     }
+    this.closePromise = this.performClose(options, timeoutMs);
+    return this.closePromise;
+  }
+
+  private async performClose(
+    options: Readonly<AxEventCloseOptions>,
+    timeoutMs: number
+  ): Promise<void> {
+    const deadline = this.clock.now() + timeoutMs;
     this.closing = true;
     this.sourceController.abort('AxEventRuntime closing');
     const sourceClose = Promise.allSettled(
@@ -494,18 +508,13 @@ export class AxEventRuntime {
         Promise.resolve().then(() => handle.close())
       )
     );
-    const sourceCloseTimeout = new AbortController();
-    try {
-      await Promise.race([
-        sourceClose,
-        this.clock.sleep(timeoutMs, sourceCloseTimeout.signal),
-      ]);
-    } finally {
-      sourceCloseTimeout.abort('Event source close phase completed');
-    }
+    await this.waitUntilCloseDeadline(sourceClose, deadline);
     if (options.drain !== false) {
       try {
-        await this.waitForIdle(timeoutMs);
+        await this.waitUntilCloseDeadline(
+          this.waitForIdle(timeoutMs),
+          deadline
+        );
       } catch {
         // The abort below makes unfinished volatile deliveries visible again on
         // an explicit redrive rather than hiding the shutdown failure.
@@ -515,9 +524,45 @@ export class AxEventRuntime {
     for (const controller of this.activeRuns.values()) {
       controller.abort('AxEventRuntime closed');
     }
-    await Promise.allSettled(this.workerPromises);
-    await this.store.close?.();
-    this.started = false;
+    for (const iterator of this.activeStreamIterators.values()) {
+      void Promise.resolve(iterator.return?.()).catch(() => undefined);
+    }
+    const workers = Promise.allSettled(this.workerPromises);
+    await this.waitUntilCloseDeadline(workers, deadline);
+    const storeClose = workers.then(() => this.store.close?.());
+    await this.waitUntilCloseDeadline(storeClose, deadline);
+    if (this.clock.now() < deadline) this.started = false;
+    else {
+      void storeClose.then(
+        () => {
+          this.started = false;
+        },
+        () => {
+          this.started = false;
+        }
+      );
+    }
+  }
+
+  private async waitUntilCloseDeadline(
+    operation: PromiseLike<unknown>,
+    deadline: number
+  ): Promise<void> {
+    const settled = Promise.resolve(operation);
+    const remaining = Math.max(0, deadline - this.clock.now());
+    if (remaining === 0) {
+      void settled.catch(() => undefined);
+      return;
+    }
+    const timeout = new AbortController();
+    try {
+      await Promise.race([
+        settled,
+        this.clock.sleep(remaining, timeout.signal),
+      ]);
+    } finally {
+      timeout.abort('AxEventRuntime close phase completed');
+    }
   }
 
   private async routeMatches(
@@ -570,10 +615,15 @@ export class AxEventRuntime {
     workerId: string
   ): Promise<void> {
     let claimed = initialClaim;
+    const recoveredRun =
+      claimed.recoveredFromExpiredLease && claimed.runId
+        ? await this.store.getRun(claimed.runId)
+        : undefined;
     if (
       claimed.recoveredFromExpiredLease &&
       claimed.invocationStarted &&
-      claimed.retrySafety === 'unknown'
+      claimed.retrySafety === 'unknown' &&
+      recoveredRun?.status !== 'succeeded'
     ) {
       await this.parkOutcomeUnknownEffects(claimed);
       const reason =
@@ -628,6 +678,21 @@ export class AxEventRuntime {
         if (!target) {
           throw new Error(`Continuation target ${targetId} is not configured`);
         }
+      }
+
+      if (
+        await this.resumePersistedCompletion(
+          claimed,
+          workerId,
+          route,
+          target,
+          targetId,
+          instanceKey
+        )
+      ) {
+        if (continuation)
+          await this.store.completeContinuation(continuation.id);
+        return;
       }
 
       const runId = axEventId('event-run');
@@ -833,6 +898,12 @@ export class AxEventRuntime {
           return;
         }
         if (axIsEventOutputPersistenceError(error)) {
+          if (error.phase === 'commit' || error.phase === 'recovery') {
+            // A staged provider commit may have succeeded even though its local
+            // acknowledgement did not. Keep the succeeded run and journal for
+            // fenced sink-only recovery; never overwrite it or rerun the target.
+            return;
+          }
           run = {
             ...run,
             output: undefined,
@@ -957,6 +1028,79 @@ export class AxEventRuntime {
     }
   }
 
+  private async resumePersistedCompletion(
+    claimed: Readonly<AxEventDelivery>,
+    workerId: string,
+    route: Readonly<AxEventRoute>,
+    target: Readonly<AxEventTarget<any, any>> | undefined,
+    targetId: string | undefined,
+    instanceKey: string
+  ): Promise<boolean> {
+    if (!claimed.recoveredFromExpiredLease || !claimed.runId) return false;
+    const persisted = await this.store.getRun(claimed.runId);
+    if (!persisted || persisted.status !== 'succeeded') return false;
+
+    const controller = new AbortController();
+    const heartbeatController = new AbortController();
+    this.activeRuns.set(persisted.id, controller);
+    const heartbeat = this.heartbeatClaim(
+      claimed,
+      workerId,
+      controller,
+      heartbeatController.signal
+    );
+    try {
+      const effectParkReason = await this.reconcileEffects(
+        claimed,
+        controller.signal
+      );
+      if (effectParkReason) {
+        await this.parkDelivery(claimed, effectParkReason);
+        return true;
+      }
+      const context = new AxRuntimeEventContext(
+        this.id,
+        persisted.id,
+        claimed.id,
+        route.id,
+        targetId,
+        instanceKey,
+        claimed.ingress,
+        claimed.ingress.identity ?? {},
+        claimed.ingress.trust ?? 'untrusted',
+        persisted.attempt,
+        claimed.id,
+        controller.signal,
+        undefined,
+        claimed.fencingToken,
+        this.store,
+        () => this.clock.now()
+      );
+      let run: AxEventRun = {
+        ...persisted,
+        claimedBy: workerId,
+        ...(claimed.fencingToken !== undefined
+          ? { fencingToken: claimed.fencingToken }
+          : {}),
+      };
+      if (target && run.output !== undefined) {
+        run = await this.dispatchFinalSinks(target, run, context);
+        await this.store.saveRun(run);
+      }
+      await this.store.saveDelivery({
+        ...claimed,
+        status: 'succeeded',
+        attempt: Math.max(claimed.attempt, persisted.attempt),
+        runId: persisted.id,
+      });
+      return true;
+    } finally {
+      heartbeatController.abort('Persisted event completion resumed');
+      await heartbeat;
+      this.activeRuns.delete(persisted.id);
+    }
+  }
+
   private async invokeTarget(
     target: Readonly<AxEventTarget<any, any>>,
     instanceKey: string,
@@ -1060,15 +1204,33 @@ export class AxEventRuntime {
       await onInvoke();
       if (target.execution === 'streaming') {
         const stream = program.streamingForward(target.ai, input, options);
-        for await (const chunk of stream) {
-          chunks.push(structuredClone(chunk));
-          const partialRun: AxEventRun = { ...run, chunks: [...chunks] };
-          await this.store.saveRun(partialRun);
-          for (const sink of target.sinks ?? []) {
-            if (!sink.writeChunk) continue;
-            await this.dispatchChunkSink(sink, chunk, partialRun, eventContext);
+        const iterator = stream[Symbol.asyncIterator]();
+        this.activeStreamIterators.set(run.id, iterator);
+        try {
+          for (;;) {
+            const next = await iterator.next();
+            if (next.done || eventContext.abortSignal.aborted) break;
+            const chunk = next.value;
+            chunks.push(structuredClone(chunk));
+            const partialRun: AxEventRun = { ...run, chunks: [...chunks] };
+            await this.store.saveRun(partialRun);
+            for (const sink of target.sinks ?? []) {
+              if (!sink.writeChunk || eventContext.abortSignal.aborted)
+                continue;
+              await this.dispatchChunkSink(
+                sink,
+                chunk,
+                partialRun,
+                eventContext
+              );
+            }
+            output = chunk.partial ?? { ...(output as object), ...chunk.delta };
           }
-          output = chunk.partial ?? { ...(output as object), ...chunk.delta };
+        } finally {
+          this.activeStreamIterators.delete(run.id);
+          if (eventContext.abortSignal.aborted) {
+            void Promise.resolve(iterator.return?.()).catch(() => undefined);
+          }
         }
       } else {
         output = await program.forward(target.ai, input, options);
@@ -1206,6 +1368,13 @@ export class AxEventRuntime {
   ): Promise<AxEventRun> {
     const attempts = [];
     for (const sink of target.sinks ?? []) {
+      const persisted = run.sinks?.find(
+        (attempt) => attempt.sinkId === sink.id
+      );
+      if (persisted?.status === 'succeeded') {
+        attempts.push(persisted);
+        continue;
+      }
       let error: unknown;
       let count = 0;
       for (; count < (this.options.maxAttempts ?? 5); count++) {
