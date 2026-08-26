@@ -394,6 +394,10 @@ const artifacts: AxExecutableSkillArtifact[] = [
 const trustedFunctionRegistry = new Map([
   ['functions/browser-checkout/2', checkoutFunction],
 ]);
+const verificationNow = new Date();
+const receiptExpiresAt = new Date(
+  verificationNow.getTime() + 30 * 24 * 60 * 60 * 1000
+);
 
 const selection = axSelectExecutableSkills(
   artifacts,
@@ -427,11 +431,11 @@ const selection = axSelectExecutableSkills(
         issuer: 'eval.example',
         audience: 'agent:checkout',
         evaluation: 'checkout-compatibility-v2',
-        verifiedAt: '2026-08-24T00:00:00.000Z',
-        expiresAt: '2026-09-24T00:00:00.000Z',
+        verifiedAt: verificationNow.toISOString(),
+        expiresAt: receiptExpiresAt.toISOString(),
       },
     ],
-    now: new Date().toISOString(),
+    now: verificationNow.toISOString(),
     resolveFunction: (functionRef) => trustedFunctionRegistry.get(functionRef),
   },
   { query: 'complete checkout', topK: 1 }
@@ -484,9 +488,12 @@ and plain or null-prototype records. Callables, symbols, bigints, custom-prototy
 objects such as `Date`, and cyclic values fail closed. The trusted context
 resolver is the ingress exception. Function resolution reads designated `func`
 exactly once from an own property only after validating that the resolved root is
-a plain or null-prototype record. It validates that exact value and snapshots
-other function metadata without touching `func` again; inherited handlers, class
-instances, callable aliases, and throwing getters fail closed.
+a plain or null-prototype record. Every selected root and own `func` descriptor
+is captured before any selected handler or metadata getter runs; all handlers
+are then bound before metadata is copied. Metadata snapshots never reread
+`func`, so one selected root cannot replace a later sibling handler in place.
+Inherited handlers, class instances, callable aliases, missing function names,
+and throwing getters fail closed; function descriptions remain optional.
 Select immediately before registration/invocation and select again whenever host
 principal, authority, capability, receipt, or compatibility facts change.
 `provenance` is informational and must never be populated from model output as

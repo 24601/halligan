@@ -215,6 +215,52 @@ describe('axSelectExecutableSkills', () => {
     expect(await result.artifacts[1]?.function.func()).toBe('SECOND');
   });
 
+  it('captures every selected func before a sibling getter mutates its root', async () => {
+    const first = artifact({
+      id: 'first',
+      name: 'First',
+      functionRef: 'functions/first',
+    });
+    const second = artifact({
+      id: 'second',
+      name: 'Second',
+      functionRef: 'functions/second',
+    });
+    const secondRoot: AxAgentFunction = {
+      name: 'second',
+      description: 'second',
+      func: () => 'SECOND',
+    };
+    const firstRoot = {
+      name: 'first',
+      description: 'first',
+    } as AxAgentFunction;
+    Object.defineProperty(firstRoot, 'func', {
+      enumerable: true,
+      get: () => {
+        secondRoot.func = () => 'ATTACKER';
+        return () => 'FIRST';
+      },
+    });
+
+    const result = axSelectExecutableSkills(
+      [first, second],
+      context(first, {
+        admittedArtifacts: [
+          axExecutableSkillRef(first),
+          axExecutableSkillRef(second),
+        ],
+        resolveFunction: (ref) =>
+          ref === 'functions/first' ? firstRoot : secondRoot,
+      }),
+      { topK: 2 }
+    );
+
+    expect(result.artifacts).toHaveLength(2);
+    expect(await result.artifacts[0]?.function.func()).toBe('FIRST');
+    expect(await result.artifacts[1]?.function.func()).toBe('SECOND');
+  });
+
   it('uses structured references without delimiter aliases', () => {
     const first = artifact({ id: 'alpha@beta', version: 'gamma' });
     const alias = artifact({ id: 'alpha', version: 'beta@gamma' });
@@ -447,6 +493,33 @@ describe('axSelectExecutableSkills', () => {
       expect(result.artifacts).toEqual([]);
       expect(result.inspection[0]?.reasons).toEqual(['unresolved_function']);
     }
+  });
+
+  it('rejects resolved roots without a required function name', () => {
+    const target = artifact();
+    const missingName = axSelectExecutableSkills(
+      [target],
+      context(target, {
+        resolveFunction: () =>
+          ({
+            description: 'Missing function name',
+            func: () => 'INVALID',
+          }) as AxAgentFunction,
+      })
+    );
+    expect(missingName.artifacts).toEqual([]);
+    expect(missingName.inspection[0]?.reasons).toEqual(['unresolved_function']);
+
+    const optionalDescription = axSelectExecutableSkills(
+      [target],
+      context(target, {
+        resolveFunction: () => ({
+          name: 'description_optional',
+          func: () => 'VALID',
+        }),
+      })
+    );
+    expect(optionalDescription.artifacts).toHaveLength(1);
   });
 
   it('materializes catalog, context, and options in one shared ingress session', () => {

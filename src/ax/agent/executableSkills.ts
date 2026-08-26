@@ -632,38 +632,72 @@ function tryMaterializeIngress(
   };
 }
 
-function snapshotFunction(
-  value: unknown
-): Readonly<AxAgentFunction> | undefined {
+type CapturedFunctionRoot = Readonly<{
+  root: Record<string, unknown>;
+  funcDescriptor: PropertyDescriptor;
+}>;
+
+type CapturedFunction = CapturedFunctionRoot &
+  Readonly<{ handler: AxAgentFunction['func'] }>;
+
+function captureFunctionRoot(value: unknown): CapturedFunctionRoot | undefined {
   if (!value || typeof value !== 'object') return undefined;
   try {
     const prototype = Object.getPrototypeOf(value);
     if (prototype !== Object.prototype && prototype !== null) return undefined;
     const funcDescriptor = Object.getOwnPropertyDescriptor(value, 'func');
     if (!funcDescriptor) return undefined;
-    // This is the only handler read. Metadata copying below explicitly omits `func`.
+    if (
+      ('value' in funcDescriptor &&
+        typeof funcDescriptor.value !== 'function') ||
+      (!('value' in funcDescriptor) && typeof funcDescriptor.get !== 'function')
+    )
+      return undefined;
+    return Object.freeze({
+      root: value as Record<string, unknown>,
+      funcDescriptor: Object.freeze(funcDescriptor),
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+function captureFunctionHandler(
+  captured: CapturedFunctionRoot | undefined
+): CapturedFunction | undefined {
+  if (!captured) return undefined;
+  try {
+    const { funcDescriptor, root } = captured;
     const handler =
       'value' in funcDescriptor
         ? funcDescriptor.value
-        : funcDescriptor.get?.call(value);
+        : funcDescriptor.get?.call(root);
     if (typeof handler !== 'function') return undefined;
+    return Object.freeze({ ...captured, handler });
+  } catch {
+    return undefined;
+  }
+}
 
+function snapshotFunction(
+  captured: CapturedFunction | undefined
+): Readonly<AxAgentFunction> | undefined {
+  if (!captured) return undefined;
+  try {
+    const { handler, root } = captured;
     const metadata: Record<string, unknown> = {};
-    const copies = new WeakMap<object, unknown>([[value, metadata]]);
-    const visiting = new WeakSet<object>([value]);
-    for (const key of Reflect.ownKeys(value)) {
+    const copies = new WeakMap<object, unknown>([[root, metadata]]);
+    const visiting = new WeakSet<object>([root]);
+    for (const key of Reflect.ownKeys(root)) {
       if (typeof key !== 'string') return undefined;
       if (key === 'func') continue;
       Object.defineProperty(metadata, key, {
-        value: materializeDetached(
-          (value as Record<string, unknown>)[key],
-          copies,
-          visiting
-        ),
+        value: materializeDetached(root[key], copies, visiting),
         enumerable: true,
       });
     }
-    visiting.delete(value);
+    visiting.delete(root);
+    if (!isBoundedString(metadata.name)) return undefined;
     const boundHandler: AxAgentFunction['func'] = (args, extra) =>
       handler(args, extra);
     const snapshot = {
@@ -901,9 +935,13 @@ export function axSelectExecutableSkills(
       return undefined;
     }
   });
+  // Capture every own func descriptor before any selected getter can mutate a
+  // sibling root, then bind every handler before copying any selected metadata.
+  const capturedRoots = resolvedRoots.map(captureFunctionRoot);
+  const capturedFunctions = capturedRoots.map(captureFunctionHandler);
 
   for (const [index, candidate] of selected.entries()) {
-    const functionSnapshot = snapshotFunction(resolvedRoots[index]);
+    const functionSnapshot = snapshotFunction(capturedFunctions[index]);
     if (!functionSnapshot) {
       candidate.inspection.eligible = false;
       candidate.inspection.reasons = ['unresolved_function'];
