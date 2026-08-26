@@ -183,8 +183,12 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
   }
 
   async transitionVerifier(
-    request: Readonly<AxEventVerifierTransitionRequest>
+    request: Readonly<AxEventVerifierTransitionRequest>,
+    signal?: AbortSignal
   ): Promise<AxEventPublishReceipt> {
+    if (signal?.aborted) {
+      throw signal.reason ?? new Error('Verifier transition cancelled');
+    }
     const eventBytes = Buffer.byteLength(JSON.stringify(request.child.ingress));
     if (eventBytes > this.maxEventBytes) {
       throw new AxEventBackpressureError(

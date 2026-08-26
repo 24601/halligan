@@ -614,7 +614,8 @@ export interface AxEventStore {
    * capabilities.verifierTransitions advertises the matching marker.
    */
   transitionVerifier?(
-    request: Readonly<AxEventVerifierTransitionRequest>
+    request: Readonly<AxEventVerifierTransitionRequest>,
+    signal?: AbortSignal
   ): Promise<AxEventPublishReceipt>;
   /** Confirms an exact, authority-bearing V2 request without exposing journal data. */
   confirmVerifierTransition?(

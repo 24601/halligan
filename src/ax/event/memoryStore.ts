@@ -198,8 +198,12 @@ export class AxInMemoryEventStore implements AxEventStore {
   }
 
   async transitionVerifier(
-    request: Readonly<AxEventVerifierTransitionRequest>
+    request: Readonly<AxEventVerifierTransitionRequest>,
+    signal?: AbortSignal
   ): Promise<AxEventPublishReceipt> {
+    if (signal?.aborted) {
+      throw signal.reason ?? new Error('Verifier transition cancelled');
+    }
     const requestCommitment = await axEventCanonicalDigest(request);
     const childProjection = this.verifierChildProjection(request);
     const expectedChildCommitment =

@@ -632,6 +632,70 @@ describe('AxEventRuntime verifier continuation policy', () => {
     await runtime.close();
   });
 
+  it('does not install a verifier child when cancel is accepted before delayed transition', async () => {
+    const backing = new AxInMemoryEventStore();
+    let releaseTransition!: () => void;
+    const transitionGate = new Promise<void>((resolve) => {
+      releaseTransition = resolve;
+    });
+    let transitionStarted!: () => void;
+    const transitionStart = new Promise<void>((resolve) => {
+      transitionStarted = resolve;
+    });
+    let enteredTransition = false;
+    let runId = '';
+    let targetCalls = 0;
+    const store = new Proxy(backing, {
+      get(target, property, receiver) {
+        if (property === 'transitionVerifier') {
+          return async (
+            request: Parameters<typeof target.transitionVerifier>[0],
+            signal?: AbortSignal
+          ) => {
+            enteredTransition = true;
+            transitionStarted();
+            await transitionGate;
+            return target.transitionVerifier(request, signal);
+          };
+        }
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const { runtime } = setup(
+      {
+        id: 'cancel-during-transition',
+        verify: (_output, context) => {
+          runId = context.run.id;
+          return {
+            status: 'fail',
+            failure: { code: 'retry' },
+          };
+        },
+      },
+      {
+        store,
+        forward: () => {
+          targetCalls++;
+          return { answer: 'fix the tests' };
+        },
+      }
+    );
+    await runtime.start();
+    const receipt = await runtime.publish(ingress('cancel-during-transition'));
+    await transitionStart;
+    expect(runtime.cancelRun(runId, 'host abort')).toBe(true);
+    releaseTransition();
+    await runtime.waitForIdle();
+    expect((await runtime.getRun(runId))?.status).toBe('cancelled');
+    expect((await backing.getDelivery(receipt.deliveryIds[0]!))?.status).toBe(
+      'cancelled'
+    );
+    expect(targetCalls).toBe(1);
+    expect(enteredTransition).toBe(true);
+    await runtime.close({ drain: false });
+  });
+
   it('restores a queued verifier continuation and policy state after restart', async () => {
     const store = new AxInMemoryEventStore();
     const stateStore = new AxInMemoryProgramStateStore();

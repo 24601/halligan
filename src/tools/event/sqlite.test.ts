@@ -210,6 +210,101 @@ describe('AxSQLiteEventStore', () => {
     await runtime.close({ drain: false });
   });
 
+  it('does not install a verifier child when cancel wins a delayed SQLite transition', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const backing = new AxSQLiteEventStore({
+      filename: join(directory, 'cancel-transition.sqlite'),
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    let releaseTransition!: () => void;
+    const transitionGate = new Promise<void>((resolve) => {
+      releaseTransition = resolve;
+    });
+    let transitionStarted!: () => void;
+    const transitionStart = new Promise<void>((resolve) => {
+      transitionStarted = resolve;
+    });
+    let runId = '';
+    let targetCalls = 0;
+    const store = new Proxy(backing, {
+      get(target, property, receiver) {
+        if (property === 'transitionVerifier') {
+          return async (
+            request: Parameters<typeof target.transitionVerifier>[0],
+            signal?: AbortSignal
+          ) => {
+            transitionStarted();
+            await transitionGate;
+            return target.transitionVerifier(request, signal);
+          };
+        }
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const signature = s('goal:string, feedback?:json -> answer:string');
+    const program = {
+      getId: () => 'cancel-transition-program',
+      getSignature: () => signature,
+      forward: async () => {
+        targetCalls++;
+        return { answer: 'fix the tests' };
+      },
+      streamingForward: async function* () {},
+    } as unknown as AxProgrammable<any, any>;
+    const runtime = new AxEventRuntime({
+      store,
+      workerConcurrency: 1,
+      routes: [
+        eventRoute({
+          id: 'cancel-transition-route',
+          match: { types: ['goal.run'] },
+          action: 'wake',
+          target: eventTarget({
+            id: 'goal',
+            ai: {} as never,
+            program,
+            mapInput: () => ({ goal: 'fix the tests' }),
+            retrySafety: 'idempotent',
+            verifier: {
+              id: 'cancel-transition',
+              verify: (_output, context) => {
+                runId = context.run.id;
+                return {
+                  status: 'fail',
+                  failure: { code: 'retry' },
+                };
+              },
+            },
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    const receipt = await runtime.publish({
+      event: {
+        specversion: '1.0',
+        id: 'cancel-sqlite-transition',
+        source: 'app://tests',
+        type: 'goal.run',
+        data: { goal: 'fix the tests' },
+      },
+      identity: { tenantId: 'tenant-1' },
+      trust: 'authenticated',
+    });
+    await transitionStart;
+    expect(runtime.cancelRun(runId, 'host abort')).toBe(true);
+    releaseTransition();
+    await runtime.waitForIdle();
+    expect((await runtime.getRun(runId))?.status).toBe('cancelled');
+    expect((await backing.getDelivery(receipt.deliveryIds[0]!))?.status).toBe(
+      'cancelled'
+    );
+    expect(targetCalls).toBe(1);
+    await runtime.close({ drain: false });
+  });
+
   it('journals immutable transitions across repeated commit-ack loss', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
     directories.push(directory);

@@ -721,7 +721,8 @@ export class AxEventRuntime {
             attempt,
             verification,
             continuation,
-            target!
+            target!,
+            controller.signal
           );
         } else {
           // Persist the complete output before any final sink dispatch.
@@ -876,7 +877,8 @@ export class AxEventRuntime {
     attempt: number,
     outcome: Readonly<VerificationOutcome>,
     consumed: Readonly<AxEventContinuation> | undefined,
-    target: Readonly<AxEventTarget>
+    target: Readonly<AxEventTarget>,
+    signal: AbortSignal
   ): Promise<void> {
     const next = outcome.continuation!;
     const delivery: AxEventDelivery = {
@@ -913,12 +915,24 @@ export class AxEventRuntime {
       },
       ...(consumed ? { consumeContinuationId: consumed.id } : {}),
     };
+    if (signal.aborted) {
+      throw signal.reason ?? new Error('Verifier transition cancelled');
+    }
+    const commit = Promise.resolve().then(() => {
+      if (signal.aborted) {
+        throw signal.reason ?? new Error('Verifier transition cancelled');
+      }
+      return this.store.transitionVerifier!(request, signal);
+    });
     try {
-      await this.store.transitionVerifier!(request);
+      await commit;
     } catch (error) {
       if (await this.verifierTransitionCommitted(request)) return;
+      if (signal.aborted) {
+        throw signal.reason ?? error;
+      }
       try {
-        await this.store.transitionVerifier!(request);
+        await this.store.transitionVerifier!(request, signal);
       } catch {
         if (await this.verifierTransitionCommitted(request)) return;
         throw error;
