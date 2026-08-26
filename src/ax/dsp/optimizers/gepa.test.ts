@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AxAIService } from '../../ai/types.js';
+import { axSerializeOptimizedProgram } from '../optimizer.js';
 import { ax } from '../template.js';
 import { AxGEPA } from './gepa.js';
 
@@ -431,6 +432,56 @@ describe('AxGEPA Optimizer', () => {
       expect(result.optimizedProgram?.componentMap).toEqual({
         'root::instruction': 'task',
       });
+    });
+
+    it('plumbs custom proposal policies without persisting their references', async () => {
+      const secretReference = 'private proposal guidance, not an artifact';
+      const seen: Array<{ reference: string; currentValue: string }> = [];
+      const optimizer = new AxGEPA({
+        studentAI: {} as AxAIService,
+        teacherAI: {} as AxAIService,
+        numTrials: 1,
+        minibatch: false,
+        earlyStoppingTrials: 5,
+        minImprovementThreshold: 0,
+        seed: 1,
+      });
+      const program = createSingleRootProgram('task', async (instruction) => ({
+        score: instruction === 'better' ? 1 : 0,
+      }));
+
+      const result = await optimizer.compile(
+        program as any,
+        [{ question: 'q1' }, { question: 'q2' }],
+        async ({ prediction }) => prediction.score,
+        {
+          maxMetricCalls: 20,
+          skipPerfectScore: false,
+          gepaProposal: {
+            references: [{ name: 'private-guide', content: secretReference }],
+            additionalGuidance: 'Prefer the smallest general rule.',
+            policy: ({ currentValue, references }) => {
+              seen.push({
+                currentValue,
+                reference: references[0]?.content ?? '',
+              });
+              return 'better';
+            },
+          },
+        }
+      );
+
+      expect(seen).toEqual([
+        { currentValue: 'task', reference: secretReference },
+      ]);
+      expect(result.optimizedProgram?.componentMap).toEqual({
+        'root::instruction': 'better',
+      });
+      const serialized = JSON.stringify(
+        axSerializeOptimizedProgram(result.optimizedProgram!)
+      );
+      expect(serialized).not.toContain(secretReference);
+      expect(serialized).not.toContain('Prefer the smallest general rule.');
     });
 
     it('returns the accepted evolved component when it ties the seed on the Pareto set', async () => {
