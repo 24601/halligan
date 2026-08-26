@@ -282,9 +282,17 @@ export async function evolveAgentPlaybook<
   // ---- Sequential propose -> (verify) accept/reject ----
   const outcomes: AxAgentPlaybookEvolveOutcome[] = [];
   const accepted: AxAppliedProposal[] = [];
+  const rollbackAccepted = () => {
+    for (const applied of [...accepted].reverse()) {
+      applied.rollback();
+    }
+  };
 
   for (const weakness of weaknesses) {
     if (options?.abortSignal?.aborted) {
+      if (options.apply === false) {
+        rollbackAccepted();
+      }
       throw new Error('AxAgent.playbook().evolve(): aborted');
     }
     const proposal = buildProposal(weakness);
@@ -350,9 +358,7 @@ export async function evolveAgentPlaybook<
     } catch (err) {
       applied.rollback();
       if (options?.apply === false) {
-        for (const previous of [...accepted].reverse()) {
-          previous.rollback();
-        }
+        rollbackAccepted();
       }
       throw err;
     }
@@ -434,9 +440,7 @@ export async function evolveAgentPlaybook<
     accepted.length > 0 ? playbookHandle?.getState() : undefined;
 
   if (options?.apply === false) {
-    for (const applied of [...accepted].reverse()) {
-      applied.rollback();
-    }
+    rollbackAccepted();
   }
 
   progress(

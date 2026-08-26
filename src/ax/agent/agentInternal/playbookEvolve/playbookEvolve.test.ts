@@ -591,115 +591,138 @@ describe('agent.playbook().evolve()', () => {
     }
   );
 
-  it('restores the live playbook byte-for-byte when apply:false aborts during the second candidate revalidation', async () => {
-    const controller = new AbortController();
-    const ai = new AxMockAIService({
-      features: { functions: false, streaming: false },
-      chatResponse: async () => ({
-        results: [
-          {
-            index: 0,
-            content: [
-              'Weakness Description: A distinct baseline failure recurs.',
-              'Root Cause: The current playbook lacks the candidate rule.',
-              'Proposed Guidance: Apply the candidate rule.',
-              'Evidence Quotes: ["deterministic failure evidence"]',
-            ].join('\n'),
-            finishReason: 'stop' as const,
+  it.each([
+    ['during the second candidate revalidation', 'during-revalidation', 4],
+    ['between accepted candidates', 'between-candidates', 3],
+  ] as const)(
+    'restores the live playbook byte-for-byte when apply:false aborts %s',
+    async (_, abortWhen, expectedCandidateMetricCalls) => {
+      const controller = new AbortController();
+      const ai = new AxMockAIService({
+        features: { functions: false, streaming: false },
+        chatResponse: async () => ({
+          results: [
+            {
+              index: 0,
+              content: [
+                'Weakness Description: A distinct baseline failure recurs.',
+                'Root Cause: The current playbook lacks the candidate rule.',
+                'Proposed Guidance: Apply the candidate rule.',
+                'Evidence Quotes: ["deterministic failure evidence"]',
+              ].join('\n'),
+              finishReason: 'stop' as const,
+            },
+          ],
+          modelUsage: makeModelUsage() as any,
+        }),
+      });
+      let revision = 0;
+      let rules: string[] = [];
+      let history: { updatedBulletIds: string[] }[] = [];
+      let candidateMetricCalls = 0;
+      const handle = {
+        update: async () => {
+          revision++;
+          rules = [...rules, `candidate-${revision}`];
+          history = [
+            ...history,
+            { updatedBulletIds: [`candidate-${revision}`] },
+          ];
+        },
+        render: () => rules.join('\n'),
+        getState: () => ({
+          revision,
+          rules: [...rules],
+          artifact: {
+            history: history.map((entry) => ({
+              updatedBulletIds: [...entry.updatedBulletIds],
+            })),
           },
-        ],
-        modelUsage: makeModelUsage() as any,
-      }),
-    });
-    let revision = 0;
-    let rules: string[] = [];
-    let history: { updatedBulletIds: string[] }[] = [];
-    let candidateMetricCalls = 0;
-    const handle = {
-      update: async () => {
-        revision++;
-        rules = [...rules, `candidate-${revision}`];
-        history = [...history, { updatedBulletIds: [`candidate-${revision}`] }];
-      },
-      render: () => rules.join('\n'),
-      getState: () => ({
-        revision,
-        rules: [...rules],
-        artifact: {
-          history: history.map((entry) => ({
+        }),
+        load: (
+          snapshot: Readonly<{
+            revision: number;
+            rules: string[];
+            artifact: { history: { updatedBulletIds: string[] }[] };
+          }>
+        ) => {
+          revision = snapshot.revision;
+          rules = [...snapshot.rules];
+          history = snapshot.artifact.history.map((entry) => ({
             updatedBulletIds: [...entry.updatedBulletIds],
-          })),
+          }));
         },
-      }),
-      load: (
-        snapshot: Readonly<{
-          revision: number;
-          rules: string[];
-          artifact: { history: { updatedBulletIds: string[] }[] };
-        }>
-      ) => {
-        revision = snapshot.revision;
-        rules = [...snapshot.rules];
-        history = snapshot.artifact.history.map((entry) => ({
-          updatedBulletIds: [...entry.updatedBulletIds],
-        }));
-      },
-    };
-    const self = {
-      init: { ai },
-      getPlaybook: () => handle,
-      _forwardForEvaluation: async (_ai: unknown, task: { id: string }) => ({
-        completionType: 'final',
-        output: { revision },
-        actionLog: 'deterministic failure evidence',
-        functionCalls: [],
-        toolErrors: revision === 0 ? [`${task.id}: baseline failure`] : [],
-        turnCount: 1,
-        usage: [],
-      }),
-    };
-    const before = handle.getState();
-    const beforeBytes = JSON.stringify(before);
+      };
+      const self = {
+        init: { ai },
+        getPlaybook: () => handle,
+        _forwardForEvaluation: async (_ai: unknown, task: { id: string }) => ({
+          completionType: 'final',
+          output: { revision },
+          actionLog: 'deterministic failure evidence',
+          functionCalls: [],
+          toolErrors: revision === 0 ? [`${task.id}: baseline failure`] : [],
+          turnCount: 1,
+          usage: [],
+        }),
+      };
+      const before = handle.getState();
+      const beforeBytes = JSON.stringify(before);
 
-    await expect(
-      evolveAgentPlaybook(
-        self,
-        {
-          train: [
-            { input: { case: 'one' }, criteria: 'pass', id: 'train-1' },
-            { input: { case: 'two' }, criteria: 'pass', id: 'train-2' },
-          ],
-          validation: [
-            { input: { case: 'held-out' }, criteria: 'pass', id: 'validation' },
-          ],
-        },
-        {
-          requireHeldOut: true,
-          apply: false,
-          abortSignal: controller.signal,
-          maxProposals: 2,
-          metric: async ({ prediction }: any) => {
-            if (prediction.output.revision > 0) {
-              candidateMetricCalls++;
-              if (
-                prediction.output.revision === 2 &&
-                candidateMetricCalls === 4
-              ) {
-                controller.abort('abort second candidate revalidation');
-              }
-              return 1;
-            }
-            return 0;
+      await expect(
+        evolveAgentPlaybook(
+          self,
+          {
+            train: [
+              { input: { case: 'one' }, criteria: 'pass', id: 'train-1' },
+              { input: { case: 'two' }, criteria: 'pass', id: 'train-2' },
+            ],
+            validation: [
+              {
+                input: { case: 'held-out' },
+                criteria: 'pass',
+                id: 'validation',
+              },
+            ],
           },
-        }
-      )
-    ).rejects.toThrow(/aborted/);
+          {
+            requireHeldOut: true,
+            apply: false,
+            abortSignal: controller.signal,
+            maxProposals: 2,
+            metric: async ({ prediction }: any) => {
+              if (prediction.output.revision > 0) {
+                candidateMetricCalls++;
+                if (
+                  abortWhen === 'during-revalidation' &&
+                  prediction.output.revision === 2 &&
+                  candidateMetricCalls === 4
+                ) {
+                  controller.abort('abort second candidate revalidation');
+                }
+                return 1;
+              }
+              return 0;
+            },
+            onProgress: ({ phase, message }) => {
+              if (
+                abortWhen === 'between-candidates' &&
+                phase === 'validation' &&
+                message.endsWith(': ACCEPTED')
+              ) {
+                controller.abort('abort between accepted candidates');
+              }
+            },
+          }
+        )
+      ).rejects.toThrow(/aborted/);
 
-    expect(candidateMetricCalls).toBe(4);
-    expect(handle.getState()).toEqual(before);
-    expect(JSON.stringify(handle.getState())).toBe(beforeBytes);
-    expect(handle.render()).toBe('');
-  });
+      expect(candidateMetricCalls).toBe(expectedCandidateMetricCalls);
+      expect(handle.getState()).toEqual(before);
+      expect(JSON.stringify(handle.getState())).toBe(beforeBytes);
+      expect(handle.render()).toBe('');
+    }
+  );
 
   it('throws without train tasks and without any AI', async () => {
     const { ag } = makeAgent();
