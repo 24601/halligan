@@ -634,4 +634,33 @@ describe('Ax host authority boundary', () => {
       ])
     ).resolves.toMatchObject({ code: 'cancelled' });
   });
+
+  it('does not return allow after cancellation during a successful audit', async () => {
+    let lateReject!: (reason: unknown) => void;
+    let auditStarted!: () => void;
+    const auditStart = new Promise<void>((resolve) => {
+      auditStarted = resolve;
+    });
+    const controller = new AbortController();
+    const pending = axAuthorize(
+      authority({
+        authorizeTimeoutMs: 1_000,
+        onAudit: () => {
+          auditStarted();
+          return new Promise<void>((_resolve, reject) => {
+            lateReject = reject;
+          });
+        },
+      }),
+      'document.read',
+      resource,
+      controller.signal
+    );
+    await auditStart;
+    controller.abort('stop');
+    await expect(pending).rejects.toMatchObject({ code: 'cancelled' });
+    lateReject(new Error('late successful-audit rejection'));
+    await Promise.resolve();
+    await Promise.resolve();
+  });
 });

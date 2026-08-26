@@ -733,6 +733,12 @@ export async function axAuthorize(
     },
     signal
   );
+  if (cancelled(signal)) {
+    throw new AxAuthorizationDeniedError(
+      'cancelled',
+      'Authorization cancelled'
+    );
+  }
   if (decision === 'deny') {
     throw new AxAuthorizationDeniedError(
       'host_denied',
