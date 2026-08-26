@@ -22,11 +22,11 @@ jobs:
       axir_targets: ${{ steps.scope.outputs.axir_targets }}
       core: ${{ steps.scope.outputs.run_core }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: '22.x'
       - name: Detect CI scope
@@ -41,9 +41,9 @@ jobs:
     if: needs.changes.outputs.core == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: '22.x'
           cache: npm
@@ -57,11 +57,11 @@ jobs:
     name: Repo Checks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: '22.x'
           cache: npm
@@ -103,9 +103,9 @@ jobs:
     if: needs.changes.outputs.core == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: '22.x'
           cache: npm
@@ -125,16 +125,16 @@ jobs:
       matrix:
         target: ${{ fromJSON(needs.changes.outputs.axir_targets) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: '22.x'
           cache: npm
           cache-dependency-path: package-lock.json
       - name: Setup Python
         if: matrix.target == 'python'
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: '3.x'
       - name: Setup Java
@@ -144,12 +144,12 @@ jobs:
           distribution: temurin
           java-version: '17'
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version: '1.23.x'
           cache: false
       - name: Cache AxIR Go outputs
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ${{ env.AXIR_BIN_CACHE }}
@@ -160,7 +160,7 @@ jobs:
             ${{ runner.os }}-axir-go-
       - name: Cache Cargo outputs
         if: matrix.target == 'rust'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/git
@@ -191,20 +191,20 @@ jobs:
     if: needs.changes.outputs.axir == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: '22.x'
           cache: npm
           cache-dependency-path: package-lock.json
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version: '1.23.x'
           cache: false
       - name: Cache AxIR Go outputs
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ${{ env.AXIR_BIN_CACHE }}
@@ -224,9 +224,9 @@ jobs:
     name: Documentation Website
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: '22.x'
           cache: npm
@@ -252,16 +252,16 @@ jobs:
       matrix:
         target: ${{ fromJSON(needs.changes.outputs.axir_targets) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: '22.x'
           cache: npm
           cache-dependency-path: package-lock.json
       - name: Setup Python
         if: matrix.target == 'python'
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: '3.x'
       - name: Setup Java
@@ -271,12 +271,12 @@ jobs:
           distribution: temurin
           java-version: '17'
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version: '1.23.x'
           cache: false
       - name: Cache AxIR Go outputs
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ${{ env.AXIR_BIN_CACHE }}
@@ -287,7 +287,7 @@ jobs:
             ${{ runner.os }}-axir-go-
       - name: Cache Cargo outputs
         if: matrix.target == 'rust'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/git
@@ -324,10 +324,10 @@ jobs:
     if: needs.changes.outputs.axir == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Setup Go
         if: contains(fromJSON(needs.changes.outputs.axir_targets), 'go')
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version: '1.23.x'
           cache: false
@@ -336,7 +336,7 @@ jobs:
         run: cd packages/go && go run ./conformance ../../ir/conformance/axagent-real
       - name: Setup Python
         if: contains(fromJSON(needs.changes.outputs.axir_targets), 'python')
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: '3.x'
       - name: Python in-process engine antidote (axllm[runtime-quickjs])
@@ -346,7 +346,7 @@ jobs:
           PYTHONPATH=packages/python python -m axllm.conformance ir/conformance/axagent-real
       - name: Cache Cargo outputs
         if: contains(fromJSON(needs.changes.outputs.axir_targets), 'rust')
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/git
