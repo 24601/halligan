@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { wrapFunction } from '../agent/agentInternal/runtimeGlobals.js';
+import { createCompletionBindings } from '../agent/completion.js';
 import type { AxFunction } from '../ai/types.js';
 import { AxJSRuntime } from './jsRuntime.js';
 import { setJSRuntimeHostFunctionSpeculationAdapter } from './jsRuntimeHostFunction.js';
@@ -972,6 +973,32 @@ describe('AxJSRuntime speculative programmatic tool calling', () => {
     ).toThrow('speculation.maxConcurrency');
   });
 
+  it('fails closed when a prior assignment makes later planned arguments stale', async () => {
+    const events: AxJSRuntimeSpeculationEvent[] = [];
+    const calls: string[] = [];
+    const tool = createTestCallable(async ([input]) => {
+      const value = String((input as { value: unknown }).value);
+      calls.push(value);
+      return value;
+    });
+
+    await expect(
+      run(
+        'inputs.q = "planned"; inputs.q = "actual"; return await tools.read({ value: inputs.q });',
+        { inputs: { q: 'initial' }, tools: { read: tool } },
+        speculation(events, { 'tools.read': pure(false) })
+      )
+    ).resolves.toBe('actual');
+    expect(calls).toEqual(['actual']);
+    expect(events.some((event) => event.kind === 'dispatch')).toBe(false);
+    expect(events.some((event) => event.kind === 'hit')).toBe(false);
+    expect(events.some((event) => event.kind === 'cancelled')).toBe(false);
+    expect(events).toContainEqual({
+      kind: 'blocked',
+      reason: 'unsafe-dependency',
+    });
+  });
+
   it('forwards extra.protocol on speculative launches of allowlisted functions', async () => {
     const events: AxJSRuntimeSpeculationEvent[] = [];
     let sawProtocol = false;
@@ -1006,5 +1033,50 @@ describe('AxJSRuntime speculative programmatic tool calling', () => {
     ).rejects.toThrow('final');
     expect(sawProtocol).toBe(true);
     expect(events.some((event) => event.kind === 'hit')).toBe(true);
+  });
+
+  it('does not apply extra.protocol until a speculative launch is claimed', async () => {
+    const events: AxJSRuntimeSpeculationEvent[] = [];
+    const payloads: unknown[] = [];
+    const bindings = createCompletionBindings((payload) => {
+      payloads.push(payload);
+    });
+    const fn: AxFunction = {
+      name: 'complete',
+      description: 'Complete the actor turn',
+      parameters: {
+        type: 'object',
+        properties: { answer: { type: 'string', description: 'Final answer' } },
+        required: ['answer'],
+      },
+      func: (_args, extra) => {
+        extra?.protocol?.final?.('SPECULATIVE');
+        return 'unreachable';
+      },
+    };
+    const callable = wrapFunction(
+      fn,
+      undefined,
+      undefined,
+      bindings.protocolForTrigger,
+      'tools.complete'
+    );
+
+    await expect(
+      run(
+        'throw new Error("stop"); await tools.complete({ answer: "SPECULATIVE" });',
+        { tools: { complete: callable } },
+        speculation(events, { 'tools.complete': pure(false) })
+      )
+    ).rejects.toThrow('stop');
+    expect(payloads).toEqual([]);
+    expect(events.some((event) => event.kind === 'hit')).toBe(false);
+    expect(events).toContainEqual({
+      kind: 'cancelled',
+      tool: 'tools.complete',
+      callIndex: 0,
+      deterministic: false,
+      reason: 'execution-failed',
+    });
   });
 });

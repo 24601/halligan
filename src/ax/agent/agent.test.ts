@@ -1707,6 +1707,57 @@ describe('AxAgent.test()', () => {
     expect(events.filter((event) => event.kind === 'hit')).toHaveLength(2);
   });
 
+  it('refunds only an abandoned speculative llmQuery debit after a later call is retained', async () => {
+    const events: Array<{ kind: string; reason?: string }> = [];
+    let calls = 0;
+    const testMockAI = new AxMockAIService({
+      features: { functions: false, streaming: false },
+      chatResponse: async (req) => {
+        calls++;
+        const prompt = req.chatPrompt
+          .map((message) => String(message.content ?? ''))
+          .join('\n');
+        return {
+          results: [
+            {
+              index: 0,
+              content: prompt.includes('Task: actual')
+                ? 'Answer: ACTUAL'
+                : 'Answer: STALE',
+              finishReason: 'stop',
+            },
+          ],
+          modelUsage: makeModelUsage(),
+        };
+      },
+    });
+    const testAgent = agent('query:string -> answer:string', {
+      ai: testMockAI,
+      contextFields: [],
+      maxSubAgentCalls: 8,
+      runtime: new AxJSRuntime({
+        speculation: {
+          callables: {
+            llmQuery: { purity: 'pure', deterministic: false },
+          },
+          onEvent: (event) => events.push(event),
+        },
+      }),
+    });
+
+    await expect(
+      testAgent.test(
+        'inputs.q = "planned"; inputs.q = "actual"; console.log(await llmQuery(inputs.q));'
+      )
+    ).resolves.toBe('ACTUAL');
+    expect(calls).toBe(1);
+    expect(events.some((event) => event.kind === 'dispatch')).toBe(false);
+    expect(events).toContainEqual({
+      kind: 'blocked',
+      reason: 'unsafe-dependency',
+    });
+  });
+
   it('exposes inspectRuntime when enabled by context policy', async () => {
     const testAgent = agent('query:string -> answer:string', {
       contextFields: [],

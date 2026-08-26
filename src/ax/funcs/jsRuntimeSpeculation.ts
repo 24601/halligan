@@ -556,6 +556,43 @@ function splitCallArguments(
   return undefined;
 }
 
+function isDeclarationEquals(
+  statement: readonly Token[],
+  index: number
+): boolean {
+  const name = statement[index - 1];
+  const declaration = statement[index - 2];
+  return (
+    name?.kind === 'identifier' &&
+    (declaration?.value === 'const' ||
+      declaration?.value === 'let' ||
+      declaration?.value === 'var')
+  );
+}
+
+function isEqualityEquals(statement: readonly Token[], index: number): boolean {
+  return (
+    statement[index - 1]?.value === '=' || statement[index + 1]?.value === '='
+  );
+}
+
+function isUnsupportedMutation(statement: readonly Token[]): boolean {
+  for (let index = 0; index < statement.length; index++) {
+    const token = statement[index]!;
+    if (token.kind !== 'punctuator') continue;
+    const value = String(token.value);
+    const next = statement[index + 1]?.value;
+    if (value === '+' && next === '+') return true;
+    if (value === '-' && next === '-') return true;
+    if ((value === '+' || value === '-') && next === '=') return true;
+    if (value !== '=') continue;
+    if (isEqualityEquals(statement, index)) continue;
+    if (isDeclarationEquals(statement, index)) continue;
+    return true;
+  }
+  return false;
+}
+
 function parsePlannedCall(
   statement: readonly Token[],
   configuredTools: ReadonlySet<string>
@@ -966,6 +1003,10 @@ export class JSRuntimeSpeculationTurn {
     let callLimitReported = false;
 
     for (const statement of statements) {
+      if (isUnsupportedMutation(statement)) {
+        this.emit({ kind: 'blocked', reason: 'unsafe-dependency' });
+        return;
+      }
       let parsed: PlannedCall | undefined;
       try {
         parsed = parsePlannedCall(statement, configuredTools);

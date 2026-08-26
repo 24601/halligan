@@ -245,6 +245,7 @@ Typesafe
 typetest
 typetests
 ulaw
+unawaited
 unminified
 unranked
 unscored

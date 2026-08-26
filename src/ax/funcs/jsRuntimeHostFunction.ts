@@ -25,6 +25,13 @@ export type JSRuntimeHostFunctionSpeculationLaunch = Readonly<{
   retain?: () => void;
   /** Abort the physical speculative launch without starting a second call. */
   abort?: (reason?: unknown) => void;
+  /** Release this launch's uncommitted budget debit only. */
+  releaseDebit?: () => void;
+  /**
+   * Apply deferred protocol side effects only after this launch is claimed.
+   * Unclaimed speculation must not mutate the shared completion payload.
+   */
+  claimProtocol?: () => void;
 }>;
 
 export type JSRuntimeHostFunctionSpeculationAdapter = Readonly<{

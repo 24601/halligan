@@ -44,6 +44,10 @@ export interface LlmQueryBindings {
   ) => Promise<string | string[]>;
 }
 
+type LlmQueryDebitReservation = {
+  register(release: () => void): void;
+};
+
 export function buildLlmQueryBindings(
   deps: LlmQueryBindingsDeps
 ): LlmQueryBindings {
@@ -74,7 +78,8 @@ export function buildLlmQueryBindings(
       | { query: string; context?: unknown }
       | readonly { query: string; context?: unknown }[],
     ctx?: unknown,
-    invocationAbortSignal: AbortSignal | undefined = effectiveAbortSignal
+    invocationAbortSignal: AbortSignal | undefined = effectiveAbortSignal,
+    reservation?: LlmQueryDebitReservation
   ): Promise<string | string[]> => {
     if (
       !Array.isArray(queryOrQueries) &&
@@ -85,7 +90,8 @@ export function buildLlmQueryBindings(
       return runLlmQuery(
         queryOrQueries.query,
         queryOrQueries.context ?? ctx,
-        invocationAbortSignal
+        invocationAbortSignal,
+        reservation
       );
     }
 
@@ -149,6 +155,18 @@ export function buildLlmQueryBindings(
       }
       llmQueryBudgetState.global.used++;
       llmQueryBudgetState.localUsed++;
+      const debit = {
+        global: 1,
+        local: 1,
+        released: false,
+      };
+      const releaseOwnDebit = () => {
+        if (debit.released) return;
+        debit.released = true;
+        llmQueryBudgetState.global.used -= debit.global;
+        llmQueryBudgetState.localUsed -= debit.local;
+      };
+      reservation?.register(releaseOwnDebit);
 
       const maxAttempts = 3;
       let lastError: unknown;
@@ -313,7 +331,7 @@ export function buildLlmQueryBindings(
       }
     }
 
-    const result = await runSingleLlmQuery(query, ctx);
+    const result = await runSingleLlmQuery(query, ctx, invocationAbortSignal);
     if (llmQueryBudgetState.localUsed === llmCallWarnThreshold) {
       const remaining =
         llmQueryBudgetState.localMax - llmQueryBudgetState.localUsed;
@@ -327,39 +345,41 @@ export function buildLlmQueryBindings(
   setJSRuntimeHostFunctionSpeculationAdapter(llmQuery, {
     launch: (args, signal) => {
       let retained = false;
-      const usedBefore = {
-        global: llmQueryBudgetState.global.used,
-        local: llmQueryBudgetState.localUsed,
+      const ownedDebits: Array<() => void> = [];
+      const reservation: LlmQueryDebitReservation = {
+        register(release) {
+          ownedDebits.push(release);
+        },
       };
-      const refundIfAbandoned = () => {
-        if (retained) return;
-        if (llmQueryBudgetState.global.used > usedBefore.global) {
-          llmQueryBudgetState.global.used = usedBefore.global;
-        }
-        if (llmQueryBudgetState.localUsed > usedBefore.local) {
-          llmQueryBudgetState.localUsed = usedBefore.local;
-        }
-      };
+      const invocationSignal = mergeAbortSignals(effectiveAbortSignal, signal);
       const result = runLlmQuery(
         args[0] as Parameters<LlmQueryBindings['llmQuery']>[0],
         args[1],
-        mergeAbortSignals(effectiveAbortSignal, signal)
+        invocationSignal,
+        reservation
       );
+      const refundIfAbandoned = () => {
+        if (retained) return;
+        for (const release of ownedDebits) release();
+        ownedDebits.length = 0;
+      };
       void result.catch(() => {
         refundIfAbandoned();
       });
-      signal.addEventListener(
-        'abort',
-        () => {
-          refundIfAbandoned();
-        },
-        { once: true }
-      );
+      const onAbort = () => {
+        refundIfAbandoned();
+      };
+      if (signal.aborted) {
+        onAbort();
+      } else {
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
       return {
         result,
         retain: () => {
           retained = true;
         },
+        releaseDebit: refundIfAbandoned,
       };
     },
     commit: (_args, launch) => {

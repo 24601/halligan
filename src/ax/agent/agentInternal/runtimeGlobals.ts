@@ -261,7 +261,7 @@ export function wrapFunction(
   const launchFunction = (
     callArgs: Record<string, unknown>,
     invocationSignal: AbortSignal | undefined,
-    includeCompletionProtocol: boolean,
+    protocol: AxAgentCompletionProtocol | undefined,
     authorization: Awaited<ReturnType<typeof authorizeCall>>
   ): Promise<unknown> => {
     try {
@@ -269,9 +269,7 @@ export function wrapFunction(
         fn.func(callArgs, {
           abortSignal: invocationSignal,
           ai,
-          protocol: includeCompletionProtocol
-            ? protocolForTrigger?.(normalizedQualifiedName)
-            : undefined,
+          protocol,
           eventContext,
           authority: authorization?.authority,
           authorityInheritance,
@@ -283,6 +281,82 @@ export function wrapFunction(
     }
   };
 
+  const createIsolatedCompletionProtocol = (): {
+    protocol?: AxAgentCompletionProtocol;
+    claimProtocol: () => void;
+  } => {
+    if (!protocolForTrigger) {
+      return { claimProtocol: () => {} };
+    }
+    const real = protocolForTrigger(normalizedQualifiedName);
+    const queued: Array<
+      | Readonly<{
+          kind: 'final' | 'askClarification' | 'guideAgent';
+          args: unknown[];
+        }>
+      | Readonly<{ kind: 'success' | 'failed'; message: string }>
+    > = [];
+    let claimed = false;
+    const protocol: AxAgentCompletionProtocol = {
+      final: (...args: unknown[]): never => {
+        if (claimed) return real.final(...args);
+        queued.push({ kind: 'final', args });
+        throw new AxAgentProtocolCompletionSignal('final');
+      },
+      askClarification: (...args: unknown[]): never => {
+        if (claimed) return real.askClarification(...args);
+        queued.push({ kind: 'askClarification', args });
+        throw new AxAgentProtocolCompletionSignal('askClarification');
+      },
+      guideAgent: (guidance: string): never => {
+        if (claimed) return real.guideAgent(guidance);
+        queued.push({ kind: 'guideAgent', args: [guidance] });
+        throw new AxAgentProtocolCompletionSignal('guide_agent');
+      },
+      success: async (message: string): Promise<void> => {
+        if (claimed) return real.success(message);
+        queued.push({ kind: 'success', message });
+      },
+      failed: async (message: string): Promise<void> => {
+        if (claimed) return real.failed(message);
+        queued.push({ kind: 'failed', message });
+      },
+    };
+    return {
+      protocol,
+      claimProtocol: () => {
+        if (claimed) return;
+        claimed = true;
+        const replay = () => {
+          for (const item of queued) {
+            if (item.kind === 'success') {
+              void real.success(item.message);
+              continue;
+            }
+            if (item.kind === 'failed') {
+              void real.failed(item.message);
+              continue;
+            }
+            if (item.kind === 'final') {
+              real.final(...item.args);
+            } else if (item.kind === 'askClarification') {
+              real.askClarification(...item.args);
+            } else {
+              real.guideAgent(String(item.args[0] ?? ''));
+            }
+          }
+        };
+        try {
+          replay();
+        } catch (error) {
+          if (!(error instanceof AxAgentProtocolCompletionSignal)) {
+            throw error;
+          }
+        }
+      },
+    };
+  };
+
   const runLogicalCall = async (
     callArgs: Record<string, unknown>,
     invocationSignal: AbortSignal | undefined
@@ -291,7 +365,12 @@ export function wrapFunction(
     if (onFunctionCall) await observeCall(callArgs);
     return observeResult(
       callArgs,
-      launchFunction(callArgs, invocationSignal, true, authorization)
+      launchFunction(
+        callArgs,
+        invocationSignal,
+        protocolForTrigger?.(normalizedQualifiedName),
+        authorization
+      )
     );
   };
 
@@ -330,6 +409,7 @@ export function wrapFunction(
       );
     }
     speculative.retain?.();
+    speculative.claimProtocol?.();
     return observeResult(
       normalizeCallArgs(args),
       speculative.result,
@@ -348,10 +428,11 @@ export function wrapFunction(
         try {
           const authorization = await authorizeCall(invocationSignal);
           const argumentsBefore = cloneArguments([callArgs]);
+          const isolated = createIsolatedCompletionProtocol();
           const result = launchFunction(
             callArgs,
             invocationSignal,
-            true,
+            isolated.protocol,
             authorization
           );
           const serializedArgumentsAfter = result.then(
@@ -365,6 +446,7 @@ export function wrapFunction(
             serializedArgumentsAfter,
             signal: invocationSignal,
             canClaim: () => invocationSignal?.aborted !== true,
+            claimProtocol: isolated.claimProtocol,
           };
         } catch (error) {
           const result = Promise.reject(error);
