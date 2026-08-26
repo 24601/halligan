@@ -226,6 +226,79 @@ describe('AxEventRuntime', () => {
     await runtime.close();
   });
 
+  it('clears a rejecting authority resolver from activeRuns so waitForIdle can finish', async () => {
+    const invoked = vi.fn();
+    const runtime = new AxEventRuntime({
+      maxAttempts: 1,
+      authority: async () => {
+        throw new Error('resolver rejected');
+      },
+      routes: [
+        eventRoute({
+          id: 'rejecting-authority',
+          match: { types: ['authority.reject'] },
+          action: 'wake',
+          target: eventTarget({
+            id: 'rejecting-authority-target',
+            ai,
+            program: program(invoked),
+            mapInput: () => ({}),
+            retrySafety: 'idempotent',
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    const receipt = await runtime.publish(
+      ingress('authority-reject-1', 'authority.reject')
+    );
+    await expect(runtime.waitForIdle(200)).resolves.toBeUndefined();
+    expect(invoked).not.toHaveBeenCalled();
+    expect((await runtime.listDeadLetters()).length).toBeGreaterThan(0);
+    expect(receipt.deliveryIds).toHaveLength(1);
+    await runtime.close({ drain: false });
+  });
+
+  it('does not wedge close({drain:false}) on a never-settling authority resolver', async () => {
+    const invoked = vi.fn();
+    let lateReject: ((reason?: unknown) => void) | undefined;
+    const runtime = new AxEventRuntime({
+      maxAttempts: 1,
+      authority: () =>
+        new Promise<undefined>((_resolve, reject) => {
+          lateReject = reject;
+        }),
+      routes: [
+        eventRoute({
+          id: 'hanging-authority',
+          match: { types: ['authority.hang'] },
+          action: 'wake',
+          target: eventTarget({
+            id: 'hanging-authority-target',
+            ai,
+            program: program(invoked),
+            mapInput: () => ({}),
+            retrySafety: 'idempotent',
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    await runtime.publish(ingress('authority-hang-1', 'authority.hang'));
+    for (let index = 0; index < 20; index++) await Promise.resolve();
+    const closed = runtime.close({ drain: false });
+    await expect(
+      Promise.race([
+        closed.then(() => 'closed'),
+        new Promise((resolve) => setTimeout(() => resolve('timeout'), 100)),
+      ])
+    ).resolves.toBe('closed');
+    expect(invoked).not.toHaveBeenCalled();
+    lateReject?.(new Error('late resolver rejection'));
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+
   it('re-resolves current authority before sink dead-letter redrive', async () => {
     const store = new AxInMemoryEventStore();
     const write = vi

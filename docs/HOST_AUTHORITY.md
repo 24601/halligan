@@ -115,6 +115,9 @@ MCP/UCP operations are attached to an Ax program or agent.
 each delivery. The runtime ignores authority-looking event data. It binds event
 operations to the verified ingress tenant and passes the resolved context into
 the target program, live agent runtime, MCP/UCP tools, and sinks.
+Resolver callbacks are raced against the run abort signal and a 30s timeout.
+Late rejection after cancel/timeout is observed and swallowed. Failure cannot
+leave a ghost `activeRuns` entry or prevent `close({drain:false})`.
 Sink dead-letter redrive calls the resolver again and requires a current
 `event.sink.write` receipt; a receipt from the original delivery is never reused.
 
