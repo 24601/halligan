@@ -190,6 +190,62 @@ describe('AxJSRuntime secure defaults', () => {
     );
     expect(Object.isFrozen(captured.resourceLimits)).toBe(true);
   });
+
+  it('makes every execution-affecting field non-replaceable', () => {
+    const runtime = new AxJSRuntime();
+    const fields = [
+      'language',
+      'capabilities',
+      'timeout',
+      'permissions',
+      'allowUnsafeNodeHostAccess',
+      'nodeWorkerPoolSize',
+      'debugNodeWorkerPool',
+      'outputMode',
+      'captureConsole',
+      'blockDynamicImport',
+      'allowedModules',
+      'freezeIntrinsics',
+      'blockShadowRealm',
+      'lockWorkerIPC',
+      'preventGlobalThisExtensions',
+      'useNodePermissionModel',
+      'nodePermissionAllowlist',
+      'resourceLimits',
+      'allowDenoRemoteImport',
+    ] as const;
+    const ownStateFields = Object.keys(
+      Object.getOwnPropertyDescriptors(runtime)
+    ).filter(
+      (field) => field !== 'createSession' && field !== 'getUsageInstructions'
+    );
+    expect(ownStateFields.sort()).toEqual([...fields].sort());
+
+    for (const field of fields) {
+      expect(Object.getOwnPropertyDescriptor(runtime, field)).toMatchObject({
+        writable: false,
+        configurable: false,
+      });
+      expect(Reflect.set(runtime, field, Symbol('replacement'))).toBe(false);
+      expect(Reflect.deleteProperty(runtime, field)).toBe(false);
+      expect(() =>
+        Object.defineProperty(runtime, field, {
+          value: Symbol('replacement'),
+        })
+      ).toThrow(TypeError);
+    }
+
+    runtime.createSession();
+    expect(mockPostMessage.mock.calls[0]![0]).toMatchObject({
+      permissions: [],
+      allowUnsafeNodeHostAccess: false,
+      blockDynamicImport: true,
+      allowedModules: [],
+      freezeIntrinsics: true,
+      blockShadowRealm: true,
+      lockWorkerIPC: true,
+    });
+  });
 });
 
 describe('AxJSRuntime', () => {

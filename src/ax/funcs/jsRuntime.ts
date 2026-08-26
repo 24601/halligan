@@ -43,6 +43,28 @@ export type { AxJSRuntimeNodePermissionAllowlist, AxJSRuntimeResourceLimits };
 
 export type AxJSRuntimeOutputMode = 'return' | 'stdout';
 
+const immutableRuntimeFieldNames = [
+  'language',
+  'capabilities',
+  'timeout',
+  'permissions',
+  'allowUnsafeNodeHostAccess',
+  'nodeWorkerPoolSize',
+  'debugNodeWorkerPool',
+  'outputMode',
+  'captureConsole',
+  'blockDynamicImport',
+  'allowedModules',
+  'freezeIntrinsics',
+  'blockShadowRealm',
+  'lockWorkerIPC',
+  'preventGlobalThisExtensions',
+  'useNodePermissionModel',
+  'nodePermissionAllowlist',
+  'resourceLimits',
+  'allowDenoRemoteImport',
+] as const;
+
 /**
  * Browser-compatible JavaScript interpreter for RLM using Web Workers.
  * Creates persistent sessions where variables survive across `execute()` calls.
@@ -338,36 +360,17 @@ export class AxJSRuntime implements AxCodeRuntime {
         platform: platformAuthority,
       },
     });
-  }
-
-  /**
-   * Computes Node execArgv for the Permission Model when it should engage,
-   * otherwise returns undefined.
-   *
-   * - 'auto': engages unconditionally on supported Node versions; skips
-   *   silently where the Node Permission Model is unavailable.
-   * - true: engages unconditionally; hard-fails on Node < 20.
-   * - false: never engages.
-   */
-  private computeNodeExecArgv(): string[] | undefined {
-    return computeNodePermissionExecArgv({
-      mode: this.useNodePermissionModel,
-      permissions: this.permissions,
-      nodePermissionAllowlist: this.nodePermissionAllowlist,
-    });
-  }
-
-  private computeSecurityPostureHash(): string {
-    return computeSecurityPostureHash({
-      permissions: this.permissions,
-      allowUnsafeNodeHostAccess: this.allowUnsafeNodeHostAccess,
-      blockDynamicImport: this.blockDynamicImport,
-      allowedModules: this.allowedModules,
-      freezeIntrinsics: this.freezeIntrinsics,
-      blockShadowRealm: this.blockShadowRealm,
-      lockWorkerIPC: this.lockWorkerIPC,
-      preventGlobalThisExtensions: this.preventGlobalThisExtensions,
-    });
+    for (const key of immutableRuntimeFieldNames) {
+      const descriptor = Object.getOwnPropertyDescriptor(this, key);
+      if (!descriptor || !('value' in descriptor)) {
+        throw new Error(`AxJSRuntime.${key} must be an own data property`);
+      }
+      Object.defineProperty(this, key, {
+        ...descriptor,
+        writable: false,
+        configurable: false,
+      });
+    }
   }
 
   public getUsageInstructions(): string {
@@ -413,9 +416,22 @@ export class AxJSRuntime implements AxCodeRuntime {
     // Computed up front so any Node-version/permission-model misconfigurations
     // throw at session creation, not on first execute.
     const nodeExecArgv = isNodeRuntime()
-      ? this.computeNodeExecArgv()
+      ? computeNodePermissionExecArgv({
+          mode: this.useNodePermissionModel,
+          permissions: this.permissions,
+          nodePermissionAllowlist: this.nodePermissionAllowlist,
+        })
       : undefined;
-    const securityPostureHash = this.computeSecurityPostureHash();
+    const securityPostureHash = computeSecurityPostureHash({
+      permissions: this.permissions,
+      allowUnsafeNodeHostAccess: this.allowUnsafeNodeHostAccess,
+      blockDynamicImport: this.blockDynamicImport,
+      allowedModules: this.allowedModules,
+      freezeIntrinsics: this.freezeIntrinsics,
+      blockShadowRealm: this.blockShadowRealm,
+      lockWorkerIPC: this.lockWorkerIPC,
+      preventGlobalThisExtensions: this.preventGlobalThisExtensions,
+    });
     const nodeWorkerPool = isNodeRuntime()
       ? getNodeWorkerPool(
           source,

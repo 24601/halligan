@@ -259,6 +259,7 @@ function ownDataValue(value: unknown, key: string, path: string): unknown {
 }
 
 type AxRuntimeImplementation = Readonly<{
+  capabilities: AxRuntimeCapabilities | undefined;
   language: string | undefined;
   createSession: AxCodeRuntime['createSession'];
   getUsageInstructions: AxCodeRuntime['getUsageInstructions'];
@@ -289,6 +290,7 @@ function captureRuntimeImplementation(
     return descriptor.value;
   };
   return frozenNullRecord<AxRuntimeImplementation>([
+    ['capabilities', captured('capabilities')],
     ['language', captured('language')],
     ['createSession', captured('createSession', true)],
     ['getUsageInstructions', captured('getUsageInstructions', true)],
@@ -1030,6 +1032,7 @@ function resolveAdmission(
     const current = captureRuntimeImplementation(runtime);
     const stale =
       !implementation ||
+      current.capabilities !== implementation.capabilities ||
       current.language !== implementation.language ||
       current.createSession !== implementation.createSession ||
       current.getUsageInstructions !== implementation.getUsageInstructions ||

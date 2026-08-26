@@ -323,6 +323,10 @@ Options quick reference:
 - `allowDenoRemoteImport?: boolean`: default `false`.
 - `allowUnsafeNodeHostAccess?: boolean`: default `false`.
 
+Security-relevant options and the capability declaration are immutable after
+`AxJSRuntime` construction; create a new runtime instead of reconfiguring an
+admitted instance.
+
 Recipes:
 
 ```typescript

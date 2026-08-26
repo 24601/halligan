@@ -73,6 +73,12 @@ null-prototype boundary. Optional timeout and memory bounds are copied only
 from own data properties; ambient prototype values cannot become admitted
 bounds.
 
+`AxJSRuntime` additionally makes every execution-affecting configuration field
+and its capability declaration non-writable and non-configurable after
+construction. Reconfiguration requires a new runtime; post-admission property
+replacement cannot change worker initialization, Node permission arguments,
+pool security posture, timeout, or resource limits.
+
 Node `worker_threads.resourceLimits` constrain selected V8 areas only and
 explicitly exclude external data such as `ArrayBuffer`s. They are therefore
 not projected into `AxJSRuntime.capabilities.resources.memoryMb`. A host may
@@ -122,13 +128,13 @@ const { runtime: selected } = axSelectCodeRuntime(
 
 Authority/resource requirements must specify the exact
 `ax-runtime-requirements/v1` schema. Receipts are bound to a runtime identity
-and its captured method identities, deeply snapshot admitted values, and must
-be supplied out-of-band by the selecting host. Changing the candidate's
-language or executable methods after admission invalidates the receipt before
-selection. Security-aware selection returns the receipt's frozen executable
-facade, whose methods are bound to the admitted implementation, rather than the
-mutable candidate object. A runtime cannot make its declaration count as a
-receipt.
+and its captured capability-declaration and method identities, deeply snapshot
+admitted values, and must be supplied out-of-band by the selecting host.
+Changing the candidate's capability declaration, language, or executable
+methods after admission invalidates the receipt before selection.
+Security-aware selection returns the receipt's frozen executable facade, whose
+methods are bound to the admitted implementation, rather than the mutable
+candidate object. A runtime cannot make its declaration count as a receipt.
 
 The facade prevents method replacement from changing the selected executable;
 it cannot generically freeze or attest implementation-private mutable state.

@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
+import {
+  axCreateRuntimeAdmissionReceipt,
+  axRuntimeCapabilityRequirementsVersion,
+  axSelectCodeRuntime,
+} from '../agent/runtimeCapabilities.js';
 import { AxJSRuntime, AxJSRuntimePermission } from './jsRuntime.js';
 
 describe('AxJSRuntime integration', () => {
@@ -1275,6 +1280,60 @@ describe('AxJSRuntime sandbox hardening', () => {
           }
         `);
         expect(result).toBe('ERR_ACCESS_DENIED');
+      } finally {
+        session.close();
+      }
+    });
+
+    it('does not widen host access after admission-time instance mutation', async () => {
+      const runtime = new AxJSRuntime({
+        outputMode: 'return',
+        useNodePermissionModel: false,
+      });
+      const admission = axCreateRuntimeAdmissionReceipt(runtime, {
+        evaluator: 'AxJSRuntime immutable configuration test',
+        source: 'host-policy',
+        authority: runtime.capabilities.authority,
+        resources: runtime.capabilities.resources,
+      });
+
+      expect(Reflect.set(runtime, 'allowUnsafeNodeHostAccess', true)).toBe(
+        false
+      );
+      const selected = axSelectCodeRuntime(
+        [runtime],
+        {
+          schemaVersion: axRuntimeCapabilityRequirementsVersion,
+          authority: {
+            host: 'denied',
+            platform: { filesystem: 'denied' },
+          },
+        },
+        { admissions: [admission] }
+      );
+
+      const session = selected.runtime.createSession();
+      try {
+        const result = await session.execute(`
+          await Promise.resolve();
+          return (() => {
+            try {
+              const loadBuiltin =
+                typeof process !== 'undefined' &&
+                typeof process.getBuiltinModule === 'function'
+                  ? process.getBuiltinModule.bind(process)
+                  : typeof require === 'function'
+                    ? require
+                    : undefined;
+              if (!loadBuiltin) return 'BLOCKED';
+              loadBuiltin('node:fs').readFileSync('/etc/hosts');
+              return 'FILESYSTEM READ SUCCEEDED';
+            } catch {
+              return 'BLOCKED';
+            }
+          })()
+        `);
+        expect(result).toBe('BLOCKED');
       } finally {
         session.close();
       }

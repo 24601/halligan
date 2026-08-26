@@ -671,6 +671,34 @@ describe('axSelectCodeRuntime', () => {
     expect(replacementExecutions).toBe(0);
   });
 
+  it('rejects a receipt after the capability declaration is replaced', () => {
+    const declaration = capabilities({
+      authority: admissionEvidence().authority,
+      resources: admissionEvidence().resources,
+    });
+    const candidate = runtime(declaration);
+    const admission = axCreateRuntimeAdmissionReceipt(
+      candidate,
+      admissionEvidence()
+    );
+    (candidate as { capabilities: AxRuntimeCapabilities }).capabilities =
+      capabilities({
+        authority: admissionEvidence().authority,
+        resources: admissionEvidence().resources,
+      });
+
+    expect(() =>
+      axSelectCodeRuntime(
+        [candidate],
+        {
+          schemaVersion: axRuntimeCapabilityRequirementsVersion,
+          authority: { host: 'denied' },
+        },
+        { admissions: [admission] }
+      )
+    ).toThrow(/admission no longer matches runtime implementation/);
+  });
+
   it('returns a frozen admitted executable immune to later method replacement', () => {
     let admittedExecutions = 0;
     let replacementExecutions = 0;
@@ -712,6 +740,7 @@ describe('axSelectCodeRuntime', () => {
 
   it('does not admit inherited executable metadata', () => {
     const metadataKeys = [
+      'capabilities',
       'language',
       'createSession',
       'getUsageInstructions',
@@ -772,6 +801,7 @@ describe('axSelectCodeRuntime', () => {
       }
     }
     expect(reads).toEqual({
+      capabilities: 0,
       language: 0,
       createSession: 0,
       getUsageInstructions: 0,
@@ -781,6 +811,7 @@ describe('axSelectCodeRuntime', () => {
   });
 
   it.each([
+    'capabilities',
     'language',
     'createSession',
     'getUsageInstructions',
@@ -807,6 +838,7 @@ describe('axSelectCodeRuntime', () => {
 
   it('captures every runtime metadata field through descriptors without value gets', () => {
     const keys = [
+      'capabilities',
       'language',
       'createSession',
       'getUsageInstructions',
@@ -854,6 +886,7 @@ describe('axSelectCodeRuntime', () => {
     expect(selected.runtime).toBe(admission.executable);
     expect(valueReads).toBe(0);
     expect(descriptorReads).toEqual({
+      capabilities: 3,
       language: 2,
       createSession: 2,
       getUsageInstructions: 2,
