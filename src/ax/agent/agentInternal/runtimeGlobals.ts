@@ -203,16 +203,9 @@ export function wrapFunction(
       ReturnType<typeof serializeForEval>
     > => {
       if (!serializedArguments) return serializeForEval(callArgs);
-      try {
-        return structuredClone(await serializedArguments) as ReturnType<
-          typeof serializeForEval
-        >;
-      } catch {
-        // The worker's real call arguments remain an isolated, pre-call
-        // fallback. Never repeat a physical speculative operation solely to
-        // recover optional telemetry.
-        return serializeForEval(callArgs);
-      }
+      return structuredClone(await serializedArguments) as ReturnType<
+        typeof serializeForEval
+      >;
     };
     try {
       const value = await result;

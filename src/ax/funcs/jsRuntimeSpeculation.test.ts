@@ -275,19 +275,105 @@ describe('AxJSRuntime speculative programmatic tool calling', () => {
     ).toHaveLength(1);
   });
 
-  it('does not retry when tool-local argument mutation cannot be cloned', async () => {
+  it('propagates post-call serialization errors without retrying', async () => {
     const execute = async (enabled: boolean) => {
       let executions = 0;
-      const recorded: unknown[] = [];
+      let recorderCalls = 0;
+      const events: AxJSRuntimeSpeculationEvent[] = [];
       const wrapped = wrapFunction(
         {
           name: 'mutate',
-          description: 'Create a cycle only inside the invocation-local input',
+          description: 'Install throwing serializers on the local input',
           parameters: { type: 'object', additionalProperties: true },
-          func: (args: { nested: { self?: unknown } }) => {
+          func: (args: { nested: { toJSON?: () => unknown } }) => {
+            executions++;
+            args.nested.toJSON = () => {
+              throw new Error('json-fail');
+            };
+            Object.defineProperty(args, Symbol.toPrimitive, {
+              value: () => {
+                throw new Error('string-fail');
+              },
+            });
+            return 'ok';
+          },
+        },
+        undefined,
+        undefined,
+        undefined,
+        'tools.mutate',
+        () => {
+          recorderCalls++;
+        }
+      );
+      const runtime = new AxJSRuntime({
+        outputMode: 'return',
+        useNodePermissionModel: false,
+        speculation: enabled
+          ? speculation(events, { 'tools.mutate': pure(false) })
+          : undefined,
+      });
+      const session = runtime.createSession({ tools: { mutate: wrapped } });
+      try {
+        let outcome:
+          | { status: 'resolved'; value: unknown }
+          | { status: 'rejected'; error: string };
+        try {
+          outcome = {
+            status: 'resolved',
+            value: await session.execute(
+              'const value = await tools.mutate({ nested: { x: 1 } }); return value;'
+            ),
+          };
+        } catch (error) {
+          outcome = {
+            status: 'rejected',
+            error: error instanceof Error ? error.message : String(error),
+          };
+        }
+        return {
+          outcome,
+          executions,
+          recorderCalls,
+          events,
+        };
+      } finally {
+        session.close();
+      }
+    };
+
+    const baseline = await execute(false);
+    const speculative = await execute(true);
+
+    expect(speculative.outcome).toEqual(baseline.outcome);
+    expect(baseline.outcome).toEqual({
+      status: 'rejected',
+      error: 'string-fail',
+    });
+    expect(baseline.executions).toBe(1);
+    expect(speculative.executions).toBe(1);
+    expect(baseline.recorderCalls).toBe(0);
+    expect(speculative.recorderCalls).toBe(0);
+    expect(speculative.events.map((event) => event.kind)).toEqual(
+      expect.arrayContaining(['dispatch', 'hit'])
+    );
+  });
+
+  it('records cyclic and aliased post-call arguments without retrying', async () => {
+    const execute = async (enabled: boolean) => {
+      let executions = 0;
+      const recorded: unknown[] = [];
+      const events: AxJSRuntimeSpeculationEvent[] = [];
+      const wrapped = wrapFunction(
+        {
+          name: 'mutate',
+          description: 'Create a cycle and alias only in the local input',
+          parameters: { type: 'object', additionalProperties: true },
+          func: (args: { nested: { self?: unknown }; alias?: unknown }) => {
             executions++;
             args.nested.self = args.nested;
-            return executions;
+            args.alias = args.nested;
+            return args.alias === args.nested;
           },
         },
         undefined,
@@ -300,17 +386,18 @@ describe('AxJSRuntime speculative programmatic tool calling', () => {
         outputMode: 'return',
         useNodePermissionModel: false,
         speculation: enabled
-          ? speculation([], { 'tools.mutate': pure(false) })
+          ? speculation(events, { 'tools.mutate': pure(false) })
           : undefined,
       });
       const session = runtime.createSession({ tools: { mutate: wrapped } });
       try {
         return {
           value: await session.execute(
-            'return await tools.mutate({ nested: {} });'
+            'const value = await tools.mutate({ nested: {} }); return value;'
           ),
           executions,
           recorded,
+          events,
         };
       } finally {
         session.close();
@@ -320,9 +407,15 @@ describe('AxJSRuntime speculative programmatic tool calling', () => {
     const baseline = await execute(false);
     const speculative = await execute(true);
 
-    expect(speculative).toEqual(baseline);
+    expect(speculative.value).toBe(baseline.value);
+    expect(speculative.recorded).toEqual(baseline.recorded);
+    expect(speculative.value).toBe(true);
+    expect(baseline.executions).toBe(1);
     expect(speculative.executions).toBe(1);
     expect(speculative.recorded).toEqual(['[object Object]']);
+    expect(speculative.events.map((event) => event.kind)).toEqual(
+      expect.arrayContaining(['dispatch', 'hit'])
+    );
   });
 
   it('does not mutate worker state while planning syntactically invalid code', async () => {
