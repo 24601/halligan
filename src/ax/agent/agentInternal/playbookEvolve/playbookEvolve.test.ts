@@ -592,11 +592,28 @@ describe('agent.playbook().evolve()', () => {
   );
 
   it.each([
-    ['during the second candidate revalidation', 'during-revalidation', 4],
-    ['between accepted candidates', 'between-candidates', 3],
+    [
+      'during the second candidate revalidation',
+      'during-revalidation',
+      4,
+      /aborted/,
+    ],
+    ['between accepted candidates', 'between-candidates', 3, /aborted/],
+    [
+      'when the accepted progress observer throws',
+      'observer-throws',
+      3,
+      /progress observer failed/,
+    ],
+    [
+      'when accepted evidence recording throws',
+      'evidence-throws',
+      3,
+      /evidence recorder failed/,
+    ],
   ] as const)(
-    'restores the live playbook byte-for-byte when apply:false aborts %s',
-    async (_, abortWhen, expectedCandidateMetricCalls) => {
+    'restores the live playbook byte-for-byte when apply:false fails %s',
+    async (_, abortWhen, expectedCandidateMetricCalls, expectedError) => {
       const controller = new AbortController();
       const ai = new AxMockAIService({
         features: { functions: false, streaming: false },
@@ -652,6 +669,11 @@ describe('agent.playbook().evolve()', () => {
             updatedBulletIds: [...entry.updatedBulletIds],
           }));
         },
+        recordEvidence: () => {
+          if (abortWhen === 'evidence-throws') {
+            throw new Error('evidence recorder failed');
+          }
+        },
       };
       const self = {
         init: { ai },
@@ -705,17 +727,17 @@ describe('agent.playbook().evolve()', () => {
               return 0;
             },
             onProgress: ({ phase, message }) => {
-              if (
-                abortWhen === 'between-candidates' &&
-                phase === 'validation' &&
-                message.endsWith(': ACCEPTED')
-              ) {
-                controller.abort('abort between accepted candidates');
+              if (phase === 'validation' && message.endsWith(': ACCEPTED')) {
+                if (abortWhen === 'between-candidates') {
+                  controller.abort('abort between accepted candidates');
+                } else if (abortWhen === 'observer-throws') {
+                  throw new Error('progress observer failed');
+                }
               }
             },
           }
         )
-      ).rejects.toThrow(/aborted/);
+      ).rejects.toThrow(expectedError);
 
       expect(candidateMetricCalls).toBe(expectedCandidateMetricCalls);
       expect(handle.getState()).toEqual(before);

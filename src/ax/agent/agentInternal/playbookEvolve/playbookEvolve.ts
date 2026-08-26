@@ -287,152 +287,153 @@ export async function evolveAgentPlaybook<
       applied.rollback();
     }
   };
+  let inFlight: AxAppliedProposal | undefined;
 
-  for (const weakness of weaknesses) {
-    if (options?.abortSignal?.aborted) {
-      if (options.apply === false) {
-        rollbackAccepted();
+  try {
+    for (const weakness of weaknesses) {
+      if (options?.abortSignal?.aborted) {
+        throw new Error('AxAgent.playbook().evolve(): aborted');
       }
-      throw new Error('AxAgent.playbook().evolve(): aborted');
-    }
-    const proposal = buildProposal(weakness);
-    const requiredCalls =
-      (normalized.train.length + (normalized.validation?.length ?? 0)) *
-      runsPerTask;
-    if (verify && budget.remaining < requiredCalls) {
-      outcomes.push({
-        proposal,
-        status: 'rejected',
-        accepted: false,
-        reason: 'metric_budget exhausted before validation',
-        heldIn: { before: heldIn, after: heldIn },
-      });
-      progress('validation', `${weakness.id}: budget exhausted, skipped`);
-      continue;
-    }
+      const proposal = buildProposal(weakness);
+      const requiredCalls =
+        (normalized.train.length + (normalized.validation?.length ?? 0)) *
+        runsPerTask;
+      if (verify && budget.remaining < requiredCalls) {
+        outcomes.push({
+          proposal,
+          status: 'rejected',
+          accepted: false,
+          reason: 'metric_budget exhausted before validation',
+          heldIn: { before: heldIn, after: heldIn },
+        });
+        progress('validation', `${weakness.id}: budget exhausted, skipped`);
+        continue;
+      }
 
-    progress('proposal', `${weakness.id}: applying playbook proposal`);
-    let applied: AxAppliedProposal;
-    try {
-      applied = await applyProposal({ proposal, playbookHandle });
-    } catch (err) {
-      outcomes.push({
-        proposal,
-        status: 'rejected',
-        accepted: false,
-        reason: `apply failed: ${err instanceof Error ? err.message : String(err)}`,
-        heldIn: { before: heldIn, after: heldIn },
-      });
-      continue;
-    }
+      progress('proposal', `${weakness.id}: applying playbook proposal`);
+      let applied: AxAppliedProposal;
+      try {
+        applied = await applyProposal({ proposal, playbookHandle });
+      } catch (err) {
+        outcomes.push({
+          proposal,
+          status: 'rejected',
+          accepted: false,
+          reason: `apply failed: ${err instanceof Error ? err.message : String(err)}`,
+          heldIn: { before: heldIn, after: heldIn },
+        });
+        continue;
+      }
+      inFlight = applied;
 
-    // Trust-batch: keep the lesson without a gate.
-    if (!verify) {
-      accepted.push(applied);
-      outcomes.push({
-        proposal,
-        status: 'accepted',
-        accepted: true,
-        reason: 'applied without verification (verify: false)',
-        heldIn: { before: heldIn, after: heldIn },
-      });
-      progress('validation', `${weakness.id}: applied (trust-batch)`);
-      continue;
-    }
+      // Trust-batch: keep the lesson without a gate.
+      if (!verify) {
+        accepted.push(applied);
+        inFlight = undefined;
+        outcomes.push({
+          proposal,
+          status: 'accepted',
+          accepted: true,
+          reason: 'applied without verification (verify: false)',
+          heldIn: { before: heldIn, after: heldIn },
+        });
+        progress('validation', `${weakness.id}: applied (trust-batch)`);
+        continue;
+      }
 
-    let revalTrain: Awaited<ReturnType<typeof runAgentEvalBatch<IN, OUT>>>;
-    let revalHeldOutBatch:
-      | Awaited<ReturnType<typeof runAgentEvalBatch<IN, OUT>>>
-      | undefined;
-    try {
-      revalTrain = await runAgentEvalBatch<IN, OUT>({
+      const revalTrain = await runAgentEvalBatch<IN, OUT>({
         ...batchArgs,
         tasks: normalized.train,
       });
+      let revalHeldOutBatch:
+        | Awaited<ReturnType<typeof runAgentEvalBatch<IN, OUT>>>
+        | undefined;
       if (normalized.validation?.length) {
         revalHeldOutBatch = await runAgentEvalBatch<IN, OUT>({
           ...batchArgs,
           tasks: normalized.validation,
         });
       }
-    } catch (err) {
-      applied.rollback();
-      if (options?.apply === false) {
-        rollbackAccepted();
+      let revalHeldOut: number | undefined;
+      let revalHeldOutExhausted = false;
+      if (revalHeldOutBatch) {
+        revalHeldOut = revalHeldOutBatch.mean;
+        revalHeldOutExhausted = revalHeldOutBatch.exhausted;
       }
-      throw err;
-    }
-    let revalHeldOut: number | undefined;
-    let revalHeldOutExhausted = false;
-    if (revalHeldOutBatch) {
-      revalHeldOut = revalHeldOutBatch.mean;
-      revalHeldOutExhausted = revalHeldOutBatch.exhausted;
-    }
 
-    // A re-eval that exhausted mid-way produced a subset mean — comparing it
-    // to the full-set baseline is apples-to-oranges, so refuse the accept.
-    const revalComplete = requireHeldOut
-      ? revalTrain.complete && revalHeldOutBatch?.complete === true
-      : !revalTrain.exhausted && !revalHeldOutExhausted;
-    const gainOk = revalComplete && revalTrain.mean - heldIn >= minHeldInGain;
-    const heldOutOk =
-      revalHeldOut === undefined ||
-      heldOut === undefined ||
-      revalHeldOut - heldOut >= -epsilon;
-    const accept = revalComplete && gainOk && heldOutOk;
+      // A re-eval that exhausted mid-way produced a subset mean — comparing it
+      // to the full-set baseline is apples-to-oranges, so refuse the accept.
+      const revalComplete = requireHeldOut
+        ? revalTrain.complete && revalHeldOutBatch?.complete === true
+        : !revalTrain.exhausted && !revalHeldOutExhausted;
+      const gainOk = revalComplete && revalTrain.mean - heldIn >= minHeldInGain;
+      const heldOutOk =
+        revalHeldOut === undefined ||
+        heldOut === undefined ||
+        revalHeldOut - heldOut >= -epsilon;
+      const accept = revalComplete && gainOk && heldOutOk;
 
-    outcomes.push({
-      proposal,
-      status: accept ? 'accepted' : 'rejected',
-      accepted: accept,
-      reason:
-        requireHeldOut && !revalTrain.complete
-          ? 'held-in evaluation incomplete or errored'
-          : requireHeldOut && revalHeldOutBatch?.complete !== true
-            ? 'held-out evaluation incomplete or errored'
-            : !revalComplete
-              ? 'metric_budget exhausted during re-evaluation'
-              : accept
-                ? heldOut === undefined
-                  ? 'held-in improved (no held-out set provided — consider one)'
-                  : 'held-in improved, held-out non-regressing'
-                : !gainOk
-                  ? `held-in gain ${(revalTrain.mean - heldIn).toFixed(3)} below ${minHeldInGain}`
-                  : `held-out regressed ${((revalHeldOut ?? 0) - (heldOut ?? 0)).toFixed(3)}`,
-      heldIn: { before: heldIn, after: revalTrain.mean },
-      ...(revalHeldOut !== undefined && heldOut !== undefined
-        ? { heldOut: { before: heldOut, after: revalHeldOut } }
-        : {}),
-    });
-
-    if (accept) {
-      playbookHandle?.recordEvidence?.(applied.bulletIds, {
-        source: 'agent-evolve',
-        sourceRunId: proposal.clusterSignature,
-        feedbackIds: [proposal.weaknessId],
-        verification: [
-          {
-            verifierId: 'agent.playbook.evolve',
-            testId: proposal.weaknessId,
-            result: 'passed',
-            summary: `held-in ${heldIn.toFixed(3)} -> ${revalTrain.mean.toFixed(3)}${
-              heldOut !== undefined && revalHeldOut !== undefined
-                ? `; held-out ${heldOut.toFixed(3)} -> ${revalHeldOut.toFixed(3)}`
-                : ''
-            }`,
-          },
-        ],
+      outcomes.push({
+        proposal,
+        status: accept ? 'accepted' : 'rejected',
+        accepted: accept,
+        reason:
+          requireHeldOut && !revalTrain.complete
+            ? 'held-in evaluation incomplete or errored'
+            : requireHeldOut && revalHeldOutBatch?.complete !== true
+              ? 'held-out evaluation incomplete or errored'
+              : !revalComplete
+                ? 'metric_budget exhausted during re-evaluation'
+                : accept
+                  ? heldOut === undefined
+                    ? 'held-in improved (no held-out set provided — consider one)'
+                    : 'held-in improved, held-out non-regressing'
+                  : !gainOk
+                    ? `held-in gain ${(revalTrain.mean - heldIn).toFixed(3)} below ${minHeldInGain}`
+                    : `held-out regressed ${((revalHeldOut ?? 0) - (heldOut ?? 0)).toFixed(3)}`,
+        heldIn: { before: heldIn, after: revalTrain.mean },
+        ...(revalHeldOut !== undefined && heldOut !== undefined
+          ? { heldOut: { before: heldOut, after: revalHeldOut } }
+          : {}),
       });
-      accepted.push(applied);
-      heldIn = revalTrain.mean;
-      if (revalHeldOut !== undefined) {
-        heldOut = revalHeldOut;
+
+      if (accept) {
+        playbookHandle?.recordEvidence?.(applied.bulletIds, {
+          source: 'agent-evolve',
+          sourceRunId: proposal.clusterSignature,
+          feedbackIds: [proposal.weaknessId],
+          verification: [
+            {
+              verifierId: 'agent.playbook.evolve',
+              testId: proposal.weaknessId,
+              result: 'passed',
+              summary: `held-in ${heldIn.toFixed(3)} -> ${revalTrain.mean.toFixed(3)}${
+                heldOut !== undefined && revalHeldOut !== undefined
+                  ? `; held-out ${heldOut.toFixed(3)} -> ${revalHeldOut.toFixed(3)}`
+                  : ''
+              }`,
+            },
+          ],
+        });
+        accepted.push(applied);
+        inFlight = undefined;
+        heldIn = revalTrain.mean;
+        if (revalHeldOut !== undefined) {
+          heldOut = revalHeldOut;
+        }
+        progress('validation', `${weakness.id}: ACCEPTED`);
+      } else {
+        applied.rollback();
+        inFlight = undefined;
+        progress('validation', `${weakness.id}: rejected, rolled back`);
       }
-      progress('validation', `${weakness.id}: ACCEPTED`);
-    } else {
-      applied.rollback();
-      progress('validation', `${weakness.id}: rejected, rolled back`);
     }
+  } catch (err) {
+    inFlight?.rollback();
+    if (options?.apply === false) {
+      rollbackAccepted();
+    }
+    throw err;
   }
 
   // ---- Finalize ----
