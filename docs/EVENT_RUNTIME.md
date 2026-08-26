@@ -83,10 +83,11 @@ another tenant's notification.
 - `observe` records or forwards telemetry without calling a model.
 - `invalidate` refreshes a declared catalog or cache without calling a model.
 - `wake` starts a target with inputs produced by its typed input plan.
-- `resume` finds the continuation that owns a correlation key and durably
-  snapshots that admission on the run before invocation. Retries and recovery
-  use only that immutable continuation/target/instance binding; correlation-key
-  reuse cannot retarget persisted work.
+- `resume` atomically and exclusively admits the continuation that owns a
+  correlation key to the fenced delivery, then snapshots the same binding on
+  the run before invocation. Retries, delivery redrive, sink redrive, and
+  recovery use only that immutable continuation/target/instance binding;
+  correlation-key reuse cannot retarget persisted work.
 
 Matching an event is never enough to invoke an LLM. The route action remains
 the authorization boundary.
@@ -188,7 +189,13 @@ context.eventContext.registerContinuation({
 
 Correlation ownership is unique within one identity scope. Progress events can
 use `observe`; terminal events use `resume`. Missing, ambiguous, or expired
-continuations are dead-lettered rather than converted into fresh work.
+continuations are dead-lettered rather than converted into fresh work. Resume
+admission is one fenced store transaction: one continuation can bind to only
+one delivery, and the immutable snapshot is retained when that delivery is
+redriven. A store that does not implement `admitContinuation(...)` fails resume
+closed while preserving source compatibility for existing `AxEventStore`
+implementations. Legacy or malformed resume records without matching delivery
+and run bindings also fail closed rather than looking up a replacement.
 
 ## Delivery and Side Effects
 
@@ -354,9 +361,12 @@ shutdown. The return deadline uses a host-native timer independent of an
 injected replay/manual event clock. Ax retains active stream iterators,
 best-effort requests `return()` after abort, ignores synchronous or asynchronous
 iterator cancellation failures, and suppresses chunks that arrive after the
-abort signal. This bounds when
-`close()` returns only: Ax cannot terminate non-cooperative JavaScript, revoke
-capabilities it already captured, or prevent its later host side effects.
+abort signal. Runtime-owned persistence, sink dispatch, effect calls, and
+continuation registration recheck abort/revocation after host awaits; claim
+heartbeats stop with the active run or runtime abort and do not retain lease
+authority after close. This bounds when `close()` returns only: Ax cannot
+terminate non-cooperative JavaScript, revoke capabilities it already captured,
+or prevent its later host side effects.
 Sources, iterators, tools, and stores must cooperate with abort or use a
 host-owned revocation/epoch check before external writes. Timed-out work and
 store close may continue after the returned promise settles. Once workers
@@ -410,13 +420,16 @@ without blocking unrelated claims, reads, close, or the supervised worker loop.
 A successful recovery atomically commits the stage and binds
 the existing succeeded run to its delivery; lease takeover then dispatches only
 final sinks from that persisted output and never invokes the target again. A
-resume route persists its admitted continuation snapshot before invocation and
-uses that exact snapshot for retries, recovered sink context, target/instance
-selection, and completion. An expired original plus a replacement under the
-same correlation key does not retarget output or consume the replacement.
-Legacy resume runs without a durable admission snapshot fail closed instead of
-performing a fresh lookup; legacy wake runs retain their configured-target
-fallback.
+resume route atomically binds the active continuation to its fenced delivery
+and persists the same snapshot on the run before invocation. Competing workers
+cannot admit the same one-shot continuation. Delivery redrive retains the
+delivery binding even though it starts a new run; sink redrive validates both
+persisted copies and reconstructs context from the original target, instance,
+and continuation. An expired original plus a replacement under the same
+correlation key does not retarget output or consume the replacement. Legacy or
+malformed resume records without matching delivery/run admission snapshots
+fail closed instead of performing a fresh lookup; legacy wake runs retain their
+configured-target fallback.
 A live provider-commit acknowledgement must still hold the exact active,
 unexpired owner/token. Stale acknowledgements and every failure after staging
 begins use structural output-persistence phases. Failed provider reconciliation
@@ -439,7 +452,7 @@ days. Settled effects default to 30 days; unresolved intent, dispatched, and
 parked effects prevent their owning delivery from being pruned. Configured
 settled-effect retention is raised to the delivery redrive horizon when needed.
 Committed payload ownership is released by stage ID when result retention
-expires. Schema v1 databases migrate in place to schema v5 with empty effect
+expires. Schema v1 databases migrate in place to schema v6 with empty effect
 and payload-stage ledgers.
 Schema v2 databases backfill request digests and canonical ingress fingerprints
 from ingress retained independently in the dedupe row, falling back to a
@@ -451,7 +464,12 @@ are removed before migration rather than rematerialized; dedupe retention is a
 privacy/replay horizon, so the same scoped event identity is accepted as new
 after that horizon. Schema v3 fingerprints
 remain authoritative, while schema v4 retains ingress independently for
-zero-route records and schema v5 adds bounded payload-stage recovery. A
+zero-route records, schema v5 adds bounded payload-stage recovery, and schema
+v6 adds exclusive continuation admission. Valid v5 run snapshots are backfilled
+only when they identify one unambiguous delivery; missing, malformed, or
+multiply used legacy bindings after a prior run are marked to fail closed. A
+never-invoked v5 resume delivery has no outcome to preserve and performs its
+first atomic admission under v6. A
 duplicate scoped event id with a changed envelope is
 otherwise rejected while its dedupe record is retained. Legacy retention
 objects default effect retention to run-metadata retention. Inline payloads

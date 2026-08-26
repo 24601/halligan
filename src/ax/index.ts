@@ -992,6 +992,7 @@ import {
 } from './event/ucpSource.js';
 import {
   axApplyEventEffectTransition,
+  axEventContinuationFingerprint,
   axEventEffectRequestDigest,
   axEventEffectRequestFingerprint,
   axEventErrorMessage,
@@ -1518,6 +1519,7 @@ export { axDefaultOptimizerLogger };
 export { axDefaultOptimizerMetricsConfig };
 export { axDeserializeOptimizedProgram };
 export { axEmitUsageEvent };
+export { axEventContinuationFingerprint };
 export { axEventEffectRequestDigest };
 export { axEventEffectRequestFingerprint };
 export { axEventErrorMessage };

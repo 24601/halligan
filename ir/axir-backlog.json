@@ -1179,7 +1179,7 @@
         "src/ax/event/conformance.ts"
       ],
       "portableSurface": "axprogram",
-      "impact": "Add the effect intent/dispatched/settled/parked state machine, resolver outcomes, effect-level replay safety, fencing, and host APIs to AxIR plus all generated language runtimes and conformance fixtures without claiming exactly-once effects.",
+      "impact": "Add the effect intent/dispatched/settled/parked state machine, resolver outcomes, effect-level replay safety, fencing, exclusive continuation admission/redrive binding, shutdown revocation, and host APIs to AxIR plus all generated language runtimes and conformance fixtures without claiming exactly-once effects.",
       "suggestedAxirWork": [
         "Add or update the TS-derived conformance fixture.",
         "Update AxIR/Core or descriptor data to match the portable TS behavior.",

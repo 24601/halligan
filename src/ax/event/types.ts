@@ -562,6 +562,8 @@ export interface AxEventDelivery {
   fencingToken?: number;
   invocationStarted?: boolean;
   recoveredFromExpiredLease?: boolean;
+  /** Immutable, exclusively admitted continuation binding for resume redrive. */
+  admittedContinuation?: Readonly<AxEventContinuation>;
 }
 
 export type AxEventRunStatus =
@@ -670,6 +672,18 @@ export interface AxEventStore {
     continuation: Readonly<AxEventContinuation>
   ): Promise<void>;
   findContinuation(
+    identityScope: string,
+    correlation: Readonly<AxEventCorrelationKey>,
+    now: number
+  ): Promise<Readonly<AxEventContinuation> | undefined>;
+  /**
+   * Atomically and exclusively binds one active continuation to a fenced
+   * delivery. Resume routes fail closed when a store does not implement this.
+   */
+  admitContinuation?(
+    deliveryId: string,
+    workerId: string,
+    fencingToken: number,
     identityScope: string,
     correlation: Readonly<AxEventCorrelationKey>,
     now: number

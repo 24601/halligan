@@ -22,6 +22,7 @@ import {
   type AxProgramStateStore,
   AxSystemEventClock,
   axApplyEventEffectTransition,
+  axEventContinuationFingerprint,
   axEventEffectRequestDigest,
   axEventEffectRequestFingerprint,
   axEventIdentityScope,
@@ -33,8 +34,8 @@ import {
 } from '@ax-llm/ax';
 import Database from 'better-sqlite3';
 
-const SCHEMA_VERSION = 5;
-const MULTI_WORKER_CONFORMANCE = 'axevent-store-v4';
+const SCHEMA_VERSION = 6;
+const MULTI_WORKER_CONFORMANCE = 'axevent-store-v5';
 const MAX_FENCING_TOKEN = Number.MAX_SAFE_INTEGER;
 const LEGACY_UNVERIFIABLE_INGRESS_PREFIX = 'legacy-unverifiable:';
 const TERMINAL = [
@@ -108,6 +109,7 @@ type DeliveryRow = {
   lease_expires_at: number | null;
   fencing_token: number;
   invocation_started: number;
+  admitted_continuation_json: string | null;
 };
 
 type PayloadStageRow = {
@@ -120,6 +122,73 @@ type PayloadStageRow = {
   expires_at: number;
   state: 'staging' | 'commit_pending' | 'committed' | 'abort_pending';
 };
+
+function parseContinuationAdmission(
+  deliveryId: string,
+  json: string
+): AxEventContinuation {
+  let value: unknown;
+  try {
+    value = JSON.parse(json);
+  } catch (error) {
+    throw new Error(
+      `outcome_unknown: continuation admission for ${deliveryId} is malformed`,
+      { cause: error }
+    );
+  }
+  if (
+    !value ||
+    typeof value !== 'object' ||
+    typeof (value as AxEventContinuation).id !== 'string' ||
+    typeof (value as AxEventContinuation).targetId !== 'string' ||
+    typeof (value as AxEventContinuation).routeId !== 'string' ||
+    typeof (value as AxEventContinuation).instanceKey !== 'string' ||
+    typeof (value as AxEventContinuation).identityScope !== 'string' ||
+    !Array.isArray((value as AxEventContinuation).correlation) ||
+    !(value as AxEventContinuation).correlation.every(
+      (correlation) =>
+        typeof correlation?.kind === 'string' &&
+        typeof correlation.value === 'string'
+    ) ||
+    !Number.isFinite((value as AxEventContinuation).createdAt)
+  ) {
+    throw new Error(
+      `outcome_unknown: continuation admission for ${deliveryId} is malformed`
+    );
+  }
+  return value as AxEventContinuation;
+}
+
+function safeParseContinuationAdmission(
+  deliveryId: string,
+  json: string | null
+): AxEventContinuation | undefined {
+  if (json === null) return;
+  try {
+    return parseContinuationAdmission(deliveryId, json);
+  } catch {
+    return;
+  }
+}
+
+function assertContinuationCorrelation(
+  deliveryId: string,
+  continuation: Readonly<AxEventContinuation>,
+  identityScope: string,
+  correlation: Readonly<AxEventCorrelationKey>
+): void {
+  if (
+    continuation.identityScope !== identityScope ||
+    !continuation.correlation.some(
+      (value) =>
+        value.kind === correlation.kind && value.value === correlation.value
+    )
+  ) {
+    throw new Error(
+      `outcome_unknown: continuation admission for ${deliveryId} conflicts with its resume correlation`
+    );
+  }
+}
 
 export class AxSQLiteEventStore
   implements AxEventStore, AxEventEffectStore, AxProgramStateStore
@@ -284,8 +353,41 @@ export class AxSQLiteEventStore
     }
     this.assertSafeFencingToken(delivery.id, delivery.fencingToken);
     const result = this.db
-      .transaction(() =>
-        this.db
+      .transaction(() => {
+        const persisted = this.db
+          .prepare(
+            `SELECT admitted_continuation_json FROM event_deliveries
+             WHERE id=? AND claimed_by=? AND fencing_token=?
+               AND status IN ('claimed','running')
+               AND lease_expires_at > ?`
+          )
+          .get(
+            delivery.id,
+            delivery.claimedBy,
+            delivery.fencingToken,
+            this.clock.now()
+          ) as { admitted_continuation_json: string | null } | undefined;
+        if (!persisted) return { changes: 0 };
+        if (delivery.admittedContinuation) {
+          if (persisted.admitted_continuation_json === null) {
+            throw new Error(
+              `Continuation admission for ${delivery.id} must be created atomically`
+            );
+          }
+          const admitted = parseContinuationAdmission(
+            delivery.id,
+            persisted.admitted_continuation_json
+          );
+          if (
+            axEventContinuationFingerprint(admitted) !==
+            axEventContinuationFingerprint(delivery.admittedContinuation)
+          ) {
+            throw new Error(
+              `Continuation admission for ${delivery.id} is immutable`
+            );
+          }
+        }
+        return this.db
           .prepare(
             `UPDATE event_deliveries SET
               status=?, attempt=?, available_at=?, run_id=?, error=?,
@@ -307,8 +409,8 @@ export class AxSQLiteEventStore
             delivery.claimedBy,
             delivery.fencingToken,
             this.clock.now()
-          )
-      )
+          );
+      })
       .immediate();
     if (result.changes !== 1) {
       throw new Error(`Stale or expired event claim for ${delivery.id}`);
@@ -587,6 +689,154 @@ export class AxSQLiteEventStore
       return;
     }
     return JSON.parse(row.continuation_json) as AxEventContinuation;
+  }
+
+  async admitContinuation(
+    deliveryId: string,
+    workerId: string,
+    fencingToken: number,
+    identityScope: string,
+    correlation: Readonly<AxEventCorrelationKey>,
+    now: number
+  ): Promise<Readonly<AxEventContinuation> | undefined> {
+    this.assertSafeFencingToken(deliveryId, fencingToken);
+    return this.db
+      .transaction((): AxEventContinuation | undefined => {
+        const delivery = this.db
+          .prepare(
+            `SELECT admitted_continuation_json, identity_scope
+             FROM event_deliveries
+             WHERE id=? AND claimed_by=? AND fencing_token=?
+               AND status IN ('claimed','running')
+               AND lease_expires_at > ?`
+          )
+          .get(deliveryId, workerId, fencingToken, this.clock.now()) as
+          | {
+              admitted_continuation_json: string | null;
+              identity_scope: string;
+            }
+          | undefined;
+        if (!delivery) {
+          throw new Error(`Stale or expired event claim for ${deliveryId}`);
+        }
+        if (delivery.identity_scope !== identityScope) {
+          throw new Error(
+            `Continuation admission identity does not own delivery ${deliveryId}`
+          );
+        }
+        if (delivery.admitted_continuation_json !== null) {
+          const admitted = parseContinuationAdmission(
+            deliveryId,
+            delivery.admitted_continuation_json
+          );
+          assertContinuationCorrelation(
+            deliveryId,
+            admitted,
+            identityScope,
+            correlation
+          );
+          const owner = this.db
+            .prepare(
+              'SELECT admitted_delivery_id FROM event_continuations WHERE id=?'
+            )
+            .get(admitted.id) as
+            | { admitted_delivery_id: string | null }
+            | undefined;
+          if (
+            owner?.admitted_delivery_id &&
+            owner.admitted_delivery_id !== deliveryId
+          ) {
+            throw new Error(
+              `outcome_unknown: continuation ${admitted.id} is bound to another delivery`
+            );
+          }
+          return admitted;
+        }
+
+        const row = this.db
+          .prepare(
+            `SELECT c.id, c.continuation_json, c.expires_at,
+                    c.admitted_delivery_id
+             FROM event_continuation_keys k
+             JOIN event_continuations c ON c.id=k.continuation_id
+             WHERE k.correlation_key=? AND c.completed_at IS NULL`
+          )
+          .get(
+            axEventScopedCorrelationKey(
+              identityScope,
+              correlation.kind,
+              correlation.value
+            )
+          ) as
+          | {
+              id: string;
+              continuation_json: string;
+              expires_at: number | null;
+              admitted_delivery_id: string | null;
+            }
+          | undefined;
+        if (!row) return;
+        if (row.expires_at !== null && row.expires_at <= now) {
+          this.db
+            .prepare(
+              'DELETE FROM event_continuation_keys WHERE continuation_id=?'
+            )
+            .run(row.id);
+          this.db
+            .prepare(
+              `UPDATE event_continuations SET completed_at=?
+               WHERE id=? AND completed_at IS NULL`
+            )
+            .run(now, row.id);
+          return;
+        }
+        if (
+          row.admitted_delivery_id &&
+          row.admitted_delivery_id !== deliveryId
+        ) {
+          return;
+        }
+        const admitted = parseContinuationAdmission(
+          deliveryId,
+          row.continuation_json
+        );
+        assertContinuationCorrelation(
+          deliveryId,
+          admitted,
+          identityScope,
+          correlation
+        );
+        const continuationUpdate = this.db
+          .prepare(
+            `UPDATE event_continuations SET admitted_delivery_id=?
+             WHERE id=? AND completed_at IS NULL
+               AND (admitted_delivery_id IS NULL OR admitted_delivery_id=?)`
+          )
+          .run(deliveryId, row.id, deliveryId);
+        if (continuationUpdate.changes !== 1) return;
+        const deliveryUpdate = this.db
+          .prepare(
+            `UPDATE event_deliveries SET admitted_continuation_json=?
+             WHERE id=? AND claimed_by=? AND fencing_token=?
+               AND status IN ('claimed','running')
+               AND lease_expires_at > ?
+               AND admitted_continuation_json IS NULL`
+          )
+          .run(
+            JSON.stringify(admitted),
+            deliveryId,
+            workerId,
+            fencingToken,
+            this.clock.now()
+          );
+        if (deliveryUpdate.changes !== 1) {
+          throw new Error(
+            `Stale or conflicting continuation admission for ${deliveryId}`
+          );
+        }
+        return admitted;
+      })
+      .immediate();
   }
 
   async completeContinuation(id: string): Promise<void> {
@@ -1481,6 +1731,10 @@ export class AxSQLiteEventStore
 
   private rowToDelivery(row: DeliveryRow): AxEventDelivery {
     this.assertSafeFencingToken(row.id, row.fencing_token);
+    const admittedContinuation = safeParseContinuationAdmission(
+      row.id,
+      row.admitted_continuation_json
+    );
     return {
       id: row.id,
       sequence: row.sequence,
@@ -1505,6 +1759,7 @@ export class AxSQLiteEventStore
         : {}),
       fencingToken: row.fencing_token,
       invocationStarted: row.invocation_started === 1,
+      ...(admittedContinuation ? { admittedContinuation } : {}),
     };
   }
 
@@ -1647,7 +1902,8 @@ export class AxSQLiteEventStore
           ordering_mode TEXT NOT NULL,
           lease_expires_at INTEGER,
           fencing_token INTEGER NOT NULL DEFAULT 0,
-          invocation_started INTEGER NOT NULL DEFAULT 0
+          invocation_started INTEGER NOT NULL DEFAULT 0,
+          admitted_continuation_json TEXT
         );
         CREATE INDEX event_delivery_claim ON event_deliveries(status, available_at, lease_expires_at, sequence);
         CREATE TABLE event_dedupe (
@@ -1671,12 +1927,16 @@ export class AxSQLiteEventStore
           continuation_json TEXT NOT NULL,
           created_at INTEGER NOT NULL,
           expires_at INTEGER,
-          completed_at INTEGER
+          completed_at INTEGER,
+          admitted_delivery_id TEXT
         );
         CREATE TABLE event_continuation_keys (
           correlation_key TEXT PRIMARY KEY,
           continuation_id TEXT NOT NULL REFERENCES event_continuations(id) ON DELETE CASCADE
         );
+        CREATE UNIQUE INDEX event_continuation_admission
+          ON event_continuations(admitted_delivery_id)
+          WHERE admitted_delivery_id IS NOT NULL;
         CREATE TABLE event_dead_letters (
           id TEXT PRIMARY KEY,
           delivery_id TEXT NOT NULL,
@@ -1716,7 +1976,7 @@ export class AxSQLiteEventStore
         );
         CREATE INDEX IF NOT EXISTS event_payload_stage_state ON event_payload_stages(state, expires_at);
         CREATE INDEX IF NOT EXISTS event_payload_stage_run ON event_payload_stages(run_id);
-        PRAGMA user_version = 5;
+        PRAGMA user_version = 6;
       `)
         )
         .immediate();
@@ -1903,6 +2163,158 @@ export class AxSQLiteEventStore
         PRAGMA user_version = 5;
       `)
         )
+        .immediate();
+      version = 5;
+    }
+    if (version === 5) {
+      this.db
+        .transaction(() => {
+          const deliveryColumns = new Set(
+            (
+              this.db.pragma('table_info(event_deliveries)') as {
+                name: string;
+              }[]
+            ).map((column) => column.name)
+          );
+          if (!deliveryColumns.has('admitted_continuation_json')) {
+            this.db.exec(
+              `ALTER TABLE event_deliveries
+               ADD COLUMN admitted_continuation_json TEXT`
+            );
+          }
+          const continuationColumns = new Set(
+            (
+              this.db.pragma('table_info(event_continuations)') as {
+                name: string;
+              }[]
+            ).map((column) => column.name)
+          );
+          if (!continuationColumns.has('admitted_delivery_id')) {
+            this.db.exec(
+              `ALTER TABLE event_continuations
+               ADD COLUMN admitted_delivery_id TEXT`
+            );
+          }
+          this.db.exec(`
+            CREATE UNIQUE INDEX IF NOT EXISTS event_continuation_admission
+              ON event_continuations(admitted_delivery_id)
+              WHERE admitted_delivery_id IS NOT NULL;
+          `);
+          const candidates = this.db
+            .prepare(
+              `SELECT d.id AS delivery_id, d.run_id, d.invocation_started,
+                      r.run_json
+               FROM event_deliveries d
+               LEFT JOIN event_runs r ON r.delivery_id=d.id
+               WHERE d.action='resume'
+               ORDER BY d.id, r.updated_at, r.id`
+            )
+            .all() as {
+            delivery_id: string;
+            run_id: string | null;
+            invocation_started: number;
+            run_json: string | null;
+          }[];
+          const byDelivery = new Map<
+            string,
+            Map<
+              string,
+              { continuation: AxEventContinuation; continuationId: string }
+            >
+          >();
+          const invalidate = this.db.prepare(
+            `UPDATE event_deliveries SET admitted_continuation_json='null'
+             WHERE id=?`
+          );
+          const invalidDeliveries = new Set<string>();
+          for (const candidate of candidates) {
+            if (invalidDeliveries.has(candidate.delivery_id)) continue;
+            if (
+              candidate.run_json === null &&
+              candidate.run_id === null &&
+              candidate.invocation_started === 0
+            ) {
+              // A never-invoked delivery has no legacy admission to preserve;
+              // leave it eligible for its first atomic admission under v6.
+              continue;
+            }
+            try {
+              const run = JSON.parse(candidate.run_json ?? '') as AxEventRun;
+              const continuation = run.admittedContinuation;
+              if (
+                !continuation ||
+                run.deliveryId !== candidate.delivery_id ||
+                run.targetId !== continuation.targetId ||
+                run.instanceKey !== continuation.instanceKey
+              ) {
+                invalidate.run(candidate.delivery_id);
+                byDelivery.delete(candidate.delivery_id);
+                invalidDeliveries.add(candidate.delivery_id);
+                continue;
+              }
+              const entries =
+                byDelivery.get(candidate.delivery_id) ?? new Map();
+              entries.set(axEventContinuationFingerprint(continuation), {
+                continuation,
+                continuationId: continuation.id,
+              });
+              byDelivery.set(candidate.delivery_id, entries);
+            } catch {
+              invalidate.run(candidate.delivery_id);
+              byDelivery.delete(candidate.delivery_id);
+              invalidDeliveries.add(candidate.delivery_id);
+            }
+          }
+          const valid = new Map<
+            string,
+            Array<{ deliveryId: string; continuation: AxEventContinuation }>
+          >();
+          for (const [deliveryId, entries] of byDelivery) {
+            if (entries.size !== 1) {
+              invalidate.run(deliveryId);
+              continue;
+            }
+            const entry = [...entries.values()][0]!;
+            const owners = valid.get(entry.continuationId) ?? [];
+            owners.push({ deliveryId, continuation: entry.continuation });
+            valid.set(entry.continuationId, owners);
+          }
+          const bindContinuation = this.db.prepare(
+            `UPDATE event_continuations SET admitted_delivery_id=?
+             WHERE id=?
+               AND (admitted_delivery_id IS NULL OR admitted_delivery_id=?)`
+          );
+          const bindDelivery = this.db.prepare(
+            `UPDATE event_deliveries SET admitted_continuation_json=?
+             WHERE id=? AND admitted_continuation_json IS NULL`
+          );
+          for (const [continuationId, entries] of valid) {
+            if (entries.length !== 1) {
+              for (const entry of entries) invalidate.run(entry.deliveryId);
+              continue;
+            }
+            const entry = entries[0]!;
+            const existing = this.db
+              .prepare('SELECT id FROM event_continuations WHERE id=?')
+              .get(continuationId);
+            if (existing) {
+              const result = bindContinuation.run(
+                entry.deliveryId,
+                continuationId,
+                entry.deliveryId
+              );
+              if (result.changes !== 1) {
+                invalidate.run(entry.deliveryId);
+                continue;
+              }
+            }
+            bindDelivery.run(
+              JSON.stringify(entry.continuation),
+              entry.deliveryId
+            );
+          }
+          this.db.pragma('user_version = 6');
+        })
         .immediate();
     }
   }

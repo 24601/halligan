@@ -107,6 +107,7 @@ export {
 export type { AxUCPWebhookEventSourceOptions } from './ucpSource.js';
 export { AxUCPWebhookEventSource } from './ucpSource.js';
 export {
+  axEventContinuationFingerprint,
   axEventEffectRequestDigest,
   axEventEffectRequestFingerprint,
   axEventIngressFingerprint,

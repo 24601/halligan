@@ -267,7 +267,7 @@ export async function runAxEventStoreConformance(
       targetId: 'target',
       routeId: 'route',
       instanceKey: 'instance',
-      identityScope: 'tenant:tenant-a',
+      identityScope: takeover!.identityScope,
       correlation: [{ kind: 'task', value: '42' }],
       createdAt: options.clock.now(),
     };
@@ -280,12 +280,43 @@ export async function runAxEventStoreConformance(
       'continuation uniqueness'
     );
     assertions++;
-    const found = await peer.store.findContinuation(
+    assert(
+      typeof peer.store.admitContinuation === 'function',
+      'exclusive continuation admission capability'
+    );
+    await expectReject(
+      store.admitContinuation!(
+        staleCandidate.id,
+        staleCandidate.claimedBy!,
+        staleCandidate.fencingToken!,
+        continuation.identityScope,
+        continuation.correlation[0]!,
+        options.clock.now()
+      ),
+      'stale continuation admission fence'
+    );
+    assertions++;
+    const admitted = await peer.store.admitContinuation!(
+      takeover!.id,
+      takeover!.claimedBy!,
+      takeover!.fencingToken!,
       continuation.identityScope,
       continuation.correlation[0]!,
       options.clock.now()
     );
-    assert(found?.id === continuation.id, 'continuation lookup');
+    assert(admitted?.id === continuation.id, 'continuation admission');
+    const repeatedAdmission = await store.admitContinuation!(
+      takeover!.id,
+      takeover!.claimedBy!,
+      takeover!.fencingToken!,
+      continuation.identityScope,
+      continuation.correlation[0]!,
+      options.clock.now()
+    );
+    assert(
+      repeatedAdmission?.id === continuation.id,
+      'continuation admission is idempotent for its delivery'
+    );
     await peer.store.completeContinuation(continuation.id);
     assert(
       !(await store.findContinuation(

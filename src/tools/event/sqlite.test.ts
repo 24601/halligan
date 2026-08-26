@@ -86,7 +86,7 @@ describe('AxSQLiteEventStore', () => {
       { clock }
     );
     expect(report.assertions).toBeGreaterThanOrEqual(32);
-    expect(report.capability.conformance?.multiWorker).toBe('axevent-store-v4');
+    expect(report.capability.conformance?.multiWorker).toBe('axevent-store-v5');
   });
 
   it('requires explicit retention and WAL-enabled local storage', () => {
@@ -227,7 +227,7 @@ describe('AxSQLiteEventStore', () => {
         completedContinuationsMs: 1_000,
       },
     });
-    expect(migrated.capabilities.conformance.schemaVersion).toBe(5);
+    expect(migrated.capabilities.conformance.schemaVersion).toBe(6);
     expect(await migrated.getDelivery(receipt.deliveryIds[0]!)).toEqual(
       expect.objectContaining({ status: 'queued' })
     );
@@ -359,7 +359,7 @@ describe('AxSQLiteEventStore', () => {
     await migrated.close();
 
     const verified = new Database(filename);
-    expect(verified.pragma('user_version', { simple: true })).toBe(5);
+    expect(verified.pragma('user_version', { simple: true })).toBe(6);
     expect(
       verified
         .prepare(
@@ -1147,6 +1147,289 @@ describe('AxSQLiteEventStore', () => {
     await runtime.close({ drain: false });
   });
 
+  it('migrates schema-v5 resume runs into exclusive delivery admissions', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const filename = join(directory, 'continuation-admission-v5.sqlite');
+    const clock = new AxManualEventClock(1_000);
+    const initial = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    const receipt = await initial.enqueue({
+      ingress: {
+        event: {
+          specversion: '1.0',
+          id: 'legacy-resume',
+          source: 'test://sqlite-effects',
+          type: 'legacy.resume',
+        },
+        identity: {},
+        trust: 'authenticated',
+      },
+      deliveries: [
+        {
+          routeId: 'legacy-resume-route',
+          action: 'resume',
+          targetId: 'legacy-resume-target',
+          instanceKey: 'legacy-delivery-instance',
+          sizeBytes: 128,
+          retrySafety: 'idempotent',
+          ordering: 'strict',
+        },
+      ],
+      acceptedAt: clock.now(),
+      publishTimeoutMs: 1_000,
+    });
+    const claimed = (await initial.claim('worker-a', clock.now(), 100))!;
+    const continuation: AxEventContinuation = {
+      id: 'legacy-admitted-continuation',
+      targetId: 'legacy-resume-target',
+      routeId: 'legacy-start-route',
+      instanceKey: 'legacy-original-instance',
+      identityScope: claimed.identityScope,
+      correlation: [{ kind: 'job', value: 'legacy-job' }],
+      createdAt: clock.now(),
+      metadata: { migrated: true },
+    };
+    await initial.registerContinuation(continuation);
+    const run: AxEventRun = {
+      id: 'legacy-resume-run',
+      deliveryId: claimed.id,
+      routeId: claimed.routeId,
+      targetId: continuation.targetId,
+      instanceKey: continuation.instanceKey,
+      admittedContinuation: continuation,
+      claimedBy: claimed.claimedBy,
+      fencingToken: claimed.fencingToken,
+      status: 'running',
+      attempt: 1,
+      startedAt: clock.now(),
+    };
+    await initial.saveDelivery({
+      ...claimed,
+      status: 'running',
+      attempt: 1,
+      runId: run.id,
+    });
+    await initial.saveRun(run);
+    await initial.saveDelivery({
+      ...claimed,
+      status: 'failed',
+      attempt: 1,
+      runId: run.id,
+    });
+    await initial.redriveDelivery(claimed.id, clock.now());
+    const pendingReceipt = await initial.enqueue({
+      ingress: {
+        event: {
+          specversion: '1.0',
+          id: 'never-invoked-resume',
+          source: 'test://sqlite-effects',
+          type: 'legacy.resume.pending',
+        },
+        identity: {},
+        trust: 'authenticated',
+      },
+      deliveries: [
+        {
+          routeId: 'pending-resume-route',
+          action: 'resume',
+          targetId: 'pending-resume-target',
+          instanceKey: 'pending-resume-instance',
+          sizeBytes: 128,
+          retrySafety: 'idempotent',
+          ordering: 'strict',
+        },
+      ],
+      acceptedAt: clock.now(),
+      publishTimeoutMs: 1_000,
+    });
+    const pendingContinuation: AxEventContinuation = {
+      id: 'pending-admitted-continuation',
+      targetId: 'pending-resume-target',
+      routeId: 'pending-start-route',
+      instanceKey: 'pending-original-instance',
+      identityScope: 'anonymous',
+      correlation: [{ kind: 'job', value: 'pending-job' }],
+      createdAt: clock.now(),
+    };
+    await initial.registerContinuation(pendingContinuation);
+    await initial.close();
+
+    const legacy = new Database(filename);
+    legacy.exec(`
+      DROP INDEX event_continuation_admission;
+      ALTER TABLE event_continuations DROP COLUMN admitted_delivery_id;
+      ALTER TABLE event_deliveries DROP COLUMN admitted_continuation_json;
+      PRAGMA user_version = 5;
+    `);
+    legacy.close();
+
+    const migrated = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    expect(await migrated.getDelivery(receipt.deliveryIds[0]!)).toEqual(
+      expect.objectContaining({ admittedContinuation: continuation })
+    );
+    const takeover = (await migrated.claim('worker-b', clock.now(), 100))!;
+    await expect(
+      migrated.admitContinuation(
+        takeover.id,
+        takeover.claimedBy!,
+        takeover.fencingToken!,
+        continuation.identityScope,
+        continuation.correlation[0]!,
+        clock.now()
+      )
+    ).resolves.toEqual(continuation);
+    await migrated.saveDelivery({ ...takeover, status: 'succeeded' });
+    expect(
+      (await migrated.getDelivery(pendingReceipt.deliveryIds[0]!))
+        ?.admittedContinuation
+    ).toBeUndefined();
+    const pendingClaim = (await migrated.claim('worker-b', clock.now(), 100))!;
+    expect(pendingClaim.id).toBe(pendingReceipt.deliveryIds[0]);
+    await expect(
+      migrated.admitContinuation(
+        pendingClaim.id,
+        pendingClaim.claimedBy!,
+        pendingClaim.fencingToken!,
+        pendingContinuation.identityScope,
+        pendingContinuation.correlation[0]!,
+        clock.now()
+      )
+    ).resolves.toEqual(pendingContinuation);
+    expect(migrated.capabilities.conformance.schemaVersion).toBe(6);
+    await migrated.close();
+  });
+
+  it('exclusively admits a continuation across concurrent SQLite runtimes', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const filename = join(directory, 'continuation-admission-race.sqlite');
+    const firstStore = new AxSQLiteEventStore({
+      filename,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    const secondStore = new AxSQLiteEventStore({
+      filename,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    const continuation: AxEventContinuation = {
+      id: 'sqlite-exclusive-continuation',
+      targetId: 'sqlite-exclusive-target',
+      routeId: 'sqlite-exclusive-start',
+      instanceKey: 'sqlite-exclusive-instance',
+      identityScope: 'anonymous',
+      correlation: [{ kind: 'job', value: 'sqlite-exclusive-job' }],
+      createdAt: Date.now(),
+      metadata: { oneShot: true },
+    };
+    await firstStore.registerContinuation(continuation);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let targetStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      targetStarted = resolve;
+    });
+    const admissions: string[] = [];
+    let targetCalls = 0;
+    const signature = s('trigger?:string -> handled:boolean');
+    const program = {
+      getId: () => 'sqlite-exclusive-program',
+      getSignature: () => signature,
+      forward: async (_ai: unknown, _input: unknown, options: any) => {
+        targetCalls++;
+        admissions.push(options.eventContext.continuation.id);
+        targetStarted();
+        await gate;
+        return { handled: true };
+      },
+      streamingForward: async function* () {},
+    } as unknown as AxProgrammable<any, any>;
+    const target = eventTarget({
+      id: continuation.targetId,
+      ai: {} as never,
+      program,
+      mapInput: () => ({}),
+      retrySafety: 'idempotent',
+    });
+    const route = eventRoute({
+      id: 'sqlite-exclusive-resume',
+      match: { types: ['sqlite.exclusive.resume'] },
+      action: 'resume',
+      ordering: 'relaxed',
+      correlation: () => continuation.correlation[0]!,
+      target,
+    });
+    const firstRuntime = new AxEventRuntime({
+      store: firstStore,
+      programStateStore: firstStore,
+      coordination: 'multi-worker',
+      workerConcurrency: 1,
+      leaseMs: 500,
+      heartbeatMs: 100,
+      routes: [route],
+    });
+    const secondRuntime = new AxEventRuntime({
+      store: secondStore,
+      programStateStore: secondStore,
+      coordination: 'multi-worker',
+      workerConcurrency: 1,
+      leaseMs: 500,
+      heartbeatMs: 100,
+      routes: [route],
+    });
+    await Promise.all([firstRuntime.start(), secondRuntime.start()]);
+    const first = await firstRuntime.publish({
+      event: {
+        specversion: '1.0',
+        id: 'sqlite-exclusive-1',
+        source: 'test://sqlite-effects',
+        type: 'sqlite.exclusive.resume',
+      },
+      trust: 'authenticated',
+    });
+    const second = await firstRuntime.publish({
+      event: {
+        specversion: '1.0',
+        id: 'sqlite-exclusive-2',
+        source: 'test://sqlite-effects',
+        type: 'sqlite.exclusive.resume',
+      },
+      trust: 'authenticated',
+    });
+    await started;
+    const deliveryIds = [...first.deliveryIds, ...second.deliveryIds];
+    for (let index = 0; index < 100; index++) {
+      const statuses = await Promise.all(
+        deliveryIds.map(
+          async (id) => (await firstStore.getDelivery(id))?.status
+        )
+      );
+      if (statuses.includes('dead_lettered')) break;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    expect(targetCalls).toBe(1);
+    expect(admissions).toEqual([continuation.id]);
+    release();
+    await firstRuntime.waitForIdle(2_000);
+    const statuses = await Promise.all(
+      deliveryIds.map(async (id) => (await firstStore.getDelivery(id))?.status)
+    );
+    expect(statuses.sort()).toEqual(['dead_lettered', 'succeeded']);
+    await Promise.all([
+      firstRuntime.close({ drain: false }),
+      secondRuntime.close({ drain: false }),
+    ]);
+  });
+
   it('recovers the persisted continuation admission after correlation reuse', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
     directories.push(directory);
@@ -1194,6 +1477,17 @@ describe('AxSQLiteEventStore', () => {
       expiresAt: clock.now() + 50,
       metadata: { admission: 'original' },
     };
+    await initial.registerContinuation(admitted);
+    const exclusiveAdmission = await initial.admitContinuation(
+      claimed.id,
+      claimed.claimedBy!,
+      claimed.fencingToken!,
+      admitted.identityScope,
+      admitted.correlation[0]!,
+      clock.now()
+    );
+    expect(exclusiveAdmission).toEqual(admitted);
+    const admittedClaim = (await initial.getDelivery(claimed.id))!;
     const run: AxEventRun = {
       id: 'resume-recovery-run',
       deliveryId: claimed.id,
@@ -1210,14 +1504,13 @@ describe('AxSQLiteEventStore', () => {
       output: { handled: true },
     };
     await initial.saveDelivery({
-      ...claimed,
+      ...admittedClaim,
       status: 'running',
       attempt: 1,
       runId: run.id,
       invocationStarted: true,
     });
     await initial.saveRun(run);
-    await initial.registerContinuation(admitted);
     await initial.close();
 
     clock.advanceBy(51);

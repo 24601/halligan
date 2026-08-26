@@ -46,6 +46,7 @@ import {
   axIsEventOutputPersistenceError,
 } from './types.js';
 import {
+  axEventContinuationFingerprint,
   axEventErrorMessage,
   axEventId,
   axEventIdentityScope,
@@ -99,12 +100,14 @@ class AxRuntimeEventContext implements AxEventContext {
     readonly continuation?: Readonly<AxEventContinuation>,
     readonly fencingToken?: number,
     private readonly store?: AxEventStore,
-    private readonly now: () => number = Date.now
+    private readonly now: () => number = Date.now,
+    private readonly runtimeRevoked: () => boolean = () => false
   ) {}
 
   registerContinuation(
     registration: Readonly<AxEventContinuationRegistration>
   ): string {
+    this.assertActive();
     if (registration.correlation.length === 0) {
       throw new Error(
         'Event continuations require at least one correlation key'
@@ -125,9 +128,9 @@ class AxRuntimeEventContext implements AxEventContext {
   async declareEffect(
     intent: Readonly<AxEventEffectIntent>
   ): Promise<Readonly<AxEventEffect>> {
-    if (this.abortSignal.aborted) throw this.abortSignal.reason;
+    this.assertActive();
     const store = this.effectStore();
-    return store.declareEffect(
+    const effect = await store.declareEffect(
       {
         ...structuredClone(intent),
         id: axEventId('effect'),
@@ -138,36 +141,46 @@ class AxRuntimeEventContext implements AxEventContext {
       },
       this.effectFence()
     );
+    this.assertActive();
+    return effect;
   }
 
   async markEffectDispatched(
     effectId: string,
     expectedVersion: number
   ): Promise<Readonly<AxEventEffect>> {
-    if (this.abortSignal.aborted) throw this.abortSignal.reason;
-    return this.effectStore().transitionEffect(
+    this.assertActive();
+    const effect = await this.effectStore().transitionEffect(
       effectId,
       expectedVersion,
       { type: 'dispatched', at: this.now() },
       this.effectFence()
     );
+    this.assertActive();
+    return effect;
   }
 
-  settleEffect(
+  async settleEffect(
     effectId: string,
     expectedVersion: number,
     settlement: Readonly<AxEventEffectSettlement>
   ): Promise<Readonly<AxEventEffect>> {
-    return this.effectStore().transitionEffect(
+    this.assertActive();
+    const effect = await this.effectStore().transitionEffect(
       effectId,
       expectedVersion,
       { type: 'settled', at: this.now(), settlement },
       this.effectFence()
     );
+    this.assertActive();
+    return effect;
   }
 
-  listEffects(): Promise<readonly Readonly<AxEventEffect>[]> {
-    return this.effectStore().listEffects(this.deliveryId);
+  async listEffects(): Promise<readonly Readonly<AxEventEffect>[]> {
+    this.assertActive();
+    const effects = await this.effectStore().listEffects(this.deliveryId);
+    this.assertActive();
+    return effects;
   }
 
   takeRegistrations() {
@@ -179,6 +192,13 @@ class AxRuntimeEventContext implements AxEventContext {
       throw new Error('AxEventStore does not support the effect ledger');
     }
     return this.store;
+  }
+
+  private assertActive(): void {
+    if (this.abortSignal.aborted) throw this.abortSignal.reason;
+    if (this.runtimeRevoked()) {
+      throw new Error('AxEventRuntime store shutdown has started');
+    }
   }
 
   private effectFence(): AxEventEffectFence {
@@ -235,6 +255,7 @@ export class AxEventRuntime {
   private workerPromises: Promise<void>[] = [];
   private started = false;
   private closing = false;
+  private storeShutdownStarted = false;
   private closePromise?: Promise<void>;
 
   constructor(options: Readonly<AxEventRuntimeOptions>) {
@@ -425,48 +446,75 @@ export class AxEventRuntime {
   }
 
   async redrive(deadLetterId: string): Promise<void> {
-    const deadLetter = await this.store.getDeadLetter(deadLetterId);
-    if (!deadLetter)
-      throw new Error(`Unknown event dead letter: ${deadLetterId}`);
-    if (deadLetter.kind === 'delivery') {
-      await this.store.redriveDelivery(deadLetter.deliveryId, this.clock.now());
-      await this.store.removeDeadLetter(deadLetterId);
-      return;
-    }
-    const run = deadLetter.runId
-      ? await this.store.getRun(deadLetter.runId)
-      : undefined;
-    const delivery = await this.store.getDelivery(deadLetter.deliveryId);
-    if (!run || !delivery || !deadLetter.sinkId || run.output === undefined) {
-      throw new Error(`Sink dead letter ${deadLetterId} cannot be redriven`);
-    }
-    const target = run.targetId ? this.targets.get(run.targetId) : undefined;
-    const sink = target?.sinks?.find((value) => value.id === deadLetter.sinkId);
-    if (!target || !sink) {
-      throw new Error(`Sink ${deadLetter.sinkId} is no longer configured`);
-    }
+    if (this.closing) throw new Error('AxEventRuntime is closing');
+    const operationId = axEventId('event-redrive');
     const controller = new AbortController();
-    const context = new AxRuntimeEventContext(
-      this.id,
-      run.id,
-      delivery.id,
-      delivery.routeId,
-      target.id,
-      delivery.instanceKey,
-      delivery.ingress,
-      delivery.ingress.identity ?? {},
-      delivery.ingress.trust ?? 'untrusted',
-      delivery.attempt,
-      delivery.id,
-      controller.signal
-    );
-    await sink.write(run.output, {
-      run,
-      eventContext: context,
-      idempotencyKey: `${run.id}:${sink.id}`,
-      signal: controller.signal,
-    });
-    await this.store.removeDeadLetter(deadLetterId);
+    this.activeRuns.set(operationId, controller);
+    try {
+      const deadLetter = await this.store.getDeadLetter(deadLetterId);
+      this.assertRunActive(controller.signal);
+      if (!deadLetter)
+        throw new Error(`Unknown event dead letter: ${deadLetterId}`);
+      if (deadLetter.kind === 'delivery') {
+        await this.store.redriveDelivery(
+          deadLetter.deliveryId,
+          this.clock.now()
+        );
+        this.assertRunActive(controller.signal);
+        await this.store.removeDeadLetter(deadLetterId);
+        return;
+      }
+      const run = deadLetter.runId
+        ? await this.store.getRun(deadLetter.runId)
+        : undefined;
+      this.assertRunActive(controller.signal);
+      const delivery = await this.store.getDelivery(deadLetter.deliveryId);
+      this.assertRunActive(controller.signal);
+      if (!run || !delivery || !deadLetter.sinkId || run.output === undefined) {
+        throw new Error(`Sink dead letter ${deadLetterId} cannot be redriven`);
+      }
+      const continuation =
+        delivery.action === 'resume'
+          ? this.requireResumeAdmission(delivery, run)
+          : undefined;
+      const targetId = continuation?.targetId ?? run.targetId;
+      const target = targetId ? this.targets.get(targetId) : undefined;
+      const sink = target?.sinks?.find(
+        (value) => value.id === deadLetter.sinkId
+      );
+      if (!target || !sink) {
+        throw new Error(`Sink ${deadLetter.sinkId} is no longer configured`);
+      }
+      const context = new AxRuntimeEventContext(
+        this.id,
+        run.id,
+        delivery.id,
+        delivery.routeId,
+        target.id,
+        continuation?.instanceKey ?? run.instanceKey,
+        delivery.ingress,
+        delivery.ingress.identity ?? {},
+        delivery.ingress.trust ?? 'untrusted',
+        run.attempt,
+        delivery.id,
+        controller.signal,
+        continuation,
+        undefined,
+        undefined,
+        () => this.clock.now(),
+        () => this.storeShutdownStarted
+      );
+      await sink.write(run.output, {
+        run,
+        eventContext: context,
+        idempotencyKey: `${run.id}:${sink.id}`,
+        signal: controller.signal,
+      });
+      this.assertRunActive(controller.signal);
+      await this.store.removeDeadLetter(deadLetterId);
+    } finally {
+      this.activeRuns.delete(operationId);
+    }
   }
 
   cancelRun(runId: string, reason = 'Cancelled by caller'): boolean {
@@ -540,6 +588,7 @@ export class AxEventRuntime {
     // A non-cooperative worker must not prevent the store's own best-effort
     // shutdown from ever starting. Rejections are observed but close remains a
     // bounded, non-throwing revocation attempt.
+    this.storeShutdownStarted = true;
     const storeClose = Promise.resolve()
       .then(() => this.store.close?.())
       .catch(() => undefined);
@@ -635,11 +684,15 @@ export class AxEventRuntime {
     initialClaim: Readonly<AxEventDelivery>,
     workerId: string
   ): Promise<void> {
+    if (this.workerController.signal.aborted || this.storeShutdownStarted)
+      return;
     let claimed = initialClaim;
     let previousRun =
       claimed.recoveredFromExpiredLease && claimed.runId
         ? await this.store.getRun(claimed.runId)
         : undefined;
+    if (this.workerController.signal.aborted || this.storeShutdownStarted)
+      return;
     if (
       claimed.recoveredFromExpiredLease &&
       claimed.invocationStarted &&
@@ -687,6 +740,55 @@ export class AxEventRuntime {
           );
         }
       }
+      if (route.action === 'resume') {
+        const correlation =
+          route.correlation?.(claimed.ingress) ??
+          claimed.ingress.correlation?.[0];
+        if (!correlation) {
+          throw new Error(
+            `Resume route ${route.id} did not produce a correlation key`
+          );
+        }
+        if (previousRun && !claimed.admittedContinuation) {
+          throw new Error(
+            `outcome_unknown: resume delivery ${claimed.id} has a prior run without an exclusive continuation admission`
+          );
+        }
+        if (
+          !this.store.admitContinuation ||
+          !claimed.claimedBy ||
+          claimed.fencingToken === undefined
+        ) {
+          throw new Error(
+            `outcome_unknown: event store cannot exclusively admit a continuation for ${claimed.id}`
+          );
+        }
+        continuation = await this.store.admitContinuation(
+          claimed.id,
+          claimed.claimedBy,
+          claimed.fencingToken,
+          claimed.identityScope,
+          correlation,
+          this.clock.now()
+        );
+        if (this.workerController.signal.aborted || this.storeShutdownStarted) {
+          return;
+        }
+        if (!continuation) {
+          throw new AxEventContinuationNotFoundError(correlation);
+        }
+        claimed = {
+          ...claimed,
+          admittedContinuation: structuredClone(continuation),
+        };
+        if (previousRun) this.requireResumeAdmission(claimed, previousRun);
+        targetId = continuation.targetId;
+        target = this.targets.get(targetId);
+        instanceKey = continuation.instanceKey;
+        if (!target) {
+          throw new Error(`Continuation target ${targetId} is not configured`);
+        }
+      }
       if (
         await this.resumePersistedCompletion(
           claimed,
@@ -695,55 +797,13 @@ export class AxEventRuntime {
           previousRun
         )
       ) {
-        if (previousRun?.admittedContinuation) {
-          await this.store.completeContinuation(
-            previousRun.admittedContinuation.id
-          );
+        if (this.workerController.signal.aborted || this.storeShutdownStarted) {
+          return;
+        }
+        if (continuation) {
+          await this.store.completeContinuation(continuation.id);
         }
         return;
-      }
-
-      if (route.action === 'resume') {
-        if (previousRun) {
-          continuation = previousRun.admittedContinuation;
-          if (!continuation) {
-            throw new Error(
-              `outcome_unknown: resume run ${previousRun.id} has no durable continuation admission`
-            );
-          }
-        } else {
-          const correlation =
-            route.correlation?.(claimed.ingress) ??
-            claimed.ingress.correlation?.[0];
-          if (!correlation) {
-            throw new Error(
-              `Resume route ${route.id} did not produce a correlation key`
-            );
-          }
-          continuation = await this.store.findContinuation(
-            claimed.identityScope,
-            correlation,
-            this.clock.now()
-          );
-          if (!continuation) {
-            throw new AxEventContinuationNotFoundError(correlation);
-          }
-        }
-        targetId = continuation.targetId;
-        target = this.targets.get(targetId);
-        instanceKey = continuation.instanceKey;
-        if (
-          previousRun &&
-          (previousRun.targetId !== targetId ||
-            previousRun.instanceKey !== instanceKey)
-        ) {
-          throw new Error(
-            `outcome_unknown: resume run ${previousRun.id} continuation admission does not match its target binding`
-          );
-        }
-        if (!target) {
-          throw new Error(`Continuation target ${targetId} is not configured`);
-        }
       }
 
       const runId = axEventId('event-run');
@@ -763,6 +823,7 @@ export class AxEventRuntime {
           claimed,
           controller.signal
         );
+        this.assertRunActive(controller.signal);
       } catch (error) {
         heartbeatController.abort('Event effect reconciliation failed');
         await heartbeat;
@@ -795,6 +856,7 @@ export class AxEventRuntime {
       // Reconciliation may outlive the original lease while the heartbeat
       // extends it. Never overwrite that extension with the stale claim copy.
       claimed = refreshedClaim;
+      this.assertRunActive(controller.signal);
       const eventContext = new AxRuntimeEventContext(
         this.id,
         runId,
@@ -811,7 +873,8 @@ export class AxEventRuntime {
         continuation,
         claimed.fencingToken,
         this.store,
-        () => this.clock.now()
+        () => this.clock.now(),
+        () => this.storeShutdownStarted
       );
       let run: AxEventRun = {
         id: runId,
@@ -830,20 +893,24 @@ export class AxEventRuntime {
           ? { fencingToken: claimed.fencingToken }
           : {}),
       };
+      this.assertRunActive(controller.signal);
       await this.store.saveDelivery({
         ...claimed,
         status: 'running',
         attempt,
         runId,
       });
+      this.assertRunActive(controller.signal);
       await this.store.saveRun(run);
       let invoked = false;
       try {
         let result: InvocationResult = { waiting: false, invoked: false };
         if (route.action === 'observe') {
           await route.observe?.(claimed.ingress, eventContext);
+          this.assertRunActive(controller.signal);
         } else if (route.action === 'invalidate') {
           await route.invalidator!.invalidate(claimed.ingress, eventContext);
+          this.assertRunActive(controller.signal);
         } else {
           result = await this.invokeTarget(
             target!,
@@ -862,6 +929,7 @@ export class AxEventRuntime {
               invoked = true;
             }
           );
+          this.assertRunActive(controller.signal);
           invoked = invoked || result.invoked;
           run = {
             ...run,
@@ -873,6 +941,7 @@ export class AxEventRuntime {
         const registrations = eventContext.takeRegistrations();
         const continuations: AxEventContinuation[] = [];
         for (const registration of registrations) {
+          this.assertRunActive(controller.signal);
           const value: AxEventContinuation = {
             id: registration.id,
             targetId: targetId ?? `route:${route.id}`,
@@ -889,6 +958,7 @@ export class AxEventRuntime {
               : {}),
           };
           await this.store.registerContinuation(value);
+          this.assertRunActive(controller.signal);
           continuations.push(value);
         }
         const waiting = result.waiting || continuations.length > 0;
@@ -901,25 +971,33 @@ export class AxEventRuntime {
             : {}),
         };
         // Persist the complete output before any final sink dispatch.
+        this.assertRunActive(controller.signal);
         await this.store.saveRun(run);
+        this.assertRunActive(controller.signal);
         if (!waiting && target && run.output !== undefined) {
           run = await this.dispatchFinalSinks(target, run, eventContext);
+          this.assertRunActive(controller.signal);
           await this.store.saveRun(run);
         }
+        this.assertRunActive(controller.signal);
         await this.store.saveDelivery({
           ...claimed,
           status: waiting ? 'waiting_event' : 'succeeded',
           attempt,
           runId,
         });
-        if (continuation)
+        this.assertRunActive(controller.signal);
+        if (continuation) {
           await this.store.completeContinuation(continuation.id);
+        }
       } catch (error) {
+        if (this.storeShutdownStarted) return;
         if (controller.signal.aborted) {
           const effectParkReason = await this.parkCancelledEffects(
             claimed,
             axEventErrorMessage(controller.signal.reason)
           );
+          if (this.storeShutdownStarted) return;
           if (effectParkReason) {
             run = {
               ...run,
@@ -928,6 +1006,7 @@ export class AxEventRuntime {
               error: effectParkReason,
             };
             await this.store.saveRun(run);
+            if (this.storeShutdownStarted) return;
             await this.parkDelivery(
               { ...claimed, attempt, runId },
               effectParkReason,
@@ -942,6 +1021,7 @@ export class AxEventRuntime {
             error: axEventErrorMessage(controller.signal.reason),
           };
           await this.store.saveRun(run);
+          if (this.storeShutdownStarted) return;
           await this.store.saveDelivery({
             ...claimed,
             status: 'cancelled',
@@ -959,6 +1039,7 @@ export class AxEventRuntime {
             return;
           }
           const persistedDelivery = await this.store.getDelivery(claimed.id);
+          if (this.storeShutdownStarted) return;
           if (persistedDelivery?.status === 'output_persistence_failed') {
             // Staged stores mark the delivery terminal before releasing stage
             // ownership, closing the crash window before this caller observes
@@ -974,6 +1055,7 @@ export class AxEventRuntime {
             error: axEventErrorMessage(error),
           };
           await this.store.saveRun(run);
+          if (this.storeShutdownStarted) return;
           await this.store.saveDelivery({
             ...claimed,
             status: 'output_persistence_failed',
@@ -981,6 +1063,7 @@ export class AxEventRuntime {
             runId,
             error: run.error,
           });
+          if (this.storeShutdownStarted) return;
           await this.store.addDeadLetter({
             id: axEventId('dead-letter'),
             kind: 'delivery',
@@ -1000,6 +1083,7 @@ export class AxEventRuntime {
             attempt,
             runId,
           });
+          if (this.storeShutdownStarted) return;
           run = {
             ...run,
             status: 'outcome_unknown',
@@ -1007,6 +1091,7 @@ export class AxEventRuntime {
             error: axEventErrorMessage(error),
           };
           await this.store.saveRun(run);
+          if (this.storeShutdownStarted) return;
           await this.store.saveDelivery({
             ...claimed,
             status: 'outcome_unknown',
@@ -1014,6 +1099,7 @@ export class AxEventRuntime {
             runId,
             error: run.error,
           });
+          if (this.storeShutdownStarted) return;
           await this.store.addDeadLetter({
             id: axEventId('dead-letter'),
             kind: 'delivery',
@@ -1032,6 +1118,7 @@ export class AxEventRuntime {
             { ...claimed, attempt, runId, invocationStarted: invoked },
             controller.signal
           );
+          if (this.storeShutdownStarted) return;
           if (effectParkReason) {
             run = {
               ...run,
@@ -1040,6 +1127,7 @@ export class AxEventRuntime {
               error: effectParkReason,
             };
             await this.store.saveRun(run);
+            if (this.storeShutdownStarted) return;
             await this.parkDelivery(
               { ...claimed, attempt, runId },
               effectParkReason,
@@ -1058,6 +1146,7 @@ export class AxEventRuntime {
             error: axEventErrorMessage(error),
           };
           await this.store.saveRun(run);
+          if (this.storeShutdownStarted) return;
           await this.store.saveDelivery({
             ...claimed,
             status: 'queued',
@@ -1075,6 +1164,7 @@ export class AxEventRuntime {
           error: axEventErrorMessage(error),
         };
         await this.store.saveRun(run);
+        if (this.storeShutdownStarted) return;
         await this.deadLetterDelivery(
           { ...claimed, attempt, runId },
           run.error ?? 'Event delivery failed'
@@ -1085,6 +1175,9 @@ export class AxEventRuntime {
         this.activeRuns.delete(runId);
       }
     } catch (error) {
+      if (this.workerController.signal.aborted || this.storeShutdownStarted) {
+        return;
+      }
       await this.deadLetterDelivery(claimed, axEventErrorMessage(error));
     }
   }
@@ -1101,21 +1194,10 @@ export class AxEventRuntime {
     ) {
       return false;
     }
-    const continuation = persisted.admittedContinuation;
-    if (route.action === 'resume' && !continuation) {
-      throw new Error(
-        `outcome_unknown: succeeded resume run ${persisted.id} has no durable continuation admission`
-      );
-    }
-    if (
-      continuation &&
-      (persisted.targetId !== continuation.targetId ||
-        persisted.instanceKey !== continuation.instanceKey)
-    ) {
-      throw new Error(
-        `outcome_unknown: succeeded resume run ${persisted.id} continuation admission does not match its target binding`
-      );
-    }
+    const continuation =
+      route.action === 'resume'
+        ? this.requireResumeAdmission(claimed, persisted)
+        : persisted.admittedContinuation;
     // Legacy wake runs may predate persisted target IDs; the configured wake
     // route remains their compatibility fallback. Resume runs never use it.
     const targetId =
@@ -1141,6 +1223,7 @@ export class AxEventRuntime {
         claimed,
         controller.signal
       );
+      this.assertRunActive(controller.signal);
       if (effectParkReason) {
         await this.parkDelivery(claimed, effectParkReason);
         return true;
@@ -1161,7 +1244,8 @@ export class AxEventRuntime {
         continuation,
         claimed.fencingToken,
         this.store,
-        () => this.clock.now()
+        () => this.clock.now(),
+        () => this.storeShutdownStarted
       );
       let run: AxEventRun = {
         ...persisted,
@@ -1172,8 +1256,10 @@ export class AxEventRuntime {
       };
       if (target && run.output !== undefined) {
         run = await this.dispatchFinalSinks(target, run, context);
+        this.assertRunActive(controller.signal);
         await this.store.saveRun(run);
       }
+      this.assertRunActive(controller.signal);
       await this.store.saveDelivery({
         ...claimed,
         status: 'succeeded',
@@ -1188,6 +1274,40 @@ export class AxEventRuntime {
     }
   }
 
+  private requireResumeAdmission(
+    delivery: Readonly<AxEventDelivery>,
+    run: Readonly<AxEventRun>
+  ): Readonly<AxEventContinuation> {
+    const deliveryAdmission = delivery.admittedContinuation;
+    const runAdmission = run.admittedContinuation;
+    if (!deliveryAdmission || !runAdmission) {
+      throw new Error(
+        `outcome_unknown: resume delivery ${delivery.id} has no durable exclusive continuation admission`
+      );
+    }
+    if (
+      run.deliveryId !== delivery.id ||
+      axEventContinuationFingerprint(deliveryAdmission) !==
+        axEventContinuationFingerprint(runAdmission) ||
+      run.targetId !== deliveryAdmission.targetId ||
+      run.instanceKey !== deliveryAdmission.instanceKey
+    ) {
+      throw new Error(
+        `outcome_unknown: resume run ${run.id} continuation admission does not match its delivery binding`
+      );
+    }
+    return deliveryAdmission;
+  }
+
+  private assertRunActive(signal: AbortSignal): void {
+    if (signal.aborted) {
+      throw signal.reason ?? new Error('Event run was aborted');
+    }
+    if (this.storeShutdownStarted) {
+      throw new Error('AxEventRuntime store shutdown has started');
+    }
+  }
+
   private async invokeTarget(
     target: Readonly<AxEventTarget<any, any>>,
     instanceKey: string,
@@ -1197,6 +1317,7 @@ export class AxEventRuntime {
     onInvoke: () => Promise<void>
   ): Promise<InvocationResult> {
     const program = await this.resolveProgram(target, instanceKey, ingress);
+    this.assertRunActive(eventContext.abortSignal);
     verifyEventTargetProgram(target, program);
     const stateAdapter = target.state ?? this.defaultStateAdapter(program);
     const stateKey = `${target.id}\n${axEventIdentityScope(ingress.identity)}\n${instanceKey}`;
@@ -1221,8 +1342,10 @@ export class AxEventRuntime {
           toSchemaVersion: stateAdapter.schemaVersion,
           toProgramVersion: stateAdapter.programVersion,
         });
+        this.assertRunActive(eventContext.abortSignal);
       }
       await stateAdapter.restore(program, state);
+      this.assertRunActive(eventContext.abortSignal);
     }
     const inputPlan = selectEventInputPlan(target, eventContext.continuation);
     let input: unknown;
@@ -1239,6 +1362,7 @@ export class AxEventRuntime {
           eventContext,
           continuation: eventContext.continuation,
         });
+        this.assertRunActive(eventContext.abortSignal);
         if (mapped === undefined) {
           throw new AxEventInputError(
             `Target ${target.id} has no mapping for ${eventContext.continuation ? 'resume' : 'wake'}`
@@ -1289,6 +1413,7 @@ export class AxEventRuntime {
     const chunks: AxGenDeltaOut<unknown>[] = [];
     try {
       await onInvoke();
+      this.assertRunActive(eventContext.abortSignal);
       if (target.execution === 'streaming') {
         const stream = program.streamingForward(target.ai, input, options);
         const iterator = stream[Symbol.asyncIterator]();
@@ -1296,11 +1421,14 @@ export class AxEventRuntime {
         try {
           for (;;) {
             const next = await iterator.next();
+            this.assertRunActive(eventContext.abortSignal);
             if (next.done || eventContext.abortSignal.aborted) break;
             const chunk = next.value;
             chunks.push(structuredClone(chunk));
             const partialRun: AxEventRun = { ...run, chunks: [...chunks] };
+            this.assertRunActive(eventContext.abortSignal);
             await this.store.saveRun(partialRun);
+            this.assertRunActive(eventContext.abortSignal);
             for (const sink of target.sinks ?? []) {
               if (!sink.writeChunk || eventContext.abortSignal.aborted)
                 continue;
@@ -1323,11 +1451,16 @@ export class AxEventRuntime {
         }
       } else {
         output = await program.forward(target.ai, input, options);
+        this.assertRunActive(eventContext.abortSignal);
       }
     } catch (error) {
+      if (eventContext.abortSignal.aborted || this.storeShutdownStarted) {
+        throw error;
+      }
       if (error instanceof AxAgentClarificationError) {
         const state = error.getState();
         if (stateAdapter && state !== undefined) {
+          this.assertRunActive(eventContext.abortSignal);
           await this.persistProgramState(
             stateKey,
             stored,
@@ -1344,6 +1477,7 @@ export class AxEventRuntime {
       }
       if (stateAdapter) {
         const state = await stateAdapter.capture(program);
+        this.assertRunActive(eventContext.abortSignal);
         await this.persistProgramState(
           stateKey,
           stored,
@@ -1356,6 +1490,7 @@ export class AxEventRuntime {
     }
     if (stateAdapter) {
       const state = await stateAdapter.capture(program);
+      this.assertRunActive(eventContext.abortSignal);
       try {
         await this.persistProgramState(
           stateKey,
@@ -1386,6 +1521,7 @@ export class AxEventRuntime {
     state: unknown,
     eventContext: Readonly<AxEventContext>
   ): Promise<void> {
+    this.assertRunActive(eventContext.abortSignal);
     await this.stateStore.compareAndSet(
       key,
       stored?.revision,
@@ -1457,6 +1593,7 @@ export class AxEventRuntime {
   ): Promise<AxEventRun> {
     const attempts = [];
     for (const sink of target.sinks ?? []) {
+      this.assertRunActive(eventContext.abortSignal);
       const persisted = run.sinks?.find(
         (attempt) => attempt.sinkId === sink.id
       );
@@ -1474,9 +1611,13 @@ export class AxEventRuntime {
             idempotencyKey: `${run.id}:${sink.id}`,
             signal: eventContext.abortSignal,
           });
+          this.assertRunActive(eventContext.abortSignal);
           error = undefined;
           break;
         } catch (value) {
+          if (eventContext.abortSignal.aborted || this.storeShutdownStarted) {
+            throw value;
+          }
           error = value;
           if (count + 1 < (this.options.maxAttempts ?? 5)) {
             await this.clock.sleep(
@@ -1496,6 +1637,7 @@ export class AxEventRuntime {
         ...(error ? { error: axEventErrorMessage(error) } : {}),
       });
       if (error) {
+        this.assertRunActive(eventContext.abortSignal);
         await this.store.addDeadLetter({
           id: axEventId('dead-letter'),
           kind: 'sink',
@@ -1517,13 +1659,18 @@ export class AxEventRuntime {
     eventContext: AxRuntimeEventContext
   ): Promise<void> {
     try {
+      this.assertRunActive(eventContext.abortSignal);
       await sink.writeChunk?.(chunk, {
         run,
         eventContext,
         idempotencyKey: `${run.id}:${sink.id}:chunk:${chunk.index}:${chunk.version}`,
         signal: eventContext.abortSignal,
       });
+      this.assertRunActive(eventContext.abortSignal);
     } catch (error) {
+      if (eventContext.abortSignal.aborted || this.storeShutdownStarted) {
+        throw error;
+      }
       await this.store.addDeadLetter({
         id: axEventId('dead-letter'),
         kind: 'sink',
@@ -1543,14 +1690,19 @@ export class AxEventRuntime {
     signal: AbortSignal
   ): Promise<void> {
     if (delivery.fencingToken === undefined) return;
+    const heartbeatSignal = AbortSignal.any([
+      signal,
+      runController.signal,
+      this.workerController.signal,
+    ]);
     const heartbeatMs =
       this.options.heartbeatMs ??
       Math.floor((this.options.leaseMs ?? 30_000) / 3);
     const leaseMs = this.options.leaseMs ?? 30_000;
-    while (!signal.aborted) {
+    while (!heartbeatSignal.aborted) {
       try {
-        await this.clock.sleep(heartbeatMs, signal);
-        if (signal.aborted) return;
+        await this.clock.sleep(heartbeatMs, heartbeatSignal);
+        if (heartbeatSignal.aborted) return;
         await this.store.renewClaim(
           delivery.id,
           workerId,
@@ -1558,7 +1710,7 @@ export class AxEventRuntime {
           this.clock.now() + leaseMs
         );
       } catch (error) {
-        if (!signal.aborted) runController.abort(error);
+        if (!heartbeatSignal.aborted) runController.abort(error);
         return;
       }
     }
@@ -1572,6 +1724,7 @@ export class AxEventRuntime {
     const store = this.store;
     const fence = this.effectFence(delivery);
     const effects = await store.listEffects(delivery.id);
+    this.assertRunActive(abortSignal);
     for (let effect of effects) {
       if (
         effect.status === 'intent' ||
@@ -1585,6 +1738,7 @@ export class AxEventRuntime {
         try {
           resolution = await this.resolveEffect(effect, delivery, abortSignal);
         } catch (error) {
+          if (this.storeShutdownStarted) throw error;
           const reason = this.effectReason(
             `Effect resolver failed for ${effect.operation}: ${axEventErrorMessage(error)}`
           );
@@ -1596,6 +1750,7 @@ export class AxEventRuntime {
           );
           return effect.parkedReason;
         }
+        this.assertRunActive(abortSignal);
         if (
           resolution.status === 'succeeded' ||
           resolution.status === 'failed'
@@ -1698,7 +1853,9 @@ export class AxEventRuntime {
     if (!isEffectStore(this.store)) return;
     const fence = this.effectFence(delivery);
     let parkedReason: string | undefined;
-    for (const effect of await this.store.listEffects(delivery.id)) {
+    const effects = await this.store.listEffects(delivery.id);
+    if (this.storeShutdownStarted) return;
+    for (const effect of effects) {
       if (
         effect.status !== 'dispatched' ||
         effect.replaySafety === 'idempotent'
@@ -1708,6 +1865,7 @@ export class AxEventRuntime {
       parkedReason = this.effectReason(
         `Cancelled with indeterminate effect: ${cancellationReason}`
       );
+      if (this.storeShutdownStarted) return;
       await this.store.transitionEffect(
         effect.id,
         effect.version,
@@ -1727,8 +1885,11 @@ export class AxEventRuntime {
   ): Promise<void> {
     if (!isEffectStore(this.store)) return;
     const fence = this.effectFence(delivery);
-    for (const effect of await this.store.listEffects(delivery.id)) {
+    const effects = await this.store.listEffects(delivery.id);
+    if (this.storeShutdownStarted) return;
+    for (const effect of effects) {
       if (effect.status !== 'dispatched') continue;
+      if (this.storeShutdownStarted) return;
       await this.store.transitionEffect(
         effect.id,
         effect.version,
@@ -1749,8 +1910,10 @@ export class AxEventRuntime {
     reason: string,
     updatePreviousRun = true
   ): Promise<void> {
+    if (this.storeShutdownStarted) return;
     if (updatePreviousRun && delivery.runId) {
       const previousRun = await this.store.getRun(delivery.runId);
+      if (this.storeShutdownStarted) return;
       if (previousRun) {
         await this.store.saveRun({
           ...previousRun,
@@ -1762,6 +1925,7 @@ export class AxEventRuntime {
             ? { fencingToken: delivery.fencingToken }
             : {}),
         });
+        if (this.storeShutdownStarted) return;
       }
     }
     await this.store.saveDelivery({
@@ -1769,6 +1933,7 @@ export class AxEventRuntime {
       status: 'parked',
       error: reason,
     });
+    if (this.storeShutdownStarted) return;
     await this.store.addDeadLetter({
       id: axEventId('dead-letter'),
       kind: 'delivery',
@@ -1798,11 +1963,13 @@ export class AxEventRuntime {
     delivery: Readonly<AxEventDelivery>,
     reason: string
   ): Promise<void> {
+    if (this.storeShutdownStarted) return;
     await this.store.saveDelivery({
       ...delivery,
       status: 'dead_lettered',
       error: reason,
     });
+    if (this.storeShutdownStarted) return;
     await this.store.addDeadLetter({
       id: axEventId('dead-letter'),
       kind: 'delivery',

@@ -1,4 +1,5 @@
 import type {
+  AxEventContinuation,
   AxEventEffect,
   AxEventEffectCreateRequest,
   AxEventEffectTransition,
@@ -47,6 +48,13 @@ export function axEventIngressFingerprint(
   ingress: Readonly<AxEventIngress>
 ): string {
   return canonicalJson(ingress);
+}
+
+/** Canonical bytes used to compare immutable continuation admissions. */
+export function axEventContinuationFingerprint(
+  continuation: Readonly<AxEventContinuation>
+): string {
+  return canonicalJson(continuation);
 }
 
 export function axEventScopedCorrelationKey(

@@ -61,9 +61,12 @@ await source.publish({ event, identity, trust: 'authenticated' });
 - Use `.wakeInput()` and `.resumeInput()` when the two actions need different
   contracts. Neither action silently uses the other action's mapping.
 - Use `observe` for progress/logs and `invalidate` for catalog changes.
-- Use `resume` only with an owned continuation correlation key. Admission is
-  snapshotted on the run before invocation; retries/recovery use that immutable
-  continuation, target, and instance rather than looking up a reused key.
+- Use `resume` only with an owned continuation correlation key. The store
+  atomically admits it to one fenced delivery, then snapshots the same binding
+  on the run before invocation. Retry, delivery/sink redrive, and recovery use
+  that immutable continuation, target, and instance rather than looking up a
+  reused key. Stores without atomic admission and malformed legacy bindings
+  fail closed.
 - Use `createProgram(instance)` for stateful multi-tenant Agents.
 - Declare `retrySafety: 'idempotent'` only when stable delivery keys protect
   every possible side effect.
@@ -106,8 +109,10 @@ await source.publish({ event, identity, trust: 'authenticated' });
   `return()` on active streams, swallows sync/async cancellation failures, and
   suppresses post-abort chunks. This is return-bounded only: non-cooperative
   host work may continue and perform later side effects; use cooperative abort
-  or a host revocation check before writes. After worker settlement or deadline,
-  Ax independently attempts best-effort store close and suppresses its rejection;
+  or a host revocation check before writes. Ax revokes its own persistence,
+  sinks, effect context calls, continuation registration, and claim heartbeat
+  after abort/store shutdown. After worker settlement or deadline, Ax
+  independently attempts best-effort store close and suppresses its rejection;
   a permanently hung worker cannot prevent the attempt.
 - The in-memory store is volatile and single-process.
   Waiting runtimes schedule claimed/running lease expiry and reclaim with a new
@@ -171,11 +176,13 @@ staging/abort expiry marks its fenced delivery terminal before owned cleanup.
 Malformed recovery rows are isolated so unrelated work and worker loops remain
 live. Recovery atomically binds the persisted succeeded
 run to the delivery, then takeover resumes final sinks only; target invocation
-is never repeated. Resume admission is persisted before invocation, and
-resume-route retries/recovery retain that exact continuation/target/instance
-snapshot even if the original expires and its correlation key is reused. A
-legacy resume run without a snapshot fails closed; legacy wake recovery keeps
-its configured-target fallback.
+is never repeated. Resume admission is an exclusive fenced store transaction,
+persisted on both delivery and run before invocation. Competing deliveries
+cannot fire one continuation twice; delivery and sink redrive retain and
+validate the original continuation/target/instance even after correlation
+reuse. Legacy or malformed mismatched bindings fail closed; legacy wake
+recovery keeps its configured-target fallback. A never-invoked v5 resume
+delivery performs its first atomic admission after migration to v6.
 Live commit acknowledgement requires the current unexpired
 owner/token. Failed reconciliation quarantines that delivery without stopping
 unrelated claims. Legacy `put/delete` stores are never uploaded to

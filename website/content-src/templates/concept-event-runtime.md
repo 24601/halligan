@@ -86,13 +86,16 @@ the event's correlation value to find and restore the owner.
 {{eventResumeExample}}
 
 Continuation matching is **identity-scoped**: a correlation value for one
-tenant cannot resume another tenant's run. Consumption is atomic, so two
-workers cannot fire the same continuation twice. A missing, ambiguous, or
+tenant cannot resume another tenant's run. Admission is one fenced store
+transaction that binds the continuation exclusively to a delivery, so two
+workers cannot fire the same one-shot continuation. A missing, ambiguous, or
 expired continuation becomes a dead letter; it never turns into fresh work.
-Admission is durably snapshotted on the run before invocation. Retries and
-recovery use only that immutable continuation, target, and instance, so expiry
-and correlation-key reuse cannot retarget persisted output or consume a
-replacement. Legacy resume runs without a snapshot fail closed.
+The binding is also snapshotted on the run before invocation. Retry, delivery
+redrive, sink redrive, and recovery validate and use only that immutable
+continuation, target, and instance, so expiry and correlation-key reuse cannot
+retarget persisted output or consume a replacement. Stores without atomic
+admission and malformed legacy bindings fail closed. A never-invoked v5 resume
+delivery performs its first atomic admission after migration to v6.
 
 Targets may use separate `wakeInput` and `resumeInput` plans because the first
 event and the returning event often carry different shapes. The action-specific
@@ -192,9 +195,12 @@ returned shutdown promise, and concurrent calls join it. Ax best-effort requests
 `return()` on active stream iterators, ignores cancellation failures, and
 suppresses post-abort chunks,
 but timed-out host work may continue and perform later side effects because Ax
-cannot terminate JavaScript. After workers settle or the deadline expires, Ax
-independently attempts best-effort store close; a permanently hung worker cannot
-prevent that attempt, and a store-close rejection does not reject `close()`.
+cannot terminate JavaScript. Ax revokes runtime-owned persistence, sink
+dispatch, effect calls, continuation registration, and claim heartbeat after
+abort/store shutdown. After workers settle or the deadline expires, Ax
+independently attempts best-effort store close; a permanently hung worker
+cannot prevent that attempt, and a store-close rejection does not reject
+`close()`.
 Caller-owned protocol clients must still be closed by the caller. For
 deterministic tests, `AxManualEventClock` advances retries,
 debounce windows, and continuation expiry without waiting for wall-clock time.

@@ -20,6 +20,7 @@ import {
 } from './types.js';
 import {
   axApplyEventEffectTransition,
+  axEventContinuationFingerprint,
   axEventEffectRequestDigest,
   axEventId,
   axEventIngressFingerprint,
@@ -66,6 +67,7 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
   private readonly effectKeys = new Map<string, string>();
   private readonly continuations = new Map<string, AxEventContinuation>();
   private readonly continuationKeys = new Map<string, string>();
+  private readonly continuationAdmissions = new Map<string, string>();
   private readonly deadLetters = new Map<string, AxEventDeadLetter>();
   private readonly workWaiters = new Set<Waiter>();
   private readonly capacityWaiters = new Set<Waiter>();
@@ -257,7 +259,26 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
       delivery.fencingToken
     );
     const previous = this.deliveries.get(delivery.id);
-    this.deliveries.set(delivery.id, structuredClone(delivery));
+    if (delivery.admittedContinuation && !previous?.admittedContinuation) {
+      throw new Error(
+        `Continuation admission for ${delivery.id} must be created atomically`
+      );
+    }
+    if (
+      delivery.admittedContinuation &&
+      previous?.admittedContinuation &&
+      axEventContinuationFingerprint(delivery.admittedContinuation) !==
+        axEventContinuationFingerprint(previous.admittedContinuation)
+    ) {
+      throw new Error(`Continuation admission for ${delivery.id} is immutable`);
+    }
+    const stored = structuredClone({
+      ...delivery,
+      ...(previous?.admittedContinuation
+        ? { admittedContinuation: previous.admittedContinuation }
+        : {}),
+    });
+    this.deliveries.set(delivery.id, stored);
     if (
       previous &&
       !this.isTerminal(previous.status) &&
@@ -408,6 +429,60 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
     return structuredClone(continuation);
   }
 
+  async admitContinuation(
+    deliveryId: string,
+    workerId: string,
+    fencingToken: number,
+    identityScope: string,
+    correlation: Readonly<AxEventCorrelationKey>,
+    now: number
+  ): Promise<Readonly<AxEventContinuation> | undefined> {
+    this.assertActiveClaim(deliveryId, workerId, fencingToken);
+    const delivery = this.deliveries.get(deliveryId)!;
+    if (delivery.identityScope !== identityScope) {
+      throw new Error(
+        `Continuation admission identity does not own delivery ${deliveryId}`
+      );
+    }
+    if (delivery.admittedContinuation) {
+      const admitted = delivery.admittedContinuation;
+      if (
+        admitted.identityScope !== identityScope ||
+        !admitted.correlation.some(
+          (value) =>
+            value.kind === correlation.kind && value.value === correlation.value
+        )
+      ) {
+        throw new Error(
+          `outcome_unknown: continuation admission for ${deliveryId} conflicts with its resume correlation`
+        );
+      }
+      return structuredClone(admitted);
+    }
+    const key = axEventScopedCorrelationKey(
+      identityScope,
+      correlation.kind,
+      correlation.value
+    );
+    const continuationId = this.continuationKeys.get(key);
+    if (!continuationId) return;
+    const continuation = this.continuations.get(continuationId);
+    if (!continuation) return;
+    if (continuation.expiresAt !== undefined && continuation.expiresAt <= now) {
+      await this.completeContinuation(continuationId);
+      return;
+    }
+    const owner = this.continuationAdmissions.get(continuationId);
+    if (owner && owner !== deliveryId) return;
+    const admitted = structuredClone(continuation);
+    this.continuationAdmissions.set(continuationId, deliveryId);
+    this.deliveries.set(deliveryId, {
+      ...delivery,
+      admittedContinuation: admitted,
+    });
+    return structuredClone(admitted);
+  }
+
   async completeContinuation(id: string): Promise<void> {
     const continuation = this.continuations.get(id);
     if (!continuation) return;
@@ -421,6 +496,7 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
       );
     }
     this.continuations.delete(id);
+    this.continuationAdmissions.delete(id);
   }
 
   async addDeadLetter(deadLetter: Readonly<AxEventDeadLetter>): Promise<void> {

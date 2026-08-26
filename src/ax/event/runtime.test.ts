@@ -667,6 +667,455 @@ describe('AxEventRuntime', () => {
     expect(lateChunkSinks).toBe(0);
   });
 
+  it.each(['observe', 'invalidate'] as const)(
+    'revokes late %s work before store disposal without compensating writes',
+    async (action) => {
+      const backing = new AxInMemoryEventStore();
+      let disposed = false;
+      let postCloseWrites = 0;
+      const writes = new Set<PropertyKey>([
+        'saveDelivery',
+        'saveRun',
+        'registerContinuation',
+        'completeContinuation',
+        'addDeadLetter',
+      ]);
+      const store = new Proxy(backing, {
+        get(target, property) {
+          if (property === 'close') {
+            return async () => {
+              disposed = true;
+            };
+          }
+          const value = Reflect.get(target, property, target);
+          if (typeof value !== 'function') return value;
+          if (!writes.has(property)) return value.bind(target);
+          return async (...args: unknown[]) => {
+            if (disposed) postCloseWrites++;
+            return value.apply(target, args);
+          };
+        },
+      });
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let started!: () => void;
+      const hostStarted = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      let lateRegistrationRejected = false;
+      const hostWork = async (
+        _ingress: Readonly<AxEventIngress>,
+        context: Readonly<{
+          registerContinuation: (value: {
+            correlation: { kind: string; value: string }[];
+          }) => string;
+        }>
+      ) => {
+        started();
+        await gate;
+        try {
+          context.registerContinuation({
+            correlation: [{ kind: 'late', value: action }],
+          });
+        } catch {
+          lateRegistrationRejected = true;
+        }
+      };
+      const route =
+        action === 'observe'
+          ? eventRoute({
+              id: 'late-observer',
+              match: { types: ['late.observe'] },
+              action,
+              observe: hostWork,
+            })
+          : eventRoute({
+              id: 'late-invalidator',
+              match: { types: ['late.invalidate'] },
+              action,
+              invalidator: { invalidate: hostWork },
+            });
+      const runtime = new AxEventRuntime({
+        store,
+        routes: [route],
+      });
+      await runtime.start();
+      await runtime.publish(ingress(`late-${action}`, `late.${action}`));
+      await hostStarted;
+      await runtime.close({ drain: false, timeoutMs: 10 });
+      expect(disposed).toBe(true);
+      expect(postCloseWrites).toBe(0);
+
+      release();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(lateRegistrationRejected).toBe(true);
+      expect(postCloseWrites).toBe(0);
+    }
+  );
+
+  it('stops claim heartbeats when close revokes a permanently hung target', async () => {
+    const store = new AxInMemoryEventStore();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let started!: () => void;
+    const targetStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const runtime = new AxEventRuntime({
+      store,
+      leaseMs: 100,
+      heartbeatMs: 10,
+      routes: [
+        eventRoute({
+          id: 'heartbeat-close',
+          match: { types: ['heartbeat.close'] },
+          action: 'wake',
+          target: eventTarget({
+            id: 'heartbeat-close-target',
+            ai,
+            program: program(async () => {
+              started();
+              await gate;
+              return { handled: true };
+            }),
+            mapInput: () => ({}),
+            retrySafety: 'idempotent',
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    const receipt = await runtime.publish(
+      ingress('heartbeat-close-1', 'heartbeat.close')
+    );
+    await targetStarted;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    await runtime.close({ drain: false, timeoutMs: 10 });
+    const expiresAtClose = (await store.getDelivery(receipt.deliveryIds[0]!))
+      ?.leaseExpiresAt;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(
+      (await store.getDelivery(receipt.deliveryIds[0]!))?.leaseExpiresAt
+    ).toBe(expiresAtClose);
+    release();
+    await Promise.resolve();
+  });
+
+  it('admits a one-shot continuation to only one concurrent delivery', async () => {
+    const store = new AxInMemoryEventStore();
+    const continuation: AxEventContinuation = {
+      id: 'exclusive-continuation',
+      targetId: 'exclusive-target',
+      routeId: 'exclusive-start',
+      instanceKey: 'exclusive-instance',
+      identityScope: 'anonymous',
+      correlation: [{ kind: 'job', value: 'exclusive-job' }],
+      createdAt: Date.now(),
+      metadata: { oneShot: true },
+    };
+    await store.registerContinuation(continuation);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let targetStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      targetStarted = resolve;
+    });
+    const admissions: string[] = [];
+    let targetCalls = 0;
+    const runtime = new AxEventRuntime({
+      store,
+      workerConcurrency: 2,
+      routes: [
+        eventRoute({
+          id: 'exclusive-resume',
+          match: { types: ['exclusive.resume'] },
+          action: 'resume',
+          ordering: 'relaxed',
+          correlation: () => continuation.correlation[0]!,
+          target: eventTarget({
+            id: continuation.targetId,
+            ai,
+            program: program(async (_input, options) => {
+              targetCalls++;
+              admissions.push(options.eventContext.continuation.id);
+              targetStarted();
+              await gate;
+              return { handled: true };
+            }),
+            mapInput: () => ({}),
+            retrySafety: 'idempotent',
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    const first = await runtime.publish(
+      ingress('exclusive-1', 'exclusive.resume')
+    );
+    const second = await runtime.publish(
+      ingress('exclusive-2', 'exclusive.resume')
+    );
+    await started;
+    for (let index = 0; index < 100; index++) {
+      const statuses = await Promise.all(
+        [...first.deliveryIds, ...second.deliveryIds].map(
+          async (id) => (await store.getDelivery(id))?.status
+        )
+      );
+      if (statuses.includes('dead_lettered')) break;
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    expect(targetCalls).toBe(1);
+    expect(admissions).toEqual([continuation.id]);
+    release();
+    await runtime.waitForIdle();
+    const statuses = await Promise.all(
+      [...first.deliveryIds, ...second.deliveryIds].map(
+        async (id) => (await store.getDelivery(id))?.status
+      )
+    );
+    expect(statuses.sort()).toEqual(['dead_lettered', 'succeeded']);
+    await runtime.close({ drain: false });
+  });
+
+  it('preserves exclusive admission across delivery and sink redrive', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const store = new AxInMemoryEventStore({ clock });
+    const original: AxEventContinuation = {
+      id: 'redrive-original',
+      targetId: 'redrive-target',
+      routeId: 'redrive-start',
+      instanceKey: 'original-instance',
+      identityScope: 'anonymous',
+      correlation: [{ kind: 'job', value: 'redrive-job' }],
+      createdAt: clock.now(),
+      expiresAt: clock.now() + 50,
+      metadata: { original: true },
+    };
+    await store.registerContinuation(original);
+    const targetAdmissions: string[] = [];
+    const targetInstances: string[] = [];
+    const sinkAdmissions: string[] = [];
+    const sinkInstances: string[] = [];
+    let targetCalls = 0;
+    let sinkCalls = 0;
+    const runtime = new AxEventRuntime({
+      clock,
+      store,
+      maxAttempts: 1,
+      routes: [
+        eventRoute({
+          id: 'redrive-resume',
+          match: { types: ['redrive.resume'] },
+          action: 'resume',
+          correlation: () => original.correlation[0]!,
+          target: eventTarget({
+            id: original.targetId,
+            ai,
+            program: program((_input, options) => {
+              targetCalls++;
+              targetAdmissions.push(options.eventContext.continuation.id);
+              targetInstances.push(options.eventContext.instanceKey);
+              if (targetCalls === 1) throw new Error('first target failure');
+              return { handled: true };
+            }),
+            mapInput: () => ({}),
+            retrySafety: 'idempotent',
+            sinks: [
+              {
+                id: 'redrive-sink',
+                write: (_output, context) => {
+                  sinkCalls++;
+                  sinkAdmissions.push(context.eventContext.continuation!.id);
+                  sinkInstances.push(context.eventContext.instanceKey);
+                  if (sinkCalls === 1) throw new Error('first sink failure');
+                },
+              },
+            ],
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    const receipt = await runtime.publish(
+      ingress('redrive-1', 'redrive.resume')
+    );
+    for (let index = 0; index < 100; index++) {
+      if (
+        (await store.getDelivery(receipt.deliveryIds[0]!))?.status ===
+        'dead_lettered'
+      ) {
+        break;
+      }
+      await Promise.resolve();
+    }
+    const deliveryDeadLetter = (await runtime.listDeadLetters()).find(
+      (deadLetter) => deadLetter.kind === 'delivery'
+    )!;
+    clock.advanceBy(51);
+    await expect(
+      store.findContinuation(
+        original.identityScope,
+        original.correlation[0]!,
+        clock.now()
+      )
+    ).resolves.toBeUndefined();
+    const replacement: AxEventContinuation = {
+      ...original,
+      id: 'redrive-replacement',
+      instanceKey: 'replacement-instance',
+      createdAt: clock.now(),
+      expiresAt: undefined,
+      metadata: { replacement: true },
+    };
+    await store.registerContinuation(replacement);
+
+    await runtime.redrive(deliveryDeadLetter.id);
+    for (let index = 0; index < 100; index++) {
+      if (
+        (await store.getDelivery(receipt.deliveryIds[0]!))?.status ===
+        'succeeded'
+      ) {
+        break;
+      }
+      await Promise.resolve();
+    }
+    const sinkDeadLetter = (await runtime.listDeadLetters()).find(
+      (deadLetter) => deadLetter.kind === 'sink'
+    )!;
+    await runtime.redrive(sinkDeadLetter.id);
+
+    expect(targetAdmissions).toEqual([original.id, original.id]);
+    expect(targetInstances).toEqual([
+      original.instanceKey,
+      original.instanceKey,
+    ]);
+    expect(sinkAdmissions).toEqual([original.id, original.id]);
+    expect(sinkInstances).toEqual([original.instanceKey, original.instanceKey]);
+    await expect(
+      store.findContinuation(
+        replacement.identityScope,
+        replacement.correlation[0]!,
+        clock.now()
+      )
+    ).resolves.toEqual(replacement);
+    await runtime.close({ drain: false });
+  });
+
+  it('fails closed when a legacy sink redrive lacks a delivery admission', async () => {
+    const store = new AxInMemoryEventStore();
+    const receipt = await store.enqueue({
+      ingress: ingress('legacy-sink-redrive', 'legacy.sink.redrive'),
+      deliveries: [
+        {
+          routeId: 'legacy-sink-redrive-route',
+          action: 'resume',
+          targetId: 'legacy-sink-redrive-target',
+          instanceKey: 'delivery-instance',
+          sizeBytes: 1,
+          retrySafety: 'idempotent',
+          ordering: 'strict',
+        },
+      ],
+      acceptedAt: Date.now(),
+      publishTimeoutMs: 100,
+    });
+    const claimed = (await store.claim('worker-a', Date.now(), 1_000))!;
+    const continuation: AxEventContinuation = {
+      id: 'legacy-run-only-admission',
+      targetId: 'legacy-sink-redrive-target',
+      routeId: 'legacy-start',
+      instanceKey: 'original-instance',
+      identityScope: claimed.identityScope,
+      correlation: [{ kind: 'job', value: 'legacy-job' }],
+      createdAt: Date.now(),
+    };
+    const run: AxEventRun = {
+      id: 'legacy-sink-redrive-run',
+      deliveryId: claimed.id,
+      routeId: claimed.routeId,
+      targetId: continuation.targetId,
+      instanceKey: continuation.instanceKey,
+      admittedContinuation: continuation,
+      claimedBy: claimed.claimedBy,
+      fencingToken: claimed.fencingToken,
+      status: 'succeeded',
+      attempt: 1,
+      startedAt: Date.now(),
+      finishedAt: Date.now(),
+      output: { handled: true },
+      sinks: [
+        {
+          sinkId: 'legacy-sink',
+          attempts: 1,
+          status: 'failed',
+          error: 'offline',
+        },
+      ],
+    };
+    await store.saveDelivery({
+      ...claimed,
+      status: 'running',
+      attempt: 1,
+      runId: run.id,
+    });
+    await store.saveRun(run);
+    await store.saveDelivery({
+      ...claimed,
+      status: 'succeeded',
+      attempt: 1,
+      runId: run.id,
+    });
+    await store.addDeadLetter({
+      id: 'legacy-sink-dead-letter',
+      kind: 'sink',
+      deliveryId: receipt.deliveryIds[0]!,
+      runId: run.id,
+      sinkId: 'legacy-sink',
+      reason: 'offline',
+      createdAt: Date.now(),
+    });
+    let sinkCalls = 0;
+    const target = eventTarget({
+      id: continuation.targetId,
+      ai,
+      program: program(() => ({ handled: true })),
+      mapInput: () => ({}),
+      retrySafety: 'idempotent',
+      sinks: [
+        {
+          id: 'legacy-sink',
+          write: () => {
+            sinkCalls++;
+          },
+        },
+      ],
+    });
+    const runtime = new AxEventRuntime({
+      store,
+      routes: [
+        eventRoute({
+          id: claimed.routeId,
+          match: { types: ['legacy.sink.redrive'] },
+          action: 'resume',
+          correlation: () => continuation.correlation[0]!,
+          target,
+        }),
+      ],
+    });
+
+    await expect(runtime.redrive('legacy-sink-dead-letter')).rejects.toThrow(
+      'no durable exclusive continuation admission'
+    );
+    expect(sinkCalls).toBe(0);
+  });
+
   it('supervises a transient claim failure and continues the worker loop', async () => {
     const store = new AxInMemoryEventStore();
     const claim = store.claim.bind(store);
@@ -788,6 +1237,17 @@ describe('AxEventRuntime', () => {
       expiresAt: clock.now() + 50,
       metadata: { admitted: 'yes' },
     };
+    await store.registerContinuation(continuation);
+    const exclusiveAdmission = await store.admitContinuation(
+      claimed.id,
+      claimed.claimedBy!,
+      claimed.fencingToken!,
+      continuation.identityScope,
+      continuation.correlation[0]!,
+      clock.now()
+    );
+    expect(exclusiveAdmission).toEqual(continuation);
+    const admittedClaim = (await store.getDelivery(claimed.id))!;
     const run: AxEventRun = {
       id: 'resume-recovery-run',
       deliveryId: claimed.id,
@@ -804,14 +1264,13 @@ describe('AxEventRuntime', () => {
       output: { handled: true },
     };
     await store.saveDelivery({
-      ...claimed,
+      ...admittedClaim,
       status: 'running',
       attempt: 1,
       runId: run.id,
       invocationStarted: true,
     });
     await store.saveRun(run);
-    await store.registerContinuation(continuation);
     clock.advanceBy(51);
     await expect(
       store.findContinuation(
