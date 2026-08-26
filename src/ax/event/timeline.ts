@@ -567,6 +567,14 @@ const hasTemporalConflict = (
   ) {
     return true;
   }
+  if (
+    stream &&
+    envelope.epoch === stream.epoch &&
+    envelope.sequence > stream.maxSequence &&
+    envelope.sessionTimeUs < stream.maxSessionTimeUs
+  ) {
+    return true;
+  }
   const incomingMedia = mediaRange(envelope.event);
   for (const existing of events) {
     if (
@@ -929,7 +937,11 @@ export class AxInteractionTimeline {
       retained.length > this.options.maxEvents ||
       retainedBytes > this.options.maxBytes
     ) {
-      const evicted = retained.shift();
+      const evictIndex = retained.findIndex(
+        (event) => event.eventId !== envelope.eventId
+      );
+      if (evictIndex < 0) break;
+      const [evicted] = retained.splice(evictIndex, 1);
       if (!evicted) break;
       retainedBytes -= jsonBytes(evicted);
       evictedEventIds.push(evicted.eventId);

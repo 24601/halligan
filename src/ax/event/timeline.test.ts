@@ -382,6 +382,68 @@ describe('AxInteractionTimeline', () => {
     ).toBe('temporal_conflict');
   });
 
+  it('rejects a later sequence that regresses session time after eviction', () => {
+    let timeline = AxInteractionTimeline.create({
+      sessionId: 'session-1',
+      maxEvents: 1,
+    });
+    timeline = append(
+      timeline,
+      envelope({ eventId: 'seq-1', sequence: 1, sessionTimeUs: 100 })
+    ).timeline;
+    timeline = append(
+      timeline,
+      envelope({ eventId: 'seq-0', sequence: 0, sessionTimeUs: 90 })
+    ).timeline;
+    expect(
+      append(
+        timeline,
+        envelope({ eventId: 'seq-2', sequence: 2, sessionTimeUs: 95 })
+      )
+    ).toMatchObject({
+      accepted: false,
+      classification: 'temporal_conflict',
+    });
+    expect(timeline.project().events.map((event) => event.eventId)).toEqual([
+      'seq-0',
+    ]);
+  });
+
+  it('never evicts the envelope accepted by a revision', () => {
+    const first = envelope({
+      eventId: 'a',
+      sequence: 0,
+      event: { kind: 'text', text: 'aa' },
+    });
+    const second = envelope({
+      eventId: 'b',
+      sequence: 1,
+      sessionTimeUs: 1,
+      event: { kind: 'text', text: 'bb' },
+    });
+    let timeline = AxInteractionTimeline.create({
+      sessionId: 'session-1',
+      maxEvents: 2,
+      maxBytes: 550,
+    });
+    timeline = append(timeline, first).timeline;
+    timeline = append(timeline, second).timeline;
+    const revised = append(
+      timeline,
+      envelope({
+        eventId: 'a',
+        revision: 1,
+        event: { kind: 'text', text: 'a'.repeat(80) },
+      })
+    );
+    expect(revised.accepted).toBe(true);
+    expect(revised.classification).toBe('revision');
+    expect(revised.evictedEventIds).not.toContain('a');
+    expect(
+      revised.timeline.project().events.some((event) => event.eventId === 'a')
+    ).toBe(true);
+  });
+
   it('filters projections and sorts by authoritative session time, not arrival or wall time', () => {
     let timeline = AxInteractionTimeline.create({ sessionId: 'session-1' });
     const later = append(
