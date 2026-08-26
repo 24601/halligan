@@ -203,6 +203,33 @@ import type {
   AxResolvedAgentPlaybookLearn,
 } from './agent/playbookConfig.js';
 import {
+  type AxPreferenceApplicability,
+  type AxPreferenceEvidenceAssertion,
+  type AxPreferenceEvidenceClaim,
+  type AxPreferenceEvidenceContext,
+  type AxPreferenceEvidenceErasure,
+  type AxPreferenceEvidenceExclusion,
+  type AxPreferenceEvidenceExclusionReason,
+  type AxPreferenceEvidenceKind,
+  type AxPreferenceEvidenceOperation,
+  type AxPreferenceEvidenceReceiptPurpose,
+  type AxPreferenceEvidenceReceiptRequest,
+  type AxPreferenceEvidenceRecord,
+  type AxPreferenceEvidenceRenewal,
+  type AxPreferenceEvidenceRetraction,
+  type AxPreferenceEvidenceRevision,
+  type AxPreferenceEvidenceSelection,
+  type AxPreferenceEvidenceStreamBinding,
+  type AxPreferenceEvidenceStreamRequest,
+  type AxSelectedPreferenceEvidence,
+  axErasePreferenceEvidence,
+  axPreferenceEvidenceLimits,
+  axPreferenceEvidenceToMemories,
+  axRenewPreferenceEvidence,
+  axRetractPreferenceEvidence,
+  axSelectPreferenceEvidence,
+} from './agent/preferenceEvidence.js';
+import {
   AxAgentSessionAuthorizationError,
   AxAgentSessionClient,
   AxAgentSessionConflictError,
@@ -1638,6 +1665,7 @@ export { axDefaultOptimizerLogger };
 export { axDefaultOptimizerMetricsConfig };
 export { axDeserializeOptimizedProgram };
 export { axEmitUsageEvent };
+export { axErasePreferenceEvidence };
 export { axEventErrorMessage };
 export { axEventId };
 export { axEventIdentityScope };
@@ -1704,9 +1732,12 @@ export { axNormalizeTranscriptionResponse };
 export { axOpenAIChatAudioDefaults };
 export { axOptimizableValidators };
 export { axPlaybookFailureSection };
+export { axPreferenceEvidenceLimits };
+export { axPreferenceEvidenceToMemories };
 export { axProcessContentForProvider };
 export { axReactCanonicalJSON };
 export { axReactSerializeHistory };
+export { axRenewPreferenceEvidence };
 export { axResolveAIProfileFeatures };
 export { axResolveAIProfileId };
 export { axResolveGeminiLiveAudioConfig };
@@ -1714,10 +1745,12 @@ export { axResolveGrokRealtimeAudioConfig };
 export { axResolveMCPExecutionContext };
 export { axResolveOpenAIChatAudioConfig };
 export { axResolveOpenAIRealtimeAudioConfig };
+export { axRetractPreferenceEvidence };
 export { axRuntimePrimitives };
 export { axScoreProvidersForRequest };
 export { axSelectExecutableSkills };
 export { axSelectOptimalProvider };
+export { axSelectPreferenceEvidence };
 export { axSerializeOptimizedProgram };
 export { axShouldUseGeminiLiveAudio };
 export { axShouldUseGrokRealtime };
@@ -2500,6 +2533,24 @@ export type { AxPlaybookEvolveOptions };
 export type { AxPlaybookEvolveResult };
 export type { AxPlaybookOptions };
 export type { AxPlaybookSnapshot };
+export type { AxPreferenceApplicability };
+export type { AxPreferenceEvidenceAssertion };
+export type { AxPreferenceEvidenceClaim };
+export type { AxPreferenceEvidenceContext };
+export type { AxPreferenceEvidenceErasure };
+export type { AxPreferenceEvidenceExclusion };
+export type { AxPreferenceEvidenceExclusionReason };
+export type { AxPreferenceEvidenceKind };
+export type { AxPreferenceEvidenceOperation };
+export type { AxPreferenceEvidenceReceiptPurpose };
+export type { AxPreferenceEvidenceReceiptRequest };
+export type { AxPreferenceEvidenceRecord };
+export type { AxPreferenceEvidenceRenewal };
+export type { AxPreferenceEvidenceRetraction };
+export type { AxPreferenceEvidenceRevision };
+export type { AxPreferenceEvidenceSelection };
+export type { AxPreferenceEvidenceStreamBinding };
+export type { AxPreferenceEvidenceStreamRequest };
 export type { AxPrincipal };
 export type { AxProgramDemos };
 export type { AxProgramExamples };
@@ -2566,6 +2617,7 @@ export type { AxRuntimePrimitiveStage };
 export type { AxSamplePickerOptions };
 export type { AxSelectExecutableSkillsOptions };
 export type { AxSelectedExecutableSkill };
+export type { AxSelectedPreferenceEvidence };
 export type { AxSelfTuningConfig };
 export type { AxSerializedOptimizedProgram };
 export type { AxSetExamplesOptions };

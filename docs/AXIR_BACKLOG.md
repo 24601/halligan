@@ -50,6 +50,13 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
   - TS paths: `src/ax/ai/index.ts`, `src/ax/ai/visual`
   - Impact: TypeScript hosts can apply revision-, freshness-, authority-, change-, and rolling-budget-aware selection to host-captured visual observations; generated language packages do not yet expose the AxVisualObservation or AxFrameSampler policy.
   - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+- `axir-2026-08-25-port-host-owned-principal-preference-evidence-selection` [axagent] Port host-owned principal preference evidence selection
+  - Status: open
+  - Source PR: #19
+  - Source commit: `28675e87cbf879510e7c61fac29a88e24e1dd4c0`
+  - TS paths: `src/ax/agent/preferenceEvidence.ts`, `src/ax/agent/preferenceEvidence.test.ts`, `src/ax/agent/preferenceEvidence.test-d.ts`
+  - Impact: Generated runtimes do not yet expose the optional principal-scoped preference evidence contract, nested and per-record-byte malformed isolation without consuming the valid corpus budget, current-stream versus immutable historical receipt binding, strong-claim self-contradiction resolution, content-free erase tombstones, allowlisted retraction invariants, monotonic stream/epoch lifecycle helpers, frozen publications, or memory adapter.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 - `axir-2026-08-25-port-evidence-aware-ace-playbook-metadata-and-retrieval` [axoptimize] Port evidence-aware ACE playbook metadata and retrieval
   - Status: open
   - Source PR: #6

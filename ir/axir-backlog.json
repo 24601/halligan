@@ -1290,6 +1290,29 @@
       "verification": null
     },
     {
+      "id": "axir-2026-08-25-port-host-owned-principal-preference-evidence-selection",
+      "status": "open",
+      "title": "Port host-owned principal preference evidence selection",
+      "createdAt": "2026-08-25",
+      "sourcePR": 19,
+      "sourceCommit": "28675e87cbf879510e7c61fac29a88e24e1dd4c0",
+      "tsPaths": [
+        "src/ax/agent/preferenceEvidence.ts",
+        "src/ax/agent/preferenceEvidence.test.ts",
+        "src/ax/agent/preferenceEvidence.test-d.ts"
+      ],
+      "portableSurface": "axagent",
+      "impact": "Generated runtimes do not yet expose the optional principal-scoped preference evidence contract, nested and per-record-byte malformed isolation without consuming the valid corpus budget, current-stream versus immutable historical receipt binding, strong-claim self-contradiction resolution, content-free erase tombstones, allowlisted retraction invariants, monotonic stream/epoch lifecycle helpers, frozen publications, or memory adapter.",
+      "suggestedAxirWork": [
+        "Add or update the TS-derived conformance fixture.",
+        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
+        "Run npm run axir:conformance:check and npm run test:axir."
+      ],
+      "completedAt": null,
+      "completedByCommit": null,
+      "verification": null
+    },
+    {
       "id": "axir-2026-08-25-port-evidence-aware-ace-playbook-metadata-and-retrieval",
       "status": "open",
       "title": "Port evidence-aware ACE playbook metadata and retrieval",

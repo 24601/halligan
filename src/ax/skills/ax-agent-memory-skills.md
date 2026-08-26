@@ -198,6 +198,198 @@ const myAgent = agent('task:string -> answer:string', {
 });
 ```
 
+## Host-owned preference evidence
+
+Use `axSelectPreferenceEvidence(...)` when a host already has a bounded,
+principal-scoped preference ledger and needs to decide which evidence may enter
+Ax's existing memory input. This is an optional selection contract, not a user
+profile, identity system, consent system, database, or autonomous learner.
+
+The contract deliberately separates:
+
+- `observation`: a sourced event, never applied as a preference;
+- `inference`: an uncertain interpretation, returned under `informational` and
+  never applied;
+- `confirmed-preference`: eligible for `applied` only when the host admits its
+  exact source, authority, and consent receipts.
+
+The context `principalId` and stream checkpoint are host-owned. Ax does not
+authenticate either. Receipt references are opaque lookup keys, not bearer
+authority: the host callbacks must compare the detached, frozen request against
+durable state and verify the complete principal, record, stream/version, epoch,
+revision, event, operation, purpose, and event payload binding. A principal ID,
+consent statement, or receipt reference copied from model output cannot certify
+identity, provenance, authority, or consent. Never derive callback approval
+from the same model text being evaluated.
+
+```typescript
+import {
+  axPreferenceEvidenceToMemories,
+  axSelectPreferenceEvidence,
+} from '@ax-llm/ax';
+import type { AxPreferenceEvidenceRecord } from '@ax-llm/ax';
+
+const evidence: AxPreferenceEvidenceRecord[] = [
+  {
+    id: 'response-style',
+    principalId: trustedSession.principalId,
+    streamId: 'preference-stream-42',
+    streamVersion: 1,
+    epoch: 1,
+    revisions: [
+      {
+        operation: 'assert',
+        revision: 1,
+        epoch: 1,
+        eventId: 'preference-event-1',
+        kind: 'confirmed-preference',
+        value: 'Use concise bullet points for status updates.',
+        sourceReceiptRef: 'source-receipt-1',
+        confidence: 1,
+        scope: 'response-style',
+        applicability: { allOf: { channel: 'work' } },
+        recordedAt: '2026-08-20T12:00:00.000Z',
+        expiresAt: '2027-08-20T12:00:00.000Z',
+        authorityReceiptRef: 'authority-receipt-1',
+        consentReceiptRef: 'consent-receipt-1',
+      },
+    ],
+  },
+];
+
+const selection = axSelectPreferenceEvidence(evidence, {
+  principalId: trustedSession.principalId,
+  query: 'Draft a concise project status update',
+  scope: 'response-style',
+  attributes: { channel: 'work' },
+  now: new Date().toISOString(),
+  verifyStreamState: (request) =>
+    preferenceLedger.matchesCurrentSnapshot(request),
+  verifyReceipt: (request) => preferenceLedger.verifyReceipt(request),
+  verifyDestructiveLifecycleReceipt: (request) =>
+    privacyControls.verifyDestructiveReceipt(request),
+  allowApplication: (revision) => safetyPolicy.allows(revision),
+});
+
+await myAgent.forward(ai, {
+  task: 'Draft the update',
+  memories: axPreferenceEvidenceToMemories(selection),
+});
+```
+
+Selection validates strictly increasing timestamps and versions, principal
+scope, exact host stream state, receipt bindings, scope/applicability, expiry,
+terminal lifecycle state, contradiction, supersession, confidence, and host
+policy before using Ax's existing deterministic lexical ranker. Equal-time or
+older supersession and unresolved contradictions fail closed. Within a single
+stream's current epoch, a uniquely stronger claim resolves a self-contradiction
+by authority kind (`confirmed-preference` over `observation` over `inference`),
+then confidence; an equal-strength or otherwise unresolved conflict still fails
+closed. This prevents a weak later inference from silently displacing a
+stronger confirmed preference.
+Stream-state verification binds the selected claim to the current durable
+snapshot and its current `streamVersion`. Receipt verification instead binds
+each event to the immutable `streamVersion` that emitted it (equal to that
+event's `revision`), so later revisions cannot rewrite historical source,
+authority, or consent receipts.
+Only `applied` confirmed preferences convert to memory; observations and
+inferences remain available for host inspection under `informational`.
+Convert the returned selection directly; the memory adapter rejects copied or
+deserialized selection objects. Callback inputs and returned selections are
+detached and deeply frozen. Persist records and host checkpoints, not the
+transient selection.
+
+Use `axRetractPreferenceEvidence(...)` to append a reversible retraction while
+retaining revision history. Use `axErasePreferenceEvidence(...)` to advance the
+same stream monotonically and replace prior revisions with a content-free
+tombstone; revision numbers do not reset. Retraction and erasure are terminal
+within an epoch, and replayed older snapshots fail when
+`verifyStreamState(...)` checks the host's current checkpoint. The only reopen
+path is `axRenewPreferenceEvidence(...)`, which advances to a new epoch and
+requires a separately verified epoch-authority receipt plus fresh consent.
+Persist the new stream checkpoint before making it selectable. Erasure uses a
+separate `verifyDestructiveLifecycleReceipt(...)`; ordinary application
+authority cannot authorize deletion. The host remains responsible for
+replacing/deleting durable copies, indexes, backups, caches, and derived data.
+
+Selection has fixed fail-closed limits: 256 records, 64 revisions per record,
+262,144 total bytes, 16,384 bytes per record, 4,000 value characters, 2,000
+query characters, 256 scope/ID characters, 512 receipt-reference characters,
+32 context attributes, 16 applicability entries, 32 relation references,
+object depth 8, object/array width 64, and `topK` 20. Corpus and structural
+limits are checked before host callbacks or ranking. The values are exported as
+`axPreferenceEvidenceLimits`. Count, query, and total-byte overflow reject the
+batch. Structural and per-record byte violations exclude only the malformed
+record and do not consume the valid corpus's total-byte budget.
+
+All verification and policy callbacks are synchronous and invoked inline.
+Selector limits bound Ax-owned validation and ranking work, but do not bound
+trusted-host callback latency. Hosts must keep callbacks bounded and
+non-blocking, avoid reentrancy and lock cycles, and prefetch/cache authority
+state or complete asynchronous verification before selection when external I/O
+is required.
+
+This mechanism is useful for small, auditable preference catalogs where the
+host already owns identity, authority, privacy, retention, and safety policy.
+Do not use it as a universal memory store, an authorization decision, or a
+basis for medical, psychological, protected-trait, or other sensitive
+inference. It does not verify that a reference is authentic, discover consent,
+resolve semantic contradictions, sanitize preference text, or prove that
+personalization helps model output. Callback correctness, atomic checkpoint
+updates, receipt storage, privacy enforcement, identity binding, and input
+contamination controls remain host responsibilities. `allowApplication` must
+enforce product and safety rules independently of expected output text; user
+preference never overrides truthfulness or safety.
+
+### Deterministic mechanism evaluation
+
+Run:
+
+```bash
+npm run evaluate:preference-evidence
+```
+
+The final corpus, expected outcomes, and event-bound host policy live in the
+separately authored post-baseline artifact
+`scripts/fixtures/preference-evidence-later-v1.json`. The artifact was committed
+at `0f70af1aa9723c7059c0850b034918ba733ee958` after mechanism baseline
+`8e1152f8974231ea7e81d8078acbd7e84386c438`; its frozen SHA-256 is
+`756d76538ab5733c86894b8aecb62af7218563f301a80c599970c1d5922daa9f`.
+The evaluator checks that digest before parsing and records the provenance in
+its output. Artifact-owned expectations include exact exclusions and callback
+counts/purposes for successful and rejected cases, so a callback regression or
+an empty applied set rejected for the wrong reason fails.
+Cases cover stable benefit, contradiction, expiry, cross-principal leakage,
+forged consent/provenance and destructive authority, retraction, erasure and
+stale replay, explicit epoch renewal, uncertain inference, unseen
+harmful/sycophantic paraphrases, equal-time ambiguity, no-benefit, and noisy
+small-data. Separate stress probes exercise count, query, total-byte, and
+single and repeated cyclic-shape isolation before callbacks.
+
+On the 17-case artifact, static/no personalization scores 14/17 exact with
+three missed-personalization cases; naive latest-value scores 16/17 with two
+correct applications, zero false-personalization cases, and one missed case.
+Evidence-aware selection scores 17/17 with three correct applications, zero
+false-personalization cases, and zero missed cases. All 17 exact applied-ID,
+exclusion-reason, and callback checks pass, including unresolved observation
+contradiction, an explicitly configured `minConfidence: 0.5` uncertain
+inference rejection, equal-time observation supersession, and preservation of
+a stronger confirmed preference over a weak later inference. Retention/expiry,
+retraction/erasure, stale replay, renewal, authority, and stress checks also
+pass. The artifact is 28,572 UTF-8 bytes. The evaluator reports measured
+latency and every exclusion/callback check, exits nonzero on any failure, and
+does not suppress or golden known failures.
+
+The default bound is 17 cases × 1,000 iterations = 17,000 local selections,
+five one-shot stress probes, zero provider calls/tokens, and $0 provider cost.
+Latency is descriptive and machine-dependent. This is deterministic
+adversarial mechanism regression coverage, not independent held-out
+personalization accuracy. It makes no model-quality, security-proof,
+semantic-retrieval, authority-authenticity, privacy-system, or
+production-latency claim. The small synthetic set is useful for regression
+detection, not statistical generalization; contamination control and genuine
+independent evaluation remain host responsibilities.
+
 ## Skills Search
 
 Use `onSkillsSearch` when the agent needs to load skill guides such as usage instructions, operational guides, or domain conventions into the executor's system prompt on demand. The actor decides which skills to fetch and when, so you do not pre-render every skill into every prompt.
