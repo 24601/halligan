@@ -87,7 +87,8 @@ export interface AxCausalEvidenceAuthority {
 
 export type AxCausalEvidenceAuthorityVerifier = (
   canonicalPayload: string,
-  authority: Readonly<AxCausalEvidenceAuthority>
+  authority: Readonly<AxCausalEvidenceAuthority>,
+  purpose: 'issue' | 'replay'
 ) => boolean;
 
 export interface AxCausalEvidenceReceipt {
@@ -281,10 +282,12 @@ function normalizeRecord(
   record: Readonly<AxCausalCandidateEvidenceRecord>,
   options: Readonly<Required<AxCausalCandidateRetentionOptions>>
 ): AxCausalCandidateEvidenceRecord {
-  const summary = (value: string | undefined): string | undefined =>
-    options.includeEvidenceSummaries && value
-      ? value.slice(0, options.maxSummaryChars)
-      : undefined;
+  const summary = (value: string | undefined): string | undefined => {
+    if (!options.includeEvidenceSummaries || !value) return undefined;
+    const truncated = [...value].slice(0, options.maxSummaryChars).join('');
+    assertWellFormedUtf16(truncated);
+    return truncated;
+  };
   const predictions = (
     values: readonly AxCausalMetricPrediction[],
     field: string,
@@ -600,8 +603,13 @@ export function axCreateCausalCandidateEvidenceManifest(
   const normalized = records.map((record) => normalizeRecord(record, resolved));
   validateManifestRecords(normalized);
   const totalRecordCount = normalized.length;
-  let retained = normalized.slice(0, resolved.maxRecords);
-  let omittedRecordCount = totalRecordCount - retained.length;
+  if (totalRecordCount > resolved.maxRecords) {
+    throw new Error(
+      `causal candidate evidence exceeds maxRecords=${resolved.maxRecords}`
+    );
+  }
+  const retained = normalized;
+  const omittedRecordCount = 0;
   const authority = normalizeAuthority(options.authority);
   const inheritedReceipts = priorReceipts.map(normalizeReceipt);
   const makeManifest = (): AxCausalCandidateEvidenceManifest => ({
@@ -630,25 +638,16 @@ export function axCreateCausalCandidateEvidenceManifest(
     ],
   });
   const encoder = new TextEncoder();
-  let manifest = makeManifest();
-  while (
-    encoder.encode(JSON.stringify(manifest)).byteLength >
-      resolved.maxArtifactBytes &&
-    retained.length > 0
-  ) {
-    retained = retained.slice(0, -1);
-    omittedRecordCount += 1;
-    manifest = makeManifest();
-  }
+  const manifest = makeManifest();
   if (
     encoder.encode(JSON.stringify(manifest)).byteLength >
     resolved.maxArtifactBytes
   ) {
     throw new Error(
-      `causal candidate evidence metadata exceeds maxArtifactBytes=${resolved.maxArtifactBytes}`
+      `causal candidate evidence exceeds maxArtifactBytes=${resolved.maxArtifactBytes}`
     );
   }
-  validateReceiptChain(manifest, options.verifyAuthority);
+  validateReceiptChain(manifest, options.verifyAuthority, 'issue');
   return deepFreeze(manifest);
 }
 
@@ -695,13 +694,15 @@ function canonicalizeReceipt(
     maxRecords: manifest.maxRecords,
     maxArtifactBytes: manifest.maxArtifactBytes,
     privacy: manifest.privacy,
+    authority: receipt.authority,
     priorReceipts: manifest.receipts.slice(0, receiptIndex),
   });
 }
 
 function validateReceiptChain(
   manifest: Readonly<AxCausalCandidateEvidenceManifest>,
-  verifyAuthority: AxCausalEvidenceAuthorityVerifier
+  verifyAuthority: AxCausalEvidenceAuthorityVerifier,
+  purpose: 'issue' | 'replay'
 ): void {
   if (manifest.receipts.length === 0) {
     throw new Error('causal candidate evidence requires an authority receipt');
@@ -740,7 +741,7 @@ function validateReceiptChain(
     const authority = normalizeAuthority(receipt.authority);
     if (
       JSON.stringify(authority) !== JSON.stringify(receipt.authority) ||
-      !verifyAuthority(canonicalizeReceipt(manifest, index), authority)
+      !verifyAuthority(canonicalizeReceipt(manifest, index), authority, purpose)
     ) {
       throw new Error(
         'causal candidate evidence authority verification failed'
@@ -849,6 +850,6 @@ export function axCloneCausalCandidateEvidenceManifest(
       'invalid, unauthorized, or unbounded causal candidate evidence manifest'
     );
   }
-  validateReceiptChain(manifest, verifyAuthority);
+  validateReceiptChain(manifest, verifyAuthority, 'replay');
   return deepFreeze(manifest);
 }

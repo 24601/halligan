@@ -24,7 +24,11 @@ function receiptRegistry(): {
   verify: AxCausalEvidenceAuthorityVerifier;
 } {
   const receipts = new Map<string, string>();
-  const verify: AxCausalEvidenceAuthorityVerifier = (payload, authority) => {
+  const verify: AxCausalEvidenceAuthorityVerifier = (
+    payload,
+    authority,
+    purpose
+  ) => {
     if (
       authority.principalId !== 'host:deterministic-fixture' ||
       authority.evaluatorId !== 'eval:causal-fixture-v2' ||
@@ -34,8 +38,12 @@ function receiptRegistry(): {
       return false;
     }
     const prior = receipts.get(authority.receiptId);
-    if (prior === undefined) receipts.set(authority.receiptId, payload);
-    return prior === undefined || prior === payload;
+    if (prior === undefined) {
+      if (purpose === 'replay') return false;
+      receipts.set(authority.receiptId, payload);
+      return true;
+    }
+    return prior === payload;
   };
   return {
     options: (receiptId) => ({
@@ -230,17 +238,6 @@ export async function evaluateCausalCandidateEvidence(): Promise<AxCausalEvidenc
   });
   const replayJson = JSON.stringify(axSerializeOptimizedProgram(replayed));
 
-  const requiredAuditFields = [
-    'evidence',
-    'hypothesis',
-    'affectedComponents',
-    'predictedBenefit',
-    'predictedRegressions',
-    'outcome',
-    'decision',
-    'ablation',
-    'authority',
-  ];
   const auditFidelity = settled.causalCandidateEvidence!.records.every(
     (record) =>
       record.evidence.length > 0 &&
@@ -325,9 +322,10 @@ export async function evaluateCausalCandidateEvidence(): Promise<AxCausalEvidenc
   const toctouSerialized = JSON.parse(evidenceJson);
   const mutatingVerifier: AxCausalEvidenceAuthorityVerifier = (
     payload,
-    authority
+    authority,
+    purpose
   ) => {
-    const verified = receipts.verify(payload, authority);
+    const verified = receipts.verify(payload, authority, purpose);
     toctouSerialized.causalCandidateEvidence.records[0].hypothesis =
       'FORGED AFTER VERIFY';
     return verified;
@@ -357,11 +355,8 @@ export async function evaluateCausalCandidateEvidence(): Promise<AxCausalEvidenc
   const result: AxCausalEvidenceEvaluationResult = {
     scenarios: records.length,
     auditFidelity: {
-      baseline: requiredAuditFields.every((field) =>
-        baselineJson.includes(field)
-      )
-        ? 1
-        : 0,
+      baseline:
+        JSON.parse(baselineJson).causalCandidateEvidence === undefined ? 0 : 1,
       evidenceManifest: auditFidelity,
     },
     thresholdAttainment: {
@@ -394,7 +389,13 @@ export async function evaluateCausalCandidateEvidence(): Promise<AxCausalEvidenc
         new TextEncoder().encode(evidenceJson).byteLength -
         new TextEncoder().encode(baselineJson).byteLength,
     },
-    negativeCasesPreserved: ['claim-no-benefit', 'claim-misleading'],
+    negativeCasesPreserved: settled
+      .causalCandidateEvidence!.records.filter(
+        (record) =>
+          record.eventKind === 'candidate_decision' &&
+          record.decision.status === 'rejected'
+      )
+      .map((record) => record.id),
     budget: {
       providerCalls: 0,
       providerTokens: 0,

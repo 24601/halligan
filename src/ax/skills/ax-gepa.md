@@ -106,6 +106,7 @@ const audited = axAttachCausalCandidateEvidence(result.optimizedProgram!, [
     receiptVersion: '1',
   },
   // Verify that receiptId covers the canonical payload and authority above.
+  // The third argument is 'issue' during attach and 'replay' during deserialize.
   verifyAuthority: verifyReceipt,
 });
 ```

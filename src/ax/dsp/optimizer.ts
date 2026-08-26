@@ -902,6 +902,7 @@ export class AxOptimizedProgramImpl<OUT = any>
     selectorState?: Record<string, AxGEPAComponentBanditState>;
     causalCandidateEvidence?: AxCausalCandidateEvidenceManifest;
     causalEvidenceVerifier?: AxCausalEvidenceAuthorityVerifier;
+    causalEvidenceAlreadyIssued?: boolean;
     demos?: AxProgramDemos<any, OUT>[];
     examples?: AxExample[];
     modelConfig?: AxOptimizedProgram<OUT>['modelConfig'];
@@ -922,10 +923,12 @@ export class AxOptimizedProgramImpl<OUT = any>
       throw new Error('causal evidence verifier is required');
     }
     this.causalCandidateEvidence = config.causalCandidateEvidence
-      ? axCloneCausalCandidateEvidenceManifest(
-          config.causalCandidateEvidence,
-          config.causalEvidenceVerifier!
-        )
+      ? config.causalEvidenceAlreadyIssued
+        ? config.causalCandidateEvidence
+        : axCloneCausalCandidateEvidenceManifest(
+            config.causalCandidateEvidence,
+            config.causalEvidenceVerifier!
+          )
       : undefined;
     this.demos = config.demos;
     this.examples = config.examples;
@@ -993,25 +996,28 @@ export function axAttachCausalCandidateEvidence<OUT = any>(
         maxSummaryChars: existing.privacy.maxSummaryChars,
       }
     : undefined;
+  const definedOptions = Object.fromEntries(
+    Object.entries(options).filter(([, value]) => value !== undefined)
+  ) as AxCausalCandidateEvidenceOptions;
   if (
     existing &&
     JSON.stringify({
       ...inheritedOptions,
-      maxRecords: options.maxRecords ?? inheritedOptions?.maxRecords,
+      maxRecords: definedOptions.maxRecords ?? inheritedOptions?.maxRecords,
       maxArtifactBytes:
-        options.maxArtifactBytes ?? inheritedOptions?.maxArtifactBytes,
+        definedOptions.maxArtifactBytes ?? inheritedOptions?.maxArtifactBytes,
       includeEvidenceSummaries:
-        options.includeEvidenceSummaries ??
+        definedOptions.includeEvidenceSummaries ??
         inheritedOptions?.includeEvidenceSummaries,
       maxSummaryChars:
-        options.maxSummaryChars ?? inheritedOptions?.maxSummaryChars,
+        definedOptions.maxSummaryChars ?? inheritedOptions?.maxSummaryChars,
     }) !== JSON.stringify(inheritedOptions)
   ) {
     throw new Error('cannot change causal evidence retention while appending');
   }
   const manifest = axCreateCausalCandidateEvidenceManifest(
     [...(existing?.records ?? []), ...records],
-    { ...inheritedOptions, ...options },
+    { ...inheritedOptions, ...definedOptions },
     existing?.receipts
   );
   if (manifest.omittedRecordCount > 0) {
@@ -1021,6 +1027,7 @@ export function axAttachCausalCandidateEvidence<OUT = any>(
     ...serialized,
     causalCandidateEvidence: manifest,
     causalEvidenceVerifier: options.verifyAuthority,
+    causalEvidenceAlreadyIssued: true,
   });
 }
 

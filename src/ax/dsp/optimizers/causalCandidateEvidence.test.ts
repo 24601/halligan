@@ -32,7 +32,11 @@ function hostReceiptRegistry(): {
   verify: AxCausalEvidenceAuthorityVerifier;
 } {
   const boundPayloads = new Map<string, string>();
-  const verify: AxCausalEvidenceAuthorityVerifier = (payload, authority) => {
+  const verify: AxCausalEvidenceAuthorityVerifier = (
+    payload,
+    authority,
+    purpose
+  ) => {
     if (
       authority.principalId !== 'host:test' ||
       authority.evaluatorId !== 'eval:test' ||
@@ -43,9 +47,11 @@ function hostReceiptRegistry(): {
     }
     const boundPayload = boundPayloads.get(authority.receiptId);
     if (boundPayload === undefined) {
+      if (purpose === 'replay') return false;
       boundPayloads.set(authority.receiptId, payload);
+      return true;
     }
-    return boundPayload === undefined || boundPayload === payload;
+    return boundPayload === payload;
   };
   return {
     options: (receiptId) => ({
@@ -164,23 +170,44 @@ describe('causal candidate evidence', () => {
     );
   });
 
-  it('bounds retained summaries, records, and exact omitted metadata', () => {
+  it('fails closed instead of dropping newest records on overflow', () => {
     const receipt = hostReceipt('receipt-bounds');
-    const manifest = axCreateCausalCandidateEvidenceManifest(chain(8), {
-      ...receipt.options,
-      includeEvidenceSummaries: true,
-      maxSummaryChars: 16,
-      maxArtifactBytes: 2800,
-    });
+    expect(() =>
+      axCreateCausalCandidateEvidenceManifest(chain(8), {
+        ...receipt.options,
+        includeEvidenceSummaries: true,
+        maxSummaryChars: 16,
+        maxRecords: 1,
+      })
+    ).toThrow(/exceeds maxRecords/);
+    expect(() =>
+      axCreateCausalCandidateEvidenceManifest(chain(8), {
+        ...receipt.options,
+        includeEvidenceSummaries: true,
+        maxSummaryChars: 16,
+        maxArtifactBytes: 2800,
+      })
+    ).toThrow(/exceeds maxArtifactBytes/);
+  });
 
-    expect(manifest.totalRecordCount).toBe(8);
-    expect(manifest.omittedRecordCount).toBe(
-      manifest.totalRecordCount - manifest.records.length
+  it('rejects minted-receipt forgery on replay', () => {
+    const registry = hostReceiptRegistry();
+    const attached = axAttachCausalCandidateEvidence(
+      artifact(),
+      [record()],
+      registry.options('receipt-replay-known')
     );
-    expect(manifest.omittedRecordCount).toBeGreaterThan(0);
-    expect(
-      new TextEncoder().encode(JSON.stringify(manifest)).byteLength
-    ).toBeLessThanOrEqual(2800);
+    const forged = JSON.parse(
+      JSON.stringify(axSerializeOptimizedProgram(attached))
+    );
+    forged.causalCandidateEvidence.records[0].hypothesis = 'FORGED HYPOTHESIS';
+    forged.causalCandidateEvidence.receipts[0].authority.receiptId =
+      'receipt-forged-mint';
+    expect(() =>
+      axDeserializeOptimizedProgram(forged, {
+        causalEvidenceVerifier: registry.verify,
+      })
+    ).toThrow(/authority verification failed/);
   });
 
   it('uses canonical UTF-8 SHA-256 rather than collision-prone FNV identity', async () => {
@@ -362,9 +389,10 @@ describe('causal candidate evidence', () => {
     const original = serialized.causalCandidateEvidence.records[0].hypothesis;
     const mutatingVerifier: AxCausalEvidenceAuthorityVerifier = (
       payload,
-      authority
+      authority,
+      purpose
     ) => {
-      const verified = receipt.verify(payload, authority);
+      const verified = receipt.verify(payload, authority, purpose);
       serialized.causalCandidateEvidence.records[0].hypothesis =
         'FORGED AFTER VERIFY';
       return verified;
