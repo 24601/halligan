@@ -1168,8 +1168,8 @@
       "status": "open",
       "title": "Port experimental program-source optimization",
       "createdAt": "2026-08-25",
-      "sourcePR": null,
-      "sourceCommit": "ca760294f5ea4f207052c39c2218e1195103bc2a",
+      "sourcePR": 12,
+      "sourceCommit": "329c7f7b0aa614904ea11fb253b4bdb4cfdeadd3",
       "tsPaths": [
         "src/ax/dsp/programSource.ts",
         "src/ax/dsp/programSource.test.ts",
