@@ -25,8 +25,7 @@ fn main() -> AxResult<()> {
 
 fn visit(path: &Path) -> AxResult<()> {
     if path.is_dir() {
-        let mut entries = fs::read_dir(path)?
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut entries = fs::read_dir(path)?.collect::<Result<Vec<_>, _>>()?;
         entries.sort_by_key(|entry| entry.path());
         for entry in entries {
             visit(&entry.path())?;
@@ -39,6 +38,11 @@ fn visit(path: &Path) -> AxResult<()> {
     let text = fs::read_to_string(path)?;
     let fixture = parse_json(&text)?;
     run_conformance_fixture(fixture)?;
-    println!("ok {}", path.file_stem().and_then(|value| value.to_str()).unwrap_or("fixture"));
+    println!(
+        "ok {}",
+        path.file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("fixture")
+    );
     Ok(())
 }

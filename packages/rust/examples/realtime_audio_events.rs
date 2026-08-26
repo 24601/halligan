@@ -2,10 +2,13 @@ use axllm::{ai, AxResult};
 use serde_json::json;
 
 fn main() -> AxResult<()> {
-    let grok = ai("grok", json!({
-        "api_key": "test-key",
-        "model": "grok-voice-think-fast-1.0"
-    }))?;
+    let grok = ai(
+        "grok",
+        json!({
+            "api_key": "test-key",
+            "model": "grok-voice-think-fast-1.0"
+        }),
+    )?;
     let grok_request = json!({
         "model": "grok-voice-think-fast-1.0",
         "chat_prompt": [
@@ -29,10 +32,13 @@ fn main() -> AxResult<()> {
         }
     ]);
 
-    let gemini = ai("google-gemini", json!({
-        "api_key": "test-key",
-        "model": "gemini-2.5-flash-native-audio-preview-12-2025"
-    }))?;
+    let gemini = ai(
+        "google-gemini",
+        json!({
+            "api_key": "test-key",
+            "model": "gemini-2.5-flash-native-audio-preview-12-2025"
+        }),
+    )?;
     let gemini_request = json!({
         "model": "gemini-2.5-flash-native-audio-preview-12-2025",
         "chat_prompt": [

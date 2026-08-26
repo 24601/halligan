@@ -48,7 +48,12 @@ fn main() -> AxResult<()> {
     if result.get("finish_reason").and_then(|f| f.as_str()) != Some("stop") {
         fail("turn did not finish", &final_response);
     }
-    if result.get("audio").and_then(|a| a.get("data")).and_then(|d| d.as_str()) != Some("AQI=") {
+    if result
+        .get("audio")
+        .and_then(|a| a.get("data"))
+        .and_then(|d| d.as_str())
+        != Some("AQI=")
+    {
         fail("audio chunk not surfaced", &final_response);
     }
     println!("realtime-audio-turn-ok");
