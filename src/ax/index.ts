@@ -841,16 +841,26 @@ import {
   type AxACEResult,
 } from './dsp/optimizers/ace.js';
 import type {
+  AxACEBulletChange,
+  AxACEPlaybookRenderOptions,
+} from './dsp/optimizers/acePlaybook.js';
+import type {
+  AxACEApplicability,
   AxACEBullet,
+  AxACEBulletEvidence,
+  AxACEBulletLifecycle,
   AxACECuratorOperation,
   AxACECuratorOperationType,
   AxACECuratorOutput,
   AxACEFeedbackEvent,
   AxACEGeneratorOutput,
+  AxACEHostEvidence,
   AxACEOptimizationArtifact,
   AxACEOptions,
   AxACEPlaybook,
+  AxACEProvenance,
   AxACEReflectionOutput,
+  AxACEVerificationResult,
 } from './dsp/optimizers/aceTypes.js';
 import type { AxRolloutTrace } from './dsp/optimizers/axGenAdapter.js';
 import { AxBootstrapFewShot } from './dsp/optimizers/bootstrapFewshot.js';
@@ -1744,17 +1754,25 @@ export { runAxEventStoreConformance };
 export { s };
 
 // Type exports
+export type { AxACEApplicability };
 export type { AxACEBullet };
+export type { AxACEBulletChange };
+export type { AxACEBulletEvidence };
+export type { AxACEBulletLifecycle };
 export type { AxACECuratorOperation };
 export type { AxACECuratorOperationType };
 export type { AxACECuratorOutput };
 export type { AxACEFeedbackEvent };
 export type { AxACEGeneratorOutput };
+export type { AxACEHostEvidence };
 export type { AxACEOptimizationArtifact };
 export type { AxACEOptions };
 export type { AxACEPlaybook };
+export type { AxACEPlaybookRenderOptions };
+export type { AxACEProvenance };
 export type { AxACEReflectionOutput };
 export type { AxACEResult };
+export type { AxACEVerificationResult };
 export type { AxAIAnthropicArgs };
 export type { AxAIAnthropicChatError };
 export type { AxAIAnthropicChatRequest };

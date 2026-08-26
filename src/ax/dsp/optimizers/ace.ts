@@ -17,19 +17,24 @@ import { type AxField, f } from '../sig.js';
 import { ax } from '../template.js';
 import type { AxGenOut } from '../types.js';
 import {
+  type AxACEPlaybookRenderOptions,
   applyCuratorOperations,
   clonePlaybook,
   createEmptyPlaybook,
+  createExecutablePlaybookView,
   dedupePlaybookByContent,
+  generateBulletId,
   renderPlaybook,
   updateBulletFeedback,
 } from './acePlaybook.js';
 import type {
+  AxACEApplicability,
   AxACEBullet,
   AxACECuratorOperation,
   AxACECuratorOutput,
   AxACEFeedbackEvent,
   AxACEGeneratorOutput,
+  AxACEHostEvidence,
   AxACEOptimizationArtifact,
   AxACEOptions,
   AxACEPlaybook,
@@ -321,7 +326,7 @@ export class AxACEOptimizedProgram<
     const combinedInstruction = [
       originalDescription.trim(),
       '',
-      renderPlaybook(this.playbook),
+      renderPlaybook(this.playbook, { includeInapplicable: true }),
     ]
       .filter((block) => block && block.trim().length > 0)
       .join('\n\n');
@@ -336,9 +341,8 @@ export class AxACEOptimizedProgram<
  * ergonomics (unified optimized program artifacts, metrics, and checkpointing).
  */
 export class AxACE extends AxBaseOptimizer {
-  private readonly aceConfig: Required<typeof DEFAULT_CONFIG> & {
-    initialPlaybook?: AxACEPlaybook;
-  };
+  private readonly aceConfig: Required<typeof DEFAULT_CONFIG> &
+    Pick<AxACEOptions, 'initialPlaybook' | 'sourceRunId'>;
   private playbook: AxACEPlaybook;
   private baseInstruction?: string;
   private generatorHistory: AxACEFeedbackEvent[] = [];
@@ -421,17 +425,24 @@ export class AxACE extends AxBaseOptimizer {
   }
 
   public applyCurrentState<IN, OUT extends AxGenOut>(
-    program?: AxGen<IN, OUT>
+    program?: AxGen<IN, OUT>,
+    renderOptions?: Readonly<AxACEPlaybookRenderOptions>
   ): void {
     const target = (program ?? this.program) as AxGen<IN, OUT> | undefined;
     if (!target) {
       throw new Error('AxACE: no program available to apply playbook state');
     }
 
+    const { includeInactive: _inspectionOnly, ...executableRenderOptions } =
+      renderOptions ?? {};
     const baseInstruction =
       this.baseInstruction ?? target.getSignature().getDescription() ?? '';
     (target as any).setDescription?.(
-      this.composeInstruction(baseInstruction, this.playbook)
+      this.composeInstruction(
+        baseInstruction,
+        this.playbook,
+        executableRenderOptions
+      )
     );
   }
 
@@ -510,7 +521,8 @@ export class AxACE extends AxBaseOptimizer {
           // Compose prompt with current playbook
           const composedInstruction = this.composeInstruction(
             baseInstruction ?? originalDescription,
-            this.playbook
+            this.playbook,
+            { includeInapplicable: true }
           );
           (program as any).setDescription?.(composedInstruction);
 
@@ -535,6 +547,9 @@ export class AxACE extends AxBaseOptimizer {
             example,
             program
           );
+          const feedbackId = generateBulletId('feedback');
+          const sourceRunId =
+            aceOptions?.sourceRunId ?? this.aceConfig.sourceRunId;
 
           const reflection = await this.runReflectionRounds({
             example,
@@ -568,6 +583,7 @@ export class AxACE extends AxBaseOptimizer {
               : undefined;
 
           let appliedDeltaIds: string[] = [];
+          let changes: AxACEOptimizationArtifact['history'][number]['changes'];
           if (resolvedOperations.length > 0) {
             const protectedIds =
               this.collectProtectedBulletIds(resolvedOperations);
@@ -579,9 +595,15 @@ export class AxACE extends AxBaseOptimizer {
                 allowDynamicSections: this.aceConfig.allowDynamicSections,
                 enableAutoPrune: true,
                 protectedBulletIds: protectedIds,
+                hostEvidence: {
+                  source: 'compile',
+                  ...(sourceRunId ? { sourceRunId } : {}),
+                  feedbackIds: [feedbackId],
+                },
               }
             );
             appliedDeltaIds = applicationResult.updatedBulletIds;
+            changes = applicationResult.changes;
             if (applicationResult.autoRemoved.length > 0) {
               resolvedOperations.push(...applicationResult.autoRemoved);
               if (curatorResult) {
@@ -599,11 +621,14 @@ export class AxACE extends AxBaseOptimizer {
           if (resolvedOperations.length > 0 && appliedDeltaIds.length > 0) {
             dedupePlaybookByContent(
               this.playbook,
-              this.aceConfig.similarityThreshold
+              this.aceConfig.similarityThreshold,
+              appliedDeltaIds
             );
           }
 
           const feedbackEvent: AxACEFeedbackEvent = {
+            id: feedbackId,
+            ...(sourceRunId ? { sourceRunId } : {}),
             example: example as AxExample,
             prediction,
             score: typeof score === 'number' ? score : 0,
@@ -622,6 +647,7 @@ export class AxACE extends AxBaseOptimizer {
               exampleIndex: index,
               operations: curatorResult.operations,
               updatedBulletIds: appliedDeltaIds,
+              changes,
             });
           }
 
@@ -709,6 +735,7 @@ export class AxACE extends AxBaseOptimizer {
       example: AxExample;
       prediction: unknown;
       feedback?: string;
+      evidence?: AxACEHostEvidence;
     }>
   ): Promise<AxACECuratorOutput | undefined> {
     if (!this.program) {
@@ -722,6 +749,8 @@ export class AxACE extends AxBaseOptimizer {
       args.example,
       this.program
     );
+    const feedbackId = generateBulletId('feedback');
+    const sourceRunId = args.evidence?.sourceRunId;
 
     const reflection = await this.runReflectionRounds({
       example: args.example,
@@ -752,13 +781,8 @@ export class AxACE extends AxBaseOptimizer {
           } as AxACECuratorOutput)
         : undefined;
 
-    if (reflection?.bulletTags) {
-      for (const tag of reflection.bulletTags) {
-        updateBulletFeedback(this.playbook, tag.id, tag.tag);
-      }
-    }
-
     let appliedDeltaIds: string[] = [];
+    let changes: AxACEOptimizationArtifact['history'][number]['changes'];
     if (resolvedOperations.length > 0) {
       const protectedIds = this.collectProtectedBulletIds(resolvedOperations);
       const result = applyCuratorOperations(this.playbook, resolvedOperations, {
@@ -766,8 +790,14 @@ export class AxACE extends AxBaseOptimizer {
         allowDynamicSections: this.aceConfig.allowDynamicSections,
         enableAutoPrune: true,
         protectedBulletIds: protectedIds,
+        hostEvidence: {
+          ...args.evidence,
+          source: args.evidence?.source ?? 'online',
+          feedbackIds: [feedbackId, ...(args.evidence?.feedbackIds ?? [])],
+        },
       });
       appliedDeltaIds = result.updatedBulletIds;
+      changes = result.changes;
       if (result.autoRemoved.length > 0) {
         resolvedOperations.push(...result.autoRemoved);
         if (curatorResult) {
@@ -776,11 +806,20 @@ export class AxACE extends AxBaseOptimizer {
       }
       dedupePlaybookByContent(
         this.playbook,
-        this.aceConfig.similarityThreshold
+        this.aceConfig.similarityThreshold,
+        appliedDeltaIds
       );
     }
 
+    if (reflection?.bulletTags) {
+      for (const tag of reflection.bulletTags) {
+        updateBulletFeedback(this.playbook, tag.id, tag.tag);
+      }
+    }
+
     const feedbackEvent: AxACEFeedbackEvent = {
+      id: feedbackId,
+      ...(sourceRunId ? { sourceRunId } : {}),
       example: args.example,
       prediction: args.prediction,
       score: 0,
@@ -799,20 +838,52 @@ export class AxACE extends AxBaseOptimizer {
         exampleIndex: this.generatorHistory.length - 1,
         operations: curatorResult.operations,
         updatedBulletIds: appliedDeltaIds,
+        changes,
       });
     }
 
     return curatorResult;
   }
 
+  /** Attach trusted host/evaluator evidence without another LM call. */
+  public recordEvidence(
+    bulletIds: readonly string[],
+    evidence: Readonly<AxACEHostEvidence>
+  ): string[] {
+    const operations = bulletIds.flatMap((bulletId) => {
+      const bullet = this.locateBullet(this.playbook, bulletId);
+      return bullet
+        ? [{ type: 'UPDATE' as const, section: bullet.section, bulletId }]
+        : [];
+    });
+    if (!operations.length) {
+      return [];
+    }
+    const result = applyCuratorOperations(this.playbook, operations, {
+      hostEvidence: evidence,
+    });
+    if (result.updatedBulletIds.length) {
+      this.deltaHistory.push({
+        source: evidence.source ?? 'manual',
+        epoch: -1,
+        exampleIndex: -1,
+        operations,
+        updatedBulletIds: result.updatedBulletIds,
+        changes: result.changes,
+      });
+    }
+    return result.updatedBulletIds;
+  }
+
   private composeInstruction(
     baseInstruction: string,
-    playbook: AxACEPlaybook
+    playbook: AxACEPlaybook,
+    renderOptions?: Readonly<AxACEPlaybookRenderOptions>
   ): string {
     const instructionParts = [
       baseInstruction.trim(),
       '',
-      renderPlaybook(playbook),
+      renderPlaybook(playbook, renderOptions),
     ].filter((part) => part.trim().length > 0);
 
     return instructionParts.join('\n\n');
@@ -1188,7 +1259,84 @@ export class AxACE extends AxBaseOptimizer {
         const contentRaw = (entry as { content?: string }).content ?? '';
         const content = typeof contentRaw === 'string' ? contentRaw.trim() : '';
 
-        if (type !== 'REMOVE' && content.length === 0) {
+        const metadataRaw = (entry as { metadata?: unknown }).metadata;
+        const metadata =
+          metadataRaw === undefined ||
+          metadataRaw === null ||
+          Array.isArray(metadataRaw) ||
+          typeof metadataRaw !== 'object'
+            ? undefined
+            : Object.keys(metadataRaw).length > 0
+              ? { ...(metadataRaw as Record<string, unknown>) }
+              : undefined;
+
+        const evidenceRaw = (entry as { evidence?: unknown }).evidence;
+        let evidence: AxACECuratorOperation['evidence'];
+        if (
+          evidenceRaw !== null &&
+          !Array.isArray(evidenceRaw) &&
+          typeof evidenceRaw === 'object'
+        ) {
+          const raw = evidenceRaw as Record<string, unknown>;
+          const confidence = raw.confidence;
+          const applicability = raw.applicability;
+          const lifecycle = raw.lifecycle;
+          const normalizedEvidence: NonNullable<
+            AxACECuratorOperation['evidence']
+          > = {
+            ...(typeof confidence === 'number' && Number.isFinite(confidence)
+              ? { confidence }
+              : {}),
+            ...(applicability !== null &&
+            !Array.isArray(applicability) &&
+            typeof applicability === 'object'
+              ? {
+                  applicability:
+                    this.normalizeCuratorApplicability(applicability),
+                }
+              : {}),
+            ...(lifecycle !== null &&
+            !Array.isArray(lifecycle) &&
+            typeof lifecycle === 'object'
+              ? { lifecycle: this.normalizeCuratorLifecycle(lifecycle) }
+              : {}),
+          };
+          if (
+            normalizedEvidence.applicability &&
+            Object.keys(normalizedEvidence.applicability).length === 0
+          ) {
+            delete normalizedEvidence.applicability;
+          }
+          if (
+            normalizedEvidence.lifecycle &&
+            Object.keys(normalizedEvidence.lifecycle).length === 0
+          ) {
+            delete normalizedEvidence.lifecycle;
+          }
+          if (Object.keys(normalizedEvidence).length > 0) {
+            evidence = normalizedEvidence;
+          }
+        }
+
+        const supersedesRaw = (entry as { supersedes?: unknown }).supersedes;
+        const supersedes = Array.isArray(supersedesRaw)
+          ? [
+              ...new Set(
+                supersedesRaw
+                  .filter((value): value is string => typeof value === 'string')
+                  .map((value) => value.trim())
+                  .filter(Boolean)
+              ),
+            ].sort()
+          : undefined;
+        const hasMetadataUpdate =
+          metadata !== undefined ||
+          evidence !== undefined ||
+          (supersedes?.length ?? 0) > 0;
+        if (
+          (type === 'ADD' && content.length === 0) ||
+          (type === 'UPDATE' && content.length === 0 && !hasMetadataUpdate)
+        ) {
           continue;
         }
 
@@ -1207,7 +1355,13 @@ export class AxACE extends AxBaseOptimizer {
             ? bulletIdRaw.trim()
             : undefined;
 
-        const keyParts = [type, section, content, bulletId ?? ''];
+        const keyParts = [
+          type,
+          section,
+          content,
+          bulletId ?? '',
+          JSON.stringify({ metadata, evidence, supersedes }),
+        ];
         const key = keyParts.join(':');
         if (seen.has(key)) {
           continue;
@@ -1219,17 +1373,21 @@ export class AxACE extends AxBaseOptimizer {
           section,
         };
 
-        if (type !== 'REMOVE') {
+        if (type !== 'REMOVE' && content.length > 0) {
           normalizedEntry.content = content;
         }
         if (bulletId) {
           normalizedEntry.bulletId = bulletId;
         }
 
-        const metadataRaw = (entry as { metadata?: Record<string, unknown> })
-          .metadata;
-        if (metadataRaw && typeof metadataRaw === 'object') {
-          normalizedEntry.metadata = { ...metadataRaw };
+        if (metadata) {
+          normalizedEntry.metadata = metadata;
+        }
+        if (evidence) {
+          normalizedEntry.evidence = evidence;
+        }
+        if (supersedes?.length) {
+          normalizedEntry.supersedes = supersedes;
         }
 
         normalized.push(normalizedEntry);
@@ -1264,6 +1422,46 @@ export class AxACE extends AxBaseOptimizer {
     }
 
     return [];
+  }
+
+  private normalizeCuratorApplicability(value: object): AxACEApplicability {
+    const raw = value as Record<string, unknown>;
+    const strings = (candidate: unknown): string[] | undefined =>
+      Array.isArray(candidate)
+        ? candidate.filter(
+            (entry): entry is string => typeof entry === 'string'
+          )
+        : undefined;
+    const allOf = strings(raw.allOf);
+    const anyOf = strings(raw.anyOf);
+    const noneOf = strings(raw.noneOf);
+    return {
+      ...(allOf ? { allOf } : {}),
+      ...(anyOf ? { anyOf } : {}),
+      ...(noneOf ? { noneOf } : {}),
+    };
+  }
+
+  private normalizeCuratorLifecycle(
+    value: object
+  ): NonNullable<AxACECuratorOperation['evidence']>['lifecycle'] {
+    const raw = value as Record<string, unknown>;
+    const status = ['active', 'deprecated', 'superseded'].includes(
+      String(raw.status)
+    )
+      ? (raw.status as 'active' | 'deprecated' | 'superseded')
+      : undefined;
+    return {
+      ...(status ? { status } : {}),
+      ...(typeof raw.expiresAt === 'string' &&
+      Number.isFinite(Date.parse(raw.expiresAt))
+        ? { expiresAt: raw.expiresAt }
+        : {}),
+      ...(typeof raw.supersededBy === 'string'
+        ? { supersededBy: raw.supersededBy }
+        : {}),
+      ...(typeof raw.reason === 'string' ? { reason: raw.reason } : {}),
+    };
   }
 
   private async runReflectionRounds({
@@ -1326,6 +1524,7 @@ export class AxACE extends AxBaseOptimizer {
     const reflectorAI = this.teacherAI ?? this.studentAI;
 
     try {
+      const executablePlaybook = createExecutablePlaybookView(this.playbook);
       const signature = this.program?.getSignature();
       const inputFields = signature?.getInputFields() ?? [];
       const outputFields = signature?.getOutputFields() ?? [];
@@ -1337,8 +1536,10 @@ export class AxACE extends AxBaseOptimizer {
         generator_answer: this.stringifyBounded(generatorOutput.answer),
         generator_reasoning: generatorOutput.reasoning,
         playbook: JSON.stringify({
-          markdown: renderPlaybook(this.playbook),
-          structured: this.playbook,
+          markdown: renderPlaybook(executablePlaybook, {
+            includeInapplicable: true,
+          }),
+          structured: executablePlaybook,
         }),
         expected_answer:
           Object.keys(expectedAnswer).length > 0
@@ -1386,10 +1587,13 @@ export class AxACE extends AxBaseOptimizer {
     const questionContext = this.createQuestionContext(example, inputFields);
 
     try {
+      const executablePlaybook = createExecutablePlaybookView(playbook);
       const outputRaw = await curator.forward(curatorAI, {
         playbook: JSON.stringify({
-          markdown: renderPlaybook(playbook),
-          structured: playbook,
+          markdown: renderPlaybook(executablePlaybook, {
+            includeInapplicable: true,
+          }),
+          structured: executablePlaybook,
         }),
         reflection: JSON.stringify(reflection),
         question_context: this.stringifyBounded(questionContext),
@@ -1481,7 +1685,7 @@ export class AxACE extends AxBaseOptimizer {
         .output(
           'operations',
           f.json(
-            'List of operations, each {type: "ADD"|"UPDATE"|"REMOVE", section, content}. Emit an operation ONLY when the playbook should actually change. If nothing should change, return an empty array — never emit an ADD whose content just acknowledges that no change is needed (e.g. "No update required", "Keep the existing rule unchanged"). Each ADD content must be a standalone, reusable rule.'
+            'List of operations, each {type: "ADD"|"UPDATE"|"REMOVE", section, content?, bulletId?, evidence?: {confidence?: 0..1, applicability?: {allOf?: string[], anyOf?: string[], noneOf?: string[]}, lifecycle?: {status?: "active"|"deprecated"|"superseded", expiresAt?: ISO timestamp, supersededBy?: string, reason?: string}}, supersedes?: string[]}. Preconditions are inert condition tokens, never executable code. Provenance, evidenceCount, and verification receipts are host-owned and MUST NOT be emitted. Emit an operation ONLY when the playbook should actually change. If nothing should change, return an empty array — never emit an ADD whose content just acknowledges that no change is needed (e.g. "No update required", "Keep the existing rule unchanged"). Each ADD content must be a standalone, reusable rule.'
           )
         )
         .build();
