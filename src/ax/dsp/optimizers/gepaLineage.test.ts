@@ -100,6 +100,15 @@ describe('GEPA candidate lineage payloads', () => {
     });
   });
 
+  it('uses a 64-bit SHA-256 identifier instead of FNV-1a/32', () => {
+    const digest = fingerprintGEPAValue('secret-prompt-value');
+    expect(digest.startsWith('sha256-64:')).toBe(true);
+    expect(digest).toHaveLength('sha256-64:'.length + 16);
+    expect(digest).not.toContain('fnv1a32');
+    expect(fingerprintGEPAValue('secret-prompt-value')).toBe(digest);
+    expect(fingerprintGEPAValue('secret-prompt-value!')).not.toBe(digest);
+  });
+
   it('recursively freezes publications and clones serialized caller data', () => {
     const shallowFrozen = Object.freeze({
       records: [{ parentIds: [] }],

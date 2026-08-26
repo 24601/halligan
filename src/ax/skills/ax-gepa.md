@@ -237,12 +237,17 @@ auditability and reproducibility of the optimization search.
 
 The default manifest is privacy-minimizing and bounded:
 
-- component values (including prompts) and failure messages are fingerprinted,
-  not stored;
+- component values (including prompts) and failure messages are identified
+  with a SHA-256 digest truncated to 64 bits (`sha256-64:<hex>`), not stored.
+  That identifier is collision-resistant enough for lineage correlation and is
+  not a confidentiality control; raw values remain omitted unless explicitly
+  opted in;
 - examples, traces, predictions, references, demos, and credentials are never
   copied into lineage records;
 - at most 1,000 records and 64 changed components per record are retained;
-- final UTF-8 serialized size is capped at 1 MB by default;
+- final UTF-8 serialized size is capped at 1 MB by default. Byte-bound
+  trimming keeps the seed, the newest retained record, and the selected
+  candidate when possible, dropping middle history first;
 - once `maxRecords` is reached, later records are counted in
   `omittedRecordCount` rather than retained, preserving parent integrity among
   retained records.
@@ -315,10 +320,12 @@ cost, it compares enabled lineage to the default omitted, legacy-compatible
 path. It reports an initial 10-run cold pair, then warms each mode for 50 runs
 and measures nine paired samples of 500 runs. Each sample alternates mode order
 in ten-run chunks so scheduler/JIT drift does not consistently favor the tiny
-baseline while timer overhead remains amortized. The p75 paired runtime overhead
-must be both at most 3.5× its paired baseline and at most 0.5 ms per fixture run;
-either threshold failing fails the benchmark. Output includes the cold pair and
-full warm baseline/lineage ranges so variance remains visible:
+baseline while timer overhead remains amortized. Always-on CI runs the completeness, integrity, privacy, and size
+invariants only. The p75 paired runtime overhead gate (at most 3.5× its
+paired baseline and at most 0.5 ms per fixture run) is opt-in via
+`AX_GEPA_LINEAGE_TIMING=1` or `AX_PRINT_METRICS=1` so shared CI cannot flake
+on wall-time jitter. Output includes the cold pair and full warm
+baseline/lineage ranges so variance remains visible:
 
 ```bash
 npm run benchmark:gepa-lineage

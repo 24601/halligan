@@ -726,6 +726,47 @@ describe('AxGEPA Optimizer', () => {
       }
     });
 
+    it('drops middle lineage records before newest or selected when byte-capped', async () => {
+      let instruction = 'seed-value';
+      const optimizer = new AxGEPA({
+        studentAI: {} as AxAIService,
+        teacherAI: {} as AxAIService,
+        numTrials: 8,
+        minibatch: false,
+        earlyStoppingTrials: 20,
+      });
+      (optimizer as any).reflectTargetInstruction = async () => {
+        instruction = `${instruction}-next`;
+        return instruction;
+      };
+      const result = await optimizer.compile(
+        createSingleRootProgram('task', async () => ({ score: 0 })) as any,
+        [{ question: 'q1' }, { question: 'q2' }],
+        async ({ prediction }) => prediction.score,
+        {
+          maxMetricCalls: 40,
+          skipPerfectScore: false,
+          candidateLineage: {
+            maxArtifactBytes: 4096,
+            includeComponentValues: true,
+            maxComponentValueChars: 400,
+          },
+        }
+      );
+      const manifest = result.optimizedProgram?.candidateLineage!;
+      expect(manifest.omittedRecordCount).toBeGreaterThan(0);
+      expect(manifest.records[0]?.id).toBe('c0');
+      const last = manifest.records.at(-1);
+      expect(last).toBeDefined();
+      if (manifest.selectedCandidateId) {
+        expect(
+          manifest.records.some(
+            (record) => record.id === manifest.selectedCandidateId
+          ) || manifest.selectedCandidateRetained === false
+        ).toBe(true);
+      }
+    });
+
     it('returns the accepted evolved component when it ties the seed on the Pareto set', async () => {
       // Regression: an accepted evolution that ties the seed on validation
       // should still surface in componentMap.

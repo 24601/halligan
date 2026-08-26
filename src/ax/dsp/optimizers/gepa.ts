@@ -677,7 +677,11 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
         serializedBytes > lineageOptions!.maxArtifactBytes &&
         records.length > 0
       ) {
-        records = records.slice(0, -1);
+        const dropIndex = chooseByteBoundDropIndex(
+          records,
+          selectedCandidateId
+        );
+        records = records.filter((_, index) => index !== dropIndex);
         omittedRecordCount += 1;
         manifest = makeManifest();
         serialized = JSON.stringify(manifest);
@@ -2325,4 +2329,17 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       instructionA.length >= instructionB.length ? instructionA : instructionB
     ).slice(0, 2000);
   }
+}
+
+function chooseByteBoundDropIndex(
+  records: readonly { id: string }[],
+  selectedCandidateId: string | undefined
+): number {
+  if (records.length <= 1) return 0;
+  const lastIndex = records.length - 1;
+  for (let index = lastIndex - 1; index >= 1; index--) {
+    if (records[index]!.id !== selectedCandidateId) return index;
+  }
+  if (records[lastIndex]!.id !== selectedCandidateId) return lastIndex;
+  return 0;
 }

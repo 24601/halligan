@@ -526,10 +526,15 @@ export async function runGEPALineageBenchmark(): Promise<{
   // that scheduler/JIT drift cannot consistently favor the tiny baseline. The
   // order flips for every chunk and sample; p75 prevents one unusually fast
   // pair from hiding a regression.
-  const iterations = 500;
-  const sampleCount = 9;
-  await measureBatch(false, 50);
-  await measureBatch(true, 50);
+  const enforceTimingGate =
+    process.env.AX_GEPA_LINEAGE_TIMING === '1' ||
+    process.env.AX_PRINT_METRICS === '1';
+  const iterations = enforceTimingGate ? 500 : 20;
+  const sampleCount = enforceTimingGate ? 9 : 1;
+  if (enforceTimingGate) {
+    await measureBatch(false, 50);
+    await measureBatch(true, 50);
+  }
   const baselineSamples: number[] = [];
   const lineageSamples: number[] = [];
   const overheadRatios: number[] = [];
@@ -551,10 +556,12 @@ export async function runGEPALineageBenchmark(): Promise<{
   const overheadPerRunMs = overheadMs / iterations;
   const gateOverheadRatio = quantile(overheadRatios, 0.75);
   const gateOverheadPerRunMs = quantile(overheadPerRunSamples, 0.75);
-  invariant(
-    gateOverheadRatio <= 3.5 && gateOverheadPerRunMs <= 0.5,
-    `p75 paired runtime overhead ${gateOverheadPerRunMs.toFixed(3)} ms/run (${gateOverheadRatio.toFixed(2)}x) exceeds threshold`
-  );
+  if (enforceTimingGate) {
+    invariant(
+      gateOverheadRatio <= 3.5 && gateOverheadPerRunMs <= 0.5,
+      `p75 paired runtime overhead ${gateOverheadPerRunMs.toFixed(3)} ms/run (${gateOverheadRatio.toFixed(2)}x) exceeds threshold`
+    );
+  }
 
   return {
     baselineMode: 'candidateLineage_omitted',
