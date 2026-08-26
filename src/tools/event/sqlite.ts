@@ -189,7 +189,7 @@ function parseVerifierReceipt(
   operationId: string,
   json: string,
   childDeliveryId: string,
-  childEventId: string
+  childEventId?: string
 ): AxEventPublishReceipt {
   let value: unknown;
   try {
@@ -204,7 +204,9 @@ function parseVerifierReceipt(
   if (
     !value ||
     typeof value !== 'object' ||
-    receipt.eventId !== childEventId ||
+    typeof receipt.eventId !== 'string' ||
+    receipt.eventId.length === 0 ||
+    (childEventId !== undefined && receipt.eventId !== childEventId) ||
     receipt.accepted !== true ||
     receipt.duplicate !== false ||
     receipt.durability !== 'persistent' ||
@@ -2225,14 +2227,9 @@ export class AxSQLiteEventStore
     const child = this.db
       .prepare('SELECT ingress_json FROM event_deliveries WHERE id=?')
       .get(row.child_delivery_id) as { ingress_json: string } | undefined;
-    if (!child) {
-      throw new Error(
-        `Verifier transition child is missing: ${row.operation_id}`
-      );
-    }
-    const childIngress = JSON.parse(
-      child.ingress_json
-    ) as AxEventEnqueueRequest['ingress'];
+    const childIngress = child
+      ? (JSON.parse(child.ingress_json) as AxEventEnqueueRequest['ingress'])
+      : undefined;
     return {
       operationId: row.operation_id,
       requestCommitment: row.request_commitment,
@@ -2240,7 +2237,7 @@ export class AxSQLiteEventStore
         row.operation_id,
         row.receipt_json,
         row.child_delivery_id,
-        childIngress.event.id
+        childIngress?.event.id
       ),
       childDeliveryId: row.child_delivery_id,
       childCommitment: row.child_commitment,
@@ -3059,19 +3056,14 @@ export class AxSQLiteEventStore
       ingress_json: string | null;
     }>;
     for (const row of verifierRows) {
-      if (row.ingress_json === null) {
-        throw new Error(
-          `Verifier transition child is missing: ${row.operation_id}`
-        );
-      }
-      const ingress = JSON.parse(
-        row.ingress_json
-      ) as AxEventEnqueueRequest['ingress'];
+      const ingress = row.ingress_json
+        ? (JSON.parse(row.ingress_json) as AxEventEnqueueRequest['ingress'])
+        : undefined;
       parseVerifierReceipt(
         row.operation_id,
         row.receipt_json,
         row.child_delivery_id,
-        ingress.event.id
+        ingress?.event.id
       );
     }
     const malformedAdmission = this.db

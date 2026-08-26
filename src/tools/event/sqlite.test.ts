@@ -2037,6 +2037,103 @@ describe('AxSQLiteEventStore', () => {
     }
   );
 
+  it('retains verifier confirmation after the child delivery payload is pruned', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const filename = join(directory, 'verifier-child-retention.sqlite');
+    const clock = new AxManualEventClock(1_000);
+    const retention = {
+      eventAndResultMs: 10,
+      runMetadataAndDeadLettersMs: 1_000,
+      completedContinuationsMs: 1_000,
+      settledEffectsMs: 10,
+    };
+    let store = new AxSQLiteEventStore({ filename, clock, retention });
+    await store.enqueue(storeRequest('retained-verifier-parent', clock.now()));
+    const parent = (await store.claim(
+      'retained-verifier-worker',
+      clock.now(),
+      100
+    ))!;
+    const run: AxEventRun = {
+      id: 'retained-verifier-run',
+      deliveryId: parent.id,
+      routeId: parent.routeId,
+      targetId: parent.targetId,
+      instanceKey: parent.instanceKey,
+      claimedBy: parent.claimedBy,
+      fencingToken: parent.fencingToken,
+      status: 'waiting_event',
+      attempt: 1,
+      startedAt: clock.now(),
+      finishedAt: clock.now(),
+    };
+    await store.saveDelivery({
+      ...parent,
+      status: 'running',
+      runId: run.id,
+      invocationStarted: true,
+    });
+    await store.saveRun({ ...run, status: 'running', finishedAt: undefined });
+    const request = {
+      operationId: 'retained-verifier-operation',
+      childDeliveryId: 'retained-verifier-child',
+      parent: {
+        delivery: {
+          ...parent,
+          status: 'waiting_event' as const,
+          runId: run.id,
+          invocationStarted: true,
+        },
+        run,
+        expectedFencingToken: parent.fencingToken!,
+      },
+      continuation: {
+        id: 'retained-verifier-continuation',
+        targetId: 'target',
+        routeId: 'route',
+        instanceKey: parent.instanceKey,
+        identityScope: parent.identityScope,
+        correlation: [{ kind: 'verifier', value: 'retained' }],
+        createdAt: clock.now(),
+      },
+      child: storeRequest('retained-verifier-event', clock.now()),
+    };
+    await expect(store.transitionVerifier(request)).resolves.toEqual(
+      expect.objectContaining({
+        eventId: 'retained-verifier-event',
+        deliveryIds: [request.childDeliveryId],
+      })
+    );
+    const child = (await store.claim(
+      'retained-child-worker',
+      clock.now(),
+      100
+    ))!;
+    expect(child.id).toBe(request.childDeliveryId);
+    await store.saveDelivery({ ...child, status: 'succeeded' });
+    await store.close();
+
+    clock.advanceBy(11);
+    store = new AxSQLiteEventStore({ filename, clock, retention });
+    await store.close();
+    store = new AxSQLiteEventStore({ filename, clock, retention });
+    expect(await store.getDelivery(request.childDeliveryId)).toBeUndefined();
+    await expect(store.confirmVerifierTransition(request)).resolves.toEqual(
+      expect.objectContaining({
+        eventId: 'retained-verifier-event',
+        deliveryIds: [request.childDeliveryId],
+      })
+    );
+    await expect(store.transitionVerifier(request)).resolves.toEqual(
+      expect.objectContaining({
+        duplicate: true,
+        deliveryIds: [request.childDeliveryId],
+      })
+    );
+    await store.close();
+  });
+
   it.each(['malformed', 'delivery-mismatch', 'owner-mismatch'] as const)(
     'rejects a %s immutable admission snapshot without mutation',
     async (mismatch) => {
