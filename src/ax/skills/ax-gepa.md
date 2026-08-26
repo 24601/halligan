@@ -123,6 +123,156 @@ OPENAI_APIKEY=... node --import=tsx src/examples/gepa-proposal-policy-eval.ts --
 
 This command is not part of the zero-cost gate and should not be run unintentionally. It is bounded to two one-trial runs, at most six `gpt-5.4-mini` teacher calls including validation retries, and 32 deterministic metric calls. Use repeated seeds and representative private holdouts before making an efficacy claim.
 
+## Causal Candidate Evidence
+
+Use `axAttachCausalCandidateEvidence(...)` after an independently evaluated
+candidate when an optimized artifact must retain why a change was proposed,
+what it was expected to change, and what actually happened. This is an
+optional artifact/audit boundary; it does not alter GEPA proposal, scoring,
+selection, or promotion.
+
+```typescript
+import {
+  axAttachCausalCandidateEvidence,
+  axFingerprintCausalEvidence,
+} from '@ax-llm/ax';
+
+const [failureFingerprint, beforeFingerprint, afterFingerprint] =
+  await Promise.all([
+    axFingerprintCausalEvidence(redactedFailure),
+    axFingerprintCausalEvidence(beforeInstruction),
+    axFingerprintCausalEvidence(afterInstruction),
+  ]);
+const audited = axAttachCausalCandidateEvidence(result.optimizedProgram!, [
+  {
+    id: 'grounding-claim-1',
+    sequence: 0,
+    eventKind: 'candidate_decision',
+    candidateId: 'c1', // may reference an optimizer/lineage ID
+    evidence: [
+      {
+        id: 'failed-eval-17',
+        kind: 'failure',
+        fingerprint: failureFingerprint,
+      },
+    ],
+    hypothesis: 'The responder instruction omits the grounding requirement.',
+    affectedComponents: [
+      {
+        componentId: 'responder::instruction',
+        surface: 'instruction',
+        beforeFingerprint,
+        afterFingerprint,
+      },
+    ],
+    predictedBenefit: [
+      {
+        metric: 'accuracy',
+        split: 'held_out',
+        expectedDirection: 'increase',
+        minimumExpectedDelta: 0.05,
+        confidence: 0.7,
+      },
+    ],
+    predictedRegressions: [],
+    outcome: {
+      heldIn: {
+        metrics: [{ metric: 'accuracy', before: 0.6, after: 0.8, sampleCount: 50 }],
+      },
+      heldOut: {
+        metrics: [{ metric: 'accuracy', before: 0.62, after: 0.7, sampleCount: 50 }],
+      },
+    },
+    decision: { status: 'promoted', reason: 'Held-out gain met the gate.' },
+  },
+], {
+  authority: {
+    principalId: hostPrincipalId,
+    evaluatorId: evaluatorVersion,
+    verifierId: receiptVerifierId,
+    receiptId,
+    receiptVersion: '1',
+  },
+  // Verify that receiptId covers the canonical payload and authority above.
+  // The third argument is 'issue' during attach and 'replay' during deserialize.
+  verifyAuthority: verifyReceipt,
+});
+```
+
+The returned artifact is new; the original is unchanged. Repeated attachment
+appends records and rejects duplicate IDs or retention overflow instead of
+rewriting or silently dropping prior receipts. Use
+`axReplaceOptimizedProgramSnapshot(current, replacement, verifyReceipt)` for
+rollback or replacement: it takes the rewindable component/demo/model snapshot
+from `replacement` while carrying the current evidence history byte-for-byte.
+It rejects a replacement with divergent history. Append a `settlement` event
+whose `settlesRecordId` names the prior promoted decision afterward. Sequences
+are zero-based and monotonic; every later record names its immediately preceding
+`parentRecordId`. A candidate has one decision and a promoted decision can be
+settled only once. This is one artifact history, not a runtime event journal.
+Each append retains its prior authority receipt and adds a new receipt that
+binds the complete prior receipt chain plus the enlarged record prefix. The
+verifier supplied for append/replay must verify every authority in that chain;
+an unknown prior receipt fails closed.
+
+The manifest is recursively frozen and survives
+`axSerializeOptimizedProgram(...)` /
+`axDeserializeOptimizedProgram(serialized, { causalEvidenceVerifier })`.
+Deserialization revalidates schema, privacy metadata, fingerprints, links, and
+every manifest field against host-owned receipts. It first takes one detached
+JSON snapshot, then validation, canonicalization, verification, freezing, and
+return all consume only that snapshot, so verifier side effects cannot alter the
+authorized return value. Evidence IDs are globally
+bound to one kind and fingerprint within a manifest. Prediction metric/split
+keys and outcome metric names are unique, thresholds are non-negative, and
+predictions must have a matching observed metric on the same split. Both
+held-in and held-out receipts are required. Optional ablation/counterfactual
+receipts must name affected components, report both splits, and use exactly the
+candidate outcome metric sets.
+
+Raw examples and traces have no field in the schema. Evidence is linked by a
+caller-owned ID and fingerprint. Evidence and ablation summaries are omitted by
+default; `includeEvidenceSummaries: true` retains them with a configurable
+character bound. Other free-text fields (including hypothesis, reason, and IDs)
+are bounded but not redacted, so callers must apply host policy before attaching
+them. Records, per-field items, strings, and total UTF-8 artifact bytes are
+bounded. `await axFingerprintCausalEvidence(...)` produces a canonical NFC
+UTF-8 SHA-256 identifier. It is not a redaction function; redact before
+fingerprinting if the input itself will be logged elsewhere. SHA-256 is the only
+accepted identity form; weak legacy hashes must stay separate metadata.
+Malformed UTF-16 (including unpaired surrogates) is rejected before NFC/UTF-8
+conversion so distinct malformed strings cannot collapse to U+FFFD.
+
+The host/evaluator is authoritative for evidence identity, split independence,
+metric correctness, contamination controls, decision policy, and attribution.
+The required verifier must authenticate principal, evaluator, receipt, and
+receipt-version bindings outside Ax. Ax validates structural links but does not
+prove the hypothesis, infer an ablation result, establish split independence,
+or prevent an authorized host from supplying misleading evidence. Keep
+rejected, no-benefit, regression, and contradictory records rather than
+retaining only promoted candidates.
+
+Deterministic zero-cost mechanism evaluation:
+
+```bash
+npm run evaluate:causal-candidate-evidence
+```
+
+The fixed three-case fixture includes helpful, no-benefit, and misleading
+hypotheses. It measures causal audit completeness (legacy artifact `0`, attached
+manifest `1`), held-out threshold attainment (`1/3`) and confidence-vs-threshold
+Brier score (`0.4467`), derived ablation-attribution consistency (`3/3`), exact
+serialization/replay, exact rollback-history preservation, settlement append,
+default evidence-summary omission, SHA-256 separation of a known FNV collision,
+rejection of malformed UTF-16, forged manifest counts, and invalid chronology,
+post-verification mutation isolation, and prior receipt preservation. The command
+also reports artifact bytes (`201` baseline, `6,421` attached; `6,220` bytes
+overhead in the fixture). It makes zero provider calls, uses zero provider
+tokens, costs `$0`, and has a 1,000 ms wall-time gate. These are deterministic
+mechanism/self-consistency measurements, not independent causal proof,
+population calibration, or evidence that the candidate or model quality
+improves in production.
+
 ## Metric Selection
 
 Choose the evaluation path deliberately:
