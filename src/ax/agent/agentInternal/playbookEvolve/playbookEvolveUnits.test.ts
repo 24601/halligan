@@ -351,5 +351,6 @@ describe('evalHarness runsPerTask', () => {
     expect(result.records).toHaveLength(2);
     expect(result.records[1]?.score).toBe(1);
     expect(result.exhausted).toBe(true);
+    expect(result.complete).toBe(false);
   });
 });

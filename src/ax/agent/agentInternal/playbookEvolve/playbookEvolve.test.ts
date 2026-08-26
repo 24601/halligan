@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { AxMockAIService } from '../../../ai/mock/api.js';
 import { agent } from '../../index.js';
+import { evolveAgentPlaybook } from './playbookEvolve.js';
 
 const makeModelUsage = () => ({
   ai: 'mock',
@@ -362,16 +363,33 @@ describe('agent.playbook().evolve()', () => {
     );
   });
 
-  it('rejects non-string task.id values with the disjointness error', async () => {
+  it.each([
+    [
+      'numeric task.id',
+      {
+        train: [{ ...TASKS[0]!, id: 0 as unknown as string }],
+        validation: VALIDATION_TASKS,
+      },
+      undefined,
+    ],
+    [
+      'numeric taskId result',
+      { train: TASKS, validation: VALIDATION_TASKS },
+      () => 0 as unknown as string,
+    ],
+    [
+      'object taskId result',
+      { train: TASKS, validation: VALIDATION_TASKS },
+      () => ({ id: 'task' }) as unknown as string,
+    ],
+  ])('rejects a %s with the semantic-ID error', async (_, dataset, taskId) => {
     const { ag } = makeAgent();
     await expect(
-      ag.playbook().evolve(
-        {
-          train: [{ ...TASKS[0]!, id: 1 as unknown as string }],
-          validation: VALIDATION_TASKS,
-        },
-        { requireHeldOut: true, metric: scoreByAnswer }
-      )
+      ag.playbook().evolve(dataset, {
+        requireHeldOut: true,
+        metric: scoreByAnswer,
+        ...(taskId ? { taskId } : {}),
+      })
     ).rejects.toThrow(/has no semantic task id/);
   });
 
@@ -495,7 +513,7 @@ describe('agent.playbook().evolve()', () => {
     expect(ag.getPlaybook().getState()).toEqual(before);
   });
 
-  it('requires complete evidence across repeated runs', async () => {
+  it('requires and accepts complete evidence across repeated runs', async () => {
     const { ag } = makeAgent();
     let metricCalls = 0;
     const result = await ag.playbook().evolve(
@@ -514,6 +532,147 @@ describe('agent.playbook().evolve()', () => {
     expect(result.outcomes[0]?.status).toBe('accepted');
     expect(result.metricCallsUsed).toBe(12);
     expect(metricCalls).toBe(12);
+  });
+
+  it.each([
+    [
+      'held-in',
+      'rejects',
+      't1',
+      () => Promise.reject(new Error('judge unavailable')),
+    ],
+    ['held-in', 'returns NaN', 't1', () => Promise.resolve(Number.NaN)],
+    [
+      'held-out',
+      'rejects',
+      'v1',
+      () => Promise.reject(new Error('judge unavailable')),
+    ],
+    ['held-out', 'returns NaN', 'v1', () => Promise.resolve(Number.NaN)],
+  ])(
+    'rejects with the %s incomplete reason when a second repeat %s',
+    async (split, _, failingTaskId, failMetric) => {
+      const { ag } = makeAgent();
+      const before = ag.getPlaybook().getState();
+      const candidateRepeats = new Map<string, number>();
+      const result = await ag.playbook().evolve(
+        { train: TASKS, validation: VALIDATION_TASKS },
+        {
+          requireHeldOut: true,
+          metric: async (args: any) => {
+            if (args.prediction?.output?.answer === 'ok-fixed') {
+              const repeat = (candidateRepeats.get(args.example.id) ?? 0) + 1;
+              candidateRepeats.set(args.example.id, repeat);
+              if (args.example.id === failingTaskId && repeat === 2) {
+                return failMetric();
+              }
+            }
+            return scoreByAnswer(args);
+          },
+          runsPerTask: 2,
+          maxProposals: 1,
+        }
+      );
+      expect(result.outcomes[0]).toMatchObject({
+        status: 'rejected',
+        accepted: false,
+        reason: `${split} evaluation incomplete or errored`,
+      });
+      expect(candidateRepeats.get(failingTaskId)).toBe(2);
+      expect(ag.getPlaybook().getState()).toEqual(before);
+      expect(actorPromptOf(ag)).not.toContain(BULLET_MARKER);
+    }
+  );
+
+  it('restores the live playbook byte-for-byte when apply:false aborts during the second candidate revalidation', async () => {
+    const controller = new AbortController();
+    const ai = new AxMockAIService({
+      features: { functions: false, streaming: false },
+      chatResponse: async () => ({
+        results: [
+          {
+            index: 0,
+            content: [
+              'Weakness Description: A distinct baseline failure recurs.',
+              'Root Cause: The current playbook lacks the candidate rule.',
+              'Proposed Guidance: Apply the candidate rule.',
+              'Evidence Quotes: ["deterministic failure evidence"]',
+            ].join('\n'),
+            finishReason: 'stop' as const,
+          },
+        ],
+        modelUsage: makeModelUsage() as any,
+      }),
+    });
+    let revision = 0;
+    let rules: string[] = [];
+    let candidateMetricCalls = 0;
+    const handle = {
+      update: async () => {
+        revision++;
+        rules = [...rules, `candidate-${revision}`];
+      },
+      render: () => rules.join('\n'),
+      getState: () => ({ revision, rules: [...rules] }),
+      load: (snapshot: Readonly<{ revision: number; rules: string[] }>) => {
+        revision = snapshot.revision;
+        rules = [...snapshot.rules];
+      },
+    };
+    const self = {
+      init: { ai },
+      getPlaybook: () => handle,
+      _forwardForEvaluation: async (_ai: unknown, task: { id: string }) => ({
+        completionType: 'final',
+        output: { revision },
+        actionLog: 'deterministic failure evidence',
+        functionCalls: [],
+        toolErrors: revision === 0 ? [`${task.id}: baseline failure`] : [],
+        turnCount: 1,
+        usage: [],
+      }),
+    };
+    const before = handle.getState();
+    const beforeBytes = JSON.stringify(before);
+
+    await expect(
+      evolveAgentPlaybook(
+        self,
+        {
+          train: [
+            { input: { case: 'one' }, criteria: 'pass', id: 'train-1' },
+            { input: { case: 'two' }, criteria: 'pass', id: 'train-2' },
+          ],
+          validation: [
+            { input: { case: 'held-out' }, criteria: 'pass', id: 'validation' },
+          ],
+        },
+        {
+          requireHeldOut: true,
+          apply: false,
+          abortSignal: controller.signal,
+          maxProposals: 2,
+          metric: async ({ prediction }: any) => {
+            if (prediction.output.revision > 0) {
+              candidateMetricCalls++;
+              if (
+                prediction.output.revision === 2 &&
+                candidateMetricCalls === 4
+              ) {
+                controller.abort('abort second candidate revalidation');
+              }
+              return 1;
+            }
+            return 0;
+          },
+        }
+      )
+    ).rejects.toThrow(/aborted/);
+
+    expect(candidateMetricCalls).toBe(4);
+    expect(handle.getState()).toEqual(before);
+    expect(JSON.stringify(handle.getState())).toBe(beforeBytes);
+    expect(handle.render()).toBe('');
   });
 
   it('throws without train tasks and without any AI', async () => {

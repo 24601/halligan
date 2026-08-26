@@ -97,6 +97,7 @@ export type AxAgentPlaybookEvolveOptions<IN extends AxGenIn = AxGenIn> = {
    * Stable semantic task identity used to prove train/validation disjointness
    * when `requireHeldOut` is enabled. Defaults to each task's `id`. Ax does not
    * infer independence from object references or serialized task contents.
+   * IDs must be non-empty strings; runtime non-string values are rejected.
    */
   taskId?: (task: Readonly<AxAgentEvalTask<IN>>) => string | undefined;
   /** Runs the agent during evaluation. Defaults to the agent's `ai`. */

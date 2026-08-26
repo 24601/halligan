@@ -105,7 +105,9 @@ before mutation or rejects the candidate with exact rollback. `verify: false`
 is an error under this policy. Identity defaults to `task.id`; use
 `taskId: (task) => task.input.caseId` when identity lives in typed input or
 metadata. Ax deliberately does not treat object references or serialized
-objects as proof of semantic independence.
+objects as proof of semantic independence. IDs are non-empty strings under the
+public contract; runtime numeric and other non-string values are rejected with
+the semantic-ID error rather than coerced.
 
 ### Strict promotion evaluation and trade-off
 

@@ -288,6 +288,7 @@ CIMD
 Coalescible
 datacontenttype
 dataschema
+disjointness
 dpop
 fanout
 Fmcp
@@ -329,6 +330,7 @@ nebius
 novita
 nscale
 ovhcloud
+overfit
 runpod
 sambanova
 scaleway
