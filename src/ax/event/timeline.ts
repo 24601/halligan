@@ -544,8 +544,17 @@ const normalizeOptions = (
 
 const mediaRange = (
   event: Readonly<AxInteractionEvent>
-): AxMediaTimeRange | undefined =>
-  'mediaRange' in event ? event.mediaRange : undefined;
+): AxMediaTimeRange | undefined => {
+  switch (event.kind) {
+    case 'audio_frame':
+    case 'transcript':
+    case 'visual_observation':
+    case 'generated_media':
+      return event.mediaRange;
+    default:
+      return undefined;
+  }
+};
 
 const hasTemporalConflict = (
   envelope: Readonly<AxTemporalEnvelope>,
@@ -718,8 +727,13 @@ export class AxInteractionTimeline {
     }
     const eventIds = new Set<string>();
     const streamPositions = new Set<string>();
+    let retainedBytes = 0;
     const events = value.events.map((event, index) => {
       assertEnvelope(event);
+      retainedBytes += jsonBytes(event);
+      if (retainedBytes > base.options.maxBytes) {
+        fail('timeline exceeds its retained byte limit');
+      }
       if (event.sessionId !== base.sessionId) {
         fail(`timeline.events[${index}] belongs to a different session`);
       }
@@ -738,12 +752,6 @@ export class AxInteractionTimeline {
       streamPositions.add(streamPosition);
       return cloneEnvelope(event);
     });
-    if (
-      events.reduce((total, event) => total + jsonBytes(event), 0) >
-      base.options.maxBytes
-    ) {
-      fail('timeline exceeds its retained byte limit');
-    }
     if (
       events.some((event, index) =>
         hasTemporalConflict(event, events.slice(0, index))

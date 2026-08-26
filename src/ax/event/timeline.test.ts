@@ -395,6 +395,7 @@ describe('AxInteractionTimeline', () => {
       timeline,
       envelope({ eventId: 'seq-0', sequence: 0, sessionTimeUs: 90 })
     ).timeline;
+    timeline = AxInteractionTimeline.deserialize(timeline.serialize());
     expect(
       append(
         timeline,
@@ -438,10 +439,45 @@ describe('AxInteractionTimeline', () => {
     );
     expect(revised.accepted).toBe(true);
     expect(revised.classification).toBe('revision');
-    expect(revised.evictedEventIds).not.toContain('a');
-    expect(
-      revised.timeline.project().events.some((event) => event.eventId === 'a')
-    ).toBe(true);
+    expect(revised.evictedEventIds).toEqual(['b']);
+    expect(revised.timeline.project().events).toMatchObject([
+      {
+        eventId: 'a',
+        revision: 1,
+        event: { kind: 'text', text: 'a'.repeat(80) },
+      },
+    ]);
+  });
+
+  it('ignores undeclared mediaRange fields on non-media events', () => {
+    const initial = AxInteractionTimeline.create({ sessionId: 'session-1' });
+    const audio = append(
+      initial,
+      envelope({
+        streamId: 'shared',
+        event: {
+          kind: 'audio_frame',
+          mediaId: 'audio-0',
+          mediaRange: { timebase: 'media', startUs: 100, endUs: 200 },
+        },
+      })
+    ).timeline;
+    const controlWithExtraMediaRange = envelope({
+      eventId: 'control-1',
+      streamId: 'shared',
+      sequence: 1,
+      sessionTimeUs: 1,
+      event: {
+        kind: 'control',
+        signal: 'interrupt',
+        mediaRange: { timebase: 'session', startUs: 0, endUs: 1 },
+      } as unknown as AxInteractionEvent,
+    });
+
+    expect(append(audio, controlWithExtraMediaRange)).toMatchObject({
+      accepted: true,
+      classification: 'in_order',
+    });
   });
 
   it('filters projections and sorts by authoritative session time, not arrival or wall time', () => {
@@ -617,5 +653,24 @@ describe('AxInteractionTimeline', () => {
         JSON.stringify({ ...snapshot, version: 2 })
       )
     ).toThrow('unsupported interaction timeline version');
+  });
+
+  it('enforces the retained byte budget before processing later events', () => {
+    const baseSnapshot = AxInteractionTimeline.create({
+      sessionId: 'session-1',
+      maxEvents: 2,
+      maxBytes: 300,
+    }).toJSON();
+    const snapshot = {
+      ...baseSnapshot,
+      events: [
+        envelope({ event: { kind: 'text', text: 'x'.repeat(300) } }),
+        { schema: 'invalid' },
+      ],
+    };
+
+    expect(() =>
+      AxInteractionTimeline.deserialize(JSON.stringify(snapshot))
+    ).toThrow('timeline exceeds its retained byte limit');
   });
 });
