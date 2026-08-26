@@ -2478,12 +2478,9 @@ export type { AxUsable };
 export type { AxUsageContext };
 export type { AxUsageEvent };
 export type { AxUsageObserver };
-<<<<<<< HEAD
-export type { AxVisualObservationInteractionEvent };
-=======
 export type { AxVisualAuthority };
 export type { AxVisualChangeDigest };
 export type { AxVisualObservation };
+export type { AxVisualObservationInteractionEvent };
 export type { AxVisualPerceptualInput };
->>>>>>> origin/main
 export type { AxWorkerRuntimeConfig };
