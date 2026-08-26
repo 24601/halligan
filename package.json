@@ -79,7 +79,8 @@
     "format": "biome format .",
     "check": "biome check .",
     "init-package": "node scripts/initPackage.js",
-    "eval:frame-sampler": "node --import=tsx scripts/evaluate-frame-sampler.ts"
+    "eval:frame-sampler": "node --import=tsx scripts/evaluate-frame-sampler.ts",
+    "test:evaluation-policy": "vitest run scripts/evaluation-policy.test.js"
   },
   "engines": {
     "node": ">=20"
