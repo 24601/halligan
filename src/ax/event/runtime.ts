@@ -152,6 +152,7 @@ export class AxEventRuntime {
   private workerPromises: Promise<void>[] = [];
   private started = false;
   private closing = false;
+  private closePromise?: Promise<void>;
 
   constructor(options: Readonly<AxEventRuntimeOptions>) {
     this.options = options;
@@ -310,7 +311,12 @@ export class AxEventRuntime {
 
   async redrive(deadLetterId: string): Promise<void> {
     if (this.closing) throw new Error('AxEventRuntime is closing');
-    const operation = this.redriveInternal(deadLetterId);
+    if (this.activeRedriveControllers.has(deadLetterId)) {
+      throw new Error(`Dead letter ${deadLetterId} is already being redriven`);
+    }
+    const controller = new AbortController();
+    this.activeRedriveControllers.set(deadLetterId, controller);
+    const operation = this.redriveInternal(deadLetterId, controller);
     this.inFlightRedriveOperations.add(operation);
     void operation.then(
       () => this.inFlightRedriveOperations.delete(operation),
@@ -319,10 +325,11 @@ export class AxEventRuntime {
     return operation;
   }
 
-  private async redriveInternal(deadLetterId: string): Promise<void> {
+  private async redriveInternal(
+    deadLetterId: string,
+    controller: AbortController
+  ): Promise<void> {
     if (this.closing) throw new Error('AxEventRuntime is closing');
-    const controller = new AbortController();
-    this.activeRedriveControllers.set(deadLetterId, controller);
     try {
       const deadLetter = await this.awaitUnlessClosing(
         this.store.getDeadLetter(deadLetterId),
@@ -338,9 +345,6 @@ export class AxEventRuntime {
           deadLetter.deliveryId,
           this.clock.now()
         );
-        if (controller.signal.aborted || this.closing) {
-          throw new Error('AxEventRuntime is closing');
-        }
         await this.store.removeDeadLetter(deadLetterId);
         return;
       }
@@ -427,8 +431,15 @@ export class AxEventRuntime {
   }
 
   async close(options: Readonly<AxEventCloseOptions> = {}): Promise<void> {
-    if (this.closing) return;
+    if (this.closePromise) return this.closePromise;
     this.closing = true;
+    this.closePromise = this.performClose(options);
+    return this.closePromise;
+  }
+
+  private async performClose(
+    options: Readonly<AxEventCloseOptions>
+  ): Promise<void> {
     this.sourceController.abort('AxEventRuntime closing');
     await Promise.allSettled(
       this.sourceHandles.map((handle) => handle.close())
@@ -1224,8 +1235,9 @@ export class AxEventRuntime {
           reject(signal.reason ?? new Error('AxEventRuntime is closing'));
         };
         signal.addEventListener('abort', abort, { once: true });
-        void operation.finally(() =>
-          signal.removeEventListener('abort', abort)
+        void operation.then(
+          () => signal.removeEventListener('abort', abort),
+          () => signal.removeEventListener('abort', abort)
         );
       }),
     ]);
