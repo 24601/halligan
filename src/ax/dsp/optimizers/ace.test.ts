@@ -257,7 +257,7 @@ describe('AxACE curator no-op filtering', () => {
     });
   });
 
-  it('does not admit contentless updates from malformed metadata shapes', () => {
+  it('does not admit content-free updates from malformed metadata shapes', () => {
     const optimizer = Object.create(AxACE.prototype) as AxACE;
     const operations = (optimizer as any).normalizeCuratorOperations([
       {
