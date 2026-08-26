@@ -328,7 +328,8 @@ const assertIdList = (value: unknown, name: string): void => {
     fail(`${name} must contain at most ${MAX_LINKS} IDs`);
   }
   const ids = new Set<string>();
-  for (const item of value) {
+  for (let index = 0; index < value.length; index++) {
+    const item = value[index];
     assertId(item, `${name} item`);
     if (ids.has(item)) fail(`${name} must not contain duplicate IDs`);
     ids.add(item);
@@ -381,7 +382,8 @@ const assertJsonValue = (value: unknown, path = 'value'): void => {
     if (depth >= MAX_JSON_DEPTH) {
       fail(`${itemPath} must not exceed ${MAX_JSON_DEPTH} levels`);
     }
-    if (Object.getPrototypeOf(item) !== Object.prototype) {
+    const prototype = Object.getPrototypeOf(item);
+    if (prototype !== Object.prototype && prototype !== null) {
       fail(`${itemPath} must contain only plain JSON values`);
     }
     if (ancestors.has(item)) fail(`${itemPath} must not contain cycles`);
@@ -453,7 +455,7 @@ const UTC_LEAP_SECOND_MINUTES = new Set(
 
 const isRfc3339 = (value: string): boolean => {
   const match =
-    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|([+-])(\d{2}):(\d{2}))$/.exec(
+    /^(\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:[Zz]|([+-])(\d{2}):(\d{2}))$/.exec(
       value
     );
   if (!match) return false;
@@ -671,6 +673,20 @@ const cloneDataOnlyJson = (
         fail(`${path} must contain only plain JSON values`);
       }
       const cloned: unknown[] = [];
+      for (const key of Reflect.ownKeys(descriptors)) {
+        if (
+          key === 'length' ||
+          (typeof key === 'string' && /^\d+$/.test(key))
+        ) {
+          continue;
+        }
+        const descriptor = Reflect.get(descriptors, key) as
+          | PropertyDescriptor
+          | undefined;
+        if (descriptor?.enumerable) {
+          fail(`${path} must not contain enumerable non-index properties`);
+        }
+      }
       for (let index = 0; index < length; index++) {
         const descriptor = descriptors[String(index)];
         if (!descriptor || !('value' in descriptor)) {
@@ -690,7 +706,7 @@ const cloneDataOnlyJson = (
     if (Object.getPrototypeOf(value) !== Object.prototype) {
       fail(`${path} must contain only plain JSON values`);
     }
-    const cloned: Record<string, unknown> = {};
+    const cloned = Object.create(null) as Record<string, unknown>;
     for (const [key, descriptor] of Object.entries(descriptors)) {
       if (!descriptor.enumerable) continue;
       if (!('value' in descriptor)) {

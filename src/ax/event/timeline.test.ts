@@ -650,6 +650,17 @@ describe('AxInteractionTimeline', () => {
       append(
         timeline,
         envelope({
+          eventId: 'lowercase-rfc3339',
+          sequence: 3,
+          sessionTimeUs: 3,
+          wallTime: '2016-12-31t23:59:60z',
+        })
+      ).accepted
+    ).toBe(true);
+    expect(
+      append(
+        timeline,
+        envelope({
           eventId: 'leap-second-offset',
           sequence: 1,
           sessionTimeUs: 1,
@@ -726,6 +737,60 @@ describe('AxInteractionTimeline', () => {
       )
     ).toThrow('envelope.event.kind must not use accessors');
     expect(getterReads).toBe(0);
+
+    const parentIds = ['parent'];
+    Object.defineProperty(parentIds, 'extra', {
+      enumerable: true,
+      get: () => {
+        getterReads++;
+        return 'not JSON array data';
+      },
+    });
+    expect(() =>
+      append(
+        timeline,
+        envelope({ causalParentIds: parentIds as readonly string[] })
+      )
+    ).toThrow('must not contain enumerable non-index properties');
+    expect(getterReads).toBe(0);
+  });
+
+  it('does not read inherited envelope authority', () => {
+    const timeline = AxInteractionTimeline.create({ sessionId: 'session-1' });
+    let sessionReads = 0;
+    let kindReads = 0;
+    Object.defineProperty(Object.prototype, 'sessionId', {
+      configurable: true,
+      get: () => {
+        sessionReads++;
+        return 'session-1';
+      },
+    });
+    Object.defineProperty(Object.prototype, 'kind', {
+      configurable: true,
+      get: () => {
+        kindReads++;
+        return 'control';
+      },
+    });
+    try {
+      const missingSession = envelope() as unknown as Record<string, unknown>;
+      delete missingSession.sessionId;
+      expect(() =>
+        timeline.append(missingSession as unknown as AxTemporalEnvelope)
+      ).toThrow('sessionId must be a non-empty string');
+
+      const missingKind = envelope() as unknown as Record<string, unknown>;
+      delete (missingKind.event as Record<string, unknown>).kind;
+      expect(() =>
+        timeline.append(missingKind as unknown as AxTemporalEnvelope)
+      ).toThrow(AxTemporalValidationError);
+    } finally {
+      delete (Object.prototype as Record<string, unknown>).sessionId;
+      delete (Object.prototype as Record<string, unknown>).kind;
+    }
+    expect(sessionReads).toBe(0);
+    expect(kindReads).toBe(0);
   });
 
   it('enforces the retained byte budget before processing later events', () => {
