@@ -1545,6 +1545,23 @@ describe('AxSQLiteEventStore', () => {
         retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
       });
       await initial.enqueue(storeRequest(`${lineage}-core`, 1_000));
+      const childDeliveryId =
+        lineage === 'legacy-v2'
+          ? 'legacy-verifier-child'
+          : 'compact-verifier-child';
+      const childReceipt = await initial.enqueue(
+        storeRequest(childDeliveryId, 1_000)
+      );
+      const originalChild = (await initial.getDelivery(
+        childReceipt.deliveryIds[0]!
+      ))!;
+      const initialDb = (initial as any).db as Database.Database;
+      initialDb
+        .prepare('UPDATE event_deliveries SET id=? WHERE id=?')
+        .run(childDeliveryId, originalChild.id);
+      initialDb
+        .prepare(`UPDATE event_dedupe SET delivery_ids_json=? WHERE event_id=?`)
+        .run(JSON.stringify([childDeliveryId]), childDeliveryId);
       await initial.close();
       const fixture = new Database(filename);
       fixture.exec('DROP TABLE event_store_metadata;');
@@ -1558,25 +1575,7 @@ describe('AxSQLiteEventStore', () => {
             created_at INTEGER NOT NULL
           );
         `);
-        const child = {
-          id: 'legacy-verifier-child',
-          sequence: 2,
-          ingress: storeRequest('legacy-verifier-child', 1_000).ingress,
-          identityScope: 'tenantId=tenant',
-          routeId: 'route',
-          action: 'wake',
-          targetId: 'target',
-          instanceKey: 'legacy-verifier-child',
-          status: 'queued',
-          attempt: 0,
-          availableAt: 1_000,
-          acceptedAt: 1_000,
-          sizeBytes: 128,
-          retrySafety: 'idempotent',
-          ordering: 'strict',
-          fencingToken: 0,
-          invocationStarted: false,
-        };
+        const child = { ...originalChild, id: childDeliveryId };
         fixture
           .prepare(`INSERT INTO event_verifier_transitions VALUES(?,?,?,?)`)
           .run(
@@ -1584,7 +1583,7 @@ describe('AxSQLiteEventStore', () => {
             JSON.stringify({ operationId: 'legacy-verifier-operation' }),
             JSON.stringify({
               receipt: {
-                eventId: 'legacy-verifier-child',
+                eventId: childDeliveryId,
                 accepted: true,
                 duplicate: false,
                 durability: 'persistent',
@@ -1601,13 +1600,13 @@ describe('AxSQLiteEventStore', () => {
             'compact-verifier-operation',
             'request-commitment',
             JSON.stringify({
-              eventId: 'compact-verifier-child',
+              eventId: childDeliveryId,
               accepted: true,
               duplicate: false,
               durability: 'persistent',
-              deliveryIds: ['compact-verifier-child'],
+              deliveryIds: [childDeliveryId],
             }),
-            'compact-verifier-child',
+            childDeliveryId,
             'child-commitment',
             1_000
           );
@@ -1890,6 +1889,304 @@ describe('AxSQLiteEventStore', () => {
     }
   });
 
+  it('preserves canonical ingress fingerprints and effect digests on v7 reopen', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const filename = join(directory, 'canonical-identities.sqlite');
+    const clock = new AxManualEventClock(1_000);
+    let store = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    await store.enqueue(storeRequest('canonical-identities', clock.now()));
+    const claimed = (await store.claim('identity-worker', clock.now(), 100))!;
+    await store.declareEffect(
+      {
+        id: 'canonical-identity-effect',
+        deliveryId: claimed.id,
+        runId: 'canonical-identity-run',
+        identityScope: claimed.identityScope,
+        operation: 'canonical.write',
+        idempotencyKey: 'canonical-key',
+        replaySafety: 'idempotent',
+        createdAt: clock.now(),
+      },
+      { deliveryId: claimed.id, fencingToken: claimed.fencingToken! }
+    );
+    await store.close();
+    const before = sqliteLogicalHash(filename);
+
+    store = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    await store.close();
+    expect(sqliteLogicalHash(filename)).toBe(before);
+  });
+
+  it.each(['fingerprint', 'effect-digest'] as const)(
+    'rejects a conflicting authoritative %s without mutating v7 data',
+    async (conflict) => {
+      const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+      directories.push(directory);
+      const filename = join(directory, `${conflict}.sqlite`);
+      const clock = new AxManualEventClock(1_000);
+      const store = new AxSQLiteEventStore({
+        filename,
+        clock,
+        retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+      });
+      await store.enqueue(storeRequest(conflict, clock.now()));
+      const claimed = (await store.claim('conflict-worker', clock.now(), 100))!;
+      await store.declareEffect(
+        {
+          id: `${conflict}-effect`,
+          deliveryId: claimed.id,
+          runId: `${conflict}-run`,
+          identityScope: claimed.identityScope,
+          operation: 'conflict.write',
+          idempotencyKey: `${conflict}-key`,
+          replaySafety: 'idempotent',
+          createdAt: clock.now(),
+        },
+        { deliveryId: claimed.id, fencingToken: claimed.fencingToken! }
+      );
+      await store.close();
+      const fixture = new Database(filename);
+      if (conflict === 'fingerprint') {
+        fixture
+          .prepare(`UPDATE event_dedupe SET ingress_fingerprint='wrong'`)
+          .run();
+      } else {
+        const row = fixture
+          .prepare('SELECT id, effect_json FROM event_effects')
+          .get() as { id: string; effect_json: string };
+        const effect = JSON.parse(row.effect_json);
+        effect.requestDigest = 'wrong';
+        fixture
+          .prepare('UPDATE event_effects SET effect_json=? WHERE id=?')
+          .run(JSON.stringify(effect), row.id);
+      }
+      fixture.close();
+      const before = sqliteLogicalHash(filename);
+
+      expect(
+        () =>
+          new AxSQLiteEventStore({
+            filename,
+            clock,
+            retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+          })
+      ).toThrow(conflict === 'fingerprint' ? 'fingerprint' : 'digest');
+      expect(sqliteLogicalHash(filename)).toBe(before);
+    }
+  );
+
+  it.each(['empty', 'child', 'event'] as const)(
+    'rejects a verifier receipt with a mismatched %s binding without mutation',
+    async (mismatch) => {
+      const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+      directories.push(directory);
+      const filename = join(directory, `receipt-${mismatch}.sqlite`);
+      const store = new AxSQLiteEventStore({
+        filename,
+        retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+      });
+      const receipt = await store.enqueue(
+        storeRequest(`receipt-${mismatch}-event`, 1_000)
+      );
+      await store.close();
+      const childDeliveryId = receipt.deliveryIds[0]!;
+      const validReceipt = {
+        eventId: `receipt-${mismatch}-event`,
+        accepted: true,
+        duplicate: false,
+        durability: 'persistent',
+        deliveryIds: [childDeliveryId],
+      };
+      const malformed =
+        mismatch === 'empty'
+          ? {}
+          : mismatch === 'child'
+            ? { ...validReceipt, deliveryIds: ['unrelated-child'] }
+            : { ...validReceipt, eventId: 'unrelated-event' };
+      const fixture = new Database(filename);
+      fixture
+        .prepare(`INSERT INTO event_verifier_transitions VALUES(?,?,?,?,?,?)`)
+        .run(
+          `receipt-${mismatch}-operation`,
+          'request-commitment',
+          JSON.stringify(malformed),
+          childDeliveryId,
+          'child-commitment',
+          1_000
+        );
+      fixture.close();
+      const before = sqliteLogicalHash(filename);
+
+      expect(
+        () =>
+          new AxSQLiteEventStore({
+            filename,
+            retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+          })
+      ).toThrow('receipt is malformed');
+      expect(sqliteLogicalHash(filename)).toBe(before);
+    }
+  );
+
+  it.each(['malformed', 'delivery-mismatch', 'owner-mismatch'] as const)(
+    'rejects a %s immutable admission snapshot without mutation',
+    async (mismatch) => {
+      const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+      directories.push(directory);
+      const filename = join(directory, `admission-${mismatch}.sqlite`);
+      const clock = new AxManualEventClock(1_000);
+      const store = new AxSQLiteEventStore({
+        filename,
+        clock,
+        retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+      });
+      await store.enqueue({
+        ...storeRequest(`admission-${mismatch}`, clock.now()),
+        deliveries: [
+          {
+            routeId: 'route',
+            action: 'resume',
+            targetId: 'target',
+            instanceKey: `admission-${mismatch}`,
+            sizeBytes: 128,
+            retrySafety: 'idempotent',
+            ordering: 'strict',
+          },
+        ],
+      });
+      const claimed = (await store.claim(
+        'admission-worker',
+        clock.now(),
+        100
+      ))!;
+      const continuation: AxEventContinuation = {
+        id: `admission-${mismatch}-continuation`,
+        targetId: 'target',
+        routeId: 'origin-route',
+        instanceKey: 'origin-instance',
+        identityScope: claimed.identityScope,
+        correlation: [{ kind: 'admission', value: mismatch }],
+        createdAt: clock.now(),
+      };
+      await store.registerContinuation(continuation);
+      await store.admitContinuation(
+        claimed.id,
+        claimed.claimedBy!,
+        claimed.fencingToken!,
+        continuation.identityScope,
+        continuation.correlation[0]!,
+        clock.now()
+      );
+      await store.close();
+      const fixture = new Database(filename);
+      if (mismatch === 'malformed') {
+        fixture
+          .prepare(
+            `UPDATE event_deliveries SET admitted_continuation_json='{}'
+             WHERE id=?`
+          )
+          .run(claimed.id);
+      } else if (mismatch === 'delivery-mismatch') {
+        fixture
+          .prepare(
+            `UPDATE event_deliveries SET admitted_continuation_json=? WHERE id=?`
+          )
+          .run(
+            JSON.stringify({ ...continuation, targetId: 'other-target' }),
+            claimed.id
+          );
+      } else {
+        fixture
+          .prepare(
+            `UPDATE event_continuations SET admitted_delivery_id=NULL WHERE id=?`
+          )
+          .run(continuation.id);
+      }
+      fixture.close();
+      const before = sqliteLogicalHash(filename);
+
+      expect(
+        () =>
+          new AxSQLiteEventStore({
+            filename,
+            clock,
+            retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+          })
+      ).toThrow(/admission|continuation admission/);
+      expect(sqliteLogicalHash(filename)).toBe(before);
+    }
+  );
+
+  it('accepts a valid immutable admission after its completed continuation is pruned', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const filename = join(directory, 'admission-pruned.sqlite');
+    const clock = new AxManualEventClock(1_000);
+    let store = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    await store.enqueue({
+      ...storeRequest('admission-pruned', clock.now()),
+      deliveries: [
+        {
+          routeId: 'route',
+          action: 'resume',
+          targetId: 'target',
+          instanceKey: 'admission-pruned',
+          sizeBytes: 128,
+          retrySafety: 'idempotent',
+          ordering: 'strict',
+        },
+      ],
+    });
+    const claimed = (await store.claim('pruned-worker', clock.now(), 100))!;
+    const continuation: AxEventContinuation = {
+      id: 'admission-pruned-continuation',
+      targetId: 'target',
+      routeId: 'origin-route',
+      instanceKey: 'origin-instance',
+      identityScope: claimed.identityScope,
+      correlation: [{ kind: 'admission', value: 'pruned' }],
+      createdAt: clock.now(),
+    };
+    await store.registerContinuation(continuation);
+    await store.admitContinuation(
+      claimed.id,
+      claimed.claimedBy!,
+      claimed.fencingToken!,
+      continuation.identityScope,
+      continuation.correlation[0]!,
+      clock.now()
+    );
+    await store.close();
+    const fixture = new Database(filename);
+    fixture
+      .prepare('DELETE FROM event_continuations WHERE id=?')
+      .run(continuation.id);
+    fixture.close();
+
+    store = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    expect(await store.getDelivery(claimed.id)).toEqual(
+      expect.objectContaining({ admittedContinuation: continuation })
+    );
+    await store.close();
+  });
+
   it('completes the verifier migration WAL cleanup handshake after commit', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
     directories.push(directory);
@@ -2081,6 +2378,163 @@ describe('AxSQLiteEventStore', () => {
     expect(await store.getDelivery(resume.id)).toEqual(
       expect.objectContaining({ status: 'claimed' })
     );
+    await store.close();
+  });
+
+  it('rejects cross-continuation verifier consumption with zero SQLite writes', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const filename = join(directory, 'verifier-cross-consumption.sqlite');
+    const clock = new AxManualEventClock(1_000);
+    const store = new AxSQLiteEventStore({
+      filename,
+      clock,
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    await store.enqueue({
+      ...storeRequest('sqlite-consumption-parent', clock.now()),
+      deliveries: [
+        {
+          routeId: 'route',
+          action: 'resume',
+          targetId: 'target',
+          instanceKey: 'sqlite-consumption-parent',
+          sizeBytes: 128,
+          retrySafety: 'idempotent',
+          ordering: 'strict',
+        },
+      ],
+    });
+    const parent = (await store.claim('sqlite-worker', clock.now(), 100))!;
+    const admitted: AxEventContinuation = {
+      id: 'sqlite-admitted-continuation',
+      targetId: 'target',
+      routeId: 'origin-route',
+      instanceKey: 'origin-instance',
+      identityScope: parent.identityScope,
+      correlation: [{ kind: 'job', value: 'admitted' }],
+      createdAt: clock.now(),
+    };
+    const unrelated: AxEventContinuation = {
+      ...admitted,
+      id: 'sqlite-unrelated-continuation',
+      correlation: [{ kind: 'job', value: 'unrelated' }],
+    };
+    await store.registerContinuation(admitted);
+    await store.registerContinuation(unrelated);
+    await store.admitContinuation(
+      parent.id,
+      parent.claimedBy!,
+      parent.fencingToken!,
+      admitted.identityScope,
+      admitted.correlation[0]!,
+      clock.now()
+    );
+    const admittedParent = (await store.getDelivery(parent.id))!;
+    const run: AxEventRun = {
+      id: 'sqlite-consumption-run',
+      deliveryId: parent.id,
+      routeId: parent.routeId,
+      targetId: parent.targetId,
+      instanceKey: parent.instanceKey,
+      admittedContinuation: admitted,
+      claimedBy: parent.claimedBy,
+      fencingToken: parent.fencingToken,
+      status: 'waiting_event',
+      attempt: 1,
+      startedAt: clock.now(),
+    };
+    const baseRequest = {
+      operationId: 'sqlite-consumption-operation',
+      childDeliveryId: 'sqlite-consumption-child',
+      parent: {
+        delivery: {
+          ...admittedParent,
+          status: 'waiting_event' as const,
+          runId: run.id,
+        },
+        run,
+        expectedFencingToken: parent.fencingToken!,
+      },
+      continuation: {
+        id: 'sqlite-next-continuation',
+        targetId: 'target',
+        routeId: 'route',
+        instanceKey: parent.instanceKey,
+        identityScope: parent.identityScope,
+        correlation: [{ kind: 'verifier', value: 'next' }],
+        createdAt: clock.now(),
+      },
+      child: storeRequest('sqlite-consumption-child-event', clock.now()),
+    };
+    const db = (store as any).db as Database.Database;
+    const before = db.serialize();
+
+    for (const consumeContinuationId of [undefined, unrelated.id]) {
+      await expect(
+        store.transitionVerifier({
+          ...baseRequest,
+          ...(consumeContinuationId ? { consumeContinuationId } : {}),
+        })
+      ).rejects.toThrow(/must consume|cannot consume/);
+      expect(db.serialize()).toEqual(before);
+    }
+    await store.enqueue(
+      storeRequest('sqlite-no-admission-parent', clock.now())
+    );
+    const noAdmissionParent = (await store.claim(
+      'sqlite-worker',
+      clock.now(),
+      100
+    ))!;
+    const noAdmissionRun: AxEventRun = {
+      id: 'sqlite-no-admission-run',
+      deliveryId: noAdmissionParent.id,
+      routeId: noAdmissionParent.routeId,
+      targetId: noAdmissionParent.targetId,
+      instanceKey: noAdmissionParent.instanceKey,
+      claimedBy: noAdmissionParent.claimedBy,
+      fencingToken: noAdmissionParent.fencingToken,
+      status: 'waiting_event',
+      attempt: 1,
+      startedAt: clock.now(),
+    };
+    const beforeNoAdmission = db.serialize();
+    await expect(
+      store.transitionVerifier({
+        ...baseRequest,
+        operationId: 'sqlite-no-admission-operation',
+        childDeliveryId: 'sqlite-no-admission-child',
+        parent: {
+          delivery: {
+            ...noAdmissionParent,
+            status: 'waiting_event',
+            runId: noAdmissionRun.id,
+          },
+          run: noAdmissionRun,
+          expectedFencingToken: noAdmissionParent.fencingToken!,
+        },
+        consumeContinuationId: unrelated.id,
+      })
+    ).rejects.toThrow('cannot consume');
+    expect(db.serialize()).toEqual(beforeNoAdmission);
+    expect(
+      await store.getDelivery(baseRequest.childDeliveryId)
+    ).toBeUndefined();
+    expect(
+      await store.findContinuation(
+        admitted.identityScope,
+        admitted.correlation[0]!,
+        clock.now()
+      )
+    ).toEqual(admitted);
+    expect(
+      await store.findContinuation(
+        unrelated.identityScope,
+        unrelated.correlation[0]!,
+        clock.now()
+      )
+    ).toEqual(unrelated);
     await store.close();
   });
 

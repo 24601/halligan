@@ -162,7 +162,9 @@ function parseContinuationAdmission(
         typeof correlation?.kind === 'string' &&
         typeof correlation.value === 'string'
     ) ||
-    !Number.isFinite((value as AxEventContinuation).createdAt)
+    !Number.isFinite((value as AxEventContinuation).createdAt) ||
+    ((value as AxEventContinuation).expiresAt !== undefined &&
+      !Number.isFinite((value as AxEventContinuation).expiresAt))
   ) {
     throw new Error(
       `outcome_unknown: continuation admission for ${deliveryId} is malformed`
@@ -181,6 +183,38 @@ function safeParseContinuationAdmission(
   } catch {
     return;
   }
+}
+
+function parseVerifierReceipt(
+  operationId: string,
+  json: string,
+  childDeliveryId: string,
+  childEventId: string
+): AxEventPublishReceipt {
+  let value: unknown;
+  try {
+    value = JSON.parse(json);
+  } catch (error) {
+    throw new Error(
+      `Verifier transition receipt is malformed: ${operationId}`,
+      { cause: error }
+    );
+  }
+  const receipt = value as Partial<AxEventPublishReceipt>;
+  if (
+    !value ||
+    typeof value !== 'object' ||
+    receipt.eventId !== childEventId ||
+    receipt.accepted !== true ||
+    receipt.duplicate !== false ||
+    receipt.durability !== 'persistent' ||
+    !Array.isArray(receipt.deliveryIds) ||
+    receipt.deliveryIds.length !== 1 ||
+    receipt.deliveryIds[0] !== childDeliveryId
+  ) {
+    throw new Error(`Verifier transition receipt is malformed: ${operationId}`);
+  }
+  return value as AxEventPublishReceipt;
 }
 
 function assertContinuationCorrelation(
@@ -356,6 +390,10 @@ export class AxSQLiteEventStore
       }
 
       this.assertNoNonterminalEffects(request.parent.delivery.id);
+      this.assertVerifierContinuationConsumption(
+        request,
+        this.rowToDelivery(parent)
+      );
       this.updateDelivery(request.parent.delivery);
       const receipt = this.tryEnqueue(request.child, [request.childDeliveryId]);
       if (!receipt) throw new AxEventBackpressureError();
@@ -2184,13 +2222,76 @@ export class AxSQLiteEventStore
         }
       | undefined;
     if (!row) return;
+    const child = this.db
+      .prepare('SELECT ingress_json FROM event_deliveries WHERE id=?')
+      .get(row.child_delivery_id) as { ingress_json: string } | undefined;
+    if (!child) {
+      throw new Error(
+        `Verifier transition child is missing: ${row.operation_id}`
+      );
+    }
+    const childIngress = JSON.parse(
+      child.ingress_json
+    ) as AxEventEnqueueRequest['ingress'];
     return {
       operationId: row.operation_id,
       requestCommitment: row.request_commitment,
-      receipt: JSON.parse(row.receipt_json) as AxEventPublishReceipt,
+      receipt: parseVerifierReceipt(
+        row.operation_id,
+        row.receipt_json,
+        row.child_delivery_id,
+        childIngress.event.id
+      ),
       childDeliveryId: row.child_delivery_id,
       childCommitment: row.child_commitment,
     };
+  }
+
+  private assertVerifierContinuationConsumption(
+    request: Readonly<AxEventVerifierTransitionRequest>,
+    parent: Readonly<AxEventDelivery>
+  ): void {
+    const admitted = parent.admittedContinuation;
+    const requested = request.parent.delivery.admittedContinuation;
+    if (!request.consumeContinuationId) {
+      if (admitted || requested) {
+        throw new Error(
+          `Verifier transition must consume the continuation admitted to ${parent.id}`
+        );
+      }
+      return;
+    }
+    if (
+      !admitted ||
+      !requested ||
+      admitted.id !== request.consumeContinuationId ||
+      requested.id !== request.consumeContinuationId ||
+      axEventContinuationFingerprint(admitted) !==
+        axEventContinuationFingerprint(requested)
+    ) {
+      throw new Error(
+        `Verifier transition cannot consume a continuation not admitted to ${parent.id}`
+      );
+    }
+    const continuation = this.db
+      .prepare(
+        `SELECT continuation_json, admitted_delivery_id
+         FROM event_continuations WHERE id=? AND completed_at IS NULL`
+      )
+      .get(admitted.id) as
+      | { continuation_json: string; admitted_delivery_id: string | null }
+      | undefined;
+    if (
+      !continuation ||
+      continuation.admitted_delivery_id !== parent.id ||
+      axEventContinuationFingerprint(
+        parseContinuationAdmission(parent.id, continuation.continuation_json)
+      ) !== axEventContinuationFingerprint(admitted)
+    ) {
+      throw new Error(
+        `Verifier transition cannot consume a continuation not admitted to ${parent.id}`
+      );
+    }
   }
 
   private assertVerifierTransitionRequest(
@@ -2273,6 +2374,24 @@ export class AxSQLiteEventStore
   private canonicalCommitment(value: unknown): string {
     return createHash('sha256')
       .update(axEventCanonicalJson(value))
+      .digest('hex');
+  }
+
+  private effectRequestDigest(effect: Readonly<AxEventEffect>): string {
+    return createHash('sha256')
+      .update(
+        axEventEffectRequestFingerprint({
+          id: effect.id,
+          deliveryId: effect.deliveryId,
+          runId: effect.runId,
+          identityScope: effect.identityScope,
+          operation: effect.operation,
+          idempotencyKey: effect.idempotencyKey,
+          replaySafety: effect.replaySafety,
+          metadata: effect.metadata,
+          createdAt: effect.createdAt,
+        })
+      )
       .digest('hex');
   }
 
@@ -2857,6 +2976,36 @@ export class AxSQLiteEventStore
     if (malformedDedupe) {
       throw new Error('AxSQLiteEventStore v7 has malformed dedupe data');
     }
+    const dedupeRows = this.db
+      .prepare(
+        `SELECT dedupe_key, delivery_ids_json, ingress_json, ingress_fingerprint
+         FROM event_dedupe`
+      )
+      .all() as Array<{
+      dedupe_key: string;
+      delivery_ids_json: string;
+      ingress_json: string | null;
+      ingress_fingerprint: string;
+    }>;
+    for (const row of dedupeRows) {
+      const deliveryIds = JSON.parse(row.delivery_ids_json) as unknown;
+      if (
+        !Array.isArray(deliveryIds) ||
+        !deliveryIds.every((deliveryId) => typeof deliveryId === 'string')
+      ) {
+        throw new Error('AxSQLiteEventStore v7 has malformed dedupe data');
+      }
+      if (row.ingress_json !== null) {
+        const ingress = JSON.parse(
+          row.ingress_json
+        ) as AxEventEnqueueRequest['ingress'];
+        if (axEventIngressFingerprint(ingress) !== row.ingress_fingerprint) {
+          throw new Error(
+            `AxSQLiteEventStore v7 ingress fingerprint conflicts with ${row.dedupe_key}`
+          );
+        }
+      }
+    }
     const malformedEffect = this.db
       .prepare(
         `SELECT 1 FROM event_effects
@@ -2872,6 +3021,17 @@ export class AxSQLiteEventStore
     if (malformedEffect) {
       throw new Error('AxSQLiteEventStore v7 has malformed effect data');
     }
+    const effects = this.db
+      .prepare('SELECT id, effect_json FROM event_effects')
+      .all() as Array<{ id: string; effect_json: string }>;
+    for (const row of effects) {
+      const effect = JSON.parse(row.effect_json) as AxEventEffect;
+      if (effect.requestDigest !== this.effectRequestDigest(effect)) {
+        throw new Error(
+          `AxSQLiteEventStore v7 effect request digest conflicts with ${row.id}`
+        );
+      }
+    }
     const malformedVerifier = this.db
       .prepare(
         `SELECT 1 FROM event_verifier_transitions
@@ -2885,6 +3045,35 @@ export class AxSQLiteEventStore
     if (malformedVerifier) {
       throw new Error('AxSQLiteEventStore v7 has malformed verifier data');
     }
+    const verifierRows = this.db
+      .prepare(
+        `SELECT v.operation_id, v.receipt_json, v.child_delivery_id,
+                d.ingress_json
+         FROM event_verifier_transitions v
+         LEFT JOIN event_deliveries d ON d.id=v.child_delivery_id`
+      )
+      .all() as Array<{
+      operation_id: string;
+      receipt_json: string;
+      child_delivery_id: string;
+      ingress_json: string | null;
+    }>;
+    for (const row of verifierRows) {
+      if (row.ingress_json === null) {
+        throw new Error(
+          `Verifier transition child is missing: ${row.operation_id}`
+        );
+      }
+      const ingress = JSON.parse(
+        row.ingress_json
+      ) as AxEventEnqueueRequest['ingress'];
+      parseVerifierReceipt(
+        row.operation_id,
+        row.receipt_json,
+        row.child_delivery_id,
+        ingress.event.id
+      );
+    }
     const malformedAdmission = this.db
       .prepare(
         `SELECT 1 FROM event_deliveries
@@ -2895,6 +3084,51 @@ export class AxSQLiteEventStore
       .get();
     if (malformedAdmission) {
       throw new Error('AxSQLiteEventStore v7 has malformed admission data');
+    }
+    const admissions = this.db
+      .prepare(
+        `SELECT d.id, d.identity_scope, d.route_id, d.target_id,
+                d.instance_key, d.admitted_continuation_json,
+                c.continuation_json, c.admitted_delivery_id
+         FROM event_deliveries d
+         LEFT JOIN event_continuations c
+           ON c.id=json_extract(d.admitted_continuation_json, '$.id')
+         WHERE d.admitted_continuation_json IS NOT NULL`
+      )
+      .all() as Array<{
+      id: string;
+      identity_scope: string;
+      route_id: string;
+      target_id: string | null;
+      instance_key: string;
+      admitted_continuation_json: string;
+      continuation_json: string | null;
+      admitted_delivery_id: string | null;
+    }>;
+    for (const row of admissions) {
+      const admitted = parseContinuationAdmission(
+        row.id,
+        row.admitted_continuation_json
+      );
+      if (
+        admitted.identityScope !== row.identity_scope ||
+        admitted.targetId !== row.target_id
+      ) {
+        throw new Error(
+          `AxSQLiteEventStore v7 admission conflicts with delivery ${row.id}`
+        );
+      }
+      if (
+        row.continuation_json !== null &&
+        (row.admitted_delivery_id !== row.id ||
+          axEventContinuationFingerprint(
+            parseContinuationAdmission(row.id, row.continuation_json)
+          ) !== axEventContinuationFingerprint(admitted))
+      ) {
+        throw new Error(
+          `AxSQLiteEventStore v7 admission conflicts with continuation ${admitted.id}`
+        );
+      }
     }
     const foreignKeyViolation = (
       this.db.pragma('foreign_key_check') as unknown[]
@@ -2911,7 +3145,15 @@ export class AxSQLiteEventStore
           simple: true,
         }) as number;
         const shape = this.inspectMigrationShape(reportedVersion);
-        let version = shape.empty ? 0 : shape.effects === 'absent' ? 1 : 2;
+        let version = shape.empty
+          ? 0
+          : {
+              absent: 1,
+              ledger: 2,
+              fingerprint: 4,
+              payload: 5,
+              admission: 6,
+            }[shape.effects];
         if (version === 0) {
           this.db
             .transaction(() =>
@@ -3079,13 +3321,15 @@ export class AxSQLiteEventStore
               }
               const rows = this.db
                 .prepare(
-                  `SELECT dedupe_key, delivery_ids_json, ingress_json
+                  `SELECT dedupe_key, delivery_ids_json, ingress_json,
+                          ingress_fingerprint
                FROM event_dedupe`
                 )
                 .all() as {
                 dedupe_key: string;
                 delivery_ids_json: string;
                 ingress_json: string | null;
+                ingress_fingerprint: string | null;
               }[];
               const lookup = this.db.prepare(
                 'SELECT ingress_json FROM event_deliveries WHERE id=?'
@@ -3112,7 +3356,19 @@ export class AxSQLiteEventStore
                   : `${LEGACY_UNVERIFIABLE_INGRESS_PREFIX}${createHash('sha256')
                       .update(row.dedupe_key)
                       .digest('hex')}`;
-                update.run(ingressJson, ingressFingerprint, row.dedupe_key);
+                if (
+                  row.ingress_fingerprint &&
+                  row.ingress_fingerprint !== ingressFingerprint
+                ) {
+                  throw new Error(
+                    `Event ingress fingerprint conflicts with ${row.dedupe_key}`
+                  );
+                }
+                update.run(
+                  ingressJson,
+                  row.ingress_fingerprint ?? ingressFingerprint,
+                  row.dedupe_key
+                );
               }
               const effects = this.db
                 .prepare('SELECT id, effect_json FROM event_effects')
@@ -3122,22 +3378,17 @@ export class AxSQLiteEventStore
               );
               for (const row of effects) {
                 const effect = JSON.parse(row.effect_json) as AxEventEffect;
+                const requestDigest = this.effectRequestDigest(effect);
+                if (
+                  effect.requestDigest &&
+                  effect.requestDigest !== requestDigest
+                ) {
+                  throw new Error(
+                    `Event effect request digest conflicts with ${effect.id}`
+                  );
+                }
                 if (effect.requestDigest) continue;
-                effect.requestDigest = createHash('sha256')
-                  .update(
-                    axEventEffectRequestFingerprint({
-                      id: effect.id,
-                      deliveryId: effect.deliveryId,
-                      runId: effect.runId,
-                      identityScope: effect.identityScope,
-                      operation: effect.operation,
-                      idempotencyKey: effect.idempotencyKey,
-                      replaySafety: effect.replaySafety,
-                      metadata: effect.metadata,
-                      createdAt: effect.createdAt,
-                    })
-                  )
-                  .digest('hex');
+                effect.requestDigest = requestDigest;
                 updateEffect.run(JSON.stringify(effect), effect.id);
               }
               this.db.pragma('user_version = 3');

@@ -745,6 +745,7 @@ export interface AxEventVerifierTransitionRequest {
   }>;
   continuation: Readonly<AxEventContinuation>;
   child: Readonly<AxEventEnqueueRequest>;
+  /** Must exactly identify the immutable continuation admitted to the parent. */
   consumeContinuationId?: string;
 }
 

@@ -5,11 +5,13 @@ import { AxInMemoryEventStore } from './memoryStore.js';
 import { AxEventRuntime, eventRoute, eventTarget } from './runtime.js';
 import {
   type AxEventContext,
+  type AxEventContinuation,
   type AxEventDelivery,
   type AxEventEffectResolution,
   type AxEventIngress,
   type AxEventRun,
   type AxEventStore,
+  type AxEventVerifierTransitionRequest,
   AxManualEventClock,
 } from './types.js';
 
@@ -70,6 +72,86 @@ function runtimeFor(
   });
 }
 
+const nonterminalEffectStatuses = ['intent', 'dispatched', 'parked'] as const;
+
+async function deliveryWithNonterminalEffect(
+  id: string,
+  effectStatus: (typeof nonterminalEffectStatuses)[number],
+  action: 'wake' | 'resume' = 'wake'
+) {
+  const clock = new AxManualEventClock(1_000);
+  const store = new AxInMemoryEventStore({ clock });
+  const receipt = await store.enqueue({
+    ingress: ingress(id),
+    deliveries: [
+      {
+        routeId: 'effect-route',
+        action,
+        targetId: 'effect-target',
+        instanceKey: id,
+        sizeBytes: 1,
+        retrySafety: 'effect-aware',
+        ordering: 'strict',
+      },
+    ],
+    acceptedAt: clock.now(),
+    publishTimeoutMs: 100,
+  });
+  const claimed = (await store.claim(`${id}-worker`, clock.now(), 100))!;
+  const run: AxEventRun = {
+    id: `${id}-run`,
+    deliveryId: claimed.id,
+    routeId: claimed.routeId,
+    targetId: claimed.targetId,
+    instanceKey: claimed.instanceKey,
+    claimedBy: claimed.claimedBy,
+    fencingToken: claimed.fencingToken,
+    status: 'running',
+    attempt: 1,
+    startedAt: clock.now(),
+  };
+  const delivery: AxEventDelivery = {
+    ...claimed,
+    status: 'running',
+    attempt: 1,
+    runId: run.id,
+    invocationStarted: true,
+  };
+  await store.saveDelivery(delivery);
+  await store.saveRun(run);
+  let effect = await store.declareEffect(
+    {
+      id: `${id}-effect`,
+      deliveryId: claimed.id,
+      runId: run.id,
+      identityScope: claimed.identityScope,
+      operation: `${id}.write`,
+      idempotencyKey: `${id}-key`,
+      replaySafety: 'idempotent',
+      createdAt: clock.now(),
+    },
+    { deliveryId: claimed.id, fencingToken: claimed.fencingToken! }
+  );
+  if (effectStatus === 'dispatched') {
+    effect = await store.transitionEffect(
+      effect.id,
+      effect.version,
+      { type: 'dispatched', at: clock.now() },
+      { deliveryId: claimed.id, fencingToken: claimed.fencingToken! }
+    );
+  } else if (effectStatus === 'parked') {
+    effect = await store.transitionEffect(
+      effect.id,
+      effect.version,
+      { type: 'parked', at: clock.now(), reason: 'operator review' },
+      { deliveryId: claimed.id, fencingToken: claimed.fencingToken! }
+    );
+  }
+  expect(effect.status).toBe(effectStatus);
+  expect(receipt.deliveryIds).toEqual([claimed.id]);
+  return { clock, store, delivery, run, effect };
+}
+
 describe('AxEventRuntime effects', () => {
   it('preserves legacy stores until application code opts into effects', async () => {
     const backing = new AxInMemoryEventStore();
@@ -126,6 +208,157 @@ describe('AxEventRuntime effects', () => {
       'configuration for effect-aware targets effect-target requires an effect-aware AxEventStore'
     );
   });
+
+  it.each(nonterminalEffectStatuses)(
+    'atomically rejects ordinary successful completion with a %s effect',
+    async (effectStatus) => {
+      const fixture = await deliveryWithNonterminalEffect(
+        `ordinary-${effectStatus}`,
+        effectStatus
+      );
+
+      for (const status of ['succeeded', 'waiting_event'] as const) {
+        await expect(
+          fixture.store.saveDelivery({ ...fixture.delivery, status })
+        ).rejects.toThrow('nonterminal effect');
+        expect(await fixture.store.getDelivery(fixture.delivery.id)).toEqual(
+          fixture.delivery
+        );
+        expect(await fixture.store.getRun(fixture.run.id)).toEqual(fixture.run);
+        expect(await fixture.store.listEffects(fixture.delivery.id)).toEqual([
+          fixture.effect,
+        ]);
+      }
+    }
+  );
+
+  it.each(nonterminalEffectStatuses)(
+    'atomically rejects resume completion with a %s effect',
+    async (effectStatus) => {
+      const fixture = await deliveryWithNonterminalEffect(
+        `resume-${effectStatus}`,
+        effectStatus,
+        'resume'
+      );
+      const continuation: AxEventContinuation = {
+        id: `resume-${effectStatus}-continuation`,
+        targetId: 'effect-target',
+        routeId: 'effect-route',
+        instanceKey: fixture.delivery.instanceKey,
+        identityScope: fixture.delivery.identityScope,
+        correlation: [{ kind: 'resume-effect', value: effectStatus }],
+        createdAt: fixture.clock.now(),
+      };
+      await fixture.store.registerContinuation(continuation);
+      const admitted = await fixture.store.admitContinuation(
+        fixture.delivery.id,
+        fixture.delivery.claimedBy!,
+        fixture.delivery.fencingToken!,
+        continuation.identityScope,
+        continuation.correlation[0]!,
+        fixture.clock.now()
+      );
+      const active = (await fixture.store.getDelivery(fixture.delivery.id))!;
+
+      for (const status of ['succeeded', 'waiting_event'] as const) {
+        await expect(
+          fixture.store.saveDeliveryAndCompleteContinuation({
+            ...active,
+            admittedContinuation: admitted,
+            status,
+          })
+        ).rejects.toThrow('nonterminal effect');
+        expect(await fixture.store.getDelivery(active.id)).toEqual(active);
+        expect(await fixture.store.getRun(fixture.run.id)).toEqual(fixture.run);
+        expect(
+          await fixture.store.findContinuation(
+            continuation.identityScope,
+            continuation.correlation[0]!,
+            fixture.clock.now()
+          )
+        ).toEqual(continuation);
+        expect(await fixture.store.listEffects(active.id)).toEqual([
+          fixture.effect,
+        ]);
+      }
+    }
+  );
+
+  it.each(nonterminalEffectStatuses)(
+    'atomically rejects verifier handoff with a %s effect',
+    async (effectStatus) => {
+      const fixture = await deliveryWithNonterminalEffect(
+        `verifier-${effectStatus}`,
+        effectStatus
+      );
+      const continuation: AxEventContinuation = {
+        id: `verifier-${effectStatus}-continuation`,
+        targetId: 'effect-target',
+        routeId: 'effect-route',
+        instanceKey: fixture.delivery.instanceKey,
+        identityScope: fixture.delivery.identityScope,
+        correlation: [{ kind: 'verifier-effect', value: effectStatus }],
+        createdAt: fixture.clock.now(),
+      };
+      const request: AxEventVerifierTransitionRequest = {
+        operationId: `verifier-${effectStatus}-operation`,
+        childDeliveryId: `verifier-${effectStatus}-child`,
+        parent: {
+          delivery: {
+            ...fixture.delivery,
+            status: 'waiting_event',
+          },
+          run: {
+            ...fixture.run,
+            status: 'waiting_event',
+            finishedAt: fixture.clock.now(),
+          },
+          expectedFencingToken: fixture.delivery.fencingToken!,
+        },
+        continuation,
+        child: {
+          ingress: ingress(`verifier-${effectStatus}-child-event`),
+          deliveries: [
+            {
+              routeId: 'effect-route',
+              action: 'resume',
+              targetId: 'effect-target',
+              instanceKey: fixture.delivery.instanceKey,
+              sizeBytes: 1,
+              retrySafety: 'effect-aware',
+              ordering: 'strict',
+            },
+          ],
+          acceptedAt: fixture.clock.now(),
+          publishTimeoutMs: 100,
+        },
+      };
+
+      await expect(fixture.store.transitionVerifier(request)).rejects.toThrow(
+        'nonterminal effect'
+      );
+      expect(await fixture.store.getDelivery(fixture.delivery.id)).toEqual(
+        fixture.delivery
+      );
+      expect(await fixture.store.getRun(fixture.run.id)).toEqual(fixture.run);
+      expect(
+        await fixture.store.getDelivery(request.childDeliveryId)
+      ).toBeUndefined();
+      expect(
+        await fixture.store.findContinuation(
+          continuation.identityScope,
+          continuation.correlation[0]!,
+          fixture.clock.now()
+        )
+      ).toBeUndefined();
+      expect(
+        await fixture.store.confirmVerifierTransition(request)
+      ).toBeUndefined();
+      expect(await fixture.store.listEffects(fixture.delivery.id)).toEqual([
+        fixture.effect,
+      ]);
+    }
+  );
 
   it('reuses a persisted not-dispatched intent after a crash', async () => {
     const store = new AxInMemoryEventStore();

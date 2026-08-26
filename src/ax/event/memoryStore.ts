@@ -248,8 +248,14 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
     const parent = this.deliveries.get(request.parent.delivery.id);
     if (
       !parent ||
+      !request.parent.delivery.claimedBy ||
+      parent.claimedBy !== request.parent.delivery.claimedBy ||
       parent.fencingToken !== request.parent.expectedFencingToken ||
-      (parent.status !== 'claimed' && parent.status !== 'running')
+      request.parent.delivery.fencingToken !==
+        request.parent.expectedFencingToken ||
+      (parent.status !== 'claimed' && parent.status !== 'running') ||
+      parent.leaseExpiresAt === undefined ||
+      parent.leaseExpiresAt <= this.clock.now()
     ) {
       throw new Error(
         `Stale verifier transition for ${request.parent.delivery.id}`
@@ -261,6 +267,39 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
       request.child.deliveries.length !== 1
     ) {
       throw new Error('Verifier transition requires one waiting child');
+    }
+    this.assertNoNonterminalEffects(parent.id);
+    const admitted = parent.admittedContinuation;
+    if (
+      (admitted === undefined) !==
+        (request.parent.delivery.admittedContinuation === undefined) ||
+      (admitted &&
+        request.parent.delivery.admittedContinuation &&
+        axEventContinuationFingerprint(admitted) !==
+          axEventContinuationFingerprint(
+            request.parent.delivery.admittedContinuation
+          ))
+    ) {
+      throw new Error(`Continuation admission for ${parent.id} is immutable`);
+    }
+    if (request.consumeContinuationId !== admitted?.id) {
+      throw new Error(
+        `Verifier transition continuation consumption does not match admission for ${parent.id}`
+      );
+    }
+    if (admitted) {
+      const admissionOwner = this.continuationAdmissions.get(admitted.id);
+      const continuation = this.continuations.get(admitted.id);
+      if (
+        admissionOwner !== parent.id ||
+        !continuation ||
+        axEventContinuationFingerprint(continuation) !==
+          axEventContinuationFingerprint(admitted)
+      ) {
+        throw new Error(
+          `outcome_unknown: continuation admission for ${parent.id} is missing or changed`
+        );
+      }
     }
     const descriptor = request.child.deliveries[0]!;
     if (
@@ -478,6 +517,12 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
       delivery.claimedBy,
       delivery.fencingToken
     );
+    if (
+      delivery.status === 'succeeded' ||
+      delivery.status === 'waiting_event'
+    ) {
+      this.assertNoNonterminalEffects(delivery.id);
+    }
     const previous = this.deliveries.get(delivery.id);
     if (delivery.admittedContinuation && !previous?.admittedContinuation) {
       throw new Error(
@@ -726,6 +771,7 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
       delivery.claimedBy,
       delivery.fencingToken
     );
+    this.assertNoNonterminalEffects(delivery.id);
     const previous = this.deliveries.get(delivery.id)!;
     const admitted = previous.admittedContinuation;
     if (
@@ -1161,6 +1207,19 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
       delivery.leaseExpiresAt <= this.clock.now()
     ) {
       throw new Error(`Stale or expired event claim for ${deliveryId}`);
+    }
+  }
+
+  private assertNoNonterminalEffects(deliveryId: string): void {
+    const pending = [...this.effects.values()].some(
+      (effect) =>
+        effect.deliveryId === deliveryId &&
+        (effect.status === 'intent' ||
+          effect.status === 'dispatched' ||
+          effect.status === 'parked')
+    );
+    if (pending) {
+      throw new Error(`Event delivery ${deliveryId} has a nonterminal effect`);
     }
   }
 
