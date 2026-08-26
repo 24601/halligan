@@ -42,7 +42,6 @@ export type AxJSRuntimeSpeculationEventReason =
   | 'execution-complete'
   | 'execution-aborted'
   | 'execution-failed'
-  | 'authority-invalidated'
   | 'launch-invalidated';
 
 export type AxJSRuntimeSpeculationEvent = Readonly<{

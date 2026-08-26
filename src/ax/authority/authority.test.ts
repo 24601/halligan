@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import type { AxFunction } from '../ai/types.js';
 import { axMCPChildExecutionOptions } from '../mcp/execution.js';
 import {
   type AxAuthorizationDeniedError,
@@ -6,6 +7,7 @@ import {
   axAuthorityClaim,
   axAuthorize,
   axFunctionAuthorityTarget,
+  axSnapshotAuthority,
 } from './authority.js';
 import type {
   AxAuthorityContext,
@@ -126,6 +128,98 @@ describe('Ax host authority boundary', () => {
     }
   });
 
+  it('captures function authority target fields once into a coherent tuple', () => {
+    const reads = {
+      protocol: 0,
+      kind: 0,
+      namespace: 0,
+      protocolName: 0,
+      componentId: 0,
+      functionName: 0,
+      principal: 0,
+      tenantId: 0,
+    };
+    const protocol = {
+      get kind() {
+        reads.kind++;
+        return reads.kind === 1 ? 'mcp' : 'ucp';
+      },
+      get namespace() {
+        reads.namespace++;
+        return 'records';
+      },
+      get name() {
+        reads.protocolName++;
+        return 'lookup';
+      },
+    } as unknown as NonNullable<AxFunction['protocol']>;
+    const fn = {
+      get name() {
+        reads.functionName++;
+        return 'fallback';
+      },
+      get componentId() {
+        reads.componentId++;
+        return reads.componentId === 1 ? 'agent:first' : 'agent:forged';
+      },
+      get protocol() {
+        reads.protocol++;
+        return protocol;
+      },
+      description: 'getter-backed function',
+      func: () => undefined,
+    } as AxFunction;
+    const principal = {
+      id: 'principal-a',
+      get tenantId() {
+        reads.tenantId++;
+        return 'tenant-a';
+      },
+    };
+    const host = {
+      ...authority(),
+      get principal() {
+        reads.principal++;
+        return principal;
+      },
+    };
+
+    expect(axFunctionAuthorityTarget(fn, host)).toEqual({
+      operation: 'mcp.tool.call',
+      resource: {
+        type: 'mcp.tool',
+        id: 'records:lookup',
+        tenantId: 'tenant-a',
+      },
+    });
+    expect(reads).toEqual({
+      protocol: 1,
+      kind: 1,
+      namespace: 1,
+      protocolName: 1,
+      componentId: 1,
+      functionName: 1,
+      principal: 1,
+      tenantId: 1,
+    });
+
+    let componentReads = 0;
+    const componentFn = {
+      name: 'fallback',
+      get componentId() {
+        componentReads++;
+        return componentReads === 1 ? 'agent:first' : 'function:forged';
+      },
+      description: 'getter-backed component',
+      func: () => undefined,
+    } as AxFunction;
+    expect(axFunctionAuthorityTarget(componentFn, authority())).toMatchObject({
+      operation: 'agent.invoke',
+      resource: { type: 'agent', id: 'agent:first' },
+    });
+    expect(componentReads).toBe(1);
+  });
+
   it('requires an active exact operation, resource, tenant, actor, and lease grant', async () => {
     await expect(
       axAuthorize(authority(), 'document.read', resource)
@@ -209,6 +303,7 @@ describe('Ax host authority boundary', () => {
       { grantIds: [] },
       { leaseEpoch: 4 },
       { expiresAt: NOW },
+      { expiresAt: String(NOW + 100) },
     ]) {
       const context = authority({
         authorize: (operation, request) => allow(operation, request, override),
@@ -217,6 +312,62 @@ describe('Ax host authority boundary', () => {
         axAuthorize(context, 'document.read', resource)
       ).rejects.toMatchObject({ code: 'invalid_receipt' });
     }
+  });
+
+  it('keeps the original requested tuple authoritative when the host callback attempts mutation', async () => {
+    const sourceResource = { ...resource };
+    const sourceGrant = grant({ resources: [{ ...resource }] });
+    const context = authority({
+      grants: [sourceGrant],
+      authorize: (operation, request) => {
+        expect(Object.isFrozen(request.resource)).toBe(true);
+        expect(Object.isFrozen(request.grants[0]?.resources[0])).toBe(true);
+        expect(() => {
+          (request.resource as AxResourceScope).id = 'doc-forged';
+        }).toThrow(TypeError);
+        expect(() => {
+          (request.grants[0]!.resources[0] as AxResourceScope).id =
+            'doc-forged';
+        }).toThrow(TypeError);
+        sourceResource.id = 'doc-source-mutated';
+        (sourceGrant.resources[0] as AxResourceScope).id = 'doc-grant-mutated';
+        return allow(operation, request);
+      },
+    });
+
+    await expect(
+      axAuthorize(context, 'document.read', sourceResource)
+    ).resolves.toMatchObject({
+      operation: 'document.read',
+      resource: { type: 'document', id: 'doc-1', tenantId: 'tenant-a' },
+      grantIds: ['grant-1'],
+    });
+  });
+
+  it('reports malformed host receipts as invalid without exposing runtime errors', async () => {
+    const audits: unknown[] = [];
+    for (const malformed of [
+      null,
+      {},
+      { resource: null, actor: null, grantIds: null },
+      { resource: resource, actor: {}, grantIds: [], receiptId: 1 },
+    ]) {
+      const context = authority({
+        authorize: () => malformed as never,
+        onAudit: (event) => {
+          audits.push(event);
+        },
+      });
+      await expect(
+        axAuthorize(context, 'document.read', resource)
+      ).rejects.toMatchObject({ code: 'invalid_receipt' });
+    }
+    expect(audits).toHaveLength(4);
+    expect(audits).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: 'invalid_receipt', decision: 'deny' }),
+      ])
+    );
   });
 
   it('lets the authoritative host deny an otherwise matching grant', async () => {
@@ -327,5 +478,101 @@ describe('Ax host authority boundary', () => {
     expect(audits).toEqual([
       expect.objectContaining({ code: 'cancelled', resourceType: 'document' }),
     ]);
+  });
+
+  it('deeply snapshots authority data before publication', async () => {
+    const source = authority({
+      principal: {
+        id: 'principal-a',
+        tenantId: 'tenant-a',
+        claims: [
+          { type: 'profile', value: { groups: ['readers'], nested: { n: 1 } } },
+        ],
+      },
+      grants: [grant({ resources: [{ ...resource }] })],
+    });
+    const snapshot = axSnapshotAuthority(source);
+    const sourceGrant = source.grants[0] as AxCapabilityGrant;
+    (sourceGrant.operations as string[])[0] = 'document.write';
+    (sourceGrant.resources[0] as AxResourceScope).id = 'doc-forged';
+    const claim = source.principal.claims?.[0]?.value as {
+      groups: string[];
+      nested: { n: number };
+    };
+    claim.groups[0] = 'administrators';
+    claim.nested.n = 2;
+
+    expect(snapshot.grants[0]).toMatchObject({
+      operations: ['document.read'],
+      resources: [{ id: 'doc-1' }],
+    });
+    expect(snapshot.principal.claims?.[0]?.value).toEqual({
+      groups: ['readers'],
+      nested: { n: 1 },
+    });
+    expect(Object.isFrozen(snapshot.grants[0]?.operations)).toBe(true);
+    expect(Object.isFrozen(snapshot.grants[0]?.resources[0])).toBe(true);
+    expect(
+      Object.isFrozen(
+        (snapshot.principal.claims?.[0]?.value as { nested: object }).nested
+      )
+    ).toBe(true);
+    await expect(
+      axAuthorize(snapshot, 'document.read', resource)
+    ).resolves.toMatchObject({ decision: 'allow' });
+  });
+
+  it('captures getter-backed authority fields exactly once before validation', async () => {
+    let getterReads = 0;
+    const getterGrant = {
+      ...grant(),
+      get operations() {
+        getterReads++;
+        return getterReads === 1 ? ['document.read'] : ['document.write'];
+      },
+    } as AxCapabilityGrant;
+    const snapshot = axSnapshotAuthority(authority({ grants: [getterGrant] }));
+
+    expect(getterReads).toBe(1);
+    expect(snapshot.grants[0]?.operations).toEqual(['document.read']);
+    await expect(
+      axAuthorize(snapshot, 'document.read', resource)
+    ).resolves.toMatchObject({ decision: 'allow' });
+    await expect(
+      axAuthorize(snapshot, 'document.write', resource)
+    ).rejects.toMatchObject({ code: 'no_matching_grant' });
+    expect(getterReads).toBe(1);
+  });
+
+  it('times out or cancels an authorizer that ignores abort', async () => {
+    let timeoutSignal: AbortSignal | undefined;
+    const never = new Promise<never>(() => {});
+    await expect(
+      axAuthorize(
+        authority({
+          authorizeTimeoutMs: 5,
+          authorize: (_operation, request) => {
+            timeoutSignal = request.signal;
+            return never;
+          },
+        }),
+        'document.read',
+        resource
+      )
+    ).rejects.toMatchObject({ code: 'timeout' });
+    expect(timeoutSignal?.aborted).toBe(true);
+
+    const controller = new AbortController();
+    const pending = axAuthorize(
+      authority({
+        authorizeTimeoutMs: 1_000,
+        authorize: () => never,
+      }),
+      'document.read',
+      resource,
+      controller.signal
+    );
+    controller.abort('stop');
+    await expect(pending).rejects.toMatchObject({ code: 'cancelled' });
   });
 });

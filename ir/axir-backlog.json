@@ -1195,14 +1195,16 @@
       "sourcePR": null,
       "sourceCommit": "ca760294f5ea4f207052c39c2218e1195103bc2a",
       "tsPaths": [
+        "src/ax/authority",
+        "src/ax/agent/agentInternal/coordinator.ts",
         "src/ax/agent/agentInternal/initialization.ts",
         "src/ax/agent/agentInternal/runtimeExecution.ts",
         "src/ax/agent/agentInternal/runtimeGlobals.authority.test.ts",
         "src/ax/agent/agentInternal/runtimeGlobals.ts",
         "src/ax/ai/types.ts",
-        "src/ax/authority",
         "src/ax/dsp/functions.test.ts",
         "src/ax/dsp/functions.ts",
+        "src/ax/dsp/generate.authority.test.ts",
         "src/ax/dsp/generate.ts",
         "src/ax/dsp/response/finalize.ts",
         "src/ax/dsp/response/nonStreaming.ts",
@@ -1211,7 +1213,7 @@
         "src/ax/mcp/execution.ts"
       ],
       "portableSurface": "axai",
-      "impact": "Generated language backends need equivalent principal, scoped grant, receipt binding, event, tool, and child attenuation behavior.",
+      "impact": "Generated language backends need equivalent principal, scoped grant, receipt binding, event, tool, model-callable MCP/UCP runtime global, native DSP inheritance, and child attenuation behavior.",
       "suggestedAxirWork": [
         "Add or update the TS-derived conformance fixture.",
         "Update AxIR/Core or descriptor data to match the portable TS behavior.",

@@ -13,8 +13,12 @@ import type {
 import {
   axAuthorize,
   axFunctionAuthorityTarget,
+  axSnapshotAuthority,
 } from '../authority/authority.js';
-import type { AxAuthorityContext } from '../authority/types.js';
+import type {
+  AxAuthorityContext,
+  AxAuthorityInheritance,
+} from '../authority/types.js';
 import type { AxMemory } from '../mem/memory.js';
 import { ValidationError } from './errors.js';
 import { axGlobals } from './globals.js';
@@ -171,6 +175,9 @@ export class AxFunctionProcessor {
       args = func.args;
     }
 
+    const authority = options?.authority
+      ? axSnapshotAuthority(options.authority)
+      : undefined;
     const opt = options
       ? {
           sessionId: options.sessionId,
@@ -179,16 +186,13 @@ export class AxFunctionProcessor {
           step: options.step,
           abortSignal: options.abortSignal,
           eventContext: options.eventContext,
-          authority: options.authority,
+          authority,
           authorityInheritance: options.authorityInheritance,
-          authorityReceipt: options.authority
+          authorityReceipt: authority
             ? await (() => {
-                const target = axFunctionAuthorityTarget(
-                  fnSpec,
-                  options.authority
-                );
+                const target = axFunctionAuthorityTarget(fnSpec, authority);
                 return axAuthorize(
-                  options.authority,
+                  authority,
                   target.operation,
                   target.resource,
                   options.abortSignal
@@ -349,6 +353,7 @@ type ProcessFunctionsArgs = {
   mcpExecutionContext?: import('../mcp/execution.js').AxMCPExecutionContext;
   eventContext?: import('../event/types.js').AxEventContext;
   authority?: AxAuthorityContext;
+  authorityInheritance?: AxAuthorityInheritance;
 };
 
 export const processFunctions = async ({
@@ -373,6 +378,7 @@ export const processFunctions = async ({
   mcpExecutionContext,
   eventContext,
   authority,
+  authorityInheritance,
 }: Readonly<ProcessFunctionsArgs>) => {
   const funcProc = new AxFunctionProcessor(functionList);
   const functionsExecuted = new Set<string>();
@@ -487,6 +493,7 @@ export const processFunctions = async ({
           abortSignal,
           eventContext,
           authority,
+          authorityInheritance,
           _mcpExecutionContext: mcpExecutionContext,
         })
         .then(
@@ -619,6 +626,7 @@ export const processFunctions = async ({
             abortSignal,
             eventContext,
             authority,
+            authorityInheritance,
             _mcpExecutionContext: mcpExecutionContext,
           });
 

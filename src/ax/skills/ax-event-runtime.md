@@ -14,8 +14,10 @@ timers, queues, task completion, or application events.
 for each delivery. When configured, Ax authorizes exact route/target/sink
 operations, binds tenant scope to verified ingress identity, and propagates the
 context into target programs and their tools. Authority-looking event data is
-ignored. The callback is absent by default, preserving existing behavior. See
-`docs/HOST_AUTHORITY.md` for grants, receipts, attenuation, and limitations.
+ignored. Sink dead-letter redrive resolves authority again and requires a
+current `event.sink.write` receipt. The callback is absent by default,
+preserving existing behavior. See `docs/HOST_AUTHORITY.md` for grants, receipts,
+attenuation, and limitations.
 
 ## Mental Model
 

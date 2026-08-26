@@ -5,6 +5,7 @@ import {
   type AxPrincipal,
   axAttenuateAuthority,
   axAuthorize,
+  axSnapshotAuthority,
 } from '../index.js';
 
 const principal: AxPrincipal = { id: 'subject', tenantId: 'tenant' };
@@ -22,6 +23,7 @@ const authority: AxAuthorityContext = {
   actor: { id: 'agent', kind: 'agent' },
   grants: [grant],
   leaseEpoch: 1,
+  authorizeTimeoutMs: 1_000,
   authorize: (operation, context): AxAuthorizationReceipt => ({
     version: 1,
     receiptId: 'receipt',
@@ -36,6 +38,9 @@ const authority: AxAuthorityContext = {
     authorizedAt: context.now,
   }),
 };
+
+const snapshot: Readonly<AxAuthorityContext> = axSnapshotAuthority(authority);
+void snapshot;
 
 void axAuthorize(authority, 'function.call', {
   type: 'function',

@@ -11,10 +11,14 @@ export type JSRuntimeHostFunctionSpeculationLaunch = Readonly<{
   result: Promise<unknown>;
   /** Exact authorization denied before physical or logical call effects. */
   authorizationDenied?: boolean;
+  /** Physical call arguments captured before invocation for logical observers. */
+  argumentsBefore?: readonly unknown[];
+  /** Serialized physical arguments captured after settlement for recording. */
+  serializedArgumentsAfter?: Promise<unknown>;
   /** Revalidate host authority or other launch-time preconditions at claim. */
   canClaim?: () => boolean;
   /** Internal diagnostic when canClaim() fails. */
-  invalidReason?: 'authority-invalidated' | 'launch-invalidated';
+  invalidReason?: 'launch-invalidated';
   /** Execution-scoped cancellation used if claim must fall back normally. */
   signal?: AbortSignal;
 }>;

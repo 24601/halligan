@@ -226,6 +226,113 @@ describe('AxEventRuntime', () => {
     await runtime.close();
   });
 
+  it('re-resolves current authority before sink dead-letter redrive', async () => {
+    const store = new AxInMemoryEventStore();
+    const write = vi
+      .fn<(output: unknown) => Promise<void>>()
+      .mockRejectedValueOnce(new Error('synthetic sink failure'))
+      .mockResolvedValue(undefined);
+    const makeAuthority = (
+      leaseEpoch: number,
+      includeSink: boolean
+    ): AxAuthorityContext => ({
+      principal: { id: 'principal-a', tenantId: 'tenant-a' },
+      actor: { id: 'worker-a', kind: 'agent' },
+      grants: [
+        {
+          version: 1,
+          id: `target-${leaseEpoch}`,
+          principalId: 'principal-a',
+          operations: ['event.target.invoke'],
+          resources: [
+            {
+              type: 'event.target',
+              id: 'redrive-target',
+              tenantId: 'tenant-a',
+            },
+          ],
+          leaseEpoch,
+        },
+        ...(includeSink
+          ? [
+              {
+                version: 1 as const,
+                id: `sink-${leaseEpoch}`,
+                principalId: 'principal-a',
+                operations: ['event.sink.write'],
+                resources: [
+                  {
+                    type: 'event.sink',
+                    id: 'redrive-sink',
+                    tenantId: 'tenant-a',
+                  },
+                ],
+                leaseEpoch,
+              },
+            ]
+          : []),
+      ],
+      leaseEpoch,
+      now: () => 100,
+      authorize: (operation, context) => ({
+        version: 1,
+        receiptId: `receipt-${leaseEpoch}-${operation}`,
+        requestId: context.requestId,
+        decision: 'allow',
+        operation,
+        resource: context.resource,
+        principalId: context.principal.id,
+        actor: { id: context.actor.id, kind: context.actor.kind },
+        grantIds: context.grants.map((grant) => grant.id),
+        leaseEpoch: context.leaseEpoch,
+        authorizedAt: context.now,
+      }),
+    });
+    let currentAuthority = makeAuthority(1, true);
+    const target = eventTarget({
+      id: 'redrive-target',
+      ai,
+      program: program(() => ({ ok: true })),
+      mapInput: () => ({}),
+      retrySafety: 'idempotent',
+      sinks: [{ id: 'redrive-sink', write }],
+    });
+    const runtime = new AxEventRuntime({
+      authority: () => currentAuthority,
+      maxAttempts: 1,
+      store,
+      routes: [
+        eventRoute({
+          id: 'redrive-route',
+          match: { types: ['redrive.event'] },
+          action: 'wake',
+          target,
+        }),
+      ],
+    });
+    await runtime.start();
+    await runtime.publish(ingress('redrive-1', 'redrive.event'));
+    await runtime.waitForIdle();
+    const deadLetter = (await runtime.listDeadLetters()).find(
+      (value) => value.kind === 'sink'
+    );
+    expect(deadLetter).toBeDefined();
+    expect(write).toHaveBeenCalledOnce();
+
+    currentAuthority = makeAuthority(2, false);
+    await expect(runtime.redrive(deadLetter!.id)).rejects.toMatchObject({
+      code: 'no_matching_grant',
+    });
+    expect(write).toHaveBeenCalledOnce();
+    expect(await runtime.listDeadLetters()).toContainEqual(deadLetter);
+
+    currentAuthority = makeAuthority(2, true);
+    await runtime.redrive(deadLetter!.id);
+    expect(write).toHaveBeenCalledTimes(2);
+    expect(await runtime.listDeadLetters()).not.toContainEqual(deadLetter);
+    await runtime.close();
+  });
+
   it('retries only an explicitly idempotent target', async () => {
     let calls = 0;
     const target = eventTarget({

@@ -41,6 +41,7 @@ export async function* processResponse<OUT extends AxGenOut>({
   mcpExecutionContext,
   eventContext,
   authority,
+  authorityInheritance,
 }: ProcessResponseBaseArgs): AsyncGenDeltaOut<OUT> {
   const results = res.results ?? [];
   const treatAllFieldsOptional = signatureToolCallingManager !== undefined;
@@ -132,6 +133,7 @@ export async function* processResponse<OUT extends AxGenOut>({
             mcpExecutionContext,
             eventContext,
             authority,
+            authorityInheritance,
           });
         } catch (e) {
           mem.addRequest(

@@ -217,6 +217,114 @@ describe('AxJSRuntime speculative programmatic tool calling', () => {
     });
   });
 
+  it('matches ordinary observer and recorder arguments after tool-local mutation', async () => {
+    const execute = async (enabled: boolean) => {
+      const events: AxJSRuntimeSpeculationEvent[] = [];
+      const observed: unknown[] = [];
+      const recorded: unknown[] = [];
+      const wrapped = wrapFunction(
+        {
+          name: 'mutate',
+          description: 'Mutate only the invocation-local argument clone',
+          parameters: { type: 'object', additionalProperties: true },
+          func: (args: { nested: { count: number } }) => {
+            args.nested.count++;
+            return args.nested.count;
+          },
+        },
+        undefined,
+        undefined,
+        undefined,
+        'tools.mutate',
+        (call) => recorded.push(call.arguments),
+        'external',
+        (call) => observed.push(structuredClone(call.args))
+      );
+      const runtime = new AxJSRuntime({
+        outputMode: 'return',
+        useNodePermissionModel: false,
+        speculation: enabled
+          ? speculation(events, { 'tools.mutate': pure(true) })
+          : undefined,
+      });
+      const session = runtime.createSession({ tools: { mutate: wrapped } });
+      try {
+        return {
+          value: await session.execute(
+            'const value = await tools.mutate({ nested: { count: 0 } }); return value;'
+          ),
+          events,
+          observed,
+          recorded,
+        };
+      } finally {
+        session.close();
+      }
+    };
+
+    const baseline = await execute(false);
+    const speculative = await execute(true);
+
+    expect(speculative.value).toBe(baseline.value);
+    expect(speculative.observed).toEqual(baseline.observed);
+    expect(speculative.recorded).toEqual(baseline.recorded);
+    expect(baseline.observed).toEqual([{ nested: { count: 0 } }]);
+    expect(baseline.recorded).toEqual([{ nested: { count: 1 } }]);
+    expect(
+      speculative.events.filter((event) => event.kind === 'hit')
+    ).toHaveLength(1);
+  });
+
+  it('does not retry when tool-local argument mutation cannot be cloned', async () => {
+    const execute = async (enabled: boolean) => {
+      let executions = 0;
+      const recorded: unknown[] = [];
+      const wrapped = wrapFunction(
+        {
+          name: 'mutate',
+          description: 'Create a cycle only inside the invocation-local input',
+          parameters: { type: 'object', additionalProperties: true },
+          func: (args: { nested: { self?: unknown } }) => {
+            executions++;
+            args.nested.self = args.nested;
+            return executions;
+          },
+        },
+        undefined,
+        undefined,
+        undefined,
+        'tools.mutate',
+        (call) => recorded.push(call.arguments)
+      );
+      const runtime = new AxJSRuntime({
+        outputMode: 'return',
+        useNodePermissionModel: false,
+        speculation: enabled
+          ? speculation([], { 'tools.mutate': pure(false) })
+          : undefined,
+      });
+      const session = runtime.createSession({ tools: { mutate: wrapped } });
+      try {
+        return {
+          value: await session.execute(
+            'return await tools.mutate({ nested: {} });'
+          ),
+          executions,
+          recorded,
+        };
+      } finally {
+        session.close();
+      }
+    };
+
+    const baseline = await execute(false);
+    const speculative = await execute(true);
+
+    expect(speculative).toEqual(baseline);
+    expect(speculative.executions).toBe(1);
+    expect(speculative.recorded).toEqual(['[object Object]']);
+  });
+
   it('does not mutate worker state while planning syntactically invalid code', async () => {
     const events: AxJSRuntimeSpeculationEvent[] = [];
     let calls = 0;

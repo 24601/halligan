@@ -19,6 +19,9 @@ custody, consent, product roles, or provider-side enforcement.
 - Ax validates structure, exact operation/resource/tenant/actor scope, grant
   time bounds, revocation time, lease epoch, and child attenuation before asking
   the host. The host must still check current revocation, leases, and policy.
+- Ax deep-clones and freezes principal, actor, delegation, claim, grant, resource,
+  and receipt data at execution boundaries. Mutating the host's source objects
+  after publication cannot alter an in-flight authority snapshot.
 - An allow decision is accepted only in an `AxAuthorizationReceipt` exactly
   bound to the request ID, operation, resource, principal, actor, eligible grant
   IDs, lease epoch, and time window. Function handlers receive that receipt in
@@ -30,6 +33,9 @@ custody, consent, product roles, or provider-side enforcement.
   process and does not make arbitrary external effects exactly once.
 - Scope matching is exact. There are no wildcards, roles, policy language,
   implied operations, or resource hierarchies.
+- Host authorization is bounded by `authorizeTimeoutMs` (30 seconds by default).
+  Timeout or caller cancellation aborts the callback signal and fails closed;
+  late callback completion is ignored.
 - Redacted `onAudit` events contain operation, resource type, actor kind,
   decision, grant count, time, and result code. They intentionally omit all IDs,
   claims, arguments, receipt reasons, and resource values. Hosts that log full
@@ -49,6 +55,7 @@ const authority: AxAuthorityContext = {
   principal: { id: 'subject-42', tenantId: 'tenant-a' },
   actor: { id: 'worker-7', kind: 'agent' },
   leaseEpoch: 3,
+  authorizeTimeoutMs: 5_000,
   grants: [
     {
       version: 1,
@@ -91,6 +98,13 @@ Ax derives non-model-visible bindings from the invoked function:
 | attached UCP operation | `ucp.operation.call` | `ucp.operation`, `namespace:name` |
 | event route/target/sink | `event.*` | exact route, target, or sink ID |
 
+Model-callable MCP prompt, resource, task, subscription, cancellation, and
+completion methods are separately authorized as `mcp.prompt.*`,
+`mcp.resource.*`, `mcp.task.*`, and `mcp.completion.complete`, with exact
+catalog/name/URI/task/reference resources. UCP profile and operation catalogs
+use `ucp.profile.read` and `ucp.operation.list`. This includes reads: a model
+cannot use prompt or resource discovery to bypass the boundary.
+
 Direct calls to `AxMCPClient.callTool()` do not pass through program execution;
 keep using `authorizeToolCall` there. The shared authority boundary applies when
 MCP/UCP operations are attached to an Ax program or agent.
@@ -101,13 +115,18 @@ MCP/UCP operations are attached to an Ax program or agent.
 each delivery. The runtime ignores authority-looking event data. It binds event
 operations to the verified ingress tenant and passes the resolved context into
 the target program, live agent runtime, MCP/UCP tools, and sinks.
+Sink dead-letter redrive calls the resolver again and requires a current
+`event.sink.write` receipt; a receipt from the original delivery is never reused.
 
 Nested agent calls inherit the same authority by default. Set
 `authorityInheritance: 'none'` to propagate a fail-closed zero-grant context, or
 provide explicit child principal, actor, delegation, and grants. Ax calls
 `axAttenuateAuthority` and rejects a child grant unless it references a parent
 grant and is a subset of its operations, resources, expiry/revocation bounds,
-and lease epoch. Cancellation is checked before and after host authorization.
+and lease epoch. Explicit delegation options are consumed at that boundary;
+deeper calls inherit the resulting child unless the host supplies a new
+child-relative attenuation. Cancellation is checked before and after host
+authorization.
 
 Long-lived or durable session hosts should persist only their own serializable
 principal/grant references and reconstruct the authoritative callback in the
@@ -140,7 +159,11 @@ It declares an **unscoped operation callback** as the baseline and compares it
 against exact scoped grants. It covers confused-deputy operation/resource
 attempts, stale/revoked/expired grants, tenant and human-vs-agent mismatch,
 delegation attenuation and no expansion, child cancellation, malformed legacy
-claims, forged model claims, exact receipt binding, audit redaction, and local
-callback overhead. Timing is an environment-specific observation, not a gate.
+claims, getter-backed authority/function-target/child-option capture, nested
+mutation, ignored abort, two-level attenuation, and forged model claims through
+production model request/response
+dispatch for ordinary functions and attached MCP/UCP operations, native DSP,
+and redrive paths. It also covers exact receipt binding, audit redaction, and
+local callback overhead. Timing is an environment-specific observation, not a gate.
 The result demonstrates these mechanism checks only; it is not a security proof
 or an evaluation of host authentication and policy correctness.
