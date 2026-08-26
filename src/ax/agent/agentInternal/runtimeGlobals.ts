@@ -329,20 +329,22 @@ export function wrapFunction(
         claimed = true;
         const replay = () => {
           for (const item of queued) {
-            if (item.kind === 'success') {
-              void real.success(item.message);
-              continue;
-            }
-            if (item.kind === 'failed') {
-              void real.failed(item.message);
-              continue;
-            }
-            if (item.kind === 'final') {
-              real.final(...item.args);
-            } else if (item.kind === 'askClarification') {
-              real.askClarification(...item.args);
-            } else {
-              real.guideAgent(String(item.args[0] ?? ''));
+            switch (item.kind) {
+              case 'success':
+                void real.success(item.message);
+                break;
+              case 'failed':
+                void real.failed(item.message);
+                break;
+              case 'final':
+                real.final(...item.args);
+                break;
+              case 'askClarification':
+                real.askClarification(...item.args);
+                break;
+              case 'guideAgent':
+                real.guideAgent(String(item.args[0] ?? ''));
+                break;
             }
           }
         };
