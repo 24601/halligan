@@ -1485,34 +1485,39 @@ describe('retained child agent sessions', () => {
     const concurrentRoot = await concurrentHost.createRoot({
       authorizedChildren: ['worker'],
     });
-    const first = await concurrentRoot.spawn('worker', {
-      value: 'running',
-      delayMs: 100,
-    });
-    const second = await concurrentRoot.spawn('worker', { value: 'pending' });
-    await waitFor(
-      () => concurrentRoot.inspect(first),
-      (view) => view.status === 'running'
-    );
-    const concurrentSnapshot = await concurrentHost.snapshot(first.rootId);
-    const concurrentDigest = concurrentSnapshot.policyDigest;
-    const secondRecord = concurrentSnapshot.sessions[second.id]!;
-    const secondMessage = secondRecord.mailbox[0]!;
-    secondMessage.status = 'running';
-    secondMessage.startedAt = Date.now();
-    secondMessage.attemptId = 'forged-attempt';
-    secondMessage.tokenReservation =
-      concurrentSnapshot.root.limits.maxTokensPerMessage;
-    secondRecord.activeMessageId = secondMessage.id;
-    secondRecord.status = 'running';
-    concurrentSnapshot.root.reservedTokens +=
-      concurrentSnapshot.root.limits.maxTokensPerMessage;
-    await expect(
-      host().restore(concurrentSnapshot, {
-        expectedPolicyDigest: concurrentDigest,
-      })
-    ).rejects.toThrow(/concurrency/);
-    await concurrentRoot.cancel();
+    try {
+      const first = await concurrentRoot.spawn('worker', {
+        value: 'running',
+        delayMs: 10_000,
+      });
+      const second = await concurrentRoot.spawn('worker', { value: 'pending' });
+      await waitFor(
+        () => concurrentRoot.inspect(first),
+        (view) => view.status === 'running'
+      );
+      const concurrentSnapshot = await concurrentHost.snapshot(first.rootId);
+      const concurrentDigest = concurrentSnapshot.policyDigest;
+      const secondRecord = concurrentSnapshot.sessions[second.id]!;
+      const secondMessage = secondRecord.mailbox[0]!;
+      expect(secondMessage.status).toBe('pending');
+      expect(secondMessage.usage).toBeUndefined();
+      secondMessage.status = 'running';
+      secondMessage.startedAt = Date.now();
+      secondMessage.attemptId = 'forged-attempt';
+      secondMessage.tokenReservation =
+        concurrentSnapshot.root.limits.maxTokensPerMessage;
+      secondRecord.activeMessageId = secondMessage.id;
+      secondRecord.status = 'running';
+      concurrentSnapshot.root.reservedTokens +=
+        concurrentSnapshot.root.limits.maxTokensPerMessage;
+      await expect(
+        host().restore(concurrentSnapshot, {
+          expectedPolicyDigest: concurrentDigest,
+        })
+      ).rejects.toThrow(/concurrency/);
+    } finally {
+      await concurrentRoot.cancel();
+    }
   });
 
   it('preserves disposed usage and subcalls in reconciled retired ledgers', async () => {
