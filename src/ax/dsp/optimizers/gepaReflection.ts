@@ -196,9 +196,7 @@ const defaultGEPAProposalPolicy: AxGEPAProposalPolicy = async (args) => {
     reflectiveExamples: args.reflectiveExamples,
     traceDataset: args.traceDataset,
   } as any)) as any;
-  const proposed =
-    typeof out?.newValue === 'string' ? out.newValue.trim() : undefined;
-  return proposed === undefined ? undefined : proposed;
+  return typeof out?.newValue === 'string' ? out.newValue.trim() : '';
 };
 
 export async function proposeGEPAComponentValue(args: {
@@ -218,8 +216,15 @@ export async function proposeGEPAComponentValue(args: {
     args.proposal?.maxExamples === undefined
       ? args.tuples.length
       : Math.max(0, Math.floor(args.proposal.maxExamples));
-  const reflectiveExamples = args.tuples.slice(0, maxExamples);
+  let reflectiveExamples = args.tuples.slice(0, maxExamples);
   const customPolicy = args.proposal?.policy;
+  if (
+    !customPolicy &&
+    reflectiveExamples.length === 0 &&
+    args.proposal?.maxExamples !== 0
+  ) {
+    reflectiveExamples = [{ input: {}, prediction: {}, score: 0 }];
+  }
   const policy = customPolicy ?? defaultGEPAProposalPolicy;
   for (let attempt = 0; attempt < attempts; attempt++) {
     let proposed: string | undefined;
