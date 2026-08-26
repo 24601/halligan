@@ -512,6 +512,271 @@ describe('AxEventRuntime', () => {
     expect(await runtime.listDeadLetters()).toContainEqual(deadLetter);
   });
 
+  it('does not invoke a target when close cancels during a successful authorization audit', async () => {
+    const invoked = vi.fn();
+    const store = new AxInMemoryEventStore();
+    let lateReject: ((reason?: unknown) => void) | undefined;
+    let auditStarted!: () => void;
+    const auditStart = new Promise<void>((resolve) => {
+      auditStarted = resolve;
+    });
+    const authority: AxAuthorityContext = {
+      principal: { id: 'principal-a', tenantId: 'tenant-a' },
+      actor: { id: 'worker-a', kind: 'agent' },
+      grants: [
+        {
+          version: 1,
+          id: 'event-grant',
+          principalId: 'principal-a',
+          operations: ['event.target.invoke'],
+          resources: [
+            {
+              type: 'event.target',
+              id: 'audit-success-cancel-target',
+              tenantId: 'tenant-a',
+            },
+          ],
+          leaseEpoch: 1,
+        },
+      ],
+      leaseEpoch: 1,
+      now: () => 100,
+      authorize: (operation, context) => ({
+        version: 1,
+        receiptId: `receipt-${operation}`,
+        requestId: context.requestId,
+        decision: 'allow',
+        operation,
+        resource: context.resource,
+        principalId: context.principal.id,
+        actor: { id: context.actor.id, kind: context.actor.kind },
+        grantIds: context.grants.map((grant) => grant.id),
+        leaseEpoch: context.leaseEpoch,
+        authorizedAt: context.now,
+      }),
+      onAudit: () => {
+        auditStarted();
+        return new Promise<void>((_resolve, reject) => {
+          lateReject = reject;
+        });
+      },
+    };
+    const runtime = new AxEventRuntime({
+      maxAttempts: 1,
+      store,
+      authority: () => authority,
+      routes: [
+        eventRoute({
+          id: 'audit-success-cancel',
+          match: { types: ['authority.audit-success-cancel'] },
+          action: 'wake',
+          target: eventTarget({
+            id: 'audit-success-cancel-target',
+            ai,
+            program: program(invoked),
+            mapInput: () => ({}),
+            retrySafety: 'idempotent',
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    const receipt = await runtime.publish(
+      ingress('audit-success-cancel-1', 'authority.audit-success-cancel')
+    );
+    await auditStart;
+    const closed = runtime.close({ drain: false });
+    await expect(
+      Promise.race([
+        closed.then(() => 'closed'),
+        new Promise((resolve) => setTimeout(() => resolve('timeout'), 100)),
+      ])
+    ).resolves.toBe('closed');
+    lateReject?.(new Error('late successful-audit rejection'));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(invoked).not.toHaveBeenCalled();
+    expect((await store.getDelivery(receipt.deliveryIds[0]!))?.status).toBe(
+      'cancelled'
+    );
+  });
+
+  it('does not return from close until an already-started redrive write settles', async () => {
+    const store = new AxInMemoryEventStore();
+    let releaseWrite!: () => void;
+    const writeGate = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
+    let writeStarted!: () => void;
+    const writeStart = new Promise<void>((resolve) => {
+      writeStarted = resolve;
+    });
+    let postCloseWrites = 0;
+    const write = vi.fn(async () => {
+      if (write.mock.calls.length === 1) {
+        throw new Error('synthetic sink failure');
+      }
+      writeStarted();
+      await writeGate;
+      postCloseWrites++;
+    });
+    const makeAuthority = (): AxAuthorityContext => ({
+      principal: { id: 'principal-a', tenantId: 'tenant-a' },
+      actor: { id: 'worker-a', kind: 'agent' },
+      grants: [
+        {
+          version: 1,
+          id: 'target-1',
+          principalId: 'principal-a',
+          operations: ['event.target.invoke'],
+          resources: [
+            {
+              type: 'event.target',
+              id: 'redrive-write-target',
+              tenantId: 'tenant-a',
+            },
+          ],
+          leaseEpoch: 1,
+        },
+        {
+          version: 1,
+          id: 'sink-1',
+          principalId: 'principal-a',
+          operations: ['event.sink.write'],
+          resources: [
+            {
+              type: 'event.sink',
+              id: 'redrive-write-sink',
+              tenantId: 'tenant-a',
+            },
+          ],
+          leaseEpoch: 1,
+        },
+      ],
+      leaseEpoch: 1,
+      now: () => 100,
+      authorize: (operation, context) => ({
+        version: 1,
+        receiptId: `receipt-${operation}`,
+        requestId: context.requestId,
+        decision: 'allow',
+        operation,
+        resource: context.resource,
+        principalId: context.principal.id,
+        actor: { id: context.actor.id, kind: context.actor.kind },
+        grantIds: context.grants.map((grant) => grant.id),
+        leaseEpoch: context.leaseEpoch,
+        authorizedAt: context.now,
+      }),
+    });
+    const runtime = new AxEventRuntime({
+      authority: () => makeAuthority(),
+      maxAttempts: 1,
+      store,
+      routes: [
+        eventRoute({
+          id: 'redrive-write-route',
+          match: { types: ['redrive.write'] },
+          action: 'wake',
+          target: eventTarget({
+            id: 'redrive-write-target',
+            ai,
+            program: program(() => ({ ok: true })),
+            mapInput: () => ({}),
+            retrySafety: 'idempotent',
+            sinks: [{ id: 'redrive-write-sink', write }],
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    await runtime.publish(ingress('redrive-write-1', 'redrive.write'));
+    await runtime.waitForIdle();
+    const deadLetter = (await runtime.listDeadLetters()).find(
+      (value) => value.kind === 'sink'
+    );
+    expect(deadLetter).toBeDefined();
+    const redrive = runtime.redrive(deadLetter!.id);
+    await writeStart;
+    let closeSettled = false;
+    const closed = runtime.close({ drain: false }).then(() => {
+      closeSettled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(closeSettled).toBe(false);
+    expect(postCloseWrites).toBe(0);
+    releaseWrite();
+    await expect(redrive).rejects.toThrow(/clos(ing|ed)/);
+    await closed;
+    expect(closeSettled).toBe(true);
+    expect(postCloseWrites).toBe(1);
+    expect(await runtime.listDeadLetters()).toContainEqual(deadLetter);
+  });
+
+  it('does not requeue a delivery dead letter after close returns', async () => {
+    const backing = new AxInMemoryEventStore();
+    let releaseLookup!: () => void;
+    const lookupGate = new Promise<void>((resolve) => {
+      releaseLookup = resolve;
+    });
+    let lookupStarted!: () => void;
+    const lookupStart = new Promise<void>((resolve) => {
+      lookupStarted = resolve;
+    });
+    let postCloseMutations = 0;
+    const store = new Proxy(backing, {
+      get(target, property, receiver) {
+        if (property === 'getDeadLetter') {
+          return async (id: string) => {
+            lookupStarted();
+            await lookupGate;
+            return target.getDeadLetter(id);
+          };
+        }
+        if (property === 'redriveDelivery' || property === 'removeDeadLetter') {
+          return async (...args: unknown[]) => {
+            postCloseMutations++;
+            const value = Reflect.get(target, property, receiver);
+            return (value as (...inner: unknown[]) => unknown).apply(
+              target,
+              args
+            );
+          };
+        }
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const runtime = new AxEventRuntime({
+      maxAttempts: 1,
+      store,
+      routes: [
+        eventRoute({
+          id: 'delivery-redrive',
+          match: { types: ['delivery.redrive'] },
+          action: 'observe',
+          observe: () => {
+            throw new Error('observed failure');
+          },
+        }),
+      ],
+    });
+    await runtime.start();
+    await runtime.publish(ingress('delivery-redrive-1', 'delivery.redrive'));
+    await runtime.waitForIdle();
+    const deadLetter = (await backing.listDeadLetters())[0];
+    expect(deadLetter?.kind).toBe('delivery');
+    const redrive = runtime.redrive(deadLetter!.id);
+    await lookupStart;
+    await runtime.close({ drain: false });
+    releaseLookup();
+    await expect(redrive).rejects.toThrow(/clos(ing|ed)/);
+    expect(postCloseMutations).toBe(0);
+    expect((await backing.getDelivery(deadLetter!.deliveryId))?.status).toBe(
+      'dead_lettered'
+    );
+  });
+
   it('re-resolves current authority before sink dead-letter redrive', async () => {
     const store = new AxInMemoryEventStore();
     const write = vi

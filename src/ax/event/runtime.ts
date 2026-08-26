@@ -145,6 +145,7 @@ export class AxEventRuntime {
     string,
     AbortController
   >();
+  private readonly inFlightRedriveOperations = new Set<Promise<unknown>>();
   private readonly sourceHandles: AxEventSourceHandle[] = [];
   private readonly sourceController = new AbortController();
   private readonly workerController = new AbortController();
@@ -309,31 +310,57 @@ export class AxEventRuntime {
 
   async redrive(deadLetterId: string): Promise<void> {
     if (this.closing) throw new Error('AxEventRuntime is closing');
-    const deadLetter = await this.store.getDeadLetter(deadLetterId);
-    if (!deadLetter)
-      throw new Error(`Unknown event dead letter: ${deadLetterId}`);
-    if (deadLetter.kind === 'delivery') {
-      await this.store.redriveDelivery(deadLetter.deliveryId, this.clock.now());
-      await this.store.removeDeadLetter(deadLetterId);
-      return;
-    }
-    const run = deadLetter.runId
-      ? await this.store.getRun(deadLetter.runId)
-      : undefined;
-    const delivery = await this.store.getDelivery(deadLetter.deliveryId);
-    if (!run || !delivery || !deadLetter.sinkId || run.output === undefined) {
-      throw new Error(`Sink dead letter ${deadLetterId} cannot be redriven`);
-    }
-    const target = run.targetId ? this.targets.get(run.targetId) : undefined;
-    const sink = target?.sinks?.find((value) => value.id === deadLetter.sinkId);
-    if (!target || !sink) {
-      throw new Error(`Sink ${deadLetter.sinkId} is no longer configured`);
-    }
+    const operation = this.redriveInternal(deadLetterId);
+    this.inFlightRedriveOperations.add(operation);
+    void operation.then(
+      () => this.inFlightRedriveOperations.delete(operation),
+      () => this.inFlightRedriveOperations.delete(operation)
+    );
+    return operation;
+  }
+
+  private async redriveInternal(deadLetterId: string): Promise<void> {
     if (this.closing) throw new Error('AxEventRuntime is closing');
     const controller = new AbortController();
     this.activeRedriveControllers.set(deadLetterId, controller);
     try {
-      if (this.closing) throw new Error('AxEventRuntime is closing');
+      const deadLetter = await this.awaitUnlessClosing(
+        this.store.getDeadLetter(deadLetterId),
+        controller.signal
+      );
+      if (controller.signal.aborted || this.closing) {
+        throw new Error('AxEventRuntime is closing');
+      }
+      if (!deadLetter)
+        throw new Error(`Unknown event dead letter: ${deadLetterId}`);
+      if (deadLetter.kind === 'delivery') {
+        await this.store.redriveDelivery(
+          deadLetter.deliveryId,
+          this.clock.now()
+        );
+        if (controller.signal.aborted || this.closing) {
+          throw new Error('AxEventRuntime is closing');
+        }
+        await this.store.removeDeadLetter(deadLetterId);
+        return;
+      }
+      const run = deadLetter.runId
+        ? await this.store.getRun(deadLetter.runId)
+        : undefined;
+      const delivery = await this.store.getDelivery(deadLetter.deliveryId);
+      if (!run || !delivery || !deadLetter.sinkId || run.output === undefined) {
+        throw new Error(`Sink dead letter ${deadLetterId} cannot be redriven`);
+      }
+      const target = run.targetId ? this.targets.get(run.targetId) : undefined;
+      const sink = target?.sinks?.find(
+        (value) => value.id === deadLetter.sinkId
+      );
+      if (!target || !sink) {
+        throw new Error(`Sink ${deadLetter.sinkId} is no longer configured`);
+      }
+      if (controller.signal.aborted || this.closing) {
+        throw new Error('AxEventRuntime is closing');
+      }
       const authority = await this.resolveAuthority(
         delivery.ingress,
         AbortSignal.any([controller.signal, this.workerController.signal])
@@ -421,7 +448,10 @@ export class AxEventRuntime {
     for (const controller of this.activeRedriveControllers.values()) {
       controller.abort('AxEventRuntime closed');
     }
-    await Promise.allSettled(this.workerPromises);
+    await Promise.allSettled([
+      ...this.workerPromises,
+      ...this.inFlightRedriveOperations,
+    ]);
     await this.store.close?.();
     this.started = false;
   }
@@ -1178,6 +1208,27 @@ export class AxEventRuntime {
       },
       context.abortSignal
     );
+  }
+
+  private async awaitUnlessClosing<T>(
+    operation: Promise<T>,
+    signal: AbortSignal
+  ): Promise<T> {
+    if (signal.aborted || this.closing) {
+      throw new Error('AxEventRuntime is closing');
+    }
+    return await Promise.race([
+      operation,
+      new Promise<never>((_resolve, reject) => {
+        const abort = () => {
+          reject(signal.reason ?? new Error('AxEventRuntime is closing'));
+        };
+        signal.addEventListener('abort', abort, { once: true });
+        void operation.finally(() =>
+          signal.removeEventListener('abort', abort)
+        );
+      }),
+    ]);
   }
 
   private async resolveAuthority(
