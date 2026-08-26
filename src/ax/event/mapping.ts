@@ -415,11 +415,6 @@ export function validateEventTarget<IN, OUT>(
         `AxEventTarget ${target.id} cannot combine verifier with streaming execution because chunk sinks run before a complete output can be verified`
       );
     }
-    if (!target.verifier.id.trim()) {
-      throw new Error(
-        `AxEventTarget ${target.id} verifier id must be non-empty`
-      );
-    }
     for (const [name, value] of Object.entries({
       maxTokens: target.verifier.maxTokens,
       maxWallTimeMs: target.verifier.maxWallTimeMs,

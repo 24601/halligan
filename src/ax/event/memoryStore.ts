@@ -267,6 +267,30 @@ export class AxInMemoryEventStore implements AxEventStore {
       }
     }
 
+    const delivery: AxEventDelivery = {
+      id: request.childDeliveryId,
+      sequence: this.sequence + 1,
+      ingress: structuredClone(request.child.ingress),
+      identityScope: axEventIdentityScope(request.child.ingress.identity),
+      routeId: descriptor.routeId,
+      action: descriptor.action,
+      ...(descriptor.targetId ? { targetId: descriptor.targetId } : {}),
+      instanceKey: descriptor.instanceKey,
+      status: 'queued',
+      attempt: 0,
+      availableAt: descriptor.availableAt ?? request.child.acceptedAt,
+      acceptedAt: request.child.acceptedAt,
+      sizeBytes: descriptor.sizeBytes,
+      retrySafety: descriptor.retrySafety ?? 'unknown',
+      ordering: descriptor.ordering ?? 'strict',
+    };
+    if (
+      axEventCanonicalJson(this.persistedChildProjection(delivery)) !==
+      axEventCanonicalJson(childProjection)
+    ) {
+      throw new Error('Verifier transition child does not match request');
+    }
+    this.sequence = delivery.sequence;
     this.runs.set(request.parent.run.id, structuredClone(request.parent.run));
     this.deliveries.set(
       request.parent.delivery.id,
@@ -291,23 +315,6 @@ export class AxInMemoryEventStore implements AxEventStore {
         request.continuation.id
       );
     }
-    const delivery: AxEventDelivery = {
-      id: request.childDeliveryId,
-      sequence: ++this.sequence,
-      ingress: structuredClone(request.child.ingress),
-      identityScope: axEventIdentityScope(request.child.ingress.identity),
-      routeId: descriptor.routeId,
-      action: descriptor.action,
-      ...(descriptor.targetId ? { targetId: descriptor.targetId } : {}),
-      instanceKey: descriptor.instanceKey,
-      status: 'queued',
-      attempt: 0,
-      availableAt: descriptor.availableAt ?? request.child.acceptedAt,
-      acceptedAt: request.child.acceptedAt,
-      sizeBytes: descriptor.sizeBytes,
-      retrySafety: descriptor.retrySafety ?? 'unknown',
-      ordering: descriptor.ordering ?? 'strict',
-    };
     this.deliveries.set(delivery.id, delivery);
     this.deliveryOrdering.set(delivery.id, delivery.ordering);
     this.deliveryOrder.push(delivery.id);
@@ -324,12 +331,6 @@ export class AxInMemoryEventStore implements AxEventStore {
       durability: 'volatile',
       deliveryIds: [delivery.id],
     };
-    if (
-      axEventCanonicalJson(this.persistedChildProjection(delivery)) !==
-      axEventCanonicalJson(childProjection)
-    ) {
-      throw new Error('Verifier transition child does not match request');
-    }
     this.verifierTransitions.set(request.operationId, {
       operationId: request.operationId,
       requestCommitment,

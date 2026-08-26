@@ -198,7 +198,7 @@ describe('AxEventRuntime verifier continuation policy', () => {
     await runtime.close();
   });
 
-  it('does not verify outputless clarification invocations', async () => {
+  it('does not verify clarification invocations that produce no output', async () => {
     const verify = vi.fn(() => ({ status: 'pass' as const }));
     const { runtime } = setup(
       { id: 'clarification', verify },
@@ -487,22 +487,44 @@ describe('AxEventRuntime verifier continuation policy', () => {
     }
   );
 
-  it('times out a hanging backoff callback without enqueueing a child', async () => {
-    let runId = '';
+  it('falls back to zero backoff when the backoff callback hangs', async () => {
+    const verify = vi
+      .fn()
+      .mockReturnValueOnce({
+        status: 'fail',
+        failure: { code: 'retry' },
+      })
+      .mockReturnValue({ status: 'pass' });
     const { runtime } = setup({
       id: 'hanging-backoff',
       timeoutMs: 5,
       backoffMs: (() => new Promise<never>(() => undefined)) as never,
-      verify: (_output, context) => {
-        runId = context.run.id;
-        return { status: 'fail', failure: { code: 'retry' } };
-      },
+      verify,
     });
     await runtime.start();
     await runtime.publish(ingress('backoff'));
     await runtime.waitForIdle();
-    expect((await runtime.getRun(runId))?.verification?.status).toBe('timeout');
+    expect(verify).toHaveBeenCalledTimes(2);
     await runtime.close();
+  });
+
+  it('rejects public publishes that spoof the reserved verifier source', async () => {
+    const { runtime } = setup({
+      id: 'reserved-source',
+      verify: () => ({ status: 'pass' }),
+    });
+    await runtime.start();
+    await expect(
+      runtime.publish({
+        event: {
+          specversion: '1.0',
+          id: 'spoofed-verifier',
+          source: 'ax://event-runtime/verifier',
+          type: 'goal.run',
+        },
+      })
+    ).rejects.toThrow('reserved source');
+    await runtime.close({ drain: false });
   });
 
   it('fails closed when cumulative usage overflows', async () => {
@@ -769,4 +791,88 @@ describe('AxEventRuntime verifier continuation policy', () => {
       await runtime.close();
     }
   );
+
+  it('does not mutate store state when a child projection fails validation', async () => {
+    const store = new AxInMemoryEventStore();
+    const receipt = await store.enqueue({
+      ingress: ingress('half-commit'),
+      deliveries: [
+        {
+          routeId: 'run-goal',
+          action: 'wake',
+          targetId: 'goal',
+          instanceKey: 'half-commit',
+          sizeBytes: 1,
+        },
+      ],
+      acceptedAt: Date.now(),
+      publishTimeoutMs: 100,
+    });
+    const parent = (await store.claim('worker-a', Date.now(), 30_000))!;
+    const parentRun: AxEventRun = {
+      id: 'half-commit-run',
+      deliveryId: parent.id,
+      routeId: parent.routeId,
+      targetId: parent.targetId,
+      instanceKey: parent.instanceKey,
+      claimedBy: parent.claimedBy,
+      fencingToken: parent.fencingToken,
+      status: 'waiting_event',
+      attempt: 1,
+      startedAt: Date.now(),
+    };
+    await store.saveRun(parentRun);
+    const request = {
+      operationId: 'half-commit-op',
+      childDeliveryId: 'half-commit-child',
+      parent: {
+        delivery: {
+          ...parent,
+          status: 'waiting_event' as const,
+          runId: parentRun.id,
+        },
+        run: parentRun,
+        expectedFencingToken: parent.fencingToken!,
+      },
+      continuation: {
+        id: 'half-commit-continuation',
+        targetId: 'goal',
+        routeId: 'run-goal',
+        instanceKey: parent.instanceKey,
+        identityScope: parent.identityScope,
+        correlation: [{ kind: 'ax.verifier', value: 'half-commit' }],
+        createdAt: Date.now(),
+      },
+      child: {
+        ingress: {
+          event: {
+            specversion: '1.0' as const,
+            id: 'half-commit-child-event',
+            source: 'app://tests',
+            type: 'goal.run',
+          },
+        },
+        deliveries: [
+          {
+            routeId: 'run-goal',
+            action: 'resume' as const,
+            instanceKey: parent.instanceKey,
+            sizeBytes: 1,
+          },
+        ],
+        acceptedAt: Date.now(),
+        publishTimeoutMs: 100,
+      },
+    };
+    vi.spyOn(store as never, 'persistedChildProjection').mockReturnValueOnce({
+      id: 'mismatch',
+    });
+    await expect(store.transitionVerifier(request)).rejects.toThrow(
+      'does not match request'
+    );
+    expect(await store.getDelivery(parent.id)).toEqual(parent);
+    expect(await store.getDelivery('half-commit-child')).toBeUndefined();
+    expect(await store.confirmVerifierTransition(request)).toBeUndefined();
+    expect(receipt.deliveryIds).toEqual([parent.id]);
+  });
 });

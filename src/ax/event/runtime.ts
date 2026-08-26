@@ -310,6 +310,11 @@ export class AxEventRuntime {
     if (!this.started) throw new Error('AxEventRuntime must be started first');
     if (this.closing) throw new Error('AxEventRuntime is closing');
     axValidateEventEnvelope(ingress.event);
+    if (ingress.event.source.startsWith('ax://event-runtime/')) {
+      throw new Error(
+        `Public event publish cannot use reserved source ${ingress.event.source}`
+      );
+    }
     const normalized: AxEventIngress = {
       event: structuredClone(ingress.event),
       identity: structuredClone(ingress.identity ?? {}),
@@ -1130,14 +1135,20 @@ export class AxEventRuntime {
         },
       };
       const backoffPolicy = policy.backoffMs;
-      const backoff =
-        typeof backoffPolicy === 'function'
-          ? await this.invokeVerifierCallback(policy, context, () =>
-              backoffPolicy(state.runs, failure)
-            )
-          : (backoffPolicy ?? 0);
+      let backoff = 0;
+      if (typeof backoffPolicy === 'function') {
+        try {
+          backoff = await this.invokeVerifierCallback(policy, context, () =>
+            backoffPolicy(state.runs, failure)
+          );
+        } catch {
+          backoff = 0;
+        }
+      } else if (backoffPolicy !== undefined) {
+        backoff = backoffPolicy;
+      }
       if (!Number.isFinite(backoff) || backoff < 0) {
-        throw new Error('Verifier backoff must be non-negative');
+        backoff = 0;
       }
       return {
         verification: { ...base, status: 'fail', failure },
