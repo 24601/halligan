@@ -13,6 +13,8 @@ import {
   type AxAIOpenAIResponsesRequest,
   type AxAIService,
   type AxCodeRuntime,
+  type AxEventComponentDefinition,
+  type AxEventComponentInspection,
   type AxExecutableSkillArtifact,
   type AxExecutableSkillSelection,
   type AxFunction,
@@ -26,6 +28,7 @@ import {
   type AxProgrammable,
   type AxProgramSource,
   ax,
+  axEventComponentManager,
   axExecutableSkillRef,
   axProgramSourceRuntimeProtocol,
   axSelectExecutableSkills,
@@ -59,6 +62,24 @@ new AxJSRuntime({
     },
   },
 });
+
+const componentManager = axEventComponentManager();
+const componentDefinition = {
+  id: 'typed-listener',
+  version: '1',
+  activate: async (context) =>
+    context.acquire('listener', async (signal) => ({
+      value: { signal, close: () => undefined },
+      dispose: () => undefined,
+    })),
+} satisfies AxEventComponentDefinition<{
+  signal: AbortSignal;
+  close(): void;
+}>;
+void componentManager.define(componentDefinition);
+const componentInspection: Readonly<AxEventComponentInspection> | undefined =
+  componentManager.inspect('typed-listener');
+void componentInspection;
 
 // Extract (and flatten) the inferred field objects from an AxSignature so they
 // can be compared against plain object literals with Equal.

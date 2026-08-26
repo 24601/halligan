@@ -55,6 +55,7 @@ function setup(
     forward?: (input: any, options?: any) => unknown | Promise<unknown>;
     sink?: (output: unknown) => void | Promise<void>;
     authority?: Readonly<AxAuthorityContext>;
+    maxAttempts?: number;
   }> = {}
 ) {
   const target = eventTarget({
@@ -75,6 +76,7 @@ function setup(
     store: options.store,
     programStateStore: options.stateStore,
     authority: options.authority,
+    maxAttempts: options.maxAttempts,
     workerConcurrency: 1,
     routes: [
       eventRoute({
@@ -260,6 +262,40 @@ describe('AxEventRuntime verifier continuation policy', () => {
       },
     ]);
     expect(verify).toHaveBeenCalledTimes(2);
+    await runtime.close();
+  });
+
+  it('fails before publishing mixed ordinary and verifier continuations', async () => {
+    const store = new AxInMemoryEventStore();
+    const registerContinuation = vi.spyOn(store, 'registerContinuation');
+    const transitionVerifier = vi.spyOn(store, 'transitionVerifier');
+    const { runtime } = setup(
+      {
+        id: 'mixed-continuations',
+        verify: () => ({
+          status: 'fail',
+          failure: { code: 'retry' },
+        }),
+      },
+      {
+        store,
+        maxAttempts: 1,
+        forward: (_input, options) => {
+          const eventContext = options.eventContext as AxEventContext;
+          eventContext.registerContinuation({
+            correlation: [{ kind: 'application', value: 'mixed' }],
+          });
+          return { answer: 'retry me' };
+        },
+      }
+    );
+    await runtime.start();
+    await runtime.publish(ingress('mixed-continuations'));
+    await runtime.waitForIdle();
+
+    expect(registerContinuation).not.toHaveBeenCalled();
+    expect(transitionVerifier).not.toHaveBeenCalled();
+    expect((await runtime.listDeadLetters()).length).toBeGreaterThan(0);
     await runtime.close();
   });
 

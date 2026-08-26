@@ -1119,6 +1119,23 @@ import type {
   AxUsable,
 } from './dsp/types.js';
 import {
+  type AxEventComponentAcquisition,
+  type AxEventComponentActivationContext,
+  type AxEventComponentDefinition,
+  type AxEventComponentDiagnostic,
+  type AxEventComponentDiagnosticCode,
+  type AxEventComponentDisposer,
+  type AxEventComponentEffectInspection,
+  type AxEventComponentInspection,
+  AxEventComponentLeakError,
+  AxEventComponentManager,
+  type AxEventComponentManagerOptions,
+  type AxEventComponentState,
+  AxEventComponentTransitionError,
+  type AxEventComponentTransitionOptions,
+  axEventComponentManager,
+} from './event/components.js';
+import {
   type AxEventStoreConformanceFactory,
   type AxEventStoreConformanceFactoryOptions,
   type AxEventStoreConformanceInstance,
@@ -1638,6 +1655,9 @@ export { AxDockerSession };
 export { AxEmbeddingAdapter };
 export { AxEvalUtil };
 export { AxEventBackpressureError };
+export { AxEventComponentLeakError };
+export { AxEventComponentManager };
+export { AxEventComponentTransitionError };
 export { AxEventContinuationNotFoundError };
 export { AxEventInputError };
 export { AxEventOutcomeUnknownError };
@@ -1783,6 +1803,7 @@ export { axEmitUsageEvent };
 export { axErasePreferenceEvidence };
 export { axEventCanonicalDigest };
 export { axEventCanonicalJson };
+export { axEventComponentManager };
 export { axEventErrorMessage };
 export { axEventId };
 export { axEventIdentityScope };
@@ -2360,6 +2381,17 @@ export type { AxErrorCategory };
 export type { AxEvaluateArgs };
 export type { AxEventClock };
 export type { AxEventCloseOptions };
+export type { AxEventComponentAcquisition };
+export type { AxEventComponentActivationContext };
+export type { AxEventComponentDefinition };
+export type { AxEventComponentDiagnostic };
+export type { AxEventComponentDiagnosticCode };
+export type { AxEventComponentDisposer };
+export type { AxEventComponentEffectInspection };
+export type { AxEventComponentInspection };
+export type { AxEventComponentManagerOptions };
+export type { AxEventComponentState };
+export type { AxEventComponentTransitionOptions };
 export type { AxEventContext };
 export type { AxEventContinuation };
 export type { AxEventContinuationEnqueueRequest };

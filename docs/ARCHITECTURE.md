@@ -177,6 +177,14 @@ worker threads; their hosts own timers, listener supervision, and other
 asynchronous loops. See
 [`docs/EVENT_RUNTIME.md`](./EVENT_RUNTIME.md).
 
+TypeScript also exposes `AxEventComponentManager` at this boundary for trusted
+process-local listener and adapter lifecycle. It owns dependency ordering,
+serialized transitions, scoped disposers, activation rollback, and
+manager-visible hot replacement; it is not a durable plugin loader or a claim
+that unmanaged external I/O is reversible. `AxEventRuntime` uses the same
+substrate for source handles without taking ownership of caller-created
+protocol clients. Generated-language parity is tracked in the AxIR backlog.
+
 MCP resource events use the same generic ingress. The endpoint initializes one
 live client catalog; `inspectCatalog()` exposes a cloned view, and a managed
 subscription policy selects only concrete resource URIs. AxIR owns deterministic

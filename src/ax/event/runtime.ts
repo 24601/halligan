@@ -2,6 +2,7 @@ import { AxAgentClarificationError } from '../agent/agentInternal/agentStateType
 import { axAuthorize, axSnapshotAuthority } from '../authority/authority.js';
 import type { AxAuthorityContext } from '../authority/types.js';
 import type { AxGenDeltaOut, AxProgrammable } from '../dsp/types.js';
+import { AxEventComponentManager } from './components.js';
 import {
   AxEventRouteBuilder,
   AxEventTargetBuilder,
@@ -34,7 +35,6 @@ import {
   type AxEventRun,
   type AxEventRuntimeOptions,
   type AxEventSink,
-  type AxEventSourceHandle,
   type AxEventTarget,
   type AxEventValue,
   type AxEventVerificationResult,
@@ -85,6 +85,28 @@ const VERIFIER_CODE_BYTES = 256;
 const VERIFIER_FINGERPRINT_BYTES = 1_024;
 const VERIFIER_ERROR_BYTES = 1_024;
 const DEFAULT_AUTHORITY_RESOLVE_TIMEOUT_MS = 30_000;
+
+function combineAbortSignals(...signals: readonly AbortSignal[]): AbortSignal {
+  return AbortSignal.any([...signals]);
+}
+
+async function settleWithin(
+  operation: Promise<unknown>,
+  timeoutMs: number
+): Promise<void> {
+  if (timeoutMs <= 0) {
+    void operation.catch(() => undefined);
+    return;
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    operation.catch(() => undefined),
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, timeoutMs);
+    }),
+  ]);
+  if (timer !== undefined) clearTimeout(timer);
+}
 
 function verifierRouteId(target: Readonly<AxEventTarget>): string {
   return `ax.verifier:${target.id}:${target.verifier!.id}`;
@@ -195,10 +217,12 @@ export class AxEventRuntime {
     AbortController
   >();
   private readonly inFlightRedriveOperations = new Set<Promise<unknown>>();
-  private readonly sourceHandles: AxEventSourceHandle[] = [];
-  private readonly sourceController = new AbortController();
+  private readonly sourceComponents = new AxEventComponentManager();
+  private readonly sourceStartupController = new AbortController();
+  private readonly sourceLifetimeController = new AbortController();
   private readonly workerController = new AbortController();
   private workerPromises: Promise<void>[] = [];
+  private startPromise?: Promise<void>;
   private started = false;
   private closing = false;
   private closePromise?: Promise<void>;
@@ -254,8 +278,24 @@ export class AxEventRuntime {
   }
 
   async start(): Promise<void> {
+    if (this.closing || this.closePromise) {
+      throw new Error('AxEventRuntime is closing');
+    }
+    if (this.startPromise) return this.startPromise;
+    const operation = this.startInternal();
+    this.startPromise = operation;
+    try {
+      await operation;
+    } finally {
+      if (this.startPromise === operation) this.startPromise = undefined;
+    }
+  }
+
+  private async startInternal(): Promise<void> {
+    if (this.closing || this.closePromise) {
+      throw new Error('AxEventRuntime is closing');
+    }
     if (this.started) return;
-    if (this.closing) throw new Error('AxEventRuntime is closing');
     const durableRequired = (this.options.sources ?? []).filter(
       (source) => source.requiresDurable
     );
@@ -302,24 +342,51 @@ export class AxEventRuntime {
         'AxEventRuntime requires 0 < heartbeatMs < leaseMs and leaseMs >= 100'
       );
     }
-    this.started = true;
     const workers = this.options.workerConcurrency ?? 4;
     if (!Number.isInteger(workers) || workers < 1) {
       throw new Error('AxEventRuntime workerConcurrency must be positive');
     }
+    this.started = true;
     this.workerPromises = Array.from({ length: workers }, (_, index) =>
       this.workerLoop(`${this.options.workerId ?? this.id}:${index}`)
     );
     try {
       for (const source of this.options.sources ?? []) {
-        const handle = await source.start({
-          signal: this.sourceController.signal,
-          publish: (ingress, signal) => this.publish(ingress, signal),
-          reportError: (error) => {
-            void this.options.onSourceError?.(source.id, error);
-          },
+        this.throwIfClosing();
+        const componentId = `event-source:${source.id}`;
+        await this.sourceComponents.define({
+          id: componentId,
+          version: '1',
+          activate: (context) =>
+            context.acquire('source-handle', async (signal) => {
+              const handle = await source.start({
+                signal: combineAbortSignals(
+                  signal,
+                  this.sourceLifetimeController.signal
+                ),
+                publish: (ingress, publishSignal) =>
+                  this.publish(ingress, publishSignal),
+                reportError: (error) => {
+                  try {
+                    void Promise.resolve(
+                      this.options.onSourceError?.(source.id, error)
+                    ).catch(() => undefined);
+                  } catch {
+                    // Source diagnostics must not change source lifecycle.
+                  }
+                },
+              });
+              return {
+                value: handle,
+                dispose: () => handle?.close(),
+              };
+            }),
         });
-        if (handle) this.sourceHandles.push(handle);
+        this.throwIfClosing();
+        await this.sourceComponents.activate(componentId, {
+          signal: this.sourceStartupController.signal,
+        });
+        this.throwIfClosing();
       }
     } catch (error) {
       await this.close({ drain: false });
@@ -523,6 +590,9 @@ export class AxEventRuntime {
   async close(options: Readonly<AxEventCloseOptions> = {}): Promise<void> {
     if (this.closePromise) return this.closePromise;
     this.closing = true;
+    this.sourceStartupController.abort('AxEventRuntime closing');
+    this.sourceLifetimeController.abort('AxEventRuntime closing');
+    this.sourceComponents.abortAll('AxEventRuntime closing');
     this.closePromise = this.performClose(options);
     return this.closePromise;
   }
@@ -530,31 +600,44 @@ export class AxEventRuntime {
   private async performClose(
     options: Readonly<AxEventCloseOptions>
   ): Promise<void> {
-    this.sourceController.abort('AxEventRuntime closing');
-    await Promise.allSettled(
-      this.sourceHandles.map((handle) => handle.close())
-    );
+    const timeoutMs = options.timeoutMs ?? 30_000;
+    const deadline = Date.now() + timeoutMs;
+    const componentCleanup = this.sourceComponents.dispose(undefined, {
+      timeoutMs,
+    });
+    const abortOperations = () => {
+      this.workerController.abort('AxEventRuntime closed');
+      for (const controller of this.activeRuns.values()) {
+        controller.abort('AxEventRuntime closed');
+      }
+      for (const controller of this.activeRedriveControllers.values()) {
+        controller.abort('AxEventRuntime closed');
+      }
+    };
+    if (options.drain === false) abortOperations();
     if (options.drain !== false) {
       try {
-        await this.waitForIdle(options.timeoutMs ?? 30_000);
+        await this.waitForIdle(Math.max(0, deadline - Date.now()));
       } catch {
         // The abort below makes unfinished volatile deliveries visible again on
         // an explicit redrive rather than hiding the shutdown failure.
       }
+      abortOperations();
     }
-    this.workerController.abort('AxEventRuntime closed');
-    for (const controller of this.activeRuns.values()) {
-      controller.abort('AxEventRuntime closed');
-    }
-    for (const controller of this.activeRedriveControllers.values()) {
-      controller.abort('AxEventRuntime closed');
-    }
-    await Promise.allSettled([
-      ...this.workerPromises,
-      ...this.inFlightRedriveOperations,
-    ]);
+    await settleWithin(
+      Promise.allSettled([
+        componentCleanup,
+        ...this.workerPromises,
+        ...this.inFlightRedriveOperations,
+      ]),
+      Math.max(0, deadline - Date.now())
+    );
     await this.store.close?.();
     this.started = false;
+  }
+
+  private throwIfClosing(): void {
+    if (this.closing) throw new Error('AxEventRuntime is closing');
   }
 
   private async routeMatches(
@@ -790,6 +873,11 @@ export class AxEventRuntime {
               : undefined;
 
           const registrations = eventContext.takeRegistrations();
+          if (verification?.continuation && registrations.length > 0) {
+            throw new Error(
+              'A verifier retry cannot publish ordinary continuations in the same delivery'
+            );
+          }
           const continuations: AxEventContinuation[] = [];
           for (const registration of registrations) {
             const value: AxEventContinuation = {

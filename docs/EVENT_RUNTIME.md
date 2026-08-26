@@ -330,6 +330,150 @@ stops sources, drains by default, then aborts remaining workers. Caller-owned
 protocol clients remain caller-owned. Background source failures are supervised
 through `onSourceError`; they are never thrown from an unobserved callback.
 
+## Trusted Live Components
+
+`AxEventComponentManager` is an opt-in, process-local lifecycle boundary for
+trusted host-defined event integrations such as listeners, adapters, and source
+registrations. `AxEventRuntime` uses it internally to own source handles, but
+caller-created protocol clients remain caller-owned.
+
+```ts
+const components = axEventComponentManager();
+
+await components.define({
+  id: 'catalog',
+  version: '1',
+  activate: () => ({ revision: 1 }),
+});
+
+await components.define({
+  id: 'listener',
+  version: '1',
+  dependencies: ['catalog'],
+  activate: async (context) => {
+    const catalog = context.dependency<{ revision: number }>('catalog');
+    return context.acquire('listener-handle', async (signal) => {
+      const handle = await startListener({ catalog, signal });
+      return { value: handle, dispose: () => handle.close() };
+    });
+  },
+});
+
+await components.activate('listener');
+console.log(components.inspect());
+await components.deactivate('catalog'); // listener first, then catalog
+await components.dispose();
+```
+
+Definitions have stable IDs, explicit versions, and declared dependencies.
+Activation walks dependencies before dependents. Deactivation walks active
+dependents before dependencies. Within one component, disposers run once in
+reverse registration order; cleanup continues after a disposer error and
+records the error in `inspect()`. Missing dependencies and cycles fail before
+activation code runs. Disposing a component permanently disposes its complete
+transitive dependent definition closure, including inactive dependents, so it
+cannot leave a defined component with a permanently disposed dependency.
+
+```text
+defined / failed (cleanup settled) -> activating -> active -> deactivating -> defined
+                                           |                              |
+                                           +-- rollback -> failed        +-- dispose -> disposed
+failed (effect ownership unsettled) -> inspect only; activate/replace are fenced
+```
+
+All graph-changing calls share one serialized transition queue, so conflicting
+calls have a bounded concurrency of one. Repeated activate, deactivate, and
+dispose calls are idempotent. During activation, a transition `AbortSignal`
+forwards abort into the component lifetime controller. The listener is detached
+when activation commits, so a later transition abort does not terminate an
+active component; deactivation or disposal does. Teardown that has begun runs to
+each registered disposer once in reverse order. Pass `timeoutMs` to a lifecycle
+transition to bound the total cleanup wait. A timed-out disposer is left
+`failed`, emits a `disposer-timeout` diagnostic, and does not block later
+cleanup; because its external outcome is unknown, the manager does not report
+that component as disposed. A component with any failed or otherwise unsettled
+effect cannot be activated or replaced: both transitions preserve the failed
+inspection evidence and reject before candidate setup can acquire another
+resource. Replacement applies the same preflight to every non-active external
+dependency in its staged graph before any dependency or candidate setup runs. A
+failed activation remains retryable only when rollback settled and all
+registered effects are terminally disposed.
+
+`replace()` stages a new-version candidate and every active transitive dependent
+while the prior graph remains live. Staged dependency lookup prefers the staged
+graph, and each activation context retains that dependency snapshot through its
+cleanup. Failure anywhere in that closure rolls back the staged graph and leaves
+every prior binding untouched. Success switches the closure's manager bindings
+synchronously, then retires the prior graph dependents-first against the prior
+dependency snapshot. Prior cleanup failures become diagnostics on the
+corresponding active component rather than pretending the switch can be undone
+after retirement began.
+
+Replacement does not implicitly activate an inactive component. Replacing a
+`defined` component swaps its definition and leaves it `defined`; replacing a
+`failed` component installs a fresh `defined` version only when every prior
+effect is terminally disposed. Call `activate()` explicitly afterward. A
+`failed` component with unsettled effect ownership and a `disposed` component
+cannot be replaced.
+
+Use `context.acquire(label, setup)` for resources: setup must return both the
+value and its disposer. A missing disposer fails activation with an
+`AxEventComponentLeakError` diagnostic. `addDisposer()` supports effects that
+are already represented by a cleanup callback, but the host is responsible for
+registering it before activation completes. Registration attempted after that
+boundary is diagnosed and rejected; its callback is not invoked asynchronously.
+
+`AxEventRuntime.close()` synchronously fences further source startup and aborts
+an in-flight source activation before waiting for source cleanup. If a source
+ignores abort and returns a handle later, the activation transaction closes that
+handle before startup rejects; later configured sources are not started. The
+close timeout is one bound across component cleanup, workers, active verifier
+and authority callbacks, and redrives. Throwing or non-settling source disposers
+cannot prevent the store close boundary, but timed-out external cleanup remains
+uncertain rather than being reported as successful.
+
+### Explicit non-guarantees
+
+- This API accepts already-authorized host callbacks. It does not load, persist,
+  watch, deploy, sandbox, or execute model-generated component code.
+- Disposers are compensating cleanup, not proof that arbitrary network writes,
+  messages, external transactions, or other unmanaged I/O were reversed.
+- Unregistered effects are invisible. The manager cannot diagnose or clean up
+  a resource that the host acquires without `acquire()` or `addDisposer()`.
+- Replacement is atomic only for the manager-visible binding. Candidate setup
+  effects that must remain externally invisible need host-provided staging.
+- Abort is cooperative. Activation code that ignores its signal can delay the
+  serialized transition queue until the caller's close/cleanup deadline. A
+  timed-out callback may still settle later in its host environment.
+- Component definitions and state are process-local and intentionally not a
+  durable desired-state or auto-deployment system.
+
+### Fault mechanism and boundary evaluation
+
+Run the deterministic, model-free evaluator:
+
+```bash
+node --import=tsx scripts/evaluate-event-components.ts --iterations=200
+```
+
+The seven manual cases intentionally omit transaction machinery and are not a
+semantics-equivalent handwritten implementation. They demonstrate which narrow
+mechanism each managed case adds; repeating them 200 times checks deterministic
+stability, not schedule exploration, fuzzing, or model checking.
+
+A separate adversarial boundary matrix asserts source `start()`/`close()`
+overlap, late teardown registration followed by queued activation, inactive
+replacement, partial dependency disposal, dependency snapshots, abort before/
+during/after acquisition and after commit, undefined and malformed source
+handles, startup rollback, and cleanup failure continuation. The command fails
+if any exact boundary invariant regresses. It also prints resource leaks,
+restoration and ordering outcomes, and descriptive timing. The timing comparison
+is deliberately asymmetric—a minimal unmanaged disposer call versus full
+manager define/activate/deactivate—and is neither a semantics-equivalent
+benchmark nor a CI threshold or model-quality claim. The unmanaged-effect result
+reports one leak for both implementations; the disposer-error result reports the
+resource whose own disposer failed while verifying that later cleanup ran.
+
 ## Deterministic Tests
 
 Pass `AxManualEventClock` to the runtime and in-memory store. Retry delay,

@@ -115,6 +115,56 @@ await source.publish({ event, identity, trust: 'authenticated' });
 - Fan out to several Agents with several matching routes, not a multi-target
   route. This preserves independent authorization, ordering, retries, and runs.
 
+## Trusted Live Components
+
+Use `axEventComponentManager()` only for trusted, host-defined process-local
+event integrations that need dependency-aware live activation and deterministic
+cleanup. Definitions declare stable `id`, `version`, `dependencies`, and an
+`activate(context)` callback. Acquire resources with
+`context.acquire(label, setup)`, where setup returns `{ value, dispose }`, or
+register an existing inverse with `context.addDisposer(label, dispose)` before
+activation completes.
+
+The manager serializes all graph transitions, activates dependencies first,
+deactivates dependents first, rolls failed activation back in reverse order,
+stages and atomically switches the active transitive dependent closure during
+replacement, restores the complete prior graph on staged failure, and exposes
+state, effects, diagnostics, and errors through `inspect()`. Repeated lifecycle
+calls are idempotent. Inactive replacement stays inactive until explicit
+activation. Disposal permanently includes the complete transitive dependent
+definition closure. Abort is cooperative and detached after activation commits;
+teardown invokes all registered cleanup in reverse order. `timeoutMs` bounds the
+total cleanup wait; timeout records `disposer-timeout`, leaves state failed and
+uncertain, and continues later cleanup. Late disposer registration is diagnosed
+and rejected without invoking an untracked callback. Failed or otherwise
+unsettled effect ownership fences both activation and replacement before new
+setup runs, including non-active external dependencies introduced by active
+replacement. A failed activation is retryable only when rollback terminally
+disposed every registered effect.
+
+Runtime close fences source startup before aborting in-flight activation. A
+source handle returned after that abort is closed transactionally, and no later
+configured source starts. Runtime close applies one deadline across component
+cleanup, workers, authority/verifier callbacks, and redrives, so a throwing or
+hanging source disposer cannot block the store-close boundary.
+
+Do not describe this as reversal of arbitrary I/O. Unregistered effects and
+failed disposers can leak, candidate setup is not externally isolated, and the
+manager does not load or execute model-generated code, persist definitions,
+watch files, auto-deploy mutations, or own caller-created protocol clients.
+
+Run the fault-mechanism demonstration and adversarial boundary matrix with:
+
+```bash
+node --import=tsx scripts/evaluate-event-components.ts --iterations=200
+```
+
+The manual examples intentionally lack transaction machinery and are not a
+semantics-equivalent benchmark. Repetitions check deterministic stability, not
+schedule exploration; the separate matrix covers startup/close overlap, late
+registration, replacement states, partial disposal, dependency snapshots,
+abort boundaries, source handles, and startup/cleanup failures.
+
 ## Continuation Pattern
 
 ```ts

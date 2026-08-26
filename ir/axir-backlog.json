@@ -51,7 +51,7 @@
       "sourceCommit": "2d1a5f96f033640bf4e892e866fde99bc92e8268",
       "tsPaths": ["src/ax/ai"],
       "portableSurface": "axai",
-      "impact": "Generated Python/Java/C++/Go/Rust packages still map Anthropic streaming error events (overloaded_error/api_error/rate_limit_error) to refusals instead of retryable status errors, and lack the balancer's 529 retryability, pre-content streaming-overload retry-with-backoff, and mid-stream failure recording \u2014 so transient Anthropic errors hard-fail there with no retry or failover.",
+      "impact": "Generated Python/Java/C++/Go/Rust packages still map Anthropic streaming error events (overloaded_error/api_error/rate_limit_error) to refusals instead of retryable status errors, and lack the balancer's 529 retryability, pre-content streaming-overload retry-with-backoff, and mid-stream failure recording — so transient Anthropic errors hard-fail there with no retry or failover.",
       "suggestedAxirWork": [
         "Add or update the TS-derived conformance fixture.",
         "Update AxIR/Core or descriptor data to match the portable TS behavior.",
@@ -246,7 +246,7 @@
         "src/ax/dsp/playbook.test.ts"
       ],
       "portableSurface": "axoptimize",
-      "impact": "TS now normalizes the reflector's model-produced bulletTags (single object or junk instead of an array) before tag application and curator target resolution; live gpt-5.4-mini reflections triggered the unguarded for...of crash mid-update. optimize.axir reads %reflection[\"bulletTags\"] with only a missing-key default (optimize.axir:1725), so ported ACE updates can still crash or mis-iterate on the same malformed reflector output. Additionally, TS delta-history entries now record updatedBulletIds (ADD ids are assigned at apply time and were unrecoverable from the operations alone); the agent playbook dedupe uses it so pruned lessons re-learn \u2014 ports' artifact shape lacks the field. Review follow-ups: renderPlaybook now returns empty string for a zero-bullet/no-description playbook (ports must match to avoid injecting a bare \"## Context Playbook\" header).",
+      "impact": "TS now normalizes the reflector's model-produced bulletTags (single object or junk instead of an array) before tag application and curator target resolution; live gpt-5.4-mini reflections triggered the unguarded for...of crash mid-update. optimize.axir reads %reflection[\"bulletTags\"] with only a missing-key default (optimize.axir:1725), so ported ACE updates can still crash or mis-iterate on the same malformed reflector output. Additionally, TS delta-history entries now record updatedBulletIds (ADD ids are assigned at apply time and were unrecoverable from the operations alone); the agent playbook dedupe uses it so pruned lessons re-learn — ports' artifact shape lacks the field. Review follow-ups: renderPlaybook now returns empty string for a zero-bullet/no-description playbook (ports must match to avoid injecting a bare \"## Context Playbook\" header).",
       "suggestedAxirWork": [
         "Add an is-array guard (wrap single objects, drop malformed entries) around the bulletTags read in optimize.axir's reflection handling.",
         "Record updatedBulletIds on delta-history entries in optimize.axir's apply path.",
@@ -372,7 +372,7 @@
     {
       "id": "axir-2026-07-13-agent-playbook-verified-evolve",
       "status": "done",
-      "title": "Port agent.playbook().evolve() \u2014 verified playbook learning from a task set",
+      "title": "Port agent.playbook().evolve() — verified playbook learning from a task set",
       "createdAt": "2026-07-13",
       "sourcePR": null,
       "sourceCommit": null,
@@ -391,7 +391,7 @@
         "src/ax/agent/agentInternal/playbookEvolve/playbookEvolve.test.ts"
       ],
       "portableSurface": "axagent",
-      "impact": "TS agents gain agent.playbook().evolve(dataset, options): agent.playbook() returns an agent-aware handle (AxAgentPlaybook wrapping the stage AxPlaybook) whose evolve() runs a sequential batch eval over an AxAgentEvalDataset, clusters failures deterministically by the run's structured failureSignals (also threaded onto AxAgentEvalPrediction), mines each cluster for a grounded weakness (evidence quotes must substring-match real run excerpts), and proposes ONE playbook bullet per weakness. With verify (default on) a bullet is kept only when held-in gain >= minHeldInGain AND held-out non-regression within epsilon, else it rolls back exactly; verify:false applies the mined lessons without the gate. Bullets-only \u2014 no instruction editing. The five generated ports have neither the agent-aware playbook handle nor evolve(), and their eval predictions lack failureSignals; ported agents cannot verify-learn from a failing task set.",
+      "impact": "TS agents gain agent.playbook().evolve(dataset, options): agent.playbook() returns an agent-aware handle (AxAgentPlaybook wrapping the stage AxPlaybook) whose evolve() runs a sequential batch eval over an AxAgentEvalDataset, clusters failures deterministically by the run's structured failureSignals (also threaded onto AxAgentEvalPrediction), mines each cluster for a grounded weakness (evidence quotes must substring-match real run excerpts), and proposes ONE playbook bullet per weakness. With verify (default on) a bullet is kept only when held-in gain >= minHeldInGain AND held-out non-regression within epsilon, else it rolls back exactly; verify:false applies the mined lessons without the gate. Bullets-only — no instruction editing. The five generated ports have neither the agent-aware playbook handle nor evolve(), and their eval predictions lack failureSignals; ported agents cannot verify-learn from a failing task set.",
       "suggestedAxirWork": [
         "Decide the port shape: full evolve() loop vs consuming TS-produced playbook snapshots.",
         "Thread failureSignals through the ports' eval prediction shape; expose an agent-aware playbook handle with evolve() over the existing ACE playbook.",
@@ -432,7 +432,7 @@
       "sourceCommit": "5dfd044af5b6ac2c1839a40262286fec7c55e2ec",
       "tsPaths": ["src/ax/ai/anthropic/types.ts", "src/ax/ai/anthropic/api.ts"],
       "portableSurface": "axai",
-      "impact": "TS now sets thinking.display on the adaptive request: display='summarized' by default (gated on showThoughts) so the human-readable reasoning summary is returned, or 'omitted' when showThoughts===false. The Anthropic IR's adaptive branch (provider.axir, is_adaptive) builds thinking={type:'adaptive'} with no display field, so generated Python/Java/C++/Go/Rust targets inherit Anthropic's server default of display='omitted' on Sonnet 5 / Opus 4.7+ \u2014 the model still thinks and bills, but streams empty thinking text, and there is no way to request the summary. Fix: mirror the TS derivation by setting thinking['display'] in the is_adaptive block from the showThoughts option (summarized unless showThoughts is false).",
+      "impact": "TS now sets thinking.display on the adaptive request: display='summarized' by default (gated on showThoughts) so the human-readable reasoning summary is returned, or 'omitted' when showThoughts===false. The Anthropic IR's adaptive branch (provider.axir, is_adaptive) builds thinking={type:'adaptive'} with no display field, so generated Python/Java/C++/Go/Rust targets inherit Anthropic's server default of display='omitted' on Sonnet 5 / Opus 4.7+ — the model still thinks and bills, but streams empty thinking text, and there is no way to request the summary. Fix: mirror the TS derivation by setting thinking['display'] in the is_adaptive block from the showThoughts option (summarized unless showThoughts is false).",
       "suggestedAxirWork": [
         "Add or update the TS-derived conformance fixture.",
         "Update AxIR/Core or descriptor data to match the portable TS behavior.",
@@ -460,7 +460,7 @@
         "src/ax/flow/subContext.ts"
       ],
       "portableSurface": "axflow",
-      "impact": "TS AxFlow steps now carry inspectable build-time meta (branch bodies, loop bodies, feedback targets); the TS surface is ONLY the shorthand: flow(mermaidText, bindings?) compiles a mermaid flowchart with %%ax signature directives into a runnable flow, and AxFlow.toString(renderOptions?) renders any flow back (String(wf) round-trips via flow(String(wf))). The explicit toMermaid/fromMermaid aliases were removed before any release. Generated Python/Java/C++/Go/Rust flow surfaces cannot emit or load the dialect. Parity means tools/axir template + codegen builder + golden updates: each language's idiomatic equivalent of the shorthand only (factory string arg + str dunder/ToString/Display with render options) \u2014 do NOT add explicit toMermaid/fromMermaid names. The diagram text is language-neutral by design (signatures in %%ax comments + edges); parity is one implementation in tools/axir generated into all five ports, not five hand-written parsers. Depends on the extended-grammar entry.",
+      "impact": "TS AxFlow steps now carry inspectable build-time meta (branch bodies, loop bodies, feedback targets); the TS surface is ONLY the shorthand: flow(mermaidText, bindings?) compiles a mermaid flowchart with %%ax signature directives into a runnable flow, and AxFlow.toString(renderOptions?) renders any flow back (String(wf) round-trips via flow(String(wf))). The explicit toMermaid/fromMermaid aliases were removed before any release. Generated Python/Java/C++/Go/Rust flow surfaces cannot emit or load the dialect. Parity means tools/axir template + codegen builder + golden updates: each language's idiomatic equivalent of the shorthand only (factory string arg + str dunder/ToString/Display with render options) — do NOT add explicit toMermaid/fromMermaid names. The diagram text is language-neutral by design (signatures in %%ax comments + edges); parity is one implementation in tools/axir generated into all five ports, not five hand-written parsers. Depends on the extended-grammar entry.",
       "suggestedAxirWork": [
         "Add or update the TS-derived conformance fixture.",
         "Update AxIR/Core or descriptor data to match the portable TS behavior.",
@@ -487,7 +487,7 @@
         "src/ax/dsp/sigtypes.ts"
       ],
       "portableSurface": "axgen",
-      "impact": "TS string signatures now accept type modifier bags \u2014 min/max, format, pattern, cache, item, code language \u2014 and nested object{...} field lists, and AxSignature.toString() serializes them losslessly. Generated Python/Java/C++/Go/Rust string-signature parsers cannot parse the new grammar and their renderers cannot emit it; their FieldType models already carry min/max/format/fields slots (e.g. packages/python/axllm/signature.py) so only the string grammar and serializer lag TS. PORTABILITY-CRITICAL: signature strings are the cross-language contract and TS toString() now emits this grammar, so until ported, signatures/diagrams authored or serialized in TS are unreadable by the other five languages.",
+      "impact": "TS string signatures now accept type modifier bags — min/max, format, pattern, cache, item, code language — and nested object{...} field lists, and AxSignature.toString() serializes them losslessly. Generated Python/Java/C++/Go/Rust string-signature parsers cannot parse the new grammar and their renderers cannot emit it; their FieldType models already carry min/max/format/fields slots (e.g. packages/python/axllm/signature.py) so only the string grammar and serializer lag TS. PORTABILITY-CRITICAL: signature strings are the cross-language contract and TS toString() now emits this grammar, so until ported, signatures/diagrams authored or serialized in TS are unreadable by the other five languages.",
       "suggestedAxirWork": [
         "Add or update the TS-derived conformance fixture.",
         "Update AxIR/Core or descriptor data to match the portable TS behavior.",
@@ -1164,74 +1164,21 @@
       "verification": "TS-derived native-image routing fixture; five-language AxIR dev verifier; npm run axir:check-packages; go test ./internal/axir; focused TypeScript router tests"
     },
     {
-      "id": "axir-2026-08-25-port-shared-runtime-capability-selection-and-conformance-observa",
+      "id": "axir-2026-08-25-port-causal-candidate-evidence-artifacts",
       "status": "open",
-      "title": "Port shared runtime capability selection and conformance observations",
+      "title": "Port causal candidate evidence artifacts",
       "createdAt": "2026-08-25",
-      "sourcePR": null,
-      "sourceCommit": "ca760294f5ea4f207052c39c2218e1195103bc2a",
+      "sourcePR": 15,
+      "sourceCommit": "b70c396a54ad385a5a5bb8453e33dfb93e41368a",
       "tsPaths": [
-        "src/ax/agent/AxAgent.ts",
-        "src/ax/agent/agent.test-d.ts",
-        "src/ax/agent/benchmarks/runtimeCapabilities.eval.ts",
-        "src/ax/agent/rlm.ts",
-        "src/ax/agent/runtimeCapabilities.test.ts",
-        "src/ax/agent/runtimeCapabilities.ts"
-      ],
-      "portableSurface": "axagent",
-      "impact": "TypeScript AxCodeRuntime now exposes an explicitly versioned superset and conversion path for the generated AxIR inspect/snapshot/patch/abort/language/usage-instructions record, plus protocol/platform/persistence/resource/authority declarations, host-admitted security selection, and deterministic contradiction reporting; generated Python, Java, C++, Go, and Rust RuntimeCapabilities records and selectors do not yet expose the v1 extension or matching behavior.",
-      "suggestedAxirWork": [
-        "Add or update the TS-derived conformance fixture.",
-        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
-        "Run npm run axir:conformance:check and npm run test:axir."
-      ],
-      "completedAt": null,
-      "completedByCommit": null,
-      "verification": null
-    },
-    {
-      "id": "axir-2026-08-25-port-speculative-programmatic-tool-calling-runtime-semantics",
-      "status": "open",
-      "title": "Port speculative programmatic tool calling runtime semantics",
-      "createdAt": "2026-08-25",
-      "sourcePR": null,
-      "sourceCommit": "ca760294f5ea4f207052c39c2218e1195103bc2a",
-      "tsPaths": [
-        "src/ax/agent/agentInternal/runtimeGlobals.ts",
-        "src/ax/agent/agentInternal/runtimeGlobals.authority.test.ts",
-        "src/ax/agent/agentInternal/runtimeExecutionLlmQuery.ts",
-        "src/ax/agent/agentInternal/runtimeExecutionLlmQuery.test.ts",
-        "src/ax/agent/agent.test.ts"
-      ],
-      "portableSurface": "axagent",
-      "impact": "TypeScript AxAgent external functions and llmQuery can opt into bounded, cancellable speculative execution inside AxJSRuntime with exact-path purity policies, stable deterministic/nondeterministic matching, and fail-closed parsing; generated Python, Java, C++, Go, and Rust agent runtimes do not expose equivalent semantics.",
-      "suggestedAxirWork": [
-        "Add or update the TS-derived conformance fixture.",
-        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
-        "Run npm run axir:conformance:check and npm run test:axir."
-      ],
-      "completedAt": null,
-      "completedByCommit": null,
-      "verification": null
-    },
-    {
-      "id": "axir-2026-08-25-port-experimental-program-source-optimization",
-      "status": "open",
-      "title": "Port experimental program-source optimization",
-      "createdAt": "2026-08-25",
-      "sourcePR": 12,
-      "sourceCommit": "329c7f7b0aa614904ea11fb253b4bdb4cfdeadd3",
-      "tsPaths": [
-        "src/ax/dsp/programSource.ts",
-        "src/ax/dsp/programSource.test.ts",
-        "src/ax/dsp/programSourceEvaluation.ts",
-        "src/ax/dsp/programSourceEvaluation.test.ts",
-        "src/ax/dsp/optimizers/gepa.ts",
-        "src/ax/dsp/optimizers/gepaEvaluation.ts",
-        "src/ax/dsp/optimizers/gepaEvaluation.test.ts"
+        "src/ax/dsp/optimize.ts",
+        "src/ax/dsp/optimizer.ts",
+        "src/ax/dsp/optimizers/causalCandidateEvidence.test-d.ts",
+        "src/ax/dsp/optimizers/causalCandidateEvidence.test.ts",
+        "src/ax/dsp/optimizers/causalCandidateEvidence.ts"
       ],
       "portableSurface": "axoptimize",
-      "impact": "TypeScript exposes programSource(), a validated ax-program-source/v1 control-flow AST with explicit predictor/tool capabilities, default locked-down worker interpretation and Node resource ceilings, strict typed outputs, accessor-free immutable snapshots of declared inputs and complete predictor requests plus selected host tool schemas, revocable execution epochs, explicit custom-runtime language/protocol compatibility, per-example call/iteration budgets, state serialization, and component-specific GEPA alignment for program-source bind failures without changing ordinary config-error semantics in mixed trees. Generated Python, Java, C++, Go, and Rust packages do not expose this program-source component, interpreted grammar, or runtime bridge contract.",
+      "impact": "TypeScript optimized-program artifacts can carry bounded immutable host-verified causal evidence linking well-formed canonical SHA-256 evidence identities, hypotheses, affected components, predictions, held-in and held-out outcomes, chronological decisions and settlements, and optional comparable ablations; detached replay prevents post-verification mutation, per-batch authority receipts remain chained across append, and snapshot rollback preserves append-only history. Generated runtimes do not expose this manifest or attachment and rollback helpers.",
       "suggestedAxirWork": [
         "Add or update the TS-derived conformance fixture.",
         "Update AxIR/Core or descriptor data to match the portable TS behavior.",
@@ -1266,31 +1213,6 @@
       "verification": null
     },
     {
-      "id": "axir-2026-08-25-port-causal-candidate-evidence-artifacts",
-      "status": "open",
-      "title": "Port causal candidate evidence artifacts",
-      "createdAt": "2026-08-25",
-      "sourcePR": 15,
-      "sourceCommit": "b70c396a54ad385a5a5bb8453e33dfb93e41368a",
-      "tsPaths": [
-        "src/ax/dsp/optimize.ts",
-        "src/ax/dsp/optimizer.ts",
-        "src/ax/dsp/optimizers/causalCandidateEvidence.test-d.ts",
-        "src/ax/dsp/optimizers/causalCandidateEvidence.test.ts",
-        "src/ax/dsp/optimizers/causalCandidateEvidence.ts"
-      ],
-      "portableSurface": "axoptimize",
-      "impact": "TypeScript optimized-program artifacts can carry bounded immutable host-verified causal evidence linking well-formed canonical SHA-256 evidence identities, hypotheses, affected components, predictions, held-in and held-out outcomes, chronological decisions and settlements, and optional comparable ablations; detached replay prevents post-verification mutation, per-batch authority receipts remain chained across append, and snapshot rollback preserves append-only history. Generated runtimes do not expose this manifest or attachment and rollback helpers.",
-      "suggestedAxirWork": [
-        "Add or update the TS-derived conformance fixture.",
-        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
-        "Run npm run axir:conformance:check and npm run test:axir."
-      ],
-      "completedAt": null,
-      "completedByCommit": null,
-      "verification": null
-    },
-    {
       "id": "axir-2026-08-25-port-evidence-aware-ace-playbook-metadata-and-retrieval",
       "status": "open",
       "title": "Port evidence-aware ACE playbook metadata and retrieval",
@@ -1315,6 +1237,33 @@
       ],
       "portableSurface": "axoptimize",
       "impact": "TypeScript ACE bullets now support optional provenance, confidence/evidence counts, declarative applicability, host-owned verifier receipts, lifecycle/supersession, revision lineage, auditable before/after deltas, condition-aware rendering, inspection-only inactive rendering with executable apply stripping, and verified-agent receipts. Legacy artifacts remain valid. Generated runtimes do not yet expose this schema, host evidence boundary, inactive-entry filtering, executable apply stripping, or filtered-empty-section omission.",
+      "suggestedAxirWork": [
+        "Add or update the TS-derived conformance fixture.",
+        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
+        "Run npm run axir:conformance:check and npm run test:axir."
+      ],
+      "completedAt": null,
+      "completedByCommit": null,
+      "verification": null
+    },
+    {
+      "id": "axir-2026-08-25-port-experimental-program-source-optimization",
+      "status": "open",
+      "title": "Port experimental program-source optimization",
+      "createdAt": "2026-08-25",
+      "sourcePR": 12,
+      "sourceCommit": "329c7f7b0aa614904ea11fb253b4bdb4cfdeadd3",
+      "tsPaths": [
+        "src/ax/dsp/programSource.ts",
+        "src/ax/dsp/programSource.test.ts",
+        "src/ax/dsp/programSourceEvaluation.ts",
+        "src/ax/dsp/programSourceEvaluation.test.ts",
+        "src/ax/dsp/optimizers/gepa.ts",
+        "src/ax/dsp/optimizers/gepaEvaluation.ts",
+        "src/ax/dsp/optimizers/gepaEvaluation.test.ts"
+      ],
+      "portableSurface": "axoptimize",
+      "impact": "TypeScript exposes programSource(), a validated ax-program-source/v1 control-flow AST with explicit predictor/tool capabilities, default locked-down worker interpretation and Node resource ceilings, strict typed outputs, accessor-free immutable snapshots of declared inputs and complete predictor requests plus selected host tool schemas, revocable execution epochs, explicit custom-runtime language/protocol compatibility, per-example call/iteration budgets, state serialization, and component-specific GEPA alignment for program-source bind failures without changing ordinary config-error semantics in mixed trees. Generated Python, Java, C++, Go, and Rust packages do not expose this program-source component, interpreted grammar, or runtime bridge contract.",
       "suggestedAxirWork": [
         "Add or update the TS-derived conformance fixture.",
         "Update AxIR/Core or descriptor data to match the portable TS behavior.",
@@ -1508,6 +1457,57 @@
       "verification": null
     },
     {
+      "id": "axir-2026-08-25-port-shared-runtime-capability-selection-and-conformance-observa",
+      "status": "open",
+      "title": "Port shared runtime capability selection and conformance observations",
+      "createdAt": "2026-08-25",
+      "sourcePR": null,
+      "sourceCommit": "ca760294f5ea4f207052c39c2218e1195103bc2a",
+      "tsPaths": [
+        "src/ax/agent/AxAgent.ts",
+        "src/ax/agent/agent.test-d.ts",
+        "src/ax/agent/benchmarks/runtimeCapabilities.eval.ts",
+        "src/ax/agent/rlm.ts",
+        "src/ax/agent/runtimeCapabilities.test.ts",
+        "src/ax/agent/runtimeCapabilities.ts"
+      ],
+      "portableSurface": "axagent",
+      "impact": "TypeScript AxCodeRuntime now exposes an explicitly versioned superset and conversion path for the generated AxIR inspect/snapshot/patch/abort/language/usage-instructions record, plus protocol/platform/persistence/resource/authority declarations, host-admitted security selection, and deterministic contradiction reporting; generated Python, Java, C++, Go, and Rust RuntimeCapabilities records and selectors do not yet expose the v1 extension or matching behavior.",
+      "suggestedAxirWork": [
+        "Add or update the TS-derived conformance fixture.",
+        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
+        "Run npm run axir:conformance:check and npm run test:axir."
+      ],
+      "completedAt": null,
+      "completedByCommit": null,
+      "verification": null
+    },
+    {
+      "id": "axir-2026-08-25-port-speculative-programmatic-tool-calling-runtime-semantics",
+      "status": "open",
+      "title": "Port speculative programmatic tool calling runtime semantics",
+      "createdAt": "2026-08-25",
+      "sourcePR": null,
+      "sourceCommit": "ca760294f5ea4f207052c39c2218e1195103bc2a",
+      "tsPaths": [
+        "src/ax/agent/agentInternal/runtimeGlobals.ts",
+        "src/ax/agent/agentInternal/runtimeGlobals.authority.test.ts",
+        "src/ax/agent/agentInternal/runtimeExecutionLlmQuery.ts",
+        "src/ax/agent/agentInternal/runtimeExecutionLlmQuery.test.ts",
+        "src/ax/agent/agent.test.ts"
+      ],
+      "portableSurface": "axagent",
+      "impact": "TypeScript AxAgent external functions and llmQuery can opt into bounded, cancellable speculative execution inside AxJSRuntime with exact-path purity policies, stable deterministic/nondeterministic matching, and fail-closed parsing; generated Python, Java, C++, Go, and Rust agent runtimes do not expose equivalent semantics.",
+      "suggestedAxirWork": [
+        "Add or update the TS-derived conformance fixture.",
+        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
+        "Run npm run axir:conformance:check and npm run test:axir."
+      ],
+      "completedAt": null,
+      "completedByCommit": null,
+      "verification": null
+    },
+    {
       "id": "axir-2026-08-25-port-structured-native-tool-aware-react-module",
       "status": "open",
       "title": "Port structured native-tool-aware ReAct module",
@@ -1632,6 +1632,25 @@
       "tsPaths": ["src/ax/agent"],
       "portableSurface": "axagent",
       "impact": "TypeScript agent.playbook().evolve() can require semantic train/validation disjointness and complete held-out evidence, fail closed on insufficient budget or evaluator errors, and prevent verify:false bypass; generated language runtimes retain only the permissive verify gate.",
+      "suggestedAxirWork": [
+        "Add or update the TS-derived conformance fixture.",
+        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
+        "Run npm run axir:conformance:check and npm run test:axir."
+      ],
+      "completedAt": null,
+      "completedByCommit": null,
+      "verification": null
+    },
+    {
+      "id": "axir-2026-08-25-port-trusted-event-component-lifecycle-manager",
+      "status": "open",
+      "title": "Port trusted event component lifecycle manager",
+      "createdAt": "2026-08-25",
+      "sourcePR": 9,
+      "sourceCommit": "ef6087a382f2275cfc9dd7e5f90ea4acadabc1c6",
+      "tsPaths": ["src/ax/event/components.ts"],
+      "portableSurface": "axprogram",
+      "impact": "TypeScript exposes a trusted process-local event integration manager with stable component IDs and versions, dependency ordering, scoped reverse disposers, transactional activation rollback, serialized transitions, cooperative abort, inspectable diagnostics, and manager-visible hot replacement. Generated Python, Java, C++, Go, and Rust event runtimes retain their existing source lifecycle but do not expose this generic host component API.",
       "suggestedAxirWork": [
         "Add or update the TS-derived conformance fixture.",
         "Update AxIR/Core or descriptor data to match the portable TS behavior.",
