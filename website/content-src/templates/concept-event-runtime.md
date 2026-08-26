@@ -156,7 +156,9 @@ a replacement candidate plus its active transitive dependents before switching
 all manager-visible bindings together. Inactive replacements remain inactive,
 and partial disposal includes the transitive dependent definition closure.
 `AxEventRuntime` uses it internally for source handles and fences overlapping
-startup/close; caller-created protocol clients remain caller-owned.
+startup/close. Cleanup keeps reverse order but can be bounded; timeout is
+reported as failed and uncertain while later cleanup and runtime close proceed.
+Caller-created protocol clients remain caller-owned.
 
 This is not a durable plugin loader or a general transaction system. It does
 not load model-generated code, persist or auto-deploy definitions, reverse

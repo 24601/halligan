@@ -59,6 +59,7 @@ export type {
   AxEventCloseOptions,
   AxEventContext,
   AxEventContinuation,
+  AxEventContinuationEnqueueRequest,
   AxEventContinuationRegistration,
   AxEventCorrelationKey,
   AxEventDeadLetter,
@@ -97,6 +98,14 @@ export type {
   AxEventTargetInputContext,
   AxEventTrust,
   AxEventValue,
+  AxEventVerificationResult,
+  AxEventVerificationStatus,
+  AxEventVerificationUsage,
+  AxEventVerifierContext,
+  AxEventVerifierPolicy,
+  AxEventVerifierResult,
+  AxEventVerifierTransitionRecord,
+  AxEventVerifierTransitionRequest,
   AxProgramStateEnvelope,
   AxProgramStateStore,
 } from './types.js';
@@ -110,3 +119,4 @@ export {
 } from './types.js';
 export type { AxUCPWebhookEventSourceOptions } from './ucpSource.js';
 export { AxUCPWebhookEventSource } from './ucpSource.js';
+export { axEventCanonicalJson } from './util.js';

@@ -10,6 +10,10 @@
  */
 
 import type { AxAIService } from '../ai/types.js';
+import {
+  type AxACEPlaybookRenderOptions,
+  isBulletApplicable,
+} from '../dsp/optimizers/acePlaybook.js';
 import type { AxACEPlaybook } from '../dsp/optimizers/aceTypes.js';
 import type { AxPlaybookOptions, AxPlaybookSnapshot } from '../dsp/playbook.js';
 import type { AxAgentFailureSignal } from './agentInternal/failureReport.js';
@@ -150,13 +154,15 @@ export function isPlaybookSnapshotSeed(
  * permanently suppressed by one bad LLM call.
  */
 export function collectCoveredFailureSignatures(
-  snapshot: Readonly<AxPlaybookSnapshot>
+  snapshot: Readonly<AxPlaybookSnapshot>,
+  renderOptions?: Readonly<AxACEPlaybookRenderOptions>
 ): Set<string> {
   const covered = new Set<string>();
   const liveBulletIds = new Set<string>();
   for (const bullets of Object.values(snapshot.playbook?.sections ?? {})) {
     for (const bullet of bullets ?? []) {
-      liveBulletIds.add(bullet.id);
+      if (isBulletApplicable(bullet, renderOptions))
+        liveBulletIds.add(bullet.id);
     }
   }
   const history = snapshot.artifact?.history ?? [];
@@ -167,7 +173,9 @@ export function collectCoveredFailureSignatures(
       return;
     }
     const deltas = history.filter(
-      (entry) => entry.source === 'online' && entry.exampleIndex === index
+      (entry) =>
+        (entry.source === 'online' || entry.source === 'agent-evolve') &&
+        entry.exampleIndex === index
     );
     const curatorRan = (event as { curator?: unknown }).curator !== undefined;
     const alive =

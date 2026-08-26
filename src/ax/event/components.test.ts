@@ -639,4 +639,87 @@ describe('AxEventComponentManager', () => {
     expect(unmanagedResources).toBe(1);
     expect(manager.inspect('unmanaged')?.diagnostics).toEqual([]);
   });
+
+  it('bounds a hanging disposer, records uncertainty, and continues reverse cleanup', async () => {
+    const lifecycle: string[] = [];
+    const manager = new AxEventComponentManager();
+    await manager.define({
+      id: 'bounded-cleanup',
+      version: '1',
+      activate: (context) => {
+        context.addDisposer('first', () => lifecycle.push('first'));
+        context.addDisposer('hanging', () => {
+          lifecycle.push('hanging');
+          return new Promise<void>(() => undefined);
+        });
+        context.addDisposer('last', () => lifecycle.push('last'));
+      },
+    });
+    await manager.activate();
+
+    await expect(manager.dispose(undefined, { timeoutMs: 10 })).rejects.toThrow(
+      'Failed to dispose'
+    );
+
+    expect(lifecycle).toEqual(['last', 'hanging', 'first']);
+    expect(manager.inspect('bounded-cleanup')).toMatchObject({
+      state: 'failed',
+      diagnostics: [
+        expect.objectContaining({
+          code: 'disposer-timeout',
+          effect: 'hanging',
+        }),
+      ],
+    });
+  });
+
+  it('disposes an acquisition that completes after abort without publishing it', async () => {
+    const setup = deferred();
+    const dispose = vi.fn();
+    const controller = new AbortController();
+    const manager = new AxEventComponentManager();
+    await manager.define({
+      id: 'late-acquisition',
+      version: '1',
+      activate: (context) =>
+        context.acquire('socket', async () => {
+          await setup.promise;
+          return { value: 'socket', dispose };
+        }),
+    });
+
+    const activation = manager.activate(undefined, {
+      signal: controller.signal,
+      timeoutMs: 50,
+    });
+    await Promise.resolve();
+    controller.abort('closing');
+    setup.resolve();
+
+    await expect(activation).rejects.toThrow('activation transaction failed');
+    expect(dispose).toHaveBeenCalledOnce();
+    expect(manager.inspect('late-acquisition')?.state).toBe('failed');
+  });
+
+  it('observes rejecting diagnostic callbacks without changing cleanup', async () => {
+    const manager = new AxEventComponentManager({
+      onDiagnostic: async () => {
+        throw new Error('diagnostic callback failed');
+      },
+    });
+    await manager.define({
+      id: 'diagnostic-callback',
+      version: '1',
+      activate: (context) => {
+        context.addDisposer('failing', () => {
+          throw new Error('dispose failed');
+        });
+      },
+    });
+    await manager.activate();
+
+    await expect(manager.dispose()).rejects.toThrow('Failed to dispose');
+    await Promise.resolve();
+    expect(manager.inspect('diagnostic-callback')?.state).toBe('failed');
+  });
 });

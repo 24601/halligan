@@ -188,6 +188,121 @@ Correlation ownership is unique within one identity scope. Progress events can
 use `observe`; terminal events use `resume`. Missing, ambiguous, or expired
 continuations are dead-lettered rather than converted into fresh work.
 
+## Verifier-Gated Continuation
+
+Attach a host-owned verifier when a target may make bounded attempts toward a
+deterministically checkable result. The target receives failure evidence only
+through continuation metadata; it never receives or mutates the verifier.
+
+```ts
+const target = eventTarget('repair')
+  .program(repairAgent)
+  .ai(llm)
+  .input(mapInitialOrVerificationFeedback)
+  .retrySafety('idempotent')
+  .verifier({
+    id: 'test-suite-v1',
+    maxRuns: 4,
+    maxTokens: 40_000,
+    maxWallTimeMs: 10 * 60_000,
+    maxCostUSD: 2,
+    timeoutMs: 30_000,
+    maxEvidenceBytes: 4_096,
+    backoffMs: (attempt) => 1_000 * 2 ** (attempt - 1),
+    fingerprint: (output) => output.workspaceTreeHash,
+    usage: () => readHostRecordedUsage(),
+    verify: (_output, { signal }) => runHostTestSuite({ signal }),
+  })
+  .build();
+```
+
+After each target attempt, the runtime persists output before calling
+`verify`. A pass records `verification.status: 'pass'`, releases final sinks,
+and completes. A failure bounds every persisted verifier field and its typed
+JSON evidence, persists it on the run, then uses the store's fenced V2 verifier
+transition to atomically terminalize the parent, establish an identity-scoped
+continuation, consume the prior continuation when present, and enqueue the
+resume delivery. The evidence is exposed at
+`continuation.metadata.verification.failure` to the target's resume mapping.
+The existing store, worker, retry, cancellation, and ordering machinery owns
+the next attempt; no scheduler daemon is created.
+
+Limits are fail-closed. `maxRuns` permits that many verifier calls; token, cost,
+and wall-time limits stop before another verifier call once host-reported usage
+reaches the bound. Exhaustion, unchanged state, verifier error, and timeout end
+with run/delivery status `verification_failed` plus the precise typed
+verification status and reason. Abort remains `cancelled`. An accepted
+`cancelRun` during an in-flight V2 transition rejects the store handoff after
+commitment awaits and does not install or run the child. If a caller-supplied
+fingerprint equals the fingerprint of the previous failure, the target's new
+output is persisted but the repeated verifier call and further loop are
+suppressed. Final sinks run only after a pass.
+
+Use deterministic fingerprints over all state relevant to the verifier. The
+`usage`, `fingerprint`, and `verify` callbacks execute in the host under the
+same timeout and abort semantics; core never runs shell commands. Verifier
+targets use non-streaming execution so no chunk or final sink is observable
+before a pass. Outputless clarification waits are not verified. Autonomous
+targets should be idempotent; otherwise lease recovery stops at
+`outcome_unknown` rather than guessing whether arbitrary external side effects
+occurred. Stores must advertise `axevent-verifier-transition-v2`; the runtime
+startup-gates verifier routes rather than silently using process-local policy
+state. The transition is fence-checked, idempotent, capacity-aware, and atomic
+for the parent run/delivery, continuation ownership, child delivery, and old
+continuation consumption. Each operation has a deterministic child ID and an
+immutable store journal containing SHA-256 commitments to the canonical full
+request and deterministic child projection plus the minimal receipt. The
+journal never duplicates run output, event payload, identity, continuation
+metadata, or verifier evidence. Conflicting reuse is rejected; a committed
+operation is confirmed after lost acknowledgements instead of regressing its
+parent to `outcome_unknown`. Confirmation requires the complete expected
+request, including its parent fence, and returns only the minimal receipt;
+operation IDs alone cannot retrieve run or output data. SQLite retains these
+compact commitments for the database lifetime while ordinary payload pruning
+removes the underlying sensitive data. Schema migration rewrites legacy V2
+full-record journals to commitments and securely deletes the old rows. A
+durable cleanup-pending marker is committed with that migration; every later
+startup checkpoints and truncates the WAL before clearing the marker, so a
+crash between migration commit and cleanup cannot strand legacy payload frames.
+These verifier journal and cleanup-marker semantics are SQLite event schema v4;
+later event-family schema lines must migrate from verifier-v4 rather than
+reusing its version numbers or replacing its capability marker.
+These guarantees do not make arbitrary target or sink I/O exactly once.
+
+### Deterministic Evaluation
+
+Run the checked-in one-shot versus bounded-continuation hill-climbing suite:
+
+```bash
+node --import=tsx scripts/eval-event-verifier-continuation.ts
+npx vitest run scripts/event-verifier-eval.test.ts
+```
+
+The seven fixed tasks cover recoverable work, an already-correct/no-benefit
+case, an impossible task, unchanged state, a misleading verifier, a failing
+verifier, and SQLite close/reopen restart recovery. The deterministic outcome
+counts are:
+
+| Metric | One shot | Bounded continuation |
+| --- | ---: | ---: |
+| Ground-truth pass rate | 1/7 (14.3%) | 3/7 (42.9%) |
+| Target attempts | 7 | 12 |
+| Verifier calls | 7 | 11 |
+| Suppressed verifier calls | 0 | 1 |
+| Correct hard-stop cases | 3/3 | 3/3 |
+| Restart recovery | not exercised | passed |
+| False promotions from misleading verifier | 1 | 1 |
+
+The command also reports measured wall-clock time for that invocation; it is
+diagnostic rather than a fixed assertion. Continuation helps only when later
+attempts can use bounded failure evidence to change a failing result. It adds
+attempt, verifier, persistence, and latency overhead to recoverable failures,
+and no quality benefit to already-correct work. Impossible work exhausts its
+budget, unchanged work suppresses a redundant verifier call, verifier failure
+stops closed, and an incorrect verifier can still promote an incorrect result.
+The independent ground-truth predicate keeps that false promotion visible; the
+evaluation does not relabel it as success.
+
 ## Delivery and Side Effects
 
 The built-in `AxInMemoryEventStore` is volatile and single-process. It retries
@@ -271,7 +386,11 @@ dispose calls are idempotent. During activation, a transition `AbortSignal`
 forwards abort into the component lifetime controller. The listener is detached
 when activation commits, so a later transition abort does not terminate an
 active component; deactivation or disposal does. Teardown that has begun runs to
-completion rather than abandoning registered cleanup.
+each registered disposer once in reverse order. Pass `timeoutMs` to a lifecycle
+transition to bound the total cleanup wait. A timed-out disposer is left
+`failed`, emits a `disposer-timeout` diagnostic, and does not block later
+cleanup; because its external outcome is unknown, the manager does not report
+that component as disposed.
 
 `replace()` stages a new-version candidate and every active transitive dependent
 while the prior graph remains live. Staged dependency lookup prefers the staged
@@ -298,7 +417,11 @@ boundary is diagnosed and rejected; its callback is not invoked asynchronously.
 `AxEventRuntime.close()` synchronously fences further source startup and aborts
 an in-flight source activation before waiting for source cleanup. If a source
 ignores abort and returns a handle later, the activation transaction closes that
-handle before startup rejects; later configured sources are not started.
+handle before startup rejects; later configured sources are not started. The
+close timeout is one bound across component cleanup, workers, active verifier
+and authority callbacks, and redrives. Throwing or non-settling source disposers
+cannot prevent the store close boundary, but timed-out external cleanup remains
+uncertain rather than being reported as successful.
 
 ### Explicit non-guarantees
 
@@ -311,7 +434,8 @@ handle before startup rejects; later configured sources are not started.
 - Replacement is atomic only for the manager-visible binding. Candidate setup
   effects that must remain externally invisible need host-provided staging.
 - Abort is cooperative. Activation code that ignores its signal can delay the
-  serialized transition queue.
+  serialized transition queue until the caller's close/cleanup deadline. A
+  timed-out callback may still settle later in its host environment.
 - Component definitions and state are process-local and intentionally not a
   durable desired-state or auto-deployment system.
 

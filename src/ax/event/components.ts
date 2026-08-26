@@ -40,6 +40,7 @@ export type AxEventComponentDiagnosticCode =
   | 'missing-disposer'
   | 'late-disposer'
   | 'disposer-failed'
+  | 'disposer-timeout'
   | 'replacement-failed'
   | 'replacement-cleanup-failed';
 
@@ -71,13 +72,15 @@ export interface AxEventComponentInspection {
 
 export interface AxEventComponentTransitionOptions {
   signal?: AbortSignal;
+  /** Maximum total time spent awaiting cleanup started by this transition. */
+  timeoutMs?: number;
 }
 
 export interface AxEventComponentManagerOptions {
   onDiagnostic?: (
     diagnostic: Readonly<AxEventComponentDiagnostic>,
     component: Readonly<AxEventComponentInspection>
-  ) => void;
+  ) => void | Promise<void>;
 }
 
 export class AxEventComponentLeakError extends Error {
@@ -102,6 +105,53 @@ export class AxEventComponentTransitionError extends Error {
     super(message, options);
     this.name = 'AxEventComponentTransitionError';
   }
+}
+
+class AxEventComponentDisposerTimeoutError extends Error {
+  constructor(componentId: string, effect: string) {
+    super(`Disposer ${effect} timed out for event component ${componentId}`);
+    this.name = 'AxEventComponentDisposerTimeoutError';
+  }
+}
+
+function transitionDeadline(timeoutMs: number | undefined): number | undefined {
+  if (timeoutMs === undefined) return undefined;
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
+    throw new Error('Event component cleanup timeout must be non-negative');
+  }
+  return Date.now() + timeoutMs;
+}
+
+async function settleDisposer(
+  disposer: AxEventComponentDisposer,
+  deadline: number | undefined,
+  componentId: string,
+  effect: string
+): Promise<unknown | undefined> {
+  const operation = Promise.resolve().then(disposer);
+  if (deadline === undefined) {
+    try {
+      await operation;
+      return undefined;
+    } catch (error) {
+      return error;
+    }
+  }
+  const remaining = Math.max(0, deadline - Date.now());
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const outcome = await Promise.race([
+    operation.then(
+      () => ({ settled: true as const }),
+      (error: unknown) => ({ settled: true as const, error })
+    ),
+    new Promise<{ settled: false }>((resolve) => {
+      timer = setTimeout(() => resolve({ settled: false }), remaining);
+    }),
+  ]);
+  if (timer !== undefined) clearTimeout(timer);
+  if (outcome.settled) return 'error' in outcome ? outcome.error : undefined;
+  void operation.catch(() => undefined);
+  return new AxEventComponentDisposerTimeoutError(componentId, effect);
 }
 
 type ManagedEffect = {
@@ -133,6 +183,7 @@ class AxManagedEventComponentContext
     private readonly record: ComponentRecord,
     private readonly scope: AbortController,
     private readonly transitionSignal: AbortSignal | undefined,
+    private readonly cleanupDeadline: number | undefined,
     private readonly resolveDependency: <T>(id: string) => T,
     private readonly reportDiagnostic: (
       diagnostic: AxEventComponentDiagnostic
@@ -235,11 +286,11 @@ class AxManagedEventComponentContext
       });
       throw error;
     }
-    if (!this.registrationOpen) {
+    if (!this.registrationOpen || this.signal.aborted) {
       const error = new AxEventComponentLeakError(
         this.id,
         label,
-        `Event component ${this.id} acquisition ${label} completed after activation closed`
+        `Event component ${this.id} acquisition ${label} completed after activation closed or aborted`
       );
       this.reportDiagnostic({
         code: 'late-disposer',
@@ -250,11 +301,18 @@ class AxManagedEventComponentContext
         at: Date.now(),
         error,
       });
-      try {
-        await acquired.dispose();
-      } catch (disposeError) {
+      const disposeError = await settleDisposer(
+        acquired.dispose,
+        this.cleanupDeadline,
+        this.id,
+        label
+      );
+      if (disposeError) {
         this.reportDiagnostic({
-          code: 'disposer-failed',
+          code:
+            disposeError instanceof AxEventComponentDisposerTimeoutError
+              ? 'disposer-timeout'
+              : 'disposer-failed',
           componentId: this.id,
           phase: 'activate',
           effect: label,
@@ -268,11 +326,18 @@ class AxManagedEventComponentContext
     try {
       this.addDisposer(label, acquired.dispose);
     } catch (error) {
-      try {
-        await acquired.dispose();
-      } catch (disposeError) {
+      const disposeError = await settleDisposer(
+        acquired.dispose,
+        this.cleanupDeadline,
+        this.id,
+        label
+      );
+      if (disposeError) {
         this.reportDiagnostic({
-          code: 'disposer-failed',
+          code:
+            disposeError instanceof AxEventComponentDisposerTimeoutError
+              ? 'disposer-timeout'
+              : 'disposer-failed',
           componentId: this.id,
           phase: 'activate',
           effect: label,
@@ -389,17 +454,27 @@ export class AxEventComponentManager {
   ): Promise<void> {
     return this.enqueue(async () => {
       throwIfAborted(options.signal);
+      const cleanupDeadline = transitionDeadline(options.timeoutMs);
       const order = this.activationOrder(this.normalizeTargets(ids, false));
       const activated: ComponentRecord[] = [];
       try {
         for (const record of order) {
           throwIfAborted(options.signal);
           if (record.state === 'active') continue;
-          await this.activateRecord(record, options.signal);
+          await this.activateRecord(
+            record,
+            options.signal,
+            undefined,
+            cleanupDeadline
+          );
           activated.push(record);
         }
       } catch (error) {
-        const rollbackErrors = await this.rollback(activated, 'activate');
+        const rollbackErrors = await this.rollback(
+          activated,
+          'activate',
+          cleanupDeadline
+        );
         const componentId =
           error instanceof AxEventComponentTransitionError
             ? error.componentId
@@ -424,7 +499,8 @@ export class AxEventComponentManager {
       throwIfAborted(options.signal);
       await this.deactivateRecords(
         this.normalizeTargets(ids, true),
-        'deactivate'
+        'deactivate',
+        transitionDeadline(options.timeoutMs)
       );
     });
   }
@@ -435,12 +511,13 @@ export class AxEventComponentManager {
   ): Promise<void> {
     return this.enqueue(async () => {
       throwIfAborted(options.signal);
+      const cleanupDeadline = transitionDeadline(options.timeoutMs);
       const targets = this.dependentDefinitionClosure(
         this.normalizeTargets(ids, true)
       );
       let teardownError: unknown;
       try {
-        await this.deactivateRecords(targets, 'dispose');
+        await this.deactivateRecords(targets, 'dispose', cleanupDeadline);
       } catch (error) {
         teardownError = error;
       }
@@ -467,6 +544,7 @@ export class AxEventComponentManager {
   ): Promise<Readonly<AxEventComponentInspection>> {
     return this.enqueue(async () => {
       throwIfAborted(options.signal);
+      const cleanupDeadline = transitionDeadline(options.timeoutMs);
       const normalized = normalizeDefinition(definition);
       const previous = this.records.get(normalized.id);
       if (!previous || previous.state === 'disposed') {
@@ -535,7 +613,12 @@ export class AxEventComponentManager {
         for (const dependency of dependencyOrder) {
           throwIfAborted(options.signal);
           if (dependency.state === 'active') continue;
-          await this.activateRecord(dependency, options.signal);
+          await this.activateRecord(
+            dependency,
+            options.signal,
+            undefined,
+            cleanupDeadline
+          );
           activatedDependencies.push(dependency);
         }
         for (const stagedRecord of stagedOrder) {
@@ -543,14 +626,16 @@ export class AxEventComponentManager {
           await this.activateRecord(
             stagedRecord,
             options.signal,
-            resolveStagedDependency
+            resolveStagedDependency,
+            cleanupDeadline
           );
           activatedStaged.push(stagedRecord);
         }
       } catch (error) {
         const rollbackErrors = await this.rollback(
           [...activatedDependencies, ...activatedStaged],
-          'replace'
+          'replace',
+          cleanupDeadline
         );
         const restoration =
           previous.state === 'active'
@@ -580,7 +665,8 @@ export class AxEventComponentManager {
       for (const previousRecord of [...previousGraph].reverse()) {
         const cleanupErrors = await this.cleanupRecord(
           previousRecord,
-          'replace'
+          'replace',
+          cleanupDeadline
         );
         if (cleanupErrors.length > 0) {
           const activeRecord = staged.get(previousRecord.definition.id)!;
@@ -662,7 +748,9 @@ export class AxEventComponentManager {
   private async activateRecord(
     record: ComponentRecord,
     transitionSignal?: AbortSignal,
-    resolveDependency: <T>(id: string) => T = <T>(id: string) => this.get<T>(id)
+    resolveDependency: <T>(id: string) => T = <T>(id: string) =>
+      this.get<T>(id),
+    cleanupDeadline?: number
   ): Promise<void> {
     const dependencyValues = new Map<string, unknown>();
     for (const dependency of record.definition.dependencies ?? []) {
@@ -678,6 +766,7 @@ export class AxEventComponentManager {
       record,
       scope,
       transitionSignal,
+      cleanupDeadline,
       <T>(id: string) => dependencyValues.get(id) as T,
       (diagnostic) => this.addDiagnostic(record, diagnostic)
     );
@@ -689,7 +778,11 @@ export class AxEventComponentManager {
       context.completeActivation();
       record.state = 'active';
     } catch (error) {
-      const cleanupErrors = await this.cleanupRecord(record, 'activate');
+      const cleanupErrors = await this.cleanupRecord(
+        record,
+        'activate',
+        cleanupDeadline
+      );
       record.state = 'failed';
       record.lastError =
         cleanupErrors.length > 0
@@ -710,12 +803,15 @@ export class AxEventComponentManager {
 
   private async deactivateRecords(
     targets: readonly string[],
-    phase: 'deactivate' | 'dispose'
+    phase: 'deactivate' | 'dispose',
+    cleanupDeadline?: number
   ): Promise<void> {
     const order = this.activeDependentClosure(targets).reverse();
     const errors: unknown[] = [];
     for (const record of order) {
-      errors.push(...(await this.cleanupRecord(record, phase)));
+      errors.push(
+        ...(await this.cleanupRecord(record, phase, cleanupDeadline))
+      );
     }
     if (errors.length > 0) {
       throw new AxEventComponentTransitionError(
@@ -804,7 +900,8 @@ export class AxEventComponentManager {
 
   private async cleanupRecord(
     record: ComponentRecord,
-    phase: AxEventComponentDiagnostic['phase']
+    phase: AxEventComponentDiagnostic['phase'],
+    cleanupDeadline?: number
   ): Promise<unknown[]> {
     record.state = 'deactivating';
     record.context?.beginCleanup(
@@ -814,15 +911,23 @@ export class AxEventComponentManager {
     for (const effect of [...record.effects].reverse()) {
       if (effect.state !== 'registered') continue;
       effect.state = 'disposing';
-      try {
-        await effect.dispose();
+      const error = await settleDisposer(
+        effect.dispose,
+        cleanupDeadline,
+        record.definition.id,
+        effect.label
+      );
+      if (!error) {
         effect.state = 'disposed';
-      } catch (error) {
+      } else {
         effect.state = 'failed';
         effect.error = error;
         errors.push(error);
         this.addDiagnostic(record, {
-          code: 'disposer-failed',
+          code:
+            error instanceof AxEventComponentDisposerTimeoutError
+              ? 'disposer-timeout'
+              : 'disposer-failed',
           componentId: record.definition.id,
           phase,
           effect: effect.label,
@@ -849,11 +954,14 @@ export class AxEventComponentManager {
 
   private async rollback(
     activated: readonly ComponentRecord[],
-    phase: 'activate' | 'replace'
+    phase: 'activate' | 'replace',
+    cleanupDeadline?: number
   ): Promise<unknown[]> {
     const errors: unknown[] = [];
     for (const record of [...activated].reverse()) {
-      errors.push(...(await this.cleanupRecord(record, phase)));
+      errors.push(
+        ...(await this.cleanupRecord(record, phase, cleanupDeadline))
+      );
     }
     return errors;
   }
@@ -909,7 +1017,9 @@ export class AxEventComponentManager {
   ): void {
     record.diagnostics.push(diagnostic);
     try {
-      this.options.onDiagnostic?.(diagnostic, snapshot(record));
+      void Promise.resolve(
+        this.options.onDiagnostic?.(diagnostic, snapshot(record))
+      ).catch(() => undefined);
     } catch {
       // Diagnostics must not change lifecycle outcomes.
     }

@@ -56,4 +56,80 @@ describe('createAxGenAdapter', () => {
     );
     expect(ds['root::fn:lookup_user:desc']?.[1].score).toBe(0);
   });
+
+  it('keeps structured scalar, objectives, and feedback aligned in reflective rows', async () => {
+    const program = {
+      applyOptimizedComponents: () => {},
+      forward: async (_ai: AxAIService, input: any) => {
+        if (input.id === 'error') throw new Error('failed');
+        return { answer: input.id };
+      },
+    };
+    const adapter = createAxGenAdapter({
+      program: program as any,
+      ai: {} as AxAIService,
+      sampleCount: 1,
+      metricFn: async ({ example }) => ({
+        score: 0.8,
+        feedback: `improve-${example.id}`,
+        scores: { accuracy: 1, brevity: 0.25 },
+      }),
+    });
+
+    const batch = await adapter.evaluate(
+      [{ id: 'a' }, { id: 'error' }, { id: 'b' }],
+      {},
+      true
+    );
+    expect(batch.scores).toEqual([0.8, 0, 0.8]);
+    expect(batch.scoreVectors).toEqual([
+      { accuracy: 1, brevity: 0.25 },
+      { accuracy: 0, brevity: 0 },
+      { accuracy: 1, brevity: 0.25 },
+    ]);
+    expect(batch.feedback).toEqual(['improve-a', undefined, 'improve-b']);
+
+    const dataset = adapter.make_reflective_dataset({}, batch, [
+      'root::instruction',
+    ]);
+    expect(dataset['root::instruction']).toMatchObject([
+      { score: 0.8, feedback: 'improve-a', output: { answer: 'a' } },
+      { score: 0, error: 'failed' },
+      { score: 0.8, feedback: 'improve-b', output: { answer: 'b' } },
+    ]);
+  });
+
+  it.each([0, 1, 2])(
+    'zero-fills named objectives when adapter rollout %i fails',
+    async (failureIndex) => {
+      const adapter = createAxGenAdapter({
+        program: {
+          applyOptimizedComponents: () => {},
+          forward: async (_ai: AxAIService, input: any) => {
+            if (input.fail) throw new Error('failed');
+            return { answer: 'ok' };
+          },
+        } as any,
+        ai: {} as AxAIService,
+        sampleCount: 1,
+        metricFn: async () => ({
+          score: 0.8,
+          scores: { accuracy: 1, brevity: 1 },
+        }),
+      });
+
+      const batch = await adapter.evaluate(
+        [0, 1, 2].map((index) => ({ fail: index === failureIndex })),
+        {}
+      );
+
+      expect(batch.scoreVectors).toEqual(
+        [0, 1, 2].map((index) =>
+          index === failureIndex
+            ? { accuracy: 0, brevity: 0 }
+            : { accuracy: 1, brevity: 1 }
+        )
+      );
+    }
+  );
 });
