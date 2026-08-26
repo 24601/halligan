@@ -994,3 +994,38 @@ void structuredPlaybookMetricOptions;
     contextPolicy: { pruneUsedDocs: true },
   });
 }
+
+// playbook retention policies preserve typed slice identities and thresholds
+{
+  const runtime = {} as AxCodeRuntime;
+  const a = agent('query:string -> answer:string', {
+    contextFields: [] as const,
+    runtime,
+  });
+  const task = {
+    id: 'refund-1',
+    input: { query: 'refund this order' },
+    criteria: 'refunds eligible orders',
+  };
+  const result = a.playbook().evolve([task], {
+    retentionPolicy: {
+      evaluatorId: 'refund-metric-v1',
+      slices: [{ name: 'refunds', version: '2026-08', tasks: [task] }],
+      minCurrentGain: 0.05,
+      maxWorstHistoricalLoss: 0.02,
+      maxMeanHistoricalLoss: 0.01,
+    },
+  });
+  void result;
+
+  a.playbook().evolve([task], {
+    retentionPolicy: {
+      evaluatorId: 'refund-metric-v1',
+      // @ts-expect-error retention slices require a caller-managed version
+      slices: [{ name: 'refunds', tasks: [task] }],
+      minCurrentGain: 0.05,
+      maxWorstHistoricalLoss: 0.02,
+      maxMeanHistoricalLoss: 0.01,
+    },
+  });
+}

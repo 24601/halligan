@@ -7,7 +7,7 @@ import {
   isFailureRecord,
 } from './failureClusters.js';
 import type { AxAgentPlaybookEvolveRunRecord } from './playbookEvolveTypes.js';
-import { buildProposal } from './proposals.js';
+import { applyProposal, buildProposal } from './proposals.js';
 import {
   buildFailureExcerpt,
   coerceToArray,
@@ -315,6 +315,113 @@ describe('proposals', () => {
     expect(proposal.feedback).toContain(`[${BOOM}]`);
     expect(proposal.feedback).toContain('Compute inline');
     expect(proposal.feedback).toContain(BOOM);
+  });
+
+  it('surfaces both update and restoration failures', async () => {
+    const proposal = buildProposal(weakness);
+    const updateError = new Error('post-mutation failure');
+    const rollbackError = new Error('snapshot restoration failure');
+    const handle = {
+      getState: () => ({ value: 'before' }),
+      update: async () => {
+        throw updateError;
+      },
+      load: () => {
+        throw rollbackError;
+      },
+    };
+
+    try {
+      await applyProposal({ proposal, playbookHandle: handle });
+      throw new Error('expected applyProposal to reject');
+    } catch (error) {
+      expect(error).toBeInstanceOf(AggregateError);
+      expect((error as AggregateError).errors).toEqual([
+        updateError,
+        rollbackError,
+      ]);
+      expect((error as Error).message).toContain(
+        'update failed and exact rollback also failed'
+      );
+    }
+  });
+
+  it('restores exactly once when post-update state retrieval fails', async () => {
+    const proposal = buildProposal(weakness);
+    const before: {
+      value: string;
+      artifact: { history: { updatedBulletIds: string[] }[] };
+    } = { value: 'before', artifact: { history: [] } };
+    let state = structuredClone(before);
+    const retrievalError = new Error('post-update state retrieval failed');
+    const getState = vi
+      .fn()
+      .mockImplementationOnce(() => structuredClone(state))
+      .mockImplementationOnce(() => {
+        throw retrievalError;
+      });
+    const load = vi.fn((snapshot: typeof before) => {
+      state = structuredClone(snapshot);
+    });
+    const handle = {
+      getState,
+      update: async () => {
+        state = {
+          value: 'after',
+          artifact: { history: [{ updatedBulletIds: ['candidate-1'] }] },
+        };
+      },
+      load,
+    };
+
+    await expect(
+      applyProposal({ proposal, playbookHandle: handle })
+    ).rejects.toBe(retrievalError);
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(load).toHaveBeenCalledWith(before);
+    expect(state).toEqual(before);
+  });
+
+  it('surfaces post-update retrieval and restoration failures without retry', async () => {
+    const proposal = buildProposal(weakness);
+    const before: {
+      value: string;
+      artifact: { history: { updatedBulletIds: string[] }[] };
+    } = { value: 'before', artifact: { history: [] } };
+    let state = structuredClone(before);
+    const retrievalError = new Error('post-update state retrieval failed');
+    const rollbackError = new Error('snapshot restoration failed');
+    const getState = vi
+      .fn()
+      .mockImplementationOnce(() => structuredClone(state))
+      .mockImplementationOnce(() => {
+        throw retrievalError;
+      });
+    const load = vi.fn(() => {
+      throw rollbackError;
+    });
+    const handle = {
+      getState,
+      update: async () => {
+        state = {
+          value: 'after',
+          artifact: { history: [{ updatedBulletIds: ['candidate-1'] }] },
+        };
+      },
+      load,
+    };
+
+    try {
+      await applyProposal({ proposal, playbookHandle: handle });
+      throw new Error('expected applyProposal to reject');
+    } catch (error) {
+      expect(error).toBeInstanceOf(AggregateError);
+      expect((error as AggregateError).errors).toEqual([
+        retrievalError,
+        rollbackError,
+      ]);
+    }
+    expect(load).toHaveBeenCalledTimes(1);
   });
 });
 

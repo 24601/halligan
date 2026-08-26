@@ -19,6 +19,15 @@ import type { AxAgentPlaybookEvolveRunRecord } from './playbookEvolveTypes.js';
 /** Mutable (run + judge) pair budget shared across all improve() batches. */
 export type AxAgentEvalBudget = { remaining: number };
 
+const MAX_RUNS_PER_TASK = 100;
+const MAX_METRIC_CALLS = 1_000_000;
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new Error('AxAgent.playbook().evolve(): aborted');
+  }
+}
+
 export type AxAgentEvalBatchResult<
   IN extends AxGenIn = AxGenIn,
   OUT extends AxGenOut = AxGenOut,
@@ -28,6 +37,14 @@ export type AxAgentEvalBatchResult<
   mean: number;
   /** True when the budget ran out before every task executed. */
   exhausted: boolean;
+  /** Number of agent + metric attempts completed, including failed attempts. */
+  executedRuns: number;
+  /** Number of attempts required for complete evidence. */
+  expectedRuns: number;
+  /** False when any run threw or returned a non-finite scalar score. */
+  validEvidence: boolean;
+  /** First evaluator failure, preserved for fail-closed callers. */
+  failure?: unknown;
   /**
    * True only when every requested run completed with a finite metric and the
    * weighted aggregate has finite non-negative weights, positive total weight,
@@ -48,12 +65,35 @@ export async function runAgentEvalBatch<
   budget: AxAgentEvalBudget;
   /** Runs per task; scores average into one record. Default 1. */
   runsPerTask?: number;
+  /** Clone agent and metric inputs per run to preserve an internal corpus. */
+  isolateTaskInputs?: boolean;
   abortSignal?: AbortSignal;
 }): Promise<AxAgentEvalBatchResult<IN, OUT>> {
   const records: AxAgentPlaybookEvolveRunRecord<IN, OUT>[] = [];
-  const runsPerTask = Math.max(1, Math.floor(args.runsPerTask ?? 1));
+  const runsPerTask = args.runsPerTask ?? 1;
+  if (
+    !Number.isSafeInteger(runsPerTask) ||
+    runsPerTask <= 0 ||
+    runsPerTask > MAX_RUNS_PER_TASK
+  ) {
+    throw new Error(
+      `AxAgent.playbook().evolve(): runsPerTask must be a positive safe integer at most ${MAX_RUNS_PER_TASK}.`
+    );
+  }
+  if (
+    !Number.isSafeInteger(args.budget.remaining) ||
+    args.budget.remaining < 0 ||
+    args.budget.remaining > MAX_METRIC_CALLS
+  ) {
+    throw new Error(
+      `AxAgent.playbook().evolve(): metric budget must be a non-negative safe integer at most ${MAX_METRIC_CALLS}.`
+    );
+  }
   let exhausted = false;
-  let hadEvaluationError = false;
+  let executedRuns = 0;
+  let validEvidence = true;
+  let failure: unknown;
+  let hasFailure = false;
 
   for (const task of args.tasks) {
     const scores: number[] = [];
@@ -61,34 +101,46 @@ export async function runAgentEvalBatch<
     let lastError: string | undefined;
 
     for (let run = 0; run < runsPerTask; run++) {
-      if (args.abortSignal?.aborted) {
-        throw new Error('AxAgent.playbook().evolve(): aborted');
-      }
+      throwIfAborted(args.abortSignal);
       if (args.budget.remaining <= 0) {
         exhausted = true;
         break;
       }
       args.budget.remaining--;
+      executedRuns++;
 
       try {
+        const agentTask = args.isolateTaskInputs ? structuredClone(task) : task;
         const prediction = await args.agent._forwardForEvaluation(
           args.ai,
-          task,
+          agentTask,
           {
             ...(args.abortSignal ? { abortSignal: args.abortSignal } : {}),
           }
         );
+        throwIfAborted(args.abortSignal);
+        const metricTask = args.isolateTaskInputs
+          ? structuredClone(task)
+          : task;
         const metricResult = await args.metric({
           prediction: prediction as Record<string, unknown>,
-          example: task as unknown as Parameters<AxMetricFn>[0]['example'],
+          example:
+            metricTask as unknown as Parameters<AxMetricFn>[0]['example'],
         });
+        throwIfAborted(args.abortSignal);
         const score =
           typeof metricResult === 'number' ? metricResult : metricResult.score;
-        const finiteScore = Number.isFinite(score);
-        scores.push(finiteScore ? score : 0);
-        if (!finiteScore) {
-          hadEvaluationError = true;
+        const validScore = Number.isFinite(score);
+        scores.push(validScore ? score : 0);
+        validEvidence &&= validScore;
+        if (!validScore) {
           lastError = 'metric returned a non-finite score';
+          if (!hasFailure) {
+            failure = new TypeError(
+              'AxAgent.playbook().evolve(): evaluator metric must return a finite score.'
+            );
+            hasFailure = true;
+          }
         }
         lastPrediction = prediction;
       } catch (err) {
@@ -96,8 +148,12 @@ export async function runAgentEvalBatch<
           throw err;
         }
         scores.push(0);
-        hadEvaluationError = true;
+        validEvidence = false;
         lastError = err instanceof Error ? err.message : String(err);
+        if (!hasFailure) {
+          failure = err;
+          hasFailure = true;
+        }
       }
     }
 
@@ -136,9 +192,14 @@ export async function runAgentEvalBatch<
     records,
     mean: aggregateMean,
     exhausted,
+    executedRuns,
+    expectedRuns: args.tasks.length * runsPerTask,
+    validEvidence,
+    ...(hasFailure ? { failure } : {}),
     complete:
       !exhausted &&
-      !hadEvaluationError &&
+      validEvidence &&
+      executedRuns === args.tasks.length * runsPerTask &&
       records.length === args.tasks.length &&
       weightsValid &&
       Number.isFinite(weightSum) &&
