@@ -581,23 +581,6 @@ function tryMaterializeIngress(
     } {
   const copies = new WeakMap<object, unknown>();
   const visiting = new WeakSet<object>();
-  let catalogSnapshot: unknown;
-  try {
-    if (!Array.isArray(catalog)) return { ok: false, phase: 'catalog' };
-    catalogSnapshot = materializeDetached(
-      catalog,
-      copies,
-      visiting,
-      MAX_CATALOG_ENTRIES,
-      context as object
-    );
-  } catch (error) {
-    return {
-      ok: false,
-      phase: 'catalog',
-      limit: error instanceof MetadataLimitError,
-    };
-  }
   let contextSnapshot: unknown;
   try {
     contextSnapshot = materializeDetached(
@@ -621,6 +604,23 @@ function tryMaterializeIngress(
     );
   } catch {
     return { ok: false, phase: 'options' };
+  }
+  let catalogSnapshot: unknown;
+  try {
+    if (!Array.isArray(catalog)) return { ok: false, phase: 'catalog' };
+    catalogSnapshot = materializeDetached(
+      catalog,
+      copies,
+      visiting,
+      MAX_CATALOG_ENTRIES,
+      context as object
+    );
+  } catch (error) {
+    return {
+      ok: false,
+      phase: 'catalog',
+      limit: error instanceof MetadataLimitError,
+    };
   }
   return {
     ok: true,
@@ -881,26 +881,29 @@ export function axSelectExecutableSkills(
     : candidates
         .map(({ artifact }) => refKey(artifact))
         .sort()
-        .slice(0, optionsSnapshot.topK ?? candidates.length);
+        .slice(0, optionsSnapshot.topK ?? 3);
   const selectedKeys = new Set(ranked);
   const artifacts: AxSelectedExecutableSkill[] = [];
-
-  for (const candidate of candidates.sort(
-    (left, right) =>
-      ranked.indexOf(refKey(left.artifact)) -
-      ranked.indexOf(refKey(right.artifact))
-  )) {
-    if (!selectedKeys.has(refKey(candidate.artifact))) continue;
-    let resolved: AxAgentFunction | undefined;
+  const selected = candidates
+    .filter((candidate) => selectedKeys.has(refKey(candidate.artifact)))
+    .sort(
+      (left, right) =>
+        ranked.indexOf(refKey(left.artifact)) -
+        ranked.indexOf(refKey(right.artifact))
+    );
+  const resolvedRoots = selected.map((candidate) => {
     try {
-      resolved = contextSnapshot.resolveFunction(
+      return contextSnapshot.resolveFunction(
         candidate.artifact.functionRef,
         axExecutableSkillRef(candidate.artifact)
       );
     } catch {
-      resolved = undefined;
+      return undefined;
     }
-    const functionSnapshot = snapshotFunction(resolved);
+  });
+
+  for (const [index, candidate] of selected.entries()) {
+    const functionSnapshot = snapshotFunction(resolvedRoots[index]);
     if (!functionSnapshot) {
       candidate.inspection.eligible = false;
       candidate.inspection.reasons = ['unresolved_function'];
