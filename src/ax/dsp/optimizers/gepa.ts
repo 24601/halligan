@@ -1290,13 +1290,9 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
 
       this.currentRound = t + 1;
       const serializableCompileOptions = (() => {
-        const {
-          abortSignal: _abortSignal,
-          candidateLineage: _candidateLineage,
-          ...rest
-        } = (options ?? {}) as AxCompileOptions & {
+        const { abortSignal: _abortSignal, ...rest } = (options ??
+          {}) as AxCompileOptions & {
           abortSignal?: AbortSignal;
-          candidateLineage?: unknown;
         };
         return rest;
       })();
@@ -1605,13 +1601,9 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
           : { candidateId: candidates[bestCandidateIdx]!.id! },
         {
           ...(() => {
-            const {
-              abortSignal: _abortSignal,
-              candidateLineage: _candidateLineage,
-              ...rest
-            } = (options ?? {}) as AxCompileOptions & {
+            const { abortSignal: _abortSignal, ...rest } = (options ??
+              {}) as AxCompileOptions & {
               abortSignal?: AbortSignal;
-              candidateLineage?: unknown;
             };
             return rest;
           })(),
