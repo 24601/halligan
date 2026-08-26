@@ -1210,6 +1210,29 @@
       "verification": null
     },
     {
+      "id": "axir-2026-08-25-port-structured-native-tool-aware-react-module",
+      "status": "open",
+      "title": "Port structured native-tool-aware ReAct module",
+      "createdAt": "2026-08-25",
+      "sourcePR": 10,
+      "sourceCommit": "0c03834d19ec0bce695bc4d5a1310370ee4984f4",
+      "tsPaths": [
+        "src/ax/dsp/react.test.ts",
+        "src/ax/dsp/react.ts",
+        "src/ax/mcp/execution.ts"
+      ],
+      "portableSurface": "axgen",
+      "impact": "TypeScript now exposes react() with native/prompt tool protocols, typed terminal submit, canonical resumable history, bounded parallel execution and compaction; generated Python/Java/C++/Go/Rust packages do not yet expose equivalent semantics.",
+      "suggestedAxirWork": [
+        "Add or update the TS-derived conformance fixture.",
+        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
+        "Run npm run axir:conformance:check and npm run test:axir."
+      ],
+      "completedAt": null,
+      "completedByCommit": null,
+      "verification": null
+    },
+    {
       "id": "axir-2026-08-26-port-gepa-built-in-maxexamples-0-optional-reflectiveexamples",
       "status": "open",
       "title": "Port GEPA built-in maxExamples 0 optional reflectiveExamples",

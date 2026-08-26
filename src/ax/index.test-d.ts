@@ -21,6 +21,7 @@ import {
   flow,
   fn,
   optimize,
+  react,
 } from './index.js';
 import type { Equal, Expect, Flatten } from './util/typetest.js';
 
@@ -356,6 +357,27 @@ const optionalGenerator = ax(`
   const _bad: Result = { responseText: 'r', sentiment: 'angry' };
   void [_ok, _bad];
 }
+
+// react() preserves string-signature input/output inference and discriminates
+// successful structured output from complete null-shaped runtime failure.
+const reactProgram = react('question:string -> answer:string, score:number');
+type ReactResult = Awaited<ReturnType<typeof reactProgram.forward>>;
+type _reactSuccessOutput = Expect<
+  Equal<
+    Flatten<Extract<ReactResult, { success: true }>['output']>,
+    { answer: string; score: number }
+  >
+>;
+type _reactFailureOutput = Expect<
+  Equal<
+    Flatten<Extract<ReactResult, { success: false }>['output']>,
+    { answer: string | null; score: number | null }
+  >
+>;
+const reactAI = {} as AxAIService;
+void reactProgram.forward(reactAI, { question: 'typed' });
+// @ts-expect-error question must be a string
+void reactProgram.forward(reactAI, { question: 42 });
 
 // === fn() Function Builder Type Tests ===
 const calculatedTool = fn('calculate')

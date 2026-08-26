@@ -27,6 +27,8 @@ Ax keeps the model boundary explicit:
 - `ai()` owns provider setup, model selection, routing, streaming, media, embeddings, thinking, and usage.
 - `s()` parses reusable signatures when you need to inspect or compose contracts.
 - `ax()` runs a structured generation program from a signature.
+- TypeScript's `react()` runs a focused native-tool-aware loop with a typed
+  terminal output, canonical resumable history, and a strict prompt fallback.
 - `agent()` runs an RLM agent where model-written actor steps use tools, child agents, discovery, memory, and a runtime session.
 - `{{optimizeName}}` tunes programs with examples, metrics, GEPA, and Pareto-aware artifacts.
 
