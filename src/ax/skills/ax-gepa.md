@@ -82,7 +82,7 @@ const result = await optimize(program, train, metric, {
 
 - `references` are ordered, in-memory, trusted inputs to proposal generation. They are not runtime agent skills, tools, filesystem paths, or persisted optimized-program data.
 - `additionalGuidance` augments the built-in proposal contract; it does not replace component constraints.
-- `maxExamples` bounds the ordered reflective examples passed to each proposal. It does not change the training or held-out evaluation sets.
+- `maxExamples` bounds the ordered reflective examples passed to each proposal. It does not change the training or held-out evaluation sets. `maxExamples: 0` keeps an empty example list; the built-in policy still calls the teacher and omits the optional `reflectiveExamples` field instead of injecting a dummy example or failing required-input rendering.
 - A custom `policy` proposes text only. GEPA deterministically enforces component-owned `maxLength`, `preserve`, and `validate` before metric-based acceptance. `format` and natural-language `constraints` are proposal context, not deterministic checks unless the component's `validate` function enforces them.
 - Returning `undefined` keeps the current component value. Invalid proposals are retried with `previousValidationError`; exhausted retries also keep the current value.
 - The same `gepaProposal` option is available on `AxGEPA.compile(...)`, `optimize(...)`, and `agent.optimize(...)`.
