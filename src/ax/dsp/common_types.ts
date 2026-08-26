@@ -1,5 +1,6 @@
 import type { AxAIService, AxLoggerFunction } from '../ai/types.js';
 import type { AxGEPAAdapter } from './optimizers/gepaAdapter.js';
+import type { AxGEPACandidateLineageOptions } from './optimizers/gepaLineage.js';
 import type { AxGEPAProposalOptions } from './optimizers/gepaReflection.js';
 import type { AxOptimizerLoggerData } from './optimizerTypes.js';
 import type { AxFieldValue, AxResultPickerFunction } from './types.js';
@@ -203,6 +204,14 @@ export interface AxCompileOptions {
   skipPerfectScore?: boolean;
   perfectScore?: number;
   maxMetricCalls?: number;
+  /**
+   * GEPA only: stop between candidate batch evaluations. Cancellation is
+   * not a shared optimizer contract and is not currently propagated into
+   * bootstrap or teacher-reflection program calls.
+   */
+  abortSignal?: AbortSignal;
+  /** Opt in to GEPA candidate lineage with defaults or retention/privacy controls. */
+  candidateLineage?: boolean | AxGEPACandidateLineageOptions;
   /**
    * Custom labels to include in OpenTelemetry metrics.
    * These labels are merged with axGlobals.customLabels and AI service customLabels.

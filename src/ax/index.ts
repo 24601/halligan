@@ -907,6 +907,18 @@ import type {
   AxGEPAEvaluationState,
 } from './dsp/optimizers/gepaEvaluation.js';
 import type {
+  AxGEPACandidateComponentDelta,
+  AxGEPACandidateDecision,
+  AxGEPACandidateDisposition,
+  AxGEPACandidateEvaluation,
+  AxGEPACandidateFailure,
+  AxGEPACandidateLineageManifest,
+  AxGEPACandidateLineageOptions,
+  AxGEPACandidateLineageRecord,
+  AxGEPACandidateStrategy,
+  AxGEPAResolvedLineageOptions,
+} from './dsp/optimizers/gepaLineage.js';
+import type {
   AxGEPAOptimizationReference,
   AxGEPAProposalOptions,
   AxGEPAProposalPolicy,
@@ -2327,6 +2339,15 @@ export type { AxGEPAAdapter };
 export type { AxGEPABatchEvaluation };
 export type { AxGEPABatchRow };
 export type { AxGEPABootstrapOptions };
+export type { AxGEPACandidateComponentDelta };
+export type { AxGEPACandidateDecision };
+export type { AxGEPACandidateDisposition };
+export type { AxGEPACandidateEvaluation };
+export type { AxGEPACandidateFailure };
+export type { AxGEPACandidateLineageManifest };
+export type { AxGEPACandidateLineageOptions };
+export type { AxGEPACandidateLineageRecord };
+export type { AxGEPACandidateStrategy };
 export type { AxGEPAComponentBanditState };
 export type { AxGEPAComponentTarget };
 export type { AxGEPAEvaluationBatch };
@@ -2337,6 +2358,7 @@ export type { AxGEPAProposalOptions };
 export type { AxGEPAProposalPolicy };
 export type { AxGEPAProposalPolicyArgs };
 export type { AxGEPAReflectiveTuple };
+export type { AxGEPAResolvedLineageOptions };
 export type { AxGEPATraceSummary };
 export type { AxGEPATraceSummaryCall };
 export type { AxGenDeltaOut };

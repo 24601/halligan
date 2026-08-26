@@ -19,6 +19,7 @@ Use this skill to generate GEPA optimization code. Prefer the top-level `optimiz
 - Apply results with `program.applyOptimization(result.optimizedProgram!)`.
 - For tree-wide runs, expect `optimizedProgram.componentMap`.
 - Persist artifacts with `axSerializeOptimizedProgram(...)` and restore them with `axDeserializeOptimizedProgram(...)` so the same flow works in browsers and Node.
+- Opt in with `candidateLineage: true`, then inspect `result.optimizedProgram.candidateLineage` when optimization decisions must be audited or reproduced.
 - `optimize(...)` runs `AxBootstrapFewShot -> AxGEPA` for small starter sets by default, preserving the demos in `result.optimizedProgram.demos`.
 
 ## Critical Rules
@@ -322,6 +323,128 @@ program.applyOptimization(loaded);
 - Single-target runs usually populate both `optimizedProgram.instruction` and `optimizedProgram.componentMap`.
 - Tree-wide runs rely on `componentMap`, keyed by full component key.
 - Pareto points expose candidate configs under `point.configuration.componentMap`.
+
+## Candidate Lineage and Decision Audit
+
+GEPA artifacts can include a versioned `optimizedProgram.candidateLineage`
+manifest. Lineage is default-off: omitted or `false` preserves legacy artifacts,
+logger events, progress history, and checkpoint behavior. Set it to `true` for
+defaults or pass an options object to enable and configure it. Only an own data
+property opts in; inherited properties and accessors are ignored at this
+boundary rather than invoked. Compile options are supported as ordinary
+objects, not JavaScript `Proxy` objects. Reflection on a `Proxy` necessarily can
+invoke its meta-object traps. GEPA normalizes a throwing
+`getOwnPropertyDescriptor` while inspecting the own `candidateLineage` or
+`abortSignal` property before candidate evaluation. Arbitrary Proxy traps are
+unsupported: other stateful or throwing traps can run or fail later, including
+after candidate evaluation has started.
+It records every retained seed, reflective mutation, and system merge with a
+stable run-local ID, parent IDs, round and strategy, component delta
+fingerprints, evaluation objectives and metric-call context, final decision and
+reason, Pareto/archive disposition, and fingerprinted validator/runtime failures
+when available. Rejected and budget-aborted proposals are retained; this does
+not change candidate selection or claim to improve model quality. It improves
+auditability and reproducibility of the optimization search.
+
+The default manifest is privacy-minimizing and bounded:
+
+- component values (including prompts) and failure messages are identified
+  with a SHA-256 digest truncated to 64 bits (`sha256-64:<hex>`), not stored.
+  That identifier is collision-resistant enough for lineage correlation and is
+  not a confidentiality control; raw values remain omitted unless explicitly
+  opted in;
+- examples, traces, predictions, references, demos, and credentials are never
+  copied into lineage records;
+- at most 1,000 records and 64 changed components per record are retained;
+- final UTF-8 serialized size is capped at 1 MB by default. Byte-bound
+  trimming keeps the seed, the newest retained record, and the selected
+  candidate when possible, dropping middle history first;
+- once `maxRecords` is reached, later records are counted in
+  `omittedRecordCount` rather than retained, preserving parent integrity among
+  retained records.
+
+Configure or disable it per compile:
+
+```typescript
+const result = await optimize(program, train, metric, {
+  studentAI,
+  teacherAI,
+  maxMetricCalls: 120,
+  candidateLineage: {
+    maxRecords: 500,
+    maxArtifactBytes: 500_000,
+    maxComponentsPerCandidate: 32,
+    // Explicit privacy opt-ins; leave false for production defaults.
+    includeComponentValues: false,
+    includeFailureMessages: false,
+  },
+});
+
+const manifest = result.optimizedProgram?.candidateLineage;
+```
+
+Omit `candidateLineage` or set it to `false` to disable all lineage collection
+and publication work. Opted-in values and messages remain bounded by
+`maxComponentValueChars` and `maxFailureMessageChars`. Finite numeric limits are
+clamped as follows: records 1–10,000; final artifact bytes 4,096–10,000,000;
+components per record 1–1,024; component value characters 1–10,000; failure
+message characters 1–2,000.
+Published manifests and their nested records are cloned and recursively frozen.
+The final manifest is available in both the artifact and the existing
+`OptimizationComplete.bestConfiguration.candidateLineage` logger callback; these
+are byte-for-byte equivalent after JSON serialization. This does not add a new
+logger event variant, so exhaustive consumers of `AxOptimizerLoggerData` remain
+source-compatible. GEPA emits that completion callback and a final checkpoint
+only when lineage is explicitly enabled; disabled runs retain legacy event and
+checkpoint count, order, payloads, and timing. Opted-in `RoundProgress` and
+periodic checkpoints retain all legacy fields and add candidate metadata. The
+executable differential check runs the same omitted/`false` fixture against the
+PR checkout and its `origin/main` merge base, including logger events,
+checkpoint payloads/history, selection, the complete serialized optimized
+artifact, and its public serialize → deserialize → reserialize round trip.
+
+Lineage also appears in checkpoint `optimizerState` as a **snapshot only** with
+`checkpointSemantics: 'snapshot_only'` and `stoppedReason: 'in_progress'`.
+`AxGEPA` does not reconstruct candidates, archive state, counters, or RNG state
+from that snapshot, so this feature does not provide checkpoint resume. Older
+artifacts and checkpoints without the optional field continue to load unchanged.
+
+`termination` records where a completed run stopped, including loop-boundary and
+parent-evaluation budget/abort paths that occur before a proposal exists. Such
+paths do not synthesize fake candidate records. An abort already active before
+the seed evaluation rejects compilation and therefore produces no artifact.
+`AxCompileOptions.abortSignal` is GEPA-scoped; other optimizers do not implement
+or promise this cancellation behavior.
+When byte/record retention omits the selected candidate, the manifest keeps its
+ID and sets `selectedCandidateRetained: false`; retained Pareto IDs only name
+retained records.
+
+The reproducible stress/fault benchmark checks exact agreement between the final
+logger callback and artifact across accepted, rejected, merged, runtime-faulted,
+abort-signal, and budget-exhausted candidates. It also checks loop-boundary and
+parent-evaluation termination, parent integrity, deterministic same-seed rerun
+serialization, runtime freezing, default redaction, exact final UTF-8 byte
+truncation with Unicode/escaping and 81 generated decisions, and selected-record
+omission. Its no-selection-change claim is scoped to the deterministic synthetic
+fixture. Because its no-op baseline intentionally magnifies fixed serialization
+cost, it compares enabled lineage to the default omitted, legacy-compatible
+path. It reports an initial 10-run cold pair, then warms each mode for 50 runs
+and measures nine paired samples of 500 runs. Each sample alternates mode order
+in ten-run chunks so scheduler/JIT drift does not consistently favor the tiny
+baseline while timer overhead remains amortized. Always-on CI runs the completeness, integrity, privacy, and size
+invariants only. The p75 paired runtime overhead gate (at most 3.5× its
+paired baseline and at most 0.5 ms per fixture run) is opt-in via
+`AX_GEPA_LINEAGE_TIMING=1` or `AX_PRINT_METRICS=1` so shared CI cannot flake
+on wall-time jitter. Output includes the cold pair and full warm
+baseline/lineage ranges so variance remains visible:
+
+```bash
+npm run benchmark:gepa-lineage
+npx vitest run scripts/gepa-lineage-benchmark.test.ts
+npm run test:gepa-upstream-compatibility
+```
+
+Set `GEPA_COMPAT_BASE=<commit-or-ref>` to compare another authoritative base.
 
 ## Useful Options
 

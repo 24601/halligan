@@ -140,6 +140,70 @@ describe('evaluateGEPABatch', () => {
     expect(state.totalCalls).toBe(1);
   });
 
+  it('does not publish a completed adapter batch after abort', async () => {
+    const controller = new AbortController();
+    const state = { totalCalls: 0, observedScoreKeys: new Set<string>() };
+    const result = await evaluateGEPABatch({
+      program: {} as any,
+      ai: {} as AxAIService,
+      metricFn: async () => 0,
+      adapter: {
+        evaluate: async () => {
+          controller.abort();
+          return {
+            outputs: [{ ok: true }, { ok: true }],
+            scores: [1, 1],
+          };
+        },
+        make_reflective_dataset: () => ({}),
+      },
+      cfg: {},
+      set: [{ id: '1' }, { id: '2' }] as any,
+      phase: 'adapter-abort',
+      sampleCount: 1,
+      maxMetricCalls: 10,
+      state,
+      applyConfig: () => {},
+      scalarize: (scores) => scalarizeGEPAScores(scores),
+      abortSignal: controller.signal,
+    });
+
+    expect(result).toBeUndefined();
+    expect(state).toMatchObject({ totalCalls: 2, stopReason: 'aborted' });
+  });
+
+  it('retains completed direct-call accounting when abort ends a batch', async () => {
+    const controller = new AbortController();
+    const state = { totalCalls: 0, observedScoreKeys: new Set<string>() };
+    let forwardCalls = 0;
+    const result = await evaluateGEPABatch({
+      program: {
+        forward: async () => {
+          forwardCalls += 1;
+          return { ok: true };
+        },
+      } as any,
+      ai: {} as AxAIService,
+      metricFn: async () => {
+        controller.abort();
+        return 1;
+      },
+      cfg: {},
+      set: [{ id: '1' }, { id: '2' }] as any,
+      phase: 'direct-abort',
+      sampleCount: 1,
+      maxMetricCalls: 10,
+      state,
+      applyConfig: () => {},
+      scalarize: (scores) => scalarizeGEPAScores(scores),
+      abortSignal: controller.signal,
+    });
+
+    expect(result).toBeUndefined();
+    expect(forwardCalls).toBe(1);
+    expect(state).toMatchObject({ totalCalls: 1, stopReason: 'aborted' });
+  });
+
   it('uses an adapter explicit scalar instead of averaging named objectives', async () => {
     const state = { totalCalls: 0, observedScoreKeys: new Set<string>() };
     const result = await evaluateGEPABatch({
