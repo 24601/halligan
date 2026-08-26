@@ -957,9 +957,7 @@ export class AxDemandBoundary {
     pending.waiters++;
     try {
       const receipt = await waitForSharedWork(pending.promise, signal);
-      return duplicate
-        ? { ...receipt, duplicate: true, historical: true }
-        : receipt;
+      return duplicate ? { ...receipt, duplicate: true } : receipt;
     } finally {
       pending.waiters--;
       if (pending.waiters === 0 && this.inFlight.get(dedupeKey) === pending) {
@@ -1029,6 +1027,9 @@ export class AxDemandBoundary {
       signal,
       observationBytes + scopeBytes
     );
+    if (signal?.aborted) {
+      throw new AxDemandCancelledError(signal.reason);
+    }
     const appended = await this.store.append({
       scope,
       observation,

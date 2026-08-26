@@ -810,7 +810,7 @@ describe('AxDemandBoundary', () => {
     const [firstReceipt, secondReceipt] = await Promise.all([first, second]);
     expect(validateStandingGrant).toHaveBeenCalledOnce();
     expect(firstReceipt.duplicate).toBe(false);
-    expect(secondReceipt).toMatchObject({ duplicate: true, historical: true });
+    expect(secondReceipt).toMatchObject({ duplicate: true, historical: false });
     expect(secondReceipt.record.cursor).toBe(firstReceipt.record.cursor);
   });
 
@@ -839,7 +839,7 @@ describe('AxDemandBoundary', () => {
     release?.(detection());
     await expect(second).resolves.toMatchObject({
       duplicate: true,
-      historical: true,
+      historical: false,
     });
 
     const byteBound = new AxDemandBoundary({
