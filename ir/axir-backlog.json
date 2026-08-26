@@ -1217,6 +1217,55 @@
       "verification": "TS-derived native-image routing fixture; five-language AxIR dev verifier; npm run axir:check-packages; go test ./internal/axir; focused TypeScript router tests"
     },
     {
+      "id": "axir-2026-08-25-port-gepa-proposal-policy-guidance-and-references",
+      "status": "open",
+      "title": "Port GEPA proposal-policy guidance and references",
+      "createdAt": "2026-08-25",
+      "sourcePR": 2,
+      "sourceCommit": "ca760294f5ea4f207052c39c2218e1195103bc2a",
+      "tsPaths": [
+        "src/ax/agent/agent.test.ts",
+        "src/ax/agent/agentInternal/optimizer.ts",
+        "src/ax/dsp/common_types.ts",
+        "src/ax/dsp/optimizers/gepa.test.ts",
+        "src/ax/dsp/optimizers/gepa.ts",
+        "src/ax/dsp/optimizers/gepaReflection.test.ts",
+        "src/ax/dsp/optimizers/gepaReflection.ts"
+      ],
+      "portableSurface": "axoptimize",
+      "impact": "AxGEPA now supports custom proposal policies, trusted in-memory optimization references, additive guidance, and bounded reflective examples; generated backends need equivalent proposal-boundary options and validation semantics.",
+      "suggestedAxirWork": [
+        "Add or update the TS-derived conformance fixture.",
+        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
+        "Run npm run axir:conformance:check and npm run test:axir."
+      ],
+      "completedAt": null,
+      "completedByCommit": null,
+      "verification": null
+    },
+    {
+      "id": "axir-2026-08-25-port-provider-neutral-visual-observation-sampling-policy",
+      "status": "open",
+      "title": "Port provider-neutral visual observation sampling policy",
+      "createdAt": "2026-08-25",
+      "sourcePR": 18,
+      "sourceCommit": "ca760294f5ea4f207052c39c2218e1195103bc2a",
+      "tsPaths": [
+        "src/ax/ai/index.ts",
+        "src/ax/ai/visual"
+      ],
+      "portableSurface": "axai",
+      "impact": "TypeScript hosts can apply revision-, freshness-, authority-, change-, and rolling-budget-aware selection to host-captured visual observations; generated language packages do not yet expose the AxVisualObservation or AxFrameSampler policy.",
+      "suggestedAxirWork": [
+        "Add or update the TS-derived conformance fixture.",
+        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
+        "Run npm run axir:conformance:check and npm run test:axir."
+      ],
+      "completedAt": null,
+      "completedByCommit": null,
+      "verification": null
+    },
+    {
       "id": "axir-2026-08-25-port-host-owned-principal-preference-evidence-selection",
       "status": "open",
       "title": "Port host-owned principal preference evidence selection",
@@ -1281,6 +1330,5 @@
       "reason": "WebLLM is browser-specific integration code around a caller-supplied MLCEngine/WebGPU runtime. It is not a portable Ax semantic and should not create Python/Java/C++/Go/Rust AxIR backlog work.",
       "createdAt": "2026-06-26"
     }
-  ],
-  "items": []
+  ]
 }
