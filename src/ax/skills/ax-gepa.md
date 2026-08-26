@@ -35,6 +35,92 @@ Use this skill to generate GEPA optimization code. Prefer the top-level `optimiz
 - `result.optimizedProgram` is the easy-to-apply best candidate. `result.paretoFront` is the full trade-off set for multi-objective runs.
 - Direct `AxGEPA` still has its own `bootstrap` option, but top-level `optimize(...)` composes the existing `AxBootstrapFewShot` optimizer before GEPA instead.
 
+## Proposal Policy and Optimization References
+
+Use `gepaProposal` when the reflection model needs trusted developer guidance or a custom way to propose component text:
+
+```typescript
+const result = await optimize(program, train, metric, {
+  studentAI,
+  teacherAI,
+  validationExamples: validation,
+  gepaProposal: {
+    references: [
+      {
+        name: 'support-policy',
+        description: 'General escalation rules',
+        content: policyMarkdown,
+      },
+    ],
+    additionalGuidance: 'Prefer short, testable rules.',
+    maxExamples: 6,
+    policy: async ({
+      ai,
+      target,
+      currentValue,
+      reflectiveExamples,
+      references,
+      additionalGuidance,
+      previousValidationError,
+      attempt,
+    }) => {
+      // Return a complete replacement, or undefined to keep currentValue.
+      return proposeWithYourPolicy({
+        ai,
+        target,
+        currentValue,
+        reflectiveExamples,
+        references,
+        additionalGuidance,
+        previousValidationError,
+        attempt,
+      });
+    },
+  },
+});
+```
+
+- `references` are ordered, in-memory, trusted inputs to proposal generation. They are not runtime agent skills, tools, filesystem paths, or persisted optimized-program data.
+- `additionalGuidance` augments the built-in proposal contract; it does not replace component constraints.
+- `maxExamples` bounds the ordered reflective examples passed to each proposal. It does not change the training or held-out evaluation sets.
+- A custom `policy` proposes text only. GEPA deterministically enforces component-owned `maxLength`, `preserve`, and `validate` before metric-based acceptance. `format` and natural-language `constraints` are proposal context, not deterministic checks unless the component's `validate` function enforces them.
+- Returning `undefined` keeps the current component value. Invalid proposals are retried with `previousValidationError`; exhausted retries also keep the current value.
+- The same `gepaProposal` option is available on `AxGEPA.compile(...)`, `optimize(...)`, and `agent.optimize(...)`.
+- The built-in policy diagnoses failures, derives general rules, preserves successful behavior and required literals, and explicitly rejects memorizing example entities, quantities, dates, phrases, or answers.
+
+### When References Help and Their Limits
+
+- References help when sparse reflective examples omit a stable domain-wide definition, procedure, output convention, or safety rule that should transfer to unseen inputs.
+- References add little when they repeat the current instruction or feedback, are unrelated to the selected component, or contain rules the metric cannot observe. Irrelevant or conflicting references can reduce proposal quality while increasing prompt tokens.
+- Treat references as trusted prompt content. Delimiters provide structure, not isolation: stale, contaminated, or prompt-injecting content can steer the proposer. Validate provenance, select the smallest relevant material, and do not include secrets merely because references are omitted from saved optimization artifacts.
+- Held-out evaluation limits example memorization only when the holdout is genuinely independent. Shared entities, leaked labels, or the same contaminated reference in both proposal and evaluation design can hide overfitting.
+
+### Reproducible Hill-Climb Evaluation
+
+Run the zero-cost controlled gate from the repository root:
+
+```bash
+node --import=tsx src/examples/gepa-proposal-policy-eval.ts
+```
+
+The deterministic teacher deliberately emits three candidates: a training-entity lookup, a reference-informed general rule, and a no-benefit rewrite. This validates optimizer mechanics and generalization gating, not real-model efficacy. The checked result is:
+
+| Run | Candidate behavior | Selected held-out score | Metric calls | Selection |
+| --- | --- | ---: | ---: | --- |
+| Baseline GEPA | Memorized candidate scores 1.00 train / 0.25 held-out | 0.75 | 16 / 16 | Train-local candidate accepted; held-out selection keeps baseline |
+| Reference-informed | General rule scores 1.00 train / 1.00 held-out | 1.00 | 16 / 16 | Candidate accepted and selected |
+| Irrelevant reference | Rewrite gives no train benefit | 0.75 | 12 / 12 | Candidate rejected; baseline retained |
+
+Measured controlled overhead: baseline and reference-informed runs each make two teacher calls, so references add no proposal calls or metric calls. The rendered reference block is 307 characters. The bounded informed proposal prompt is 3,763 characters versus 3,544 for the unbounded baseline prompt: a net 219-character increase even after `maxExamples: 1` removes three reflective examples. Character counts are a reproducible payload measure, not provider token or latency estimates.
+
+To sample actual proposer behavior with a current inexpensive model, opt in explicitly:
+
+```bash
+OPENAI_APIKEY=... node --import=tsx src/examples/gepa-proposal-policy-eval.ts --real
+```
+
+This command is not part of the zero-cost gate and should not be run unintentionally. It is bounded to two one-trial runs, at most six `gpt-5.4-mini` teacher calls including validation retries, and 32 deterministic metric calls. Use repeated seeds and representative private holdouts before making an efficacy claim.
+
 ## Metric Selection
 
 Choose the evaluation path deliberately:
