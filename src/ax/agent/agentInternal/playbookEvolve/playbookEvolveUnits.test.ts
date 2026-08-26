@@ -198,6 +198,27 @@ describe('evalHarness', () => {
     expect(result.complete).toBe(false);
   });
 
+  it('uses the scalar score from structured metric results', async () => {
+    const agent = {
+      _forwardForEvaluation: vi.fn(async () => prediction()),
+    };
+    const result = await runAgentEvalBatch({
+      agent,
+      ai: {} as any,
+      tasks: [task('a')],
+      metric: async () => ({
+        score: 0.8,
+        feedback: 'GEPA can consume this text; playbook evolution does not.',
+        scores: { quality: 0 },
+      }),
+      scoreThreshold: 0.7,
+      budget: { remaining: 1 },
+    });
+
+    expect(result.mean).toBe(0.8);
+    expect(result.records[0]).toMatchObject({ score: 0.8, passed: true });
+  });
+
   it('stops when the budget runs out and marks exhaustion', async () => {
     const agent = {
       _forwardForEvaluation: vi.fn(async () => prediction()),

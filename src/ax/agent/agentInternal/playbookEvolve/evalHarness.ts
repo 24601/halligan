@@ -78,11 +78,13 @@ export async function runAgentEvalBatch<
             ...(args.abortSignal ? { abortSignal: args.abortSignal } : {}),
           }
         );
-        const score = await args.metric({
+        const metricResult = await args.metric({
           prediction: prediction as Record<string, unknown>,
           example: task as unknown as Parameters<AxMetricFn>[0]['example'],
         });
-        const finiteScore = typeof score === 'number' && Number.isFinite(score);
+        const score =
+          typeof metricResult === 'number' ? metricResult : metricResult.score;
+        const finiteScore = Number.isFinite(score);
         scores.push(finiteScore ? score : 0);
         if (!finiteScore) {
           hadEvaluationError = true;

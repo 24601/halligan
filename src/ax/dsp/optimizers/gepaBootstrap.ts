@@ -14,7 +14,7 @@ import type {
 } from '../types.js';
 import {
   type AxGEPAEvaluationState,
-  normalizeGEPAScores,
+  normalizeGEPAMetricResult,
   scalarizeGEPAScores,
 } from './gepaEvaluation.js';
 
@@ -96,14 +96,15 @@ export async function bootstrapGEPADemos<IN, OUT extends AxGenOut>(args: {
           sampleCount: args.sampleCount,
         } as any
       );
-      const scores = await normalizeGEPAScores(
+      const metricResult = await normalizeGEPAMetricResult(
         args.metricFn,
         prediction,
         example as AxExample
       );
+      const scores = metricResult.scores;
       for (const key of Object.keys(scores))
         args.state.observedScoreKeys.add(key);
-      const scalar = scalarizeGEPAScores(scores);
+      const scalar = metricResult.scalar ?? scalarizeGEPAScores(scores);
 
       metricCalls += 1;
 

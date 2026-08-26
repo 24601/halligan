@@ -15,6 +15,7 @@ import type {
 
 export type AxAppliedProposal = {
   proposal: AxAgentPlaybookEvolveProposal;
+  bulletIds: readonly string[];
   rollback: () => void;
 };
 
@@ -74,13 +75,26 @@ export async function applyProposal(args: {
       },
       prediction: {},
       feedback: proposal.feedback,
+      evidence: {
+        source: 'agent-evolve',
+        sourceRunId: proposal.clusterSignature,
+        feedbackIds: [proposal.weaknessId],
+      },
     });
   } catch (err) {
     handle.load(snapshot);
     throw err;
   }
+  const updated = handle.getState();
+  const bulletIds: string[] = updated.artifact.history
+    .slice(snapshot.artifact.history.length)
+    .flatMap(
+      (entry: { updatedBulletIds?: string[] }): string[] =>
+        entry.updatedBulletIds ?? []
+    );
   return {
     proposal,
+    bulletIds: [...new Set(bulletIds)].sort(),
     rollback: () => {
       handle.load(snapshot);
     },

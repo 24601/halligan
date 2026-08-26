@@ -143,6 +143,13 @@ describe('agent.playbook().evolve()', () => {
     expect(actorPromptOf(ag)).toContain(BULLET_MARKER);
     expect(result.playbookSnapshot).toBeDefined();
     expect(ag.getPlaybook().getState().playbook.stats.bulletCount).toBe(1);
+    const acceptedBullet = Object.values(
+      ag.getPlaybook().getState().playbook.sections
+    ).flat()[0];
+    expect(acceptedBullet?.evidence).toMatchObject({
+      provenance: [{ source: 'agent-evolve' }],
+      verification: [{ verifierId: 'agent.playbook.evolve', result: 'passed' }],
+    });
     expect(result.metricCallsUsed).toBeGreaterThan(0);
     expect(events.some((e) => e.startsWith('mining'))).toBe(true);
   });
@@ -606,17 +613,36 @@ describe('agent.playbook().evolve()', () => {
     });
     let revision = 0;
     let rules: string[] = [];
+    let history: { updatedBulletIds: string[] }[] = [];
     let candidateMetricCalls = 0;
     const handle = {
       update: async () => {
         revision++;
         rules = [...rules, `candidate-${revision}`];
+        history = [...history, { updatedBulletIds: [`candidate-${revision}`] }];
       },
       render: () => rules.join('\n'),
-      getState: () => ({ revision, rules: [...rules] }),
-      load: (snapshot: Readonly<{ revision: number; rules: string[] }>) => {
+      getState: () => ({
+        revision,
+        rules: [...rules],
+        artifact: {
+          history: history.map((entry) => ({
+            updatedBulletIds: [...entry.updatedBulletIds],
+          })),
+        },
+      }),
+      load: (
+        snapshot: Readonly<{
+          revision: number;
+          rules: string[];
+          artifact: { history: { updatedBulletIds: string[] }[] };
+        }>
+      ) => {
         revision = snapshot.revision;
         rules = [...snapshot.rules];
+        history = snapshot.artifact.history.map((entry) => ({
+          updatedBulletIds: [...entry.updatedBulletIds],
+        }));
       },
     };
     const self = {

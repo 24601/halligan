@@ -7,15 +7,26 @@ import {
   type AxAgentFunction,
   type AxAgentFunctionGroup,
   type AxAgentJudgeOutput,
+  type AxAgentPlaybookEvolveOptions,
   type AxAgentState,
   type AxAgentTestResult,
   type AxCodeRuntime,
   type AxFunction,
   type AxFunctionProvider,
+  type AxMetricResult,
   agent,
   f,
   s,
 } from '../index.js';
+
+const structuredPlaybookMetricOptions: AxAgentPlaybookEvolveOptions = {
+  metric: async (): Promise<AxMetricResult<'quality'>> => ({
+    score: 0.8,
+    feedback: 'Available to GEPA; ignored by playbook evolution.',
+    scores: { quality: 1 },
+  }),
+};
+void structuredPlaybookMetricOptions;
 
 // Basic agent with string signature — forward() returns typed output
 {

@@ -90,18 +90,37 @@ function minerAI() {
 function makeHarness(scenario: CandidateScenario) {
   let applied = false;
   let revision = 0;
+  let history: { updatedBulletIds: string[] }[] = [];
   let metricCalls = 0;
   const counters = new Map<string, number>();
   const handle = {
     update: async () => {
       applied = true;
       revision++;
+      history = [...history, { updatedBulletIds: [`candidate-${revision}`] }];
     },
     render: () => (applied ? '## Context Playbook\n- candidate' : ''),
-    getState: () => ({ applied, revision }),
-    load: (snapshot: Readonly<{ applied: boolean; revision: number }>) => {
+    getState: () => ({
+      applied,
+      revision,
+      artifact: {
+        history: history.map((entry) => ({
+          updatedBulletIds: [...entry.updatedBulletIds],
+        })),
+      },
+    }),
+    load: (
+      snapshot: Readonly<{
+        applied: boolean;
+        revision: number;
+        artifact: { history: { updatedBulletIds: string[] }[] };
+      }>
+    ) => {
       applied = snapshot.applied;
       revision = snapshot.revision;
+      history = snapshot.artifact.history.map((entry) => ({
+        updatedBulletIds: [...entry.updatedBulletIds],
+      }));
     },
   };
   const ai = minerAI();

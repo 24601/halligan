@@ -400,6 +400,23 @@ export async function evolveAgentPlaybook<
     });
 
     if (accept) {
+      playbookHandle?.recordEvidence?.(applied.bulletIds, {
+        source: 'agent-evolve',
+        sourceRunId: proposal.clusterSignature,
+        feedbackIds: [proposal.weaknessId],
+        verification: [
+          {
+            verifierId: 'agent.playbook.evolve',
+            testId: proposal.weaknessId,
+            result: 'passed',
+            summary: `held-in ${heldIn.toFixed(3)} -> ${revalTrain.mean.toFixed(3)}${
+              heldOut !== undefined && revalHeldOut !== undefined
+                ? `; held-out ${heldOut.toFixed(3)} -> ${revalHeldOut.toFixed(3)}`
+                : ''
+            }`,
+          },
+        ],
+      });
       accepted.push(applied);
       heldIn = revalTrain.mean;
       if (revalHeldOut !== undefined) {
