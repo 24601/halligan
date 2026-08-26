@@ -1413,8 +1413,9 @@ export class AxInMemoryAgentSessionScheduler
       this.running++;
       queueMicrotask(() => {
         void handler(job)
-          .catch(() => {
-            // Recovery reconciles unfinished registry claims; keep pumping.
+          .catch((error) => {
+            // Surface post-claim failures so recovery can fence the attempt.
+            void error;
           })
           .finally(() => {
             this.running--;
@@ -1475,7 +1476,17 @@ export class AxAgentSessionHost {
     this.limits = resolveLimits(DEFAULT_LIMITS, options.limits);
     this.now = options.now ?? Date.now;
     this.onEvent = options.onEvent;
-    const detach = this.scheduler.attach((job) => this.dispatch(job));
+    const detach = this.scheduler.attach(async (job) => {
+      try {
+        await this.dispatch(job);
+      } catch (error) {
+        try {
+          await this.recover(job.rootId);
+        } catch {
+          void error;
+        }
+      }
+    });
     if (typeof detach === 'function') this.detachScheduler = detach;
   }
 
@@ -2176,6 +2187,7 @@ export class AxAgentSessionHost {
     let usage = emptyUsage();
     let nextState: AxAgentState | undefined;
     let nextArtifacts: unknown;
+    let snapshotErrorMessage: string | undefined;
     try {
       live = await this.liveAgent(claimed.record);
       live.agent.resetUsage();
@@ -2204,19 +2216,25 @@ export class AxAgentSessionHost {
           }
         )
       );
-      const capturedState = live.agent.getState();
-      nextState =
-        capturedState === undefined
-          ? undefined
-          : cloneStructured(capturedState);
-      if (live.registration.captureArtifacts) {
-        const capturedArtifacts = await live.registration.captureArtifacts(
-          live.agent
-        );
-        nextArtifacts =
-          capturedArtifacts === undefined
+      try {
+        const capturedState = live.agent.getState();
+        nextState =
+          capturedState === undefined
             ? undefined
-            : cloneStructured(capturedArtifacts);
+            : cloneStructured(capturedState);
+        if (live.registration.captureArtifacts) {
+          const capturedArtifacts = await live.registration.captureArtifacts(
+            live.agent
+          );
+          nextArtifacts =
+            capturedArtifacts === undefined
+              ? undefined
+              : cloneStructured(capturedArtifacts);
+        }
+      } catch (snapshotError) {
+        // A successful forward still owns the turn; record snapshot failure
+        // without converting the result into a failed message.
+        snapshotErrorMessage = errorMessage(snapshotError);
       }
     } catch (error) {
       failure = error;
@@ -2305,7 +2323,8 @@ export class AxAgentSessionHost {
           message.status = 'completed';
           message.result = cloneStructured(result);
           record.status = 'completed';
-          delete record.lastError;
+          if (snapshotErrorMessage) record.lastError = snapshotErrorMessage;
+          else delete record.lastError;
           if (nextState !== undefined)
             record.state = cloneStructured(nextState);
           if (nextArtifacts !== undefined)
@@ -2555,7 +2574,11 @@ export class AxAgentSessionHost {
   }
 
   private reserveSubcall(snapshot: AxAgentSessionRegistrySnapshot): void {
-    if (snapshot.root.budgetExceeded === 'tokens') {
+    if (
+      snapshot.root.budgetExceeded === 'tokens' &&
+      this.durableTokens(snapshot) + snapshot.root.limits.maxTokensPerMessage >
+        snapshot.root.limits.maxTokens
+    ) {
       throw new AxAgentSessionLimitError(
         'maxTokens',
         `Retained root token usage reached maxTokens ${snapshot.root.limits.maxTokens}`
@@ -2619,7 +2642,7 @@ export class AxAgentSessionHost {
         interrupted.push(cloneStructured(record));
       }
     }
-    if (found) {
+    if (found && snapshot.root.status !== 'cancelled') {
       snapshot.root.status = 'interrupted';
       if (
         this.committedTokens(snapshot) +
@@ -2646,22 +2669,26 @@ export class AxAgentSessionHost {
     }
   }
 
-  private committedTokens(
+  private durableTokens(
     snapshot: Readonly<AxAgentSessionRegistrySnapshot>
   ): number {
     return (
       snapshot.root.descendantUsage.totalTokens +
-      snapshot.root.reservedTokens +
       snapshot.root.outcomeUnknownTokens
     );
+  }
+
+  private committedTokens(
+    snapshot: Readonly<AxAgentSessionRegistrySnapshot>
+  ): number {
+    return this.durableTokens(snapshot) + snapshot.root.reservedTokens;
   }
 
   private expectedBudgetExceeded(
     snapshot: Readonly<AxAgentSessionRegistrySnapshot>
   ): AxAgentSessionRootRecord['budgetExceeded'] {
     if (
-      this.committedTokens(snapshot) +
-        snapshot.root.limits.maxTokensPerMessage >
+      this.durableTokens(snapshot) + snapshot.root.limits.maxTokensPerMessage >
       snapshot.root.limits.maxTokens
     ) {
       return 'tokens';
