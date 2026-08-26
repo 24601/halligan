@@ -1649,7 +1649,11 @@ export class AxAgentSessionHost {
       for (const record of outcome.interrupted) {
         await this.emit('interrupted', record);
       }
-      await this.scheduleReady(id, outcome.epoch);
+      if (!(await this.scheduleReady(id, outcome.epoch))) {
+        throw new Error(
+          'Retained agent recovery could not schedule current-epoch pending work'
+        );
+      }
     }
   }
 
@@ -2647,26 +2651,27 @@ export class AxAgentSessionHost {
   private async scheduleReady(
     rootId: string,
     expectedEpoch: number
-  ): Promise<void> {
-    if (this.closed) return;
-    if (this.ownedEpochs.get(rootId) !== expectedEpoch) return;
+  ): Promise<boolean> {
+    if (this.closed) return true;
+    if (this.ownedEpochs.get(rootId) !== expectedEpoch) return true;
     const snapshot = await this.requireRoot(rootId);
-    await this.scheduleReadySnapshot(snapshot, expectedEpoch);
+    return this.scheduleReadySnapshot(snapshot, expectedEpoch);
   }
 
   private async scheduleReadySnapshot(
     snapshot: Readonly<AxAgentSessionRegistrySnapshot>,
     expectedEpoch: number
-  ): Promise<void> {
+  ): Promise<boolean> {
     const rootId = snapshot.root.id;
-    if (this.closed) return;
-    if (this.ownedEpochs.get(rootId) !== expectedEpoch) return;
-    if (snapshot.root.epoch !== expectedEpoch) return;
-    if (snapshot.root.budgetExceeded === 'tokens') return;
+    if (this.closed) return true;
+    if (this.ownedEpochs.get(rootId) !== expectedEpoch) return true;
+    if (snapshot.root.epoch !== expectedEpoch) return true;
+    if (snapshot.root.budgetExceeded === 'tokens') return true;
     const running = Object.values(snapshot.sessions).filter(
       (record) => record.activeMessageId
     ).length;
     let capacity = Math.max(0, snapshot.root.limits.maxConcurrency - running);
+    let scheduled = true;
     const records = Object.values(snapshot.sessions).sort(
       (left, right) => left.createdAt - right.createdAt
     );
@@ -2676,7 +2681,9 @@ export class AxAgentSessionHost {
       const message = this.nextPending(record);
       if (!message) continue;
       if (await this.enqueueSafely(record, message)) capacity--;
+      else scheduled = false;
     }
+    return scheduled;
   }
 
   private async resumeRecoveryJob(
@@ -2686,7 +2693,11 @@ export class AxAgentSessionHost {
     if (snapshot.root.epoch === job.epoch) return false;
     this.ownedEpochs.set(job.rootId, snapshot.root.epoch);
     await this.rootDrains.get(job.rootId);
-    await this.scheduleReadySnapshot(snapshot, snapshot.root.epoch);
+    if (!(await this.scheduleReadySnapshot(snapshot, snapshot.root.epoch))) {
+      throw new Error(
+        'Retained agent recovery retry could not schedule current-epoch pending work'
+      );
+    }
     this.recoveryJobs.delete(job.id);
     return true;
   }

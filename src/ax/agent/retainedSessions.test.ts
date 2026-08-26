@@ -1985,6 +1985,22 @@ class ManualScheduler implements AxAgentSessionScheduler {
   }
 }
 
+class EpochFailingScheduler extends ManualScheduler {
+  private failedEpoch: number | undefined;
+
+  failNextEnqueueAtEpoch(epoch: number): void {
+    this.failedEpoch = epoch;
+  }
+
+  override async enqueue(job: Readonly<AxAgentSessionJob>): Promise<void> {
+    if (job.epoch === this.failedEpoch) {
+      this.failedEpoch = undefined;
+      throw new Error(`injected epoch-${job.epoch} enqueue failure`);
+    }
+    await super.enqueue(job);
+  }
+}
+
 class InlineScheduler implements AxAgentSessionScheduler {
   readonly capabilities = {
     durability: 'volatile',
@@ -2394,6 +2410,58 @@ describe('retained session crash recovery adapters', () => {
     expect(completedFollowUp.latestResult).toMatchObject({
       value: 'rotated-follow-up',
     });
+    expect(scheduler.queuedJobs()).toEqual([]);
+  });
+
+  it('retains recovery intent when rotated post-fence scheduling is rejected', async () => {
+    const scheduler = new EpochFailingScheduler();
+    const store = new FaultInjectingDurableStore();
+    const sessions = host({ store, scheduler });
+    const root = await sessions.createRoot({
+      authorizedChildren: ['worker'],
+    });
+    const handle = await root.spawn('worker', { value: 'uncertain-first' });
+    const followUp = await root.send(
+      handle,
+      { value: 'retry-rotated-follow-up' },
+      'follow-up'
+    );
+    store.failNextCompletionAndPostRecoveryLoad();
+    scheduler.failNextEnqueueAtEpoch(2);
+
+    await scheduler.runOne();
+    const fenced = await sessions.snapshot(root.sessionId);
+    const record = fenced.sessions[handle.id]!;
+    const rotated = record.mailbox.find(
+      (message) => message.id === followUp.messageId
+    )!;
+    expect(fenced.root.epoch).toBe(2);
+    expect(record.mailbox[0]?.status).toBe('outcome_unknown');
+    expect(rotated.status).toBe('pending');
+    expect(record.lastError).toBe(
+      'Scheduler enqueue failed: injected epoch-2 enqueue failure'
+    );
+    expect(scheduler.queuedJobs()).toEqual([
+      expect.objectContaining({
+        messageId: record.mailbox[0]?.id,
+        epoch: 1,
+      }),
+    ]);
+
+    await scheduler.runOne();
+    expect(scheduler.queuedJobs()).toEqual([
+      expect.objectContaining({
+        id: rotated.jobId,
+        messageId: followUp.messageId,
+        epoch: 2,
+      }),
+    ]);
+    await scheduler.runAll();
+    const recoveredRoot = await sessions.restoreRoot(root.sessionId);
+    const recoveredHandle = await refreshDirectHandle(recoveredRoot, handle.id);
+    expect(
+      (await completed(recoveredRoot, recoveredHandle)).latestResult
+    ).toMatchObject({ value: 'retry-rotated-follow-up' });
     expect(scheduler.queuedJobs()).toEqual([]);
   });
 
