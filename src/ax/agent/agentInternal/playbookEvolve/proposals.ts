@@ -67,19 +67,24 @@ export async function applyProposal(args: {
     );
   }
   const snapshot = handle.getState();
-  await handle.update({
-    example: {
-      task: 'playbook.evolve(): repair a diagnosed agent weakness',
-      failureSignatures: [proposal.clusterSignature],
-    },
-    prediction: {},
-    feedback: proposal.feedback,
-    evidence: {
-      source: 'agent-evolve',
-      sourceRunId: proposal.clusterSignature,
-      feedbackIds: [proposal.weaknessId],
-    },
-  });
+  try {
+    await handle.update({
+      example: {
+        task: 'playbook.evolve(): repair a diagnosed agent weakness',
+        failureSignatures: [proposal.clusterSignature],
+      },
+      prediction: {},
+      feedback: proposal.feedback,
+      evidence: {
+        source: 'agent-evolve',
+        sourceRunId: proposal.clusterSignature,
+        feedbackIds: [proposal.weaknessId],
+      },
+    });
+  } catch (err) {
+    handle.load(snapshot);
+    throw err;
+  }
   const updated = handle.getState();
   const bulletIds: string[] = updated.artifact.history
     .slice(snapshot.artifact.history.length)

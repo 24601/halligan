@@ -166,6 +166,36 @@ describe('evalHarness', () => {
     expect(result.records[0]?.passed).toBe(true);
     expect(result.records[1]?.passed).toBe(false);
     expect(result.exhausted).toBe(false);
+    expect(result.complete).toBe(true);
+  });
+
+  it.each([
+    ['non-finite weight', [{ ...task('a'), weight: Number.POSITIVE_INFINITY }]],
+    ['negative weight', [{ ...task('a'), weight: -1 }]],
+    ['zero total weight', [{ ...task('a'), weight: 0 }]],
+  ])('marks a %s aggregate incomplete', async (_, tasks) => {
+    const result = await runAgentEvalBatch({
+      agent: { _forwardForEvaluation: async () => prediction() },
+      ai: {} as any,
+      tasks,
+      metric: async () => 1,
+      scoreThreshold: 0.7,
+      budget: { remaining: 10 },
+    });
+    expect(result.complete).toBe(false);
+  });
+
+  it('marks finite weights whose weighted score overflows incomplete', async () => {
+    const result = await runAgentEvalBatch({
+      agent: { _forwardForEvaluation: async () => prediction() },
+      ai: {} as any,
+      tasks: [{ ...task('a'), weight: Number.MAX_VALUE }],
+      metric: async () => 2,
+      scoreThreshold: 0.7,
+      budget: { remaining: 10 },
+    });
+    expect(result.mean).toBe(Number.POSITIVE_INFINITY);
+    expect(result.complete).toBe(false);
   });
 
   it('uses the scalar score from structured metric results', async () => {
@@ -342,5 +372,6 @@ describe('evalHarness runsPerTask', () => {
     expect(result.records).toHaveLength(2);
     expect(result.records[1]?.score).toBe(1);
     expect(result.exhausted).toBe(true);
+    expect(result.complete).toBe(false);
   });
 });

@@ -11,12 +11,14 @@
  * score does not drop by more than `epsilon`; rejected proposals roll back
  * exactly, and accepted scores become the next proposal's baseline. With
  * `verify: false` the mined lessons are applied without the gate (trust-batch).
+ * `requireHeldOut` adds a fail-closed production promotion policy on top.
  */
 
 import type { AxGenIn, AxGenOut } from '../../../dsp/types.js';
 import { normalizeAgentEvalDataset } from '../../optimize.js';
 import type {
   AxAgentEvalDataset,
+  AxAgentEvalTask,
   AxAgentJudgeOptions,
 } from '../agentOptimizeTypes.js';
 import { createAgentOptimizeMetric } from '../optimizer.js';
@@ -42,13 +44,48 @@ const DEFAULT_EPSILON = 0.01;
 const DEFAULT_MIN_HELD_IN_GAIN = 0.05;
 const DEFAULT_SCORE_THRESHOLD = 0.7;
 
+function assertRequiredHeldOut<IN extends AxGenIn>(args: {
+  train: readonly AxAgentEvalTask<IN>[];
+  validation?: readonly AxAgentEvalTask<IN>[];
+  taskId?: (task: Readonly<AxAgentEvalTask<IN>>) => string | undefined;
+}): void {
+  if (!args.validation?.length) {
+    throw new Error(
+      'AxAgent.playbook().evolve(): requireHeldOut requires a non-empty validation set.'
+    );
+  }
+  const idOf = args.taskId ?? ((task: AxAgentEvalTask<IN>) => task.id);
+  const ids = (split: 'train' | 'validation', tasks: typeof args.train) =>
+    tasks.map((task, index) => {
+      const raw = idOf(task);
+      const id = typeof raw === 'string' ? raw.trim() : '';
+      if (!id) {
+        throw new Error(
+          `AxAgent.playbook().evolve(): requireHeldOut cannot prove disjointness: ${split}[${index}] has no semantic task id; set task.id or provide taskId.`
+        );
+      }
+      return id;
+    });
+  const trainIds = new Set(ids('train', args.train));
+  const overlaps = [
+    ...new Set(
+      ids('validation', args.validation).filter((id) => trainIds.has(id))
+    ),
+  ];
+  if (overlaps.length > 0) {
+    throw new Error(
+      `AxAgent.playbook().evolve(): requireHeldOut requires disjoint train and validation sets; overlapping task id(s): ${overlaps.join(', ')}.`
+    );
+  }
+}
+
 export async function evolveAgentPlaybook<
   IN extends AxGenIn,
   OUT extends AxGenOut,
 >(
   self: any,
   dataset: Readonly<AxAgentEvalDataset<IN>>,
-  options?: Readonly<AxAgentPlaybookEvolveOptions>
+  options?: Readonly<AxAgentPlaybookEvolveOptions<IN>>
 ): Promise<AxAgentPlaybookEvolveResult<OUT>> {
   const s = self as any;
   const normalized = normalizeAgentEvalDataset(dataset);
@@ -56,6 +93,19 @@ export async function evolveAgentPlaybook<
     throw new Error(
       'AxAgent.playbook().evolve(): at least one training task is required.'
     );
+  }
+  const requireHeldOut = options?.requireHeldOut === true;
+  if (requireHeldOut && options?.verify === false) {
+    throw new Error(
+      'AxAgent.playbook().evolve(): requireHeldOut cannot be combined with verify: false.'
+    );
+  }
+  if (requireHeldOut) {
+    assertRequiredHeldOut({
+      train: normalized.train,
+      validation: normalized.validation,
+      ...(options?.taskId ? { taskId: options.taskId } : {}),
+    });
   }
 
   const studentAI = options?.studentAI ?? s.init?.ai ?? s.ai;
@@ -90,9 +140,33 @@ export async function evolveAgentPlaybook<
       options?.maxMetricCalls ?? Math.max(100, (maxProposals + 1) * datasetSize)
     )
   );
+  if (
+    requireHeldOut &&
+    (!Number.isFinite(runsPerTask) || !Number.isFinite(maxMetricCalls))
+  ) {
+    throw new Error(
+      'AxAgent.playbook().evolve(): requireHeldOut requires finite runsPerTask and maxMetricCalls.'
+    );
+  }
+  if (requireHeldOut && maxMetricCalls < datasetSize * 2) {
+    throw new Error(
+      `AxAgent.playbook().evolve(): requireHeldOut needs at least ${datasetSize * 2} metric calls for one complete baseline + candidate evaluation; maxMetricCalls is ${maxMetricCalls}.`
+    );
+  }
   const epsilon = options?.epsilon ?? DEFAULT_EPSILON;
   const minHeldInGain = options?.minHeldInGain ?? DEFAULT_MIN_HELD_IN_GAIN;
   const scoreThreshold = options?.scoreThreshold ?? DEFAULT_SCORE_THRESHOLD;
+  if (
+    requireHeldOut &&
+    (!Number.isFinite(epsilon) ||
+      epsilon < 0 ||
+      !Number.isFinite(minHeldInGain) ||
+      minHeldInGain < 0)
+  ) {
+    throw new Error(
+      'AxAgent.playbook().evolve(): requireHeldOut requires finite, non-negative epsilon and minHeldInGain.'
+    );
+  }
   const budget: AxAgentEvalBudget = { remaining: maxMetricCalls };
   const usedCalls = () => maxMetricCalls - budget.remaining;
 
@@ -137,6 +211,11 @@ export async function evolveAgentPlaybook<
     ...batchArgs,
     tasks: normalized.train,
   });
+  if (requireHeldOut && !baselineTrain.complete) {
+    throw new Error(
+      'AxAgent.playbook().evolve(): requireHeldOut held-in baseline evaluation was incomplete or errored.'
+    );
+  }
   let heldIn = baselineTrain.mean;
   let heldOut: number | undefined;
   if (normalized.validation?.length) {
@@ -144,12 +223,16 @@ export async function evolveAgentPlaybook<
       'baseline',
       `evaluating ${normalized.validation.length} validation tasks`
     );
-    heldOut = (
-      await runAgentEvalBatch<IN, OUT>({
-        ...batchArgs,
-        tasks: normalized.validation,
-      })
-    ).mean;
+    const baselineHeldOut = await runAgentEvalBatch<IN, OUT>({
+      ...batchArgs,
+      tasks: normalized.validation,
+    });
+    if (requireHeldOut && !baselineHeldOut.complete) {
+      throw new Error(
+        'AxAgent.playbook().evolve(): requireHeldOut held-out baseline evaluation was incomplete or errored.'
+      );
+    }
+    heldOut = baselineHeldOut.mean;
   }
   const baseline = {
     heldIn,
@@ -199,124 +282,158 @@ export async function evolveAgentPlaybook<
   // ---- Sequential propose -> (verify) accept/reject ----
   const outcomes: AxAgentPlaybookEvolveOutcome[] = [];
   const accepted: AxAppliedProposal[] = [];
-
-  for (const weakness of weaknesses) {
-    if (options?.abortSignal?.aborted) {
-      throw new Error('AxAgent.playbook().evolve(): aborted');
-    }
-    const proposal = buildProposal(weakness);
-    const requiredCalls =
-      (normalized.train.length + (normalized.validation?.length ?? 0)) *
-      runsPerTask;
-    if (verify && budget.remaining < requiredCalls) {
-      outcomes.push({
-        proposal,
-        accepted: false,
-        reason: 'metric_budget exhausted before validation',
-        heldIn: { before: heldIn, after: heldIn },
-      });
-      progress('validation', `${weakness.id}: budget exhausted, skipped`);
-      continue;
-    }
-
-    progress('proposal', `${weakness.id}: applying playbook proposal`);
-    let applied: AxAppliedProposal;
-    try {
-      applied = await applyProposal({ proposal, playbookHandle });
-    } catch (err) {
-      outcomes.push({
-        proposal,
-        accepted: false,
-        reason: `apply failed: ${err instanceof Error ? err.message : String(err)}`,
-        heldIn: { before: heldIn, after: heldIn },
-      });
-      continue;
-    }
-
-    // Trust-batch: keep the lesson without a gate.
-    if (!verify) {
-      accepted.push(applied);
-      outcomes.push({
-        proposal,
-        accepted: true,
-        reason: 'applied without verification (verify: false)',
-        heldIn: { before: heldIn, after: heldIn },
-      });
-      progress('validation', `${weakness.id}: applied (trust-batch)`);
-      continue;
-    }
-
-    const revalTrain = await runAgentEvalBatch<IN, OUT>({
-      ...batchArgs,
-      tasks: normalized.train,
-    });
-    let revalHeldOut: number | undefined;
-    let revalHeldOutExhausted = false;
-    if (normalized.validation?.length) {
-      const revalHeldOutBatch = await runAgentEvalBatch<IN, OUT>({
-        ...batchArgs,
-        tasks: normalized.validation,
-      });
-      revalHeldOut = revalHeldOutBatch.mean;
-      revalHeldOutExhausted = revalHeldOutBatch.exhausted;
-    }
-
-    // A re-eval that exhausted mid-way produced a subset mean — comparing it
-    // to the full-set baseline is apples-to-oranges, so refuse the accept.
-    const revalComplete = !revalTrain.exhausted && !revalHeldOutExhausted;
-    const gainOk = revalComplete && revalTrain.mean - heldIn >= minHeldInGain;
-    const heldOutOk =
-      revalHeldOut === undefined ||
-      heldOut === undefined ||
-      revalHeldOut - heldOut >= -epsilon;
-    const accept = revalComplete && gainOk && heldOutOk;
-
-    outcomes.push({
-      proposal,
-      accepted: accept,
-      reason: !revalComplete
-        ? 'metric_budget exhausted during re-evaluation'
-        : accept
-          ? heldOut === undefined
-            ? 'held-in improved (no held-out set provided — consider one)'
-            : 'held-in improved, held-out non-regressing'
-          : !gainOk
-            ? `held-in gain ${(revalTrain.mean - heldIn).toFixed(3)} below ${minHeldInGain}`
-            : `held-out regressed ${((revalHeldOut ?? 0) - (heldOut ?? 0)).toFixed(3)}`,
-      heldIn: { before: heldIn, after: revalTrain.mean },
-      ...(revalHeldOut !== undefined && heldOut !== undefined
-        ? { heldOut: { before: heldOut, after: revalHeldOut } }
-        : {}),
-    });
-
-    if (accept) {
-      playbookHandle?.recordEvidence?.(applied.bulletIds, {
-        source: 'agent-evolve',
-        sourceRunId: proposal.clusterSignature,
-        feedbackIds: [proposal.weaknessId],
-        verification: [
-          {
-            verifierId: 'agent.playbook.evolve',
-            testId: proposal.weaknessId,
-            result: 'passed',
-            summary: `held-in ${heldIn.toFixed(3)} -> ${revalTrain.mean.toFixed(3)}${
-              heldOut !== undefined && revalHeldOut !== undefined
-                ? `; held-out ${heldOut.toFixed(3)} -> ${revalHeldOut.toFixed(3)}`
-                : ''
-            }`,
-          },
-        ],
-      });
-      accepted.push(applied);
-      heldIn = revalTrain.mean;
-      if (revalHeldOut !== undefined) {
-        heldOut = revalHeldOut;
-      }
-      progress('validation', `${weakness.id}: ACCEPTED`);
-    } else {
+  const rollbackAccepted = () => {
+    for (const applied of [...accepted].reverse()) {
       applied.rollback();
-      progress('validation', `${weakness.id}: rejected, rolled back`);
     }
+  };
+  let inFlight: AxAppliedProposal | undefined;
+
+  try {
+    for (const weakness of weaknesses) {
+      if (options?.abortSignal?.aborted) {
+        throw new Error('AxAgent.playbook().evolve(): aborted');
+      }
+      const proposal = buildProposal(weakness);
+      const requiredCalls =
+        (normalized.train.length + (normalized.validation?.length ?? 0)) *
+        runsPerTask;
+      if (verify && budget.remaining < requiredCalls) {
+        outcomes.push({
+          proposal,
+          status: 'rejected',
+          accepted: false,
+          reason: 'metric_budget exhausted before validation',
+          heldIn: { before: heldIn, after: heldIn },
+        });
+        progress('validation', `${weakness.id}: budget exhausted, skipped`);
+        continue;
+      }
+
+      progress('proposal', `${weakness.id}: applying playbook proposal`);
+      let applied: AxAppliedProposal;
+      try {
+        applied = await applyProposal({ proposal, playbookHandle });
+      } catch (err) {
+        outcomes.push({
+          proposal,
+          status: 'rejected',
+          accepted: false,
+          reason: `apply failed: ${err instanceof Error ? err.message : String(err)}`,
+          heldIn: { before: heldIn, after: heldIn },
+        });
+        continue;
+      }
+      inFlight = applied;
+
+      // Trust-batch: keep the lesson without a gate.
+      if (!verify) {
+        accepted.push(applied);
+        inFlight = undefined;
+        outcomes.push({
+          proposal,
+          status: 'accepted',
+          accepted: true,
+          reason: 'applied without verification (verify: false)',
+          heldIn: { before: heldIn, after: heldIn },
+        });
+        progress('validation', `${weakness.id}: applied (trust-batch)`);
+        continue;
+      }
+
+      const revalTrain = await runAgentEvalBatch<IN, OUT>({
+        ...batchArgs,
+        tasks: normalized.train,
+      });
+      let revalHeldOutBatch:
+        | Awaited<ReturnType<typeof runAgentEvalBatch<IN, OUT>>>
+        | undefined;
+      if (normalized.validation?.length) {
+        revalHeldOutBatch = await runAgentEvalBatch<IN, OUT>({
+          ...batchArgs,
+          tasks: normalized.validation,
+        });
+      }
+      let revalHeldOut: number | undefined;
+      let revalHeldOutExhausted = false;
+      if (revalHeldOutBatch) {
+        revalHeldOut = revalHeldOutBatch.mean;
+        revalHeldOutExhausted = revalHeldOutBatch.exhausted;
+      }
+
+      // A re-eval that exhausted mid-way produced a subset mean — comparing it
+      // to the full-set baseline is apples-to-oranges, so refuse the accept.
+      const revalComplete = requireHeldOut
+        ? revalTrain.complete && revalHeldOutBatch?.complete === true
+        : !revalTrain.exhausted && !revalHeldOutExhausted;
+      const gainOk = revalComplete && revalTrain.mean - heldIn >= minHeldInGain;
+      const heldOutOk =
+        revalHeldOut === undefined ||
+        heldOut === undefined ||
+        revalHeldOut - heldOut >= -epsilon;
+      const accept = revalComplete && gainOk && heldOutOk;
+
+      outcomes.push({
+        proposal,
+        status: accept ? 'accepted' : 'rejected',
+        accepted: accept,
+        reason:
+          requireHeldOut && !revalTrain.complete
+            ? 'held-in evaluation incomplete or errored'
+            : requireHeldOut && revalHeldOutBatch?.complete !== true
+              ? 'held-out evaluation incomplete or errored'
+              : !revalComplete
+                ? 'metric_budget exhausted during re-evaluation'
+                : accept
+                  ? heldOut === undefined
+                    ? 'held-in improved (no held-out set provided — consider one)'
+                    : 'held-in improved, held-out non-regressing'
+                  : !gainOk
+                    ? `held-in gain ${(revalTrain.mean - heldIn).toFixed(3)} below ${minHeldInGain}`
+                    : `held-out regressed ${((revalHeldOut ?? 0) - (heldOut ?? 0)).toFixed(3)}`,
+        heldIn: { before: heldIn, after: revalTrain.mean },
+        ...(revalHeldOut !== undefined && heldOut !== undefined
+          ? { heldOut: { before: heldOut, after: revalHeldOut } }
+          : {}),
+      });
+
+      if (accept) {
+        playbookHandle?.recordEvidence?.(applied.bulletIds, {
+          source: 'agent-evolve',
+          sourceRunId: proposal.clusterSignature,
+          feedbackIds: [proposal.weaknessId],
+          verification: [
+            {
+              verifierId: 'agent.playbook.evolve',
+              testId: proposal.weaknessId,
+              result: 'passed',
+              summary: `held-in ${heldIn.toFixed(3)} -> ${revalTrain.mean.toFixed(3)}${
+                heldOut !== undefined && revalHeldOut !== undefined
+                  ? `; held-out ${heldOut.toFixed(3)} -> ${revalHeldOut.toFixed(3)}`
+                  : ''
+              }`,
+            },
+          ],
+        });
+        accepted.push(applied);
+        inFlight = undefined;
+        heldIn = revalTrain.mean;
+        if (revalHeldOut !== undefined) {
+          heldOut = revalHeldOut;
+        }
+        progress('validation', `${weakness.id}: ACCEPTED`);
+      } else {
+        applied.rollback();
+        inFlight = undefined;
+        progress('validation', `${weakness.id}: rejected, rolled back`);
+      }
+    }
+  } catch (err) {
+    inFlight?.rollback();
+    if (options?.apply === false) {
+      rollbackAccepted();
+    }
+    throw err;
   }
 
   // ---- Finalize ----
@@ -324,9 +441,7 @@ export async function evolveAgentPlaybook<
     accepted.length > 0 ? playbookHandle?.getState() : undefined;
 
   if (options?.apply === false) {
-    for (const applied of [...accepted].reverse()) {
-      applied.rollback();
-    }
+    rollbackAccepted();
   }
 
   progress(

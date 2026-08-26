@@ -315,6 +315,30 @@ void structuredPlaybookMetricOptions;
   );
 }
 
+// Agent playbook strict promotion keeps taskId typed to the agent input
+{
+  const runtime = {} as AxCodeRuntime;
+  const ai = {} as import('../ai/types.js').AxAIService;
+  const a = agent('query:string -> answer:string', {
+    contextFields: [] as const,
+    runtime,
+    ai,
+  });
+
+  a.playbook().evolve(
+    {
+      train: [{ input: { query: 'train' }, criteria: 'Correct', id: 'train' }],
+      validation: [
+        { input: { query: 'held-out' }, criteria: 'Correct', id: 'held-out' },
+      ],
+    },
+    {
+      requireHeldOut: true,
+      taskId: (task) => task.input.query,
+    }
+  );
+}
+
 // Agent optimize() eval predictions discriminate final vs clarification outcomes
 {
   const prediction = {} as AxAgentEvalPrediction<{ answer: string }>;

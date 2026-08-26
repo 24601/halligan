@@ -28,6 +28,12 @@ export type AxAgentEvalBatchResult<
   mean: number;
   /** True when the budget ran out before every task executed. */
   exhausted: boolean;
+  /**
+   * True only when every requested run completed with a finite metric and the
+   * weighted aggregate has finite non-negative weights, positive total weight,
+   * and a finite mean.
+   */
+  complete: boolean;
 };
 
 export async function runAgentEvalBatch<
@@ -47,6 +53,7 @@ export async function runAgentEvalBatch<
   const records: AxAgentPlaybookEvolveRunRecord<IN, OUT>[] = [];
   const runsPerTask = Math.max(1, Math.floor(args.runsPerTask ?? 1));
   let exhausted = false;
+  let hadEvaluationError = false;
 
   for (const task of args.tasks) {
     const scores: number[] = [];
@@ -76,18 +83,20 @@ export async function runAgentEvalBatch<
           example: task as unknown as Parameters<AxMetricFn>[0]['example'],
         });
         const score =
-          typeof metricResult === 'number'
-            ? metricResult
-            : typeof metricResult?.score === 'number'
-              ? metricResult.score
-              : 0;
-        scores.push(Number.isFinite(score) ? score : 0);
+          typeof metricResult === 'number' ? metricResult : metricResult.score;
+        const finiteScore = Number.isFinite(score);
+        scores.push(finiteScore ? score : 0);
+        if (!finiteScore) {
+          hadEvaluationError = true;
+          lastError = 'metric returned a non-finite score';
+        }
         lastPrediction = prediction;
       } catch (err) {
         if (args.abortSignal?.aborted) {
           throw err;
         }
         scores.push(0);
+        hadEvaluationError = true;
         lastError = err instanceof Error ? err.message : String(err);
       }
     }
@@ -113,14 +122,27 @@ export async function runAgentEvalBatch<
 
   let weightSum = 0;
   let scoreSum = 0;
+  let weightsValid = true;
   for (const record of records) {
     const weight = record.task.weight ?? 1;
+    if (!Number.isFinite(weight) || weight < 0) {
+      weightsValid = false;
+    }
     weightSum += weight;
     scoreSum += weight * record.score;
   }
+  const aggregateMean = weightSum > 0 ? scoreSum / weightSum : 0;
   return {
     records,
-    mean: weightSum > 0 ? scoreSum / weightSum : 0,
+    mean: aggregateMean,
     exhausted,
+    complete:
+      !exhausted &&
+      !hadEvaluationError &&
+      records.length === args.tasks.length &&
+      weightsValid &&
+      Number.isFinite(weightSum) &&
+      weightSum > 0 &&
+      Number.isFinite(aggregateMean),
   };
 }
