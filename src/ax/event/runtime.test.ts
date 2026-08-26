@@ -299,6 +299,219 @@ describe('AxEventRuntime', () => {
     await Promise.resolve();
   });
 
+  it('does not wedge close({drain:false}) on a never-settling onAudit hook', async () => {
+    const invoked = vi.fn();
+    let lateReject: ((reason?: unknown) => void) | undefined;
+    const neverAuthorize = new Promise<never>(() => {});
+    const authority: AxAuthorityContext = {
+      principal: { id: 'principal-a', tenantId: 'tenant-a' },
+      actor: { id: 'worker-a', kind: 'agent' },
+      grants: [
+        {
+          version: 1,
+          id: 'event-grant',
+          principalId: 'principal-a',
+          operations: ['event.target.invoke'],
+          resources: [
+            {
+              type: 'event.target',
+              id: 'audit-hang-target',
+              tenantId: 'tenant-a',
+            },
+          ],
+          leaseEpoch: 1,
+        },
+      ],
+      leaseEpoch: 1,
+      now: () => 100,
+      authorize: () => neverAuthorize,
+      onAudit: () =>
+        new Promise<void>((_resolve, reject) => {
+          lateReject = reject;
+        }),
+    };
+    const runtime = new AxEventRuntime({
+      maxAttempts: 1,
+      authority: () => authority,
+      routes: [
+        eventRoute({
+          id: 'audit-hang',
+          match: { types: ['authority.audit-hang'] },
+          action: 'wake',
+          target: eventTarget({
+            id: 'audit-hang-target',
+            ai,
+            program: program(invoked),
+            mapInput: () => ({}),
+            retrySafety: 'idempotent',
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    await runtime.publish(ingress('audit-hang-1', 'authority.audit-hang'));
+    for (let index = 0; index < 20; index++) await Promise.resolve();
+    const closed = runtime.close({ drain: false });
+    await expect(
+      Promise.race([
+        closed.then(() => 'closed'),
+        new Promise((resolve) => setTimeout(() => resolve('timeout'), 100)),
+      ])
+    ).resolves.toBe('closed');
+    expect(invoked).not.toHaveBeenCalled();
+    lateReject?.(new Error('late audit rejection'));
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+
+  it('terminally cancels a delivery aborted before authority resolution returns', async () => {
+    const invoked = vi.fn();
+    const store = new AxInMemoryEventStore();
+    let release!: () => void;
+    const gate = new Promise<undefined>((resolve) => {
+      release = () => resolve(undefined);
+    });
+    const runtime = new AxEventRuntime({
+      maxAttempts: 1,
+      store,
+      authority: () => gate,
+      routes: [
+        eventRoute({
+          id: 'pre-resolution-cancel',
+          match: { types: ['authority.pre-cancel'] },
+          action: 'wake',
+          target: eventTarget({
+            id: 'pre-cancel-target',
+            ai,
+            program: program(invoked),
+            mapInput: () => ({}),
+            retrySafety: 'idempotent',
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    const receipt = await runtime.publish(
+      ingress('pre-cancel-1', 'authority.pre-cancel')
+    );
+    for (let index = 0; index < 30; index++) await Promise.resolve();
+    await runtime.close({ drain: false });
+    release();
+    await Promise.resolve();
+    await Promise.resolve();
+    const delivery = await store.getDelivery(receipt.deliveryIds[0]!);
+    expect(delivery?.status).toBe('cancelled');
+    expect(invoked).not.toHaveBeenCalled();
+    await expect(runtime.waitForIdle(50)).resolves.toBeUndefined();
+  });
+
+  it('does not write a sink after close returns during a hanging redrive resolver', async () => {
+    const store = new AxInMemoryEventStore();
+    const write = vi
+      .fn<(output: unknown) => Promise<void>>()
+      .mockRejectedValueOnce(new Error('synthetic sink failure'))
+      .mockResolvedValue(undefined);
+    const makeAuthority = (): AxAuthorityContext => ({
+      principal: { id: 'principal-a', tenantId: 'tenant-a' },
+      actor: { id: 'worker-a', kind: 'agent' },
+      grants: [
+        {
+          version: 1,
+          id: 'target-1',
+          principalId: 'principal-a',
+          operations: ['event.target.invoke'],
+          resources: [
+            {
+              type: 'event.target',
+              id: 'redrive-hang-target',
+              tenantId: 'tenant-a',
+            },
+          ],
+          leaseEpoch: 1,
+        },
+        {
+          version: 1,
+          id: 'sink-1',
+          principalId: 'principal-a',
+          operations: ['event.sink.write'],
+          resources: [
+            {
+              type: 'event.sink',
+              id: 'redrive-hang-sink',
+              tenantId: 'tenant-a',
+            },
+          ],
+          leaseEpoch: 1,
+        },
+      ],
+      leaseEpoch: 1,
+      now: () => 100,
+      authorize: (operation, context) => ({
+        version: 1,
+        receiptId: `receipt-${operation}`,
+        requestId: context.requestId,
+        decision: 'allow',
+        operation,
+        resource: context.resource,
+        principalId: context.principal.id,
+        actor: { id: context.actor.id, kind: context.actor.kind },
+        grantIds: context.grants.map((grant) => grant.id),
+        leaseEpoch: context.leaseEpoch,
+        authorizedAt: context.now,
+      }),
+    });
+    let hanging = false;
+    let lateResolve: ((value?: unknown) => void) | undefined;
+    const runtime = new AxEventRuntime({
+      authority: () => {
+        if (!hanging) return makeAuthority();
+        return new Promise((resolve) => {
+          lateResolve = () => resolve(makeAuthority());
+        });
+      },
+      maxAttempts: 1,
+      store,
+      routes: [
+        eventRoute({
+          id: 'redrive-hang-route',
+          match: { types: ['redrive.hang'] },
+          action: 'wake',
+          target: eventTarget({
+            id: 'redrive-hang-target',
+            ai,
+            program: program(() => ({ ok: true })),
+            mapInput: () => ({}),
+            retrySafety: 'idempotent',
+            sinks: [{ id: 'redrive-hang-sink', write }],
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    await runtime.publish(ingress('redrive-hang-1', 'redrive.hang'));
+    await runtime.waitForIdle();
+    const deadLetter = (await runtime.listDeadLetters()).find(
+      (value) => value.kind === 'sink'
+    );
+    expect(deadLetter).toBeDefined();
+    expect(write).toHaveBeenCalledOnce();
+
+    hanging = true;
+    const redrive = runtime.redrive(deadLetter!.id);
+    for (let index = 0; index < 20; index++) await Promise.resolve();
+    const closed = runtime.close({ drain: false });
+    await expect(
+      Promise.race([
+        closed.then(() => 'closed'),
+        new Promise((resolve) => setTimeout(() => resolve('timeout'), 100)),
+      ])
+    ).resolves.toBe('closed');
+    lateResolve?.();
+    await expect(redrive).rejects.toThrow(/clos(ing|ed)/);
+    expect(write).toHaveBeenCalledOnce();
+    expect(await runtime.listDeadLetters()).toContainEqual(deadLetter);
+  });
+
   it('re-resolves current authority before sink dead-letter redrive', async () => {
     const store = new AxInMemoryEventStore();
     const write = vi

@@ -609,4 +609,29 @@ describe('Ax host authority boundary', () => {
     process.off('unhandledRejection', onUnhandled);
     expect(rejections).toEqual([]);
   });
+
+  it('does not wait forever for a never-settling onAudit after cancel', async () => {
+    const never = new Promise<never>(() => {});
+    const controller = new AbortController();
+    const pending = axAuthorize(
+      authority({
+        authorizeTimeoutMs: 1_000,
+        authorize: () => never,
+        onAudit: () => never,
+      }),
+      'document.read',
+      resource,
+      controller.signal
+    );
+    controller.abort('stop');
+    await expect(
+      Promise.race([
+        pending.then(
+          () => 'allowed',
+          (error) => error
+        ),
+        new Promise((resolve) => setTimeout(() => resolve('timeout'), 100)),
+      ])
+    ).resolves.toMatchObject({ code: 'cancelled' });
+  });
 });
