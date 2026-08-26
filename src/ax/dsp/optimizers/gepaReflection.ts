@@ -7,6 +7,7 @@ export type AxGEPAReflectiveTuple = {
   input: AxExample;
   prediction: unknown;
   score: number;
+  feedback?: string;
 };
 
 export type AxGEPATraceSummaryCall = {
@@ -20,6 +21,7 @@ export type AxGEPATraceSummaryCall = {
 
 export type AxGEPATraceSummary = {
   score: number;
+  feedback?: string;
   calls: AxGEPATraceSummaryCall[];
   output?: string;
   error?: string;
@@ -123,6 +125,10 @@ export function summarizeGEPATraces(
 
   return traceDataset.slice(0, maxRows).map((item: any) => ({
     score: Number(item?.score ?? 0),
+    feedback:
+      typeof item?.feedback === 'string'
+        ? renderReflectiveValue(item.feedback, maxValueChars)
+        : undefined,
     calls: Array.isArray(item?.calls)
       ? item.calls.map((call: any) => ({
           componentId:

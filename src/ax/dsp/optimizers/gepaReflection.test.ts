@@ -327,4 +327,38 @@ describe('GEPA reflection helpers', () => {
     expect(proposed).toBe('recovered proposal');
     expect(errors).toEqual([undefined, 'proposer unavailable']);
   });
+
+  it('passes per-example metric feedback into component reflection', async () => {
+    let prompt = '';
+    const ai = new AxMockAIService({
+      chatResponse: async (req) => {
+        prompt = JSON.stringify(req.chatPrompt);
+        return {
+          results: [
+            {
+              index: 0,
+              content: 'New Value: improved',
+              finishReason: 'stop',
+            },
+          ],
+        };
+      },
+    });
+
+    await proposeGEPAComponentValue({
+      ai,
+      target: { id: 'root::instruction', kind: 'instruction', current: 'base' },
+      currentValue: 'base',
+      tuples: [
+        {
+          input: { question: 'q' },
+          prediction: { answer: 'a' },
+          score: 0.4,
+          feedback: 'Ground the answer in the supplied context.',
+        },
+      ],
+    });
+
+    expect(prompt).toContain('Ground the answer in the supplied context.');
+  });
 });

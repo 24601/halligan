@@ -18,6 +18,12 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
 
 ## Open
 
+- `axir-2026-08-25-port-structured-qualitative-metric-results-through-gepa` [axoptimize] Port structured qualitative metric results through GEPA
+  - Status: open
+  - Source commit: `working-tree`
+  - TS paths: `src/ax/dsp`, `src/ax/agent/agentInternal/playbookEvolve`, `src/ax/agent/agent.test-d.ts`
+  - Impact: TypeScript metrics can return an explicit scalar score with bounded per-example textual feedback and named Pareto objective scores; GEPA aligns feedback with reflective datasets and playbook evolution consumes the structured scalar. Generated language optimizers still expose only scalar or legacy score-vector evaluation.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 - `axir-2026-08-25-port-retained-asynchronous-child-agent-sessions` [axagent] Port retained asynchronous child agent sessions
   - Status: open
   - Source commit: `ca760294f5ea4f207052c39c2218e1195103bc2a`

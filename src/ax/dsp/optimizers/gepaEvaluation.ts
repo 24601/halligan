@@ -17,6 +17,7 @@ export type AxGEPABatchRow = {
   prediction: unknown;
   scores: Record<string, number>;
   scalar: number;
+  feedback?: string;
 };
 
 export type AxGEPABatchEvaluation = {
@@ -57,24 +58,117 @@ const zeroScoreVector = (
   return Object.fromEntries([...knownKeys].map((key) => [key, 0]));
 };
 
+export const normalizeGEPABatchScoreVectors = (
+  vectors: readonly Readonly<Record<string, number>>[],
+  failedRows: ReadonlySet<number>,
+  knownKeys: ReadonlySet<string> = new Set()
+): Record<string, number>[] => {
+  const siblingKeys = new Set(knownKeys);
+  for (const [index, vector] of vectors.entries()) {
+    if (failedRows.has(index)) continue;
+    for (const key of Object.keys(vector)) siblingKeys.add(key);
+  }
+  if (siblingKeys.size === 0) {
+    return vectors.map((vector) => ({ ...vector }));
+  }
+  return vectors.map((vector) =>
+    Object.fromEntries(
+      [...siblingKeys].map((key) => [
+        key,
+        Number.isFinite(vector[key]) ? vector[key] : 0,
+      ])
+    )
+  );
+};
+
+const MAX_METRIC_FEEDBACK_CHARS = 4_000;
+
+export const normalizeGEPAMetricFeedback = (
+  feedback: unknown
+): string | undefined => {
+  if (typeof feedback !== 'string') return undefined;
+  const characters: string[] = [];
+  const source = feedback.replace(/\r\n?/g, '\n');
+  for (const character of source) {
+    if (characters.length >= MAX_METRIC_FEEDBACK_CHARS) break;
+    const codePoint = character.codePointAt(0) ?? 0;
+    if (
+      character === '\n' ||
+      character === '\t' ||
+      (codePoint >= 32 && codePoint !== 127)
+    ) {
+      characters.push(character);
+    }
+  }
+  const sanitized = characters.join('').trim();
+  return sanitized || undefined;
+};
+
+type AxNormalizedGEPAMetricResult = {
+  scores: Record<string, number>;
+  scalar?: number;
+  feedback?: string;
+};
+
+export const normalizeGEPAMetricResult = async (
+  metricFn: AxMetricFn | AxMultiMetricFn,
+  prediction: unknown,
+  example: AxExample
+): Promise<AxNormalizedGEPAMetricResult> => {
+  const raw = await (metricFn as any)({ prediction, example });
+  if (typeof raw === 'number') {
+    return Number.isFinite(raw)
+      ? { scores: { score: raw }, scalar: raw }
+      : { scores: {} };
+  }
+  if (!raw || typeof raw !== 'object') return { scores: {} };
+
+  const structured =
+    typeof (raw as any).score === 'number' &&
+    (typeof (raw as any).feedback === 'string' ||
+      ((raw as any).scores !== null &&
+        typeof (raw as any).scores === 'object'));
+  if (structured) {
+    const scalar =
+      typeof (raw as any).score === 'number' &&
+      Number.isFinite((raw as any).score)
+        ? (raw as any).score
+        : undefined;
+    const scores: Record<string, number> = {};
+    const objectives = (raw as any).scores;
+    if (objectives && typeof objectives === 'object') {
+      for (const [key, value] of Object.entries(objectives)) {
+        if (typeof value === 'number' && Number.isFinite(value)) {
+          scores[key] = value;
+        }
+      }
+    }
+    if (Object.keys(scores).length === 0 && scalar !== undefined) {
+      scores.score = scalar;
+    }
+    return {
+      scores,
+      scalar,
+      feedback: normalizeGEPAMetricFeedback((raw as any).feedback),
+    };
+  }
+
+  const scores: Record<string, number> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      scores[key] = value;
+    }
+  }
+  return { scores };
+};
+
 export const normalizeGEPAScores = async (
   metricFn: AxMetricFn | AxMultiMetricFn,
   prediction: unknown,
   example: AxExample
 ): Promise<Record<string, number>> => {
-  const raw = await (metricFn as any)({ prediction, example });
-  if (typeof raw === 'number') {
-    return Number.isFinite(raw) ? { score: raw } : {};
-  }
-  if (!raw || typeof raw !== 'object') return {};
-
-  const out: Record<string, number> = {};
-  for (const [key, value] of Object.entries(raw)) {
-    if (typeof value === 'number' && Number.isFinite(value)) {
-      out[key] = value;
-    }
-  }
-  return out;
+  return (await normalizeGEPAMetricResult(metricFn, prediction, example))
+    .scores;
 };
 
 export const scalarizeGEPAScores = (
@@ -143,12 +237,16 @@ export async function evaluateGEPABatch<IN, OUT extends AxGenOut>(args: {
             : zeroScoreVector(args.state.observedScoreKeys));
         for (const key of Object.keys(scores))
           args.state.observedScoreKeys.add(key);
-        const scalar = args.scalarize(scores);
+        const explicitScalar = evalBatch.scores[index];
+        const scalar = Number.isFinite(explicitScalar)
+          ? Number(explicitScalar)
+          : args.scalarize(scores);
         rows.push({
           input: ex as AxExample,
           prediction,
           scores,
           scalar,
+          feedback: normalizeGEPAMetricFeedback(evalBatch.feedback?.[index]),
         });
         args.state.totalCalls += 1;
         args.verboseLog?.(
@@ -177,10 +275,13 @@ export async function evaluateGEPABatch<IN, OUT extends AxGenOut>(args: {
     output?: unknown;
     error?: string;
   }> = [];
+  const failedRows = new Set<number>();
   for (const [index, ex] of args.set.entries()) {
     args.applyConfig(args.cfg);
     let prediction: unknown;
     let scores: Record<string, number>;
+    let metricScalar: number | undefined;
+    let feedback: string | undefined;
     const calls: AxFunctionCallTrace[] = [];
 
     try {
@@ -196,11 +297,14 @@ export async function evaluateGEPABatch<IN, OUT extends AxGenOut>(args: {
             : undefined,
         } as any
       );
-      scores = await normalizeGEPAScores(
+      const metricResult = await normalizeGEPAMetricResult(
         args.metricFn,
         prediction,
         ex as AxExample
       );
+      scores = metricResult.scores;
+      metricScalar = metricResult.scalar;
+      feedback = metricResult.feedback;
       for (const key of Object.keys(scores))
         args.state.observedScoreKeys.add(key);
       if (args.captureTraces) trajectories.push({ calls, output: prediction });
@@ -208,6 +312,7 @@ export async function evaluateGEPABatch<IN, OUT extends AxGenOut>(args: {
       const message = error instanceof Error ? error.message : String(error);
       prediction = { error: message };
       scores = zeroScoreVector(args.state.observedScoreKeys);
+      failedRows.add(index);
       if (args.captureTraces) trajectories.push({ calls, error: message });
       args.verboseLog?.(
         `Evaluation failed during ${args.phase}; scoring this example as zero. Error: ${message}`
@@ -215,23 +320,34 @@ export async function evaluateGEPABatch<IN, OUT extends AxGenOut>(args: {
     }
 
     args.state.totalCalls += 1;
-    const scalar = args.scalarize(scores);
+    const scalar = metricScalar ?? args.scalarize(scores);
     rows.push({
       input: ex as AxExample,
       prediction,
       scores,
       scalar,
+      feedback,
     });
     args.verboseLog?.(
       `${args.phase}: completed ${index + 1}/${args.set.length} (score=${scalar.toFixed(3)})`
     );
   }
 
+  const scoreVectors = normalizeGEPABatchScoreVectors(
+    rows.map((row) => row.scores),
+    failedRows,
+    args.state.observedScoreKeys
+  );
+  const normalizedRows = rows.map((row, index) => ({
+    ...row,
+    scores: scoreVectors[index]!,
+  }));
+
   return {
-    rows,
-    avg: avgVec(rows.map((row) => row.scores)),
-    scalars: rows.map((row) => row.scalar),
-    sum: rows.reduce((total, row) => total + row.scalar, 0),
+    rows: normalizedRows,
+    avg: avgVec(scoreVectors),
+    scalars: normalizedRows.map((row) => row.scalar),
+    sum: normalizedRows.reduce((total, row) => total + row.scalar, 0),
     trajectories: args.captureTraces ? trajectories : undefined,
   };
 }

@@ -536,10 +536,16 @@ export class AxACE extends AxBaseOptimizer {
             prediction,
             example: example as AxExample,
           });
+          const scalar =
+            typeof score === 'number'
+              ? score
+              : typeof score?.score === 'number'
+                ? score.score
+                : Number.NaN;
 
-          if (typeof score === 'number') {
-            this.stats.bestScore = Math.max(this.stats.bestScore, score);
-            bestScore = Math.max(bestScore, score);
+          if (Number.isFinite(scalar)) {
+            this.stats.bestScore = Math.max(this.stats.bestScore, scalar);
+            bestScore = Math.max(bestScore, scalar);
           }
 
           const generatorOutput = this.createGeneratorOutput(
@@ -554,7 +560,7 @@ export class AxACE extends AxBaseOptimizer {
           const reflection = await this.runReflectionRounds({
             example,
             generatorOutput,
-            feedback: this.createMetricFeedback(score),
+            feedback: this.createMetricFeedback(scalar),
           });
 
           const rawCurator = await this.runCurator({
@@ -631,7 +637,7 @@ export class AxACE extends AxBaseOptimizer {
             ...(sourceRunId ? { sourceRunId } : {}),
             example: example as AxExample,
             prediction,
-            score: typeof score === 'number' ? score : 0,
+            score: Number.isFinite(scalar) ? scalar : 0,
             generatorOutput,
             reflection,
             curator: curatorResult,
@@ -654,8 +660,7 @@ export class AxACE extends AxBaseOptimizer {
           round += 1;
           this.currentRound = round;
 
-          const numericScore =
-            typeof score === 'number' && Number.isFinite(score) ? score : 0;
+          const numericScore = Number.isFinite(scalar) ? scalar : 0;
           const bestScoreForProgress = Number.isFinite(bestScore)
             ? bestScore
             : numericScore;

@@ -1164,6 +1164,29 @@
       "verification": "TS-derived native-image routing fixture; five-language AxIR dev verifier; npm run axir:check-packages; go test ./internal/axir; focused TypeScript router tests"
     },
     {
+      "id": "axir-2026-08-25-port-structured-qualitative-metric-results-through-gepa",
+      "status": "open",
+      "title": "Port structured qualitative metric results through GEPA",
+      "createdAt": "2026-08-25",
+      "sourcePR": null,
+      "sourceCommit": "working-tree",
+      "tsPaths": [
+        "src/ax/dsp",
+        "src/ax/agent/agentInternal/playbookEvolve",
+        "src/ax/agent/agent.test-d.ts"
+      ],
+      "portableSurface": "axoptimize",
+      "impact": "TypeScript metrics can return an explicit scalar score with bounded per-example textual feedback and named Pareto objective scores; GEPA aligns feedback with reflective datasets and playbook evolution consumes the structured scalar. Generated language optimizers still expose only scalar or legacy score-vector evaluation.",
+      "suggestedAxirWork": [
+        "Add or update the TS-derived conformance fixture.",
+        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
+        "Run npm run axir:conformance:check and npm run test:axir."
+      ],
+      "completedAt": null,
+      "completedByCommit": null,
+      "verification": null
+    },
+    {
       "id": "axir-2026-08-25-port-retained-asynchronous-child-agent-sessions",
       "status": "open",
       "title": "Port retained asynchronous child agent sessions",
