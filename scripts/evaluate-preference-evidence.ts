@@ -740,5 +740,7 @@ if (
   process.argv[1] &&
   import.meta.url === pathToFileURL(process.argv[1]).href
 ) {
-  console.log(JSON.stringify(runPreferenceEvidenceEvaluation(), null, 2));
+  const result = runPreferenceEvidenceEvaluation();
+  console.log(JSON.stringify(result, null, 2));
+  if (result.failures.length > 0) process.exit(1);
 }

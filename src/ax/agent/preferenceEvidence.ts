@@ -222,7 +222,10 @@ function assertBoundedStructure(
   if (depth > AX_PREFERENCE_EVIDENCE_LIMITS.objectDepth) {
     throw new Error('Preference evidence exceeds the object depth limit.');
   }
-  if (value === null || value === undefined) return;
+  if (value === undefined) return;
+  if (value === null) {
+    throw new Error('Preference evidence must not contain null entries.');
+  }
   if (typeof value === 'string') return;
   if (typeof value === 'number' || typeof value === 'boolean') return;
   if (typeof value !== 'object') {
@@ -313,8 +316,13 @@ function validApplicability(
   return entries <= AX_PREFERENCE_EVIDENCE_LIMITS.applicabilityEntries;
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
 function validBase(revision: AxPreferenceEvidenceRevision): boolean {
   return (
+    isPlainObject(revision) &&
     positiveInteger(revision.revision) &&
     positiveInteger(revision.epoch) &&
     boundedString(revision.eventId, AX_PREFERENCE_EVIDENCE_LIMITS.idChars) &&
@@ -361,7 +369,7 @@ function validRevision(revision: AxPreferenceEvidenceRevision): boolean {
 
 function validRecord(record: AxPreferenceEvidenceRecord): boolean {
   if (
-    !record ||
+    !isPlainObject(record) ||
     !boundedString(record.id, AX_PREFERENCE_EVIDENCE_LIMITS.idChars) ||
     !boundedString(record.principalId, AX_PREFERENCE_EVIDENCE_LIMITS.idChars) ||
     !boundedString(record.streamId, AX_PREFERENCE_EVIDENCE_LIMITS.idChars) ||
@@ -493,12 +501,9 @@ function rank(
     query,
     candidates.map(({ record, revision }) => ({
       id: record.id,
-      fields: [
-        { text: revision.scope, identifier: true, weight: 2 },
-        { text: revision.value },
-      ],
+      fields: [{ text: revision.value }],
     })),
-    { topK: candidates.length, minDocs: 1, minScore: 0, marginRatio: 0 }
+    { topK: candidates.length, minDocs: 1 }
   )
     .map((result) => ({ result, candidate: byId.get(result.id) }))
     .filter(
@@ -755,7 +760,10 @@ export function axSelectPreferenceEvidence(
   }
 
   const relationshipSources = candidates.filter(
-    ({ revision }) => revision.kind === 'confirmed-preference'
+    ({ revision }) =>
+      revision.kind === 'confirmed-preference' ||
+      revision.kind === 'observation' ||
+      revision.kind === 'inference'
   );
   const candidateById = new Map(
     candidates.map((candidate) => [candidate.record.id, candidate])
@@ -954,10 +962,10 @@ export function axErasePreferenceEvidence(
     epoch: record.epoch,
     revisions: [
       {
+        ...event,
         operation: 'erase',
         revision: record.streamVersion + 1,
         epoch: record.epoch,
-        ...event,
       },
     ],
   });
@@ -990,11 +998,11 @@ export function axRenewPreferenceEvidence(
     );
   }
   const renewal: AxPreferenceEvidenceRenewal = {
+    ...event,
     operation: 'renew',
     revision: record.streamVersion + 1,
     epoch: record.epoch + 1,
     kind: 'confirmed-preference',
-    ...event,
   };
   if (!validClaim(renewal)) {
     throw new Error('Cannot renew malformed preference evidence.');
