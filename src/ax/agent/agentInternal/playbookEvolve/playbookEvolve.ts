@@ -72,7 +72,9 @@ function deepFreeze<T>(value: T, seen = new WeakSet<object>()): Readonly<T> {
     for (const child of Object.values(value)) {
       deepFreeze(child, seen);
     }
-    Object.freeze(value);
+    // JavaScript rejects Object.freeze() for non-empty typed arrays. The
+    // structured clone still isolates this snapshot from caller mutation.
+    if (!ArrayBuffer.isView(value)) Object.freeze(value);
   }
   return value;
 }
@@ -103,6 +105,7 @@ function canonicalSerialize(
     }
     return `number:${Object.is(value, -0) ? '-0' : String(value)}`;
   }
+  if (typeof value === 'bigint') return `bigint:${value}`;
   if (Array.isArray(value)) {
     if (seen.has(value)) {
       throw new Error(
@@ -117,18 +120,62 @@ function canonicalSerialize(
     return serialized;
   }
   if (typeof value === 'object') {
-    const prototype = Object.getPrototypeOf(value);
-    if (prototype !== Object.prototype && prototype !== null) {
-      throw new Error(
-        'AxAgent.playbook().evolve(): retention digest values must be plain objects, arrays, and primitives.'
-      );
-    }
     if (seen.has(value)) {
       throw new Error(
         'AxAgent.playbook().evolve(): retention digest values must not contain cycles.'
       );
     }
+    if (value instanceof Date) {
+      if (!Number.isFinite(value.getTime())) {
+        throw new Error(
+          'AxAgent.playbook().evolve(): retention digest Date values must be valid.'
+        );
+      }
+      return `date:${value.toISOString()}`;
+    }
     seen.add(value);
+    if (value instanceof Map) {
+      const entries = [...value.entries()]
+        .map(
+          ([key, entryValue]) =>
+            `entry:[${canonicalSerialize(key, seen)},${canonicalSerialize(entryValue, seen)}]`
+        )
+        .sort();
+      seen.delete(value);
+      return `map:[${entries.join(',')}]`;
+    }
+    if (value instanceof Set) {
+      const entries = [...value].map((item) => canonicalSerialize(item, seen));
+      entries.sort();
+      seen.delete(value);
+      return `set:[${entries.join(',')}]`;
+    }
+    if (ArrayBuffer.isView(value)) {
+      const bytes = new Uint8Array(
+        value.buffer,
+        value.byteOffset,
+        value.byteLength
+      );
+      const serialized = [...bytes]
+        .map((byte) => byte.toString(16).padStart(2, '0'))
+        .join('');
+      seen.delete(value);
+      return `view:${value.constructor.name}:${serialized}`;
+    }
+    if (value instanceof ArrayBuffer) {
+      const serialized = [...new Uint8Array(value)]
+        .map((byte) => byte.toString(16).padStart(2, '0'))
+        .join('');
+      seen.delete(value);
+      return `arraybuffer:${serialized}`;
+    }
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      seen.delete(value);
+      throw new Error(
+        'AxAgent.playbook().evolve(): unsupported retention digest object value.'
+      );
+    }
     const record = value as Record<string, unknown>;
     const serialized = `object:{${Object.keys(record)
       .sort()
@@ -155,6 +202,22 @@ function canonicalDigest(value: unknown): string {
   return `fnv1a64:${hash.toString(16).padStart(16, '0')}`;
 }
 
+function atMostWithFloatingPointTolerance(value: number, limit: number) {
+  const tolerance =
+    Number.EPSILON * Math.max(1, Math.abs(value), Math.abs(limit)) * 4;
+  return value <= limit + tolerance;
+}
+
+function retentionEvidenceError(
+  label: string,
+  result: AxAgentEvalBatchResult
+): Error {
+  return new Error(
+    `AxAgent.playbook().evolve(): ${label} requires complete, finite evaluator evidence.`,
+    result.failure === undefined ? undefined : { cause: result.failure }
+  );
+}
+
 function validateRetentionWeights(
   tasks: readonly { weight?: number }[],
   label: string
@@ -179,7 +242,8 @@ function validateRetentionWeights(
 function validateRetentionPolicy(
   policy: NonNullable<AxAgentPlaybookEvolveOptions['retentionPolicy']>,
   verify: boolean,
-  currentTasks: readonly { weight?: number }[]
+  currentTasks: readonly { weight?: number }[],
+  heldOutTasks?: readonly { weight?: number }[]
 ): void {
   if (!verify) {
     throw new Error(
@@ -209,6 +273,9 @@ function validateRetentionPolicy(
     }
   }
   validateRetentionWeights(currentTasks, 'retention current-task set');
+  if (heldOutTasks?.length) {
+    validateRetentionWeights(heldOutTasks, 'retention held-out set');
+  }
   const identities = new Set<string>();
   for (const slice of policy.slices) {
     if (!slice.name.trim() || !slice.version.trim()) {
@@ -225,7 +292,7 @@ function validateRetentionPolicy(
       slice.tasks,
       `retention slice ${slice.name}@${slice.version}`
     );
-    const identity = `${slice.name}\u0000${slice.version}`;
+    const identity = JSON.stringify([slice.name, slice.version]);
     if (identities.has(identity)) {
       throw new Error(
         `AxAgent.playbook().evolve(): duplicate retention slice ${slice.name}@${slice.version}.`
@@ -281,7 +348,12 @@ export async function evolveAgentPlaybook<
       : undefined
     : normalized.validation;
   if (retentionPolicy) {
-    validateRetentionPolicy(retentionPolicy, verify, trainTasks);
+    validateRetentionPolicy(
+      retentionPolicy,
+      verify,
+      trainTasks,
+      validationTasks
+    );
   }
   const maxProposals = Math.max(
     1,
@@ -301,7 +373,11 @@ export async function evolveAgentPlaybook<
     (trainTasks.length + (validationTasks?.length ?? 0) + retentionTaskCount) *
     runsPerTask;
   const maxMetricCalls = positiveSafeInteger(
-    options?.maxMetricCalls ?? Math.max(100, (maxProposals + 1) * datasetSize),
+    options?.maxMetricCalls ??
+      Math.min(
+        MAX_METRIC_CALLS,
+        Math.max(100, (maxProposals + 1) * datasetSize)
+      ),
     'maxMetricCalls',
     MAX_METRIC_CALLS
   );
@@ -313,7 +389,7 @@ export async function evolveAgentPlaybook<
     ? canonicalDigest(trainTasks)
     : undefined;
   const heldOutTaskSetDigest =
-    retentionPolicy && validationTasks
+    retentionPolicy && validationTasks?.length
       ? canonicalDigest(validationTasks)
       : undefined;
   const sliceTaskSetDigests =
@@ -395,8 +471,9 @@ export async function evolveAgentPlaybook<
     retentionPolicy &&
     (baselineTrain.exhausted || !baselineTrain.validEvidence)
   ) {
-    throw new Error(
-      'AxAgent.playbook().evolve(): retention current-task anchor requires complete, finite evaluator evidence.'
+    throw retentionEvidenceError(
+      'retention current-task anchor',
+      baselineTrain
     );
   }
   let currentTaskAnchorSequence = retentionPolicy
@@ -433,8 +510,9 @@ export async function evolveAgentPlaybook<
       retentionPolicy &&
       (baselineHeldOutBatch.exhausted || !baselineHeldOutBatch.validEvidence)
     ) {
-      throw new Error(
-        'AxAgent.playbook().evolve(): retention held-out anchor requires complete, finite evaluator evidence.'
+      throw retentionEvidenceError(
+        'retention held-out anchor',
+        baselineHeldOutBatch
       );
     }
     heldOut = baselineHeldOutBatch.mean;
@@ -463,8 +541,9 @@ export async function evolveAgentPlaybook<
         tasks: slice.tasks,
       });
       if (result.exhausted || !result.validEvidence) {
-        throw new Error(
-          `AxAgent.playbook().evolve(): retention slice ${slice.name}@${slice.version} requires complete, finite evaluator evidence.`
+        throw retentionEvidenceError(
+          `retention slice ${slice.name}@${slice.version}`,
+          result
         );
       }
       retentionAnchors.push(
@@ -629,17 +708,25 @@ export async function evolveAgentPlaybook<
       // A re-eval that exhausted mid-way produced a subset mean — comparing it
       // to the full-set baseline is apples-to-oranges, so refuse the accept.
       // Retention additionally rejects any evaluator error/non-finite score.
-      const retentionEvidenceInvalid = Boolean(
-        retentionPolicy &&
-          (!revalTrain.validEvidence ||
-            (revalHeldOutBatch && !revalHeldOutBatch.validEvidence) ||
-            candidateRetentionBatches.some(({ batch }) => !batch.validEvidence))
-      );
+      if (retentionPolicy) {
+        const failedResult = !revalTrain.validEvidence
+          ? revalTrain
+          : revalHeldOutBatch && !revalHeldOutBatch.validEvidence
+            ? revalHeldOutBatch
+            : candidateRetentionBatches.find(
+                ({ batch }) => !batch.validEvidence
+              )?.batch;
+        if (failedResult) {
+          throw retentionEvidenceError(
+            'candidate retention evaluation',
+            failedResult
+          );
+        }
+      }
       const revalComplete =
         !revalTrain.exhausted &&
         !revalHeldOutBatch?.exhausted &&
-        !candidateRetentionBatches.some(({ batch }) => batch.exhausted) &&
-        !retentionEvidenceInvalid;
+        !candidateRetentionBatches.some(({ batch }) => batch.exhausted);
       const currentGain = revalTrain.mean - heldIn;
       const gainOk = revalComplete && currentGain >= currentGainThreshold;
       const heldOutOk =
@@ -674,8 +761,14 @@ export async function evolveAgentPlaybook<
         const meanHistoricalLoss =
           losses.reduce((sum, loss) => sum + loss, 0) / losses.length;
         retentionOk =
-          worstHistoricalLoss <= retentionPolicy.maxWorstHistoricalLoss &&
-          meanHistoricalLoss <= retentionPolicy.maxMeanHistoricalLoss;
+          atMostWithFloatingPointTolerance(
+            worstHistoricalLoss,
+            retentionPolicy.maxWorstHistoricalLoss
+          ) &&
+          atMostWithFloatingPointTolerance(
+            meanHistoricalLoss,
+            retentionPolicy.maxMeanHistoricalLoss
+          );
         const accepted = gainOk && heldOutOk && retentionOk;
         retentionReceipt = deepFreeze({
           policy: {
@@ -730,23 +823,21 @@ export async function evolveAgentPlaybook<
       outcomes.push({
         proposal,
         accepted: accept,
-        reason: retentionEvidenceInvalid
-          ? 'retention evaluation produced invalid evaluator evidence'
-          : !revalComplete
-            ? 'metric_budget exhausted during re-evaluation'
-            : accept
+        reason: !revalComplete
+          ? 'metric_budget exhausted during re-evaluation'
+          : accept
+            ? retentionPolicy
+              ? 'current task improved, historical retention thresholds satisfied'
+              : heldOut === undefined
+                ? 'held-in improved (no held-out set provided — consider one)'
+                : 'held-in improved, held-out non-regressing'
+            : !gainOk
               ? retentionPolicy
-                ? 'current task improved, historical retention thresholds satisfied'
-                : heldOut === undefined
-                  ? 'held-in improved (no held-out set provided — consider one)'
-                  : 'held-in improved, held-out non-regressing'
-              : !gainOk
-                ? retentionPolicy
-                  ? `current-task gain ${currentGain.toFixed(3)} below ${currentGainThreshold}`
-                  : `held-in gain ${currentGain.toFixed(3)} below ${currentGainThreshold}`
-                : !heldOutOk
-                  ? `held-out regressed ${((revalHeldOut ?? 0) - (heldOut ?? 0)).toFixed(3)}`
-                  : `historical loss exceeded retention threshold (worst ${retentionReceipt?.worstHistoricalLoss.toFixed(3)}, mean ${retentionReceipt?.meanHistoricalLoss.toFixed(3)})`,
+                ? `current-task gain ${currentGain.toFixed(3)} below ${currentGainThreshold}`
+                : `held-in gain ${currentGain.toFixed(3)} below ${currentGainThreshold}`
+              : !heldOutOk
+                ? `held-out regressed ${((revalHeldOut ?? 0) - (heldOut ?? 0)).toFixed(3)}`
+                : `historical loss exceeded retention threshold (worst ${retentionReceipt?.worstHistoricalLoss.toFixed(3)}, mean ${retentionReceipt?.meanHistoricalLoss.toFixed(3)})`,
         heldIn: { before: heldIn, after: revalTrain.mean },
         ...(revalHeldOut !== undefined && heldOut !== undefined
           ? { heldOut: { before: heldOut, after: revalHeldOut } }
@@ -820,7 +911,9 @@ export async function evolveAgentPlaybook<
   return {
     baseline,
     final: { heldIn, ...(heldOut !== undefined ? { heldOut } : {}) },
-    ...(retentionAnchors.length > 0 ? { retentionAnchors } : {}),
+    ...(retentionAnchors.length > 0
+      ? { retentionAnchors: deepFreeze(retentionAnchors) }
+      : {}),
     weaknesses,
     outcomes,
     recommendations: weaknesses.flatMap((w) => w.configRecommendations),

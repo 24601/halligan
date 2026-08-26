@@ -477,6 +477,7 @@ describe('agent.playbook().evolve()', () => {
       expect(result.retentionAnchors?.[0]?.taskSetDigest).toBe(
         receipt?.slices[0]?.taskSetDigest
       );
+      expect(Object.isFrozen(result.retentionAnchors)).toBe(true);
       expect(Object.isFrozen(result.retentionAnchors?.[0])).toBe(true);
       expect(Object.isFrozen(receipt)).toBe(true);
       expect(Object.isFrozen(receipt?.policy)).toBe(true);
@@ -516,6 +517,48 @@ describe('agent.playbook().evolve()', () => {
       });
       expect(result.outcomes[0]?.retention?.sequence).toBe(9);
       expect(actorPromptOf(ag)).toContain(BULLET_MARKER);
+    });
+
+    it('accepts exact floating-point historical-loss boundaries', async () => {
+      const { ag } = makeAgent();
+      const result = await ag.playbook().evolve(TASKS, {
+        metric: retentionMetric({
+          'history-refunds': 0.7,
+          'history-routing': 0.9,
+        }),
+        maxProposals: 1,
+        retentionPolicy: {
+          ...retentionPolicy(0.3),
+          maxMeanHistoricalLoss: 0.2,
+        },
+      });
+
+      expect(result.outcomes[0]?.retention).toMatchObject({
+        worstHistoricalLoss: 0.30000000000000004,
+        meanHistoricalLoss: 0.2,
+        accepted: true,
+      });
+      expect(result.outcomes[0]?.accepted).toBe(true);
+    });
+
+    it('rejects historical loss genuinely above a floating-point boundary', async () => {
+      const { ag } = makeAgent();
+      const result = await ag.playbook().evolve(TASKS, {
+        metric: retentionMetric({
+          'history-refunds': 0.699999999999,
+          'history-routing': 0.9,
+        }),
+        maxProposals: 1,
+        retentionPolicy: {
+          ...retentionPolicy(0.3),
+          maxMeanHistoricalLoss: 0.3,
+        },
+      });
+
+      expect(
+        result.outcomes[0]?.retention?.worstHistoricalLoss
+      ).toBeGreaterThan(0.3);
+      expect(result.outcomes[0]?.accepted).toBe(false);
     });
 
     it('enforces the mean historical-loss threshold independently', async () => {
@@ -612,30 +655,35 @@ describe('agent.playbook().evolve()', () => {
       expect(ag.getPlaybook().toJSON()).toEqual(before);
     });
 
-    it('rejects invalid candidate evidence without emitting a promotion receipt', async () => {
+    it('rolls back and propagates the candidate evaluator failure as cause', async () => {
       const { ag } = makeAgent();
       const before = ag.getPlaybook().toJSON();
-      const result = await ag.playbook().evolve(TASKS, {
-        metric: async ({ example, prediction }: any) => {
-          const fixed = prediction?.output?.answer === 'ok-fixed';
-          if (fixed && String(example.id).startsWith('history-')) {
-            return Number.NaN;
-          }
-          return fixed
-            ? 1
-            : String(example.id).startsWith('history-')
-              ? 1
-              : 0.2;
-        },
-        maxProposals: 1,
-        retentionPolicy: retentionPolicy(0.5),
-      });
+      const evaluatorFailure = new Error('retention evaluator unavailable');
 
-      expect(result.outcomes[0]).toMatchObject({
-        accepted: false,
-        reason: 'retention evaluation produced invalid evaluator evidence',
-      });
-      expect(result.outcomes[0]?.retention).toBeUndefined();
+      try {
+        await ag.playbook().evolve(TASKS, {
+          metric: async ({ example, prediction }: any) => {
+            const fixed = prediction?.output?.answer === 'ok-fixed';
+            if (fixed && String(example.id).startsWith('history-')) {
+              throw evaluatorFailure;
+            }
+            return fixed
+              ? 1
+              : String(example.id).startsWith('history-')
+                ? 1
+                : 0.2;
+          },
+          maxProposals: 1,
+          retentionPolicy: retentionPolicy(0.5),
+        });
+        throw new Error('expected evolve to reject');
+      } catch (error) {
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toContain(
+          'candidate retention evaluation'
+        );
+        expect((error as Error).cause).toBe(evaluatorFailure);
+      }
       expect(ag.getPlaybook().toJSON()).toEqual(before);
     });
 
@@ -778,6 +826,164 @@ describe('agent.playbook().evolve()', () => {
       expect(result.outcomes[0]?.retention?.slices[0]).toMatchObject({
         taskCount: 1,
       });
+    });
+
+    it('canonically digests Date, Map, Set, and typed-array evidence', async () => {
+      const mapA = new Map<unknown, unknown>([
+        [{ key: 'same' }, 'left'],
+        [{ key: 'same' }, 'right'],
+      ]);
+      const mapB = new Map<unknown, unknown>([
+        [{ key: 'same' }, 'right'],
+        [{ key: 'same' }, 'left'],
+      ]);
+      const evidence = (
+        date: Date | string,
+        map: Map<unknown, unknown>,
+        set: Set<unknown>,
+        bytes: Uint8Array | Uint16Array
+      ) => ({
+        input: { question: 'historical', date, map, set, bytes },
+        criteria: 'preserves evidence',
+        id: 'history-canonical',
+      });
+      const equivalentA = evidence(
+        new Date('2026-08-26T00:00:00.000Z'),
+        mapA,
+        new Set([{ item: 1 }, { item: 1 }]),
+        new Uint8Array([1, 2])
+      );
+      const equivalentB = evidence(
+        new Date('2026-08-26T00:00:00.000Z'),
+        mapB,
+        new Set([{ item: 1 }, { item: 1 }]),
+        new Uint8Array([1, 2])
+      );
+      const { ag } = makeAgent();
+      const result = await ag.playbook().evolve(TASKS, {
+        metric: retentionMetric({}),
+        maxProposals: 1,
+        retentionPolicy: {
+          ...retentionPolicy(1),
+          slices: [
+            { name: 'equivalent-a', version: '1', tasks: [equivalentA] },
+            { name: 'equivalent-b', version: '1', tasks: [equivalentB] },
+            {
+              name: 'date-string',
+              version: '1',
+              tasks: [
+                evidence(
+                  '2026-08-26T00:00:00.000Z',
+                  mapA,
+                  new Set([{ item: 1 }, { item: 1 }]),
+                  new Uint8Array([1, 2])
+                ),
+              ],
+            },
+            {
+              name: 'set-multiplicity',
+              version: '1',
+              tasks: [
+                evidence(
+                  new Date('2026-08-26T00:00:00.000Z'),
+                  mapA,
+                  new Set([{ item: 1 }]),
+                  new Uint8Array([1, 2])
+                ),
+              ],
+            },
+            {
+              name: 'typed-array-kind',
+              version: '1',
+              tasks: [
+                evidence(
+                  new Date('2026-08-26T00:00:00.000Z'),
+                  mapA,
+                  new Set([{ item: 1 }, { item: 1 }]),
+                  new Uint16Array([513])
+                ),
+              ],
+            },
+          ],
+        },
+      });
+      const digests = result.retentionAnchors?.map(
+        (anchor) => anchor.taskSetDigest
+      );
+
+      expect(digests?.[0]).toBe(digests?.[1]);
+      expect(digests?.[0]).not.toBe(digests?.[2]);
+      expect(digests?.[0]).not.toBe(digests?.[3]);
+      expect(digests?.[0]).not.toBe(digests?.[4]);
+    });
+
+    it('keeps separator-containing slice identities distinct', async () => {
+      const { ag } = makeAgent();
+      const result = await ag.playbook().evolve(TASKS, {
+        metric: retentionMetric({}),
+        maxProposals: 1,
+        retentionPolicy: {
+          ...retentionPolicy(1),
+          slices: [
+            { ...RETENTION_TASKS[0], name: 'a\0b', version: 'c' },
+            { ...RETENTION_TASKS[1], name: 'a', version: 'b\0c' },
+          ],
+        },
+      });
+
+      expect(result.retentionAnchors).toHaveLength(2);
+    });
+
+    it('validates held-out weights and omits empty held-out evidence', async () => {
+      const { ag } = makeAgent();
+      await expect(
+        ag.playbook().evolve(
+          {
+            train: TASKS,
+            validation: [{ ...TASKS[0]!, weight: -1 }],
+          },
+          {
+            metric: retentionMetric({}),
+            retentionPolicy: retentionPolicy(1),
+          }
+        )
+      ).rejects.toThrow(/retention held-out set task weights/);
+
+      const result = await ag.playbook().evolve(
+        { train: TASKS, validation: [] },
+        {
+          metric: retentionMetric({}),
+          maxProposals: 1,
+          retentionPolicy: retentionPolicy(1),
+        }
+      );
+      expect(
+        result.outcomes[0]?.retention?.policy.heldOutTaskSetDigest
+      ).toBeUndefined();
+      expect(result.outcomes[0]?.retention?.heldOut).toBeUndefined();
+    });
+
+    it('caps an oversized computed metric budget default', async () => {
+      const { ag } = makeAgent();
+      const controller = new AbortController();
+      controller.abort();
+      const tasks = Array.from({ length: 2_098 }, (_, index) => ({
+        input: { question: `historical-${index}` },
+        criteria: 'preserves evidence',
+        id: `history-${index}`,
+      }));
+
+      await expect(
+        ag.playbook().evolve(TASKS, {
+          metric: retentionMetric({}),
+          runsPerTask: 100,
+          abortSignal: controller.signal,
+          retentionPolicy: {
+            ...retentionPolicy(1),
+            slices: [{ name: 'large-corpus', version: '1', tasks }],
+          },
+        })
+      ).rejects.toThrow(/aborted/);
     });
 
     it('rejects invalid policy authority and identity configurations', async () => {

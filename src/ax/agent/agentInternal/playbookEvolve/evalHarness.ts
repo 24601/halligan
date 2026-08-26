@@ -43,6 +43,8 @@ export type AxAgentEvalBatchResult<
   expectedRuns: number;
   /** False when any run threw or returned a non-finite scalar score. */
   validEvidence: boolean;
+  /** First evaluator failure, preserved for fail-closed callers. */
+  failure?: unknown;
 };
 
 export async function runAgentEvalBatch<
@@ -82,6 +84,8 @@ export async function runAgentEvalBatch<
   let exhausted = false;
   let executedRuns = 0;
   let validEvidence = true;
+  let failure: unknown;
+  let hasFailure = false;
 
   for (const task of args.tasks) {
     const scores: number[] = [];
@@ -114,6 +118,12 @@ export async function runAgentEvalBatch<
         const validScore = typeof score === 'number' && Number.isFinite(score);
         scores.push(validScore ? score : 0);
         validEvidence &&= validScore;
+        if (!validScore && !hasFailure) {
+          failure = new TypeError(
+            'AxAgent.playbook().evolve(): evaluator metric must return a finite number.'
+          );
+          hasFailure = true;
+        }
         lastPrediction = prediction;
       } catch (err) {
         if (args.abortSignal?.aborted) {
@@ -122,6 +132,10 @@ export async function runAgentEvalBatch<
         scores.push(0);
         validEvidence = false;
         lastError = err instanceof Error ? err.message : String(err);
+        if (!hasFailure) {
+          failure = err;
+          hasFailure = true;
+        }
       }
     }
 
@@ -158,5 +172,6 @@ export async function runAgentEvalBatch<
     executedRuns,
     expectedRuns: args.tasks.length * runsPerTask,
     validEvidence,
+    ...(hasFailure ? { failure } : {}),
   };
 }
