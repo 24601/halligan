@@ -28,12 +28,15 @@ import { getGEPAUpdateGroup } from './gepaDependencies.js';
 import {
   type AxGEPABatchEvaluation,
   evaluateGEPABatch,
+  normalizeGEPAMetricFeedback,
+  normalizeGEPAMetricResult,
   normalizeGEPAScores,
   scalarizeGEPAScores,
 } from './gepaEvaluation.js';
 import {
   proposeGEPAComponentValue,
   renderReflectiveValue,
+  validateGEPAComponentValue,
 } from './gepaReflection.js';
 import { AxGEPAComponentSelector } from './gepaSelection.js';
 import {
@@ -724,12 +727,14 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
         input: row.input,
         prediction: row.prediction,
         score: row.scalar,
+        feedback: row.feedback,
       }));
 
       const parentEvaluationForAdapter = {
         outputs: parentMiniEval.rows.map((row) => row.prediction),
         scores: parentMiniEval.scalars,
         scoreVectors: parentMiniEval.rows.map((row) => row.scores),
+        feedback: parentMiniEval.rows.map((row) => row.feedback),
         trajectories: parentMiniEval.trajectories,
       };
 
@@ -738,6 +743,7 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
           const rows = (parentMiniEval.trajectories ?? [])
             .map((trace: any, index) => ({
               score: parentMiniEval.scalars[index] ?? 0,
+              feedback: parentMiniEval.rows[index]?.feedback,
               calls: Array.isArray(trace?.calls) ? trace.calls : [],
               output: trace?.output,
               error: trace?.error,
@@ -770,8 +776,13 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
           )) as Record<string, string> | undefined;
           if (proposedMap) {
             for (const groupTarget of targetGroup) {
-              const proposed = proposedMap[groupTarget.id];
-              if (typeof proposed === 'string' && proposed.length > 0) {
+              const raw = proposedMap[groupTarget.id];
+              if (typeof raw !== 'string') continue;
+              const proposed = raw.trim();
+              if (
+                proposed &&
+                validateGEPAComponentValue(groupTarget, proposed) === true
+              ) {
                 proposedCfg[groupTarget.id] = proposed;
               }
             }
@@ -1100,11 +1111,14 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       );
 
       this.stats.totalCalls += 1;
-      const score = await metricFn({
+      const metricResult = await normalizeGEPAMetricResult(
+        metricFn,
         prediction,
-        example: example as AxExample,
-      });
-      if (typeof score === 'number' && !Number.isNaN(score)) {
+        example as AxExample
+      );
+      const score =
+        metricResult.scalar ?? scalarizeGEPAScores(metricResult.scores);
+      if (Number.isFinite(score)) {
         const threshold =
           typeof this.targetScore === 'number' ? this.targetScore : 0.5;
         if (score >= threshold) this.stats.successfulDemos += 1;
@@ -1131,6 +1145,7 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       input: AxExample;
       prediction: unknown;
       score: number;
+      feedback?: string;
     }>,
     targetMeta?: Readonly<{
       kind: string;
@@ -1147,6 +1162,7 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       input: AxExample;
       prediction: unknown;
       score: number;
+      feedback?: string;
     }> = preEvaluatedTuples ? [...preEvaluatedTuples] : [];
 
     if (tuples.length === 0) {
@@ -1162,14 +1178,17 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
             } as any
           );
           this.stats.totalCalls += 1;
-          const score = await metricFn({
-            prediction: pred,
-            example: ex as AxExample,
-          });
+          const metricResult = await normalizeGEPAMetricResult(
+            metricFn,
+            pred,
+            ex as AxExample
+          );
           tuples.push({
             input: ex as AxExample,
             prediction: pred,
-            score: typeof score === 'number' ? score : 0,
+            score:
+              metricResult.scalar ?? scalarizeGEPAScores(metricResult.scores),
+            feedback: metricResult.feedback,
           });
         } catch {
           tuples.push({ input: ex as AxExample, prediction: {}, score: 0 });
@@ -1185,7 +1204,9 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
 
     const feedbackNotes = (
       ((options as any)?.feedbackNotes as string[] | undefined) ?? []
-    ).filter((note) => typeof note === 'string' && note.trim().length > 0);
+    )
+      .map(normalizeGEPAMetricFeedback)
+      .filter((note): note is string => note !== undefined);
     const external: string[] = [...feedbackNotes];
     const feedbackFn = (options as any)?.feedbackFn as
       | ((
@@ -1203,7 +1224,11 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
           example: tuple.input,
           componentId: targetId,
         });
-        if (fb) Array.isArray(fb) ? external.push(...fb) : external.push(fb);
+        const values = Array.isArray(fb) ? fb : [fb];
+        for (const value of values) {
+          const normalized = normalizeGEPAMetricFeedback(value);
+          if (normalized) external.push(normalized);
+        }
       }
     }
 
@@ -1236,6 +1261,7 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       feedbackSummary,
       traceDataset: targetMeta?.traceDataset,
       maxAttempts: 2,
+      proposal: options?.gepaProposal,
     });
 
     return proposed ?? currentInstruction;
@@ -1252,6 +1278,7 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       input: AxExample;
       prediction: unknown;
       score: number;
+      feedback?: string;
     }>
   ): Promise<string> {
     // Collect quick feedback tuples from minibatch (or use pre-evaluated)
@@ -1259,6 +1286,7 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       input: AxExample;
       prediction: unknown;
       score: number;
+      feedback?: string;
     }> = preEvaluatedTuples ?? [];
 
     if (tuples.length === 0) {
@@ -1273,14 +1301,17 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
             } as any
           );
           this.stats.totalCalls += 1;
-          const score = await metricFn({
-            prediction: pred,
-            example: ex as AxExample,
-          });
+          const metricResult = await normalizeGEPAMetricResult(
+            metricFn,
+            pred,
+            ex as AxExample
+          );
           tuples.push({
             input: ex as AxExample,
             prediction: pred,
-            score: typeof score === 'number' ? score : 0,
+            score:
+              metricResult.scalar ?? scalarizeGEPAScores(metricResult.scores),
+            feedback: metricResult.feedback,
           });
         } catch {
           tuples.push({ input: ex as AxExample, prediction: {}, score: 0 });
@@ -1307,7 +1338,9 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       | undefined = (options as any)?.feedbackFn;
     const feedbackNotes = (
       ((options as any)?.feedbackNotes as string[] | undefined) ?? []
-    ).filter((note) => typeof note === 'string' && note.trim().length > 0);
+    )
+      .map(normalizeGEPAMetricFeedback)
+      .filter((note): note is string => note !== undefined);
 
     // Build reflective dataset in GEPA format (aligned with reference)
     const formatReflectiveDataset = (): string => {
@@ -1333,7 +1366,10 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
         }
         exampleStr += `## Feedback\n`;
         // Get feedback from feedbackFn if available
-        let fb = `This trajectory got a score of ${t.score.toFixed(3)}.`;
+        const feedback = [
+          `This trajectory got a score of ${t.score.toFixed(3)}.`,
+          t.feedback,
+        ].filter((value): value is string => Boolean(value));
         if (typeof feedbackFn === 'function') {
           try {
             const customFb = feedbackFn({
@@ -1341,12 +1377,14 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
               example: t.input,
               componentId,
             });
-            if (customFb) {
-              fb = Array.isArray(customFb) ? customFb.join('\n') : customFb;
+            const values = Array.isArray(customFb) ? customFb : [customFb];
+            for (const value of values) {
+              const normalized = normalizeGEPAMetricFeedback(value);
+              if (normalized) feedback.push(normalized);
             }
           } catch {}
         }
-        exampleStr += `${fb}\n`;
+        exampleStr += `${feedback.join('\n')}\n`;
         examples.push(exampleStr);
       }
       const extraNotes = feedbackNotes.map(

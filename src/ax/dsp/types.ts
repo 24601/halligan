@@ -7,6 +7,10 @@ import type {
   AxSpeechConfig,
   AxStructuredOutputMode,
 } from '../ai/types.js';
+import type {
+  AxAuthorityContext,
+  AxAuthorityInheritance,
+} from '../authority/types.js';
 import type { AxEventContext, AxEventInheritance } from '../event/types.js';
 import type { AxMCPClient } from '../mcp/client.js';
 import type {
@@ -214,6 +218,10 @@ export type AxProgramForwardOptions<MODEL> = AxAIServiceOptions & {
   eventContext?: AxEventContext;
   /** Controls propagation of event context to nested programs. Defaults to all. */
   eventInheritance?: AxEventInheritance;
+  /** Optional host-owned identity and capability boundary for function calls. */
+  authority?: AxAuthorityContext;
+  /** Child authority propagation or an explicitly attenuated child. Defaults to all. */
+  authorityInheritance?: AxAuthorityInheritance;
   /** @internal Shared run-scoped MCP context. */
   _mcpExecutionContext?: AxMCPExecutionContext;
   /** @internal Resolved MCP prompt/resource context for this run. */
