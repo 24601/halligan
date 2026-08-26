@@ -433,10 +433,16 @@ export class AxACE extends AxBaseOptimizer {
       throw new Error('AxACE: no program available to apply playbook state');
     }
 
+    const { includeInactive: _inspectionOnly, ...executableRenderOptions } =
+      renderOptions ?? {};
     const baseInstruction =
       this.baseInstruction ?? target.getSignature().getDescription() ?? '';
     (target as any).setDescription?.(
-      this.composeInstruction(baseInstruction, this.playbook, renderOptions)
+      this.composeInstruction(
+        baseInstruction,
+        this.playbook,
+        executableRenderOptions
+      )
     );
   }
 

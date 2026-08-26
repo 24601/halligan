@@ -354,6 +354,71 @@ describe('AxACE curator no-op filtering', () => {
 });
 
 describe('AxACE', () => {
+  it('keeps inspection-only inactive guidance out of direct executable apply', () => {
+    const initialPlaybook = buildPlaybook({
+      Guidance: [
+        'Eligible paid rule',
+        'Expired rule',
+        'Deprecated rule',
+        'Superseded rule',
+        'Malformed rule',
+        'Wrong-scope rule',
+      ],
+    });
+    const bullets = initialPlaybook.sections.Guidance;
+    bullets[0]!.evidence = {
+      applicability: { allOf: ['tenant:paid'] },
+    };
+    bullets[1]!.evidence = {
+      lifecycle: { expiresAt: '2020-01-01T00:00:00.000Z' },
+    };
+    bullets[2]!.evidence = {
+      lifecycle: { status: 'deprecated' },
+    };
+    bullets[3]!.evidence = {
+      lifecycle: { status: 'superseded', supersededBy: bullets[0]!.id },
+    };
+    (bullets[4] as any).evidence = {
+      applicability: { allOf: 'tenant:paid' },
+    };
+    bullets[5]!.evidence = {
+      applicability: { allOf: ['tenant:free'] },
+    };
+
+    const program = createACEProgram();
+    const ace = new AxACE({ studentAI: {} as any }, { initialPlaybook });
+    ace.hydrate(program, { playbook: initialPlaybook });
+    ace.applyCurrentState(program, {
+      conditions: ['tenant:paid'],
+      includeInactive: true,
+      now: '2026-08-26T00:00:00.000Z',
+    });
+
+    const executable = program.getSignature().getDescription() ?? '';
+    expect(executable).toContain('Eligible paid rule');
+    expect(executable).not.toContain('Expired rule');
+    expect(executable).not.toContain('Deprecated rule');
+    expect(executable).not.toContain('Superseded rule');
+    expect(executable).not.toContain('Malformed rule');
+    expect(executable).not.toContain('Wrong-scope rule');
+
+    const diagnosticProgram = createACEProgram();
+    ace.applyCurrentState(diagnosticProgram, {
+      conditions: ['tenant:paid'],
+      includeInactive: true,
+      includeInapplicable: true,
+      now: '2026-08-26T00:00:00.000Z',
+    });
+    const withInapplicable =
+      diagnosticProgram.getSignature().getDescription() ?? '';
+    expect(withInapplicable).toContain('Eligible paid rule');
+    expect(withInapplicable).toContain('Wrong-scope rule');
+    expect(withInapplicable).not.toContain('Expired rule');
+    expect(withInapplicable).not.toContain('Deprecated rule');
+    expect(withInapplicable).not.toContain('Superseded rule');
+    expect(withInapplicable).not.toContain('Malformed rule');
+  });
+
   it('keeps malformed and expired records out of every executable ACE prompt', async () => {
     const initialPlaybook = buildPlaybook({
       Guidance: ['Malformed rule', 'Expired rule', 'Scoped active rule'],
