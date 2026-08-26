@@ -459,10 +459,48 @@ const SNAPSHOT_IMPORT_LIMITS = {
 const MAX_SNAPSHOT_BIGINT =
   (1n << BigInt(SNAPSHOT_IMPORT_LIMITS.maxBigIntBits)) - 1n;
 
-function assertSnapshotImportLimits(value: unknown): void {
+interface TypedArrayConstructor {
+  readonly prototype: ArrayBufferView;
+  new (
+    buffer: ArrayBuffer,
+    byteOffset?: number,
+    length?: number
+  ): ArrayBufferView;
+}
+
+const TYPED_ARRAY_CONSTRUCTORS: readonly TypedArrayConstructor[] = [
+  Int8Array,
+  Uint8Array,
+  Uint8ClampedArray,
+  Int16Array,
+  Uint16Array,
+  Int32Array,
+  Uint32Array,
+  Float32Array,
+  Float64Array,
+  BigInt64Array,
+  BigUint64Array,
+];
+
+const ERROR_PROTOTYPES = new Map<object, string>([
+  [Error.prototype, 'Error'],
+  [EvalError.prototype, 'EvalError'],
+  [RangeError.prototype, 'RangeError'],
+  [ReferenceError.prototype, 'ReferenceError'],
+  [SyntaxError.prototype, 'SyntaxError'],
+  [TypeError.prototype, 'TypeError'],
+  [URIError.prototype, 'URIError'],
+]);
+
+/**
+ * Capture caller-owned restore input once into a detached graph. In particular,
+ * this does not read property values after inspecting their descriptors and
+ * never passes the live graph to structuredClone.
+ */
+function captureSnapshotImport<T>(value: T): T {
   let values = 0;
   let bytes = 0;
-  const seen = new Set<object>();
+  const seen = new Map<object, unknown>();
 
   const accountBytes = (amount: number) => {
     if (
@@ -479,15 +517,93 @@ function assertSnapshotImportLimits(value: unknown): void {
 
   const accountString = (text: string) => accountBytes(text.length * 2);
 
-  const visitEntries = (record: object, depth: number) => {
-    for (const key in record) {
-      if (!Object.hasOwn(record, key)) continue;
-      accountString(key);
-      visit((record as Record<string, unknown>)[key], depth + 1);
+  const ownKeys = (record: object): readonly PropertyKey[] => {
+    const keys = Reflect.ownKeys(record);
+    if (keys.length > SNAPSHOT_IMPORT_LIMITS.maxValues - values) {
+      throw new AxAgentSessionSerializationError(
+        `snapshot import exceeds maxValues ${SNAPSHOT_IMPORT_LIMITS.maxValues}`
+      );
+    }
+    return keys;
+  };
+
+  const descriptor = (record: object, key: PropertyKey): PropertyDescriptor => {
+    const current = Reflect.getOwnPropertyDescriptor(record, key);
+    if (!current) {
+      throw new AxAgentSessionSerializationError(
+        'snapshot changed while its own properties were captured'
+      );
+    }
+    return current;
+  };
+
+  const assertDataDescriptor = (
+    current: PropertyDescriptor,
+    key: PropertyKey,
+    allowNonEnumerable = false
+  ): unknown => {
+    if (typeof key === 'symbol') {
+      throw new AxAgentSessionSerializationError(
+        'snapshot import does not support symbol own keys'
+      );
+    }
+    if (!allowNonEnumerable && !current.enumerable) {
+      throw new AxAgentSessionSerializationError(
+        `snapshot import does not support non-enumerable own key "${key}"`
+      );
+    }
+    if (!('value' in current)) {
+      throw new AxAgentSessionSerializationError(
+        `snapshot import does not support accessor own key "${key}"`
+      );
+    }
+    return current.value;
+  };
+
+  const captureEntries = (
+    source: object,
+    target: object,
+    depth: number,
+    keys = ownKeys(source)
+  ) => {
+    for (const key of keys) {
+      const nested = assertDataDescriptor(descriptor(source, key), key);
+      accountString(key as string);
+      Object.defineProperty(target, key, {
+        value: visit(nested, depth + 1),
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
     }
   };
 
-  function visit(current: unknown, depth: number): void {
+  const assertNoOwnKeys = (source: object, name: string) => {
+    if (ownKeys(source).length !== 0) {
+      throw new AxAgentSessionSerializationError(
+        `snapshot import does not support custom own keys on ${name}`
+      );
+    }
+  };
+
+  const assertSameIntrinsicOwnKeys = (
+    source: object,
+    captured: object,
+    name: string
+  ) => {
+    const sourceKeys = ownKeys(source);
+    const capturedKeys = Reflect.ownKeys(captured);
+    if (
+      sourceKeys.length !== capturedKeys.length ||
+      sourceKeys.some((key, index) => key !== capturedKeys[index])
+    ) {
+      throw new AxAgentSessionSerializationError(
+        `snapshot import does not support custom own keys on ${name}`
+      );
+    }
+  };
+
+  function visit(current: unknown, depth: number): unknown {
     values++;
     if (values > SNAPSHOT_IMPORT_LIMITS.maxValues) {
       throw new AxAgentSessionSerializationError(
@@ -502,7 +618,7 @@ function assertSnapshotImportLimits(value: unknown): void {
 
     if (typeof current === 'string') {
       accountString(current);
-      return;
+      return current;
     }
     if (typeof current === 'bigint') {
       if (current > MAX_SNAPSHOT_BIGINT || current < -MAX_SNAPSHOT_BIGINT) {
@@ -511,7 +627,7 @@ function assertSnapshotImportLimits(value: unknown): void {
         );
       }
       accountString(current.toString());
-      return;
+      return current;
     }
     if (
       current === null ||
@@ -519,7 +635,7 @@ function assertSnapshotImportLimits(value: unknown): void {
       typeof current === 'boolean' ||
       typeof current === 'number'
     ) {
-      return;
+      return current;
     }
     if (typeof current === 'function' || typeof current === 'symbol') {
       throw new AxAgentSessionSerializationError(
@@ -528,41 +644,124 @@ function assertSnapshotImportLimits(value: unknown): void {
     }
 
     const object = current as object;
-    if (seen.has(object)) return;
-    seen.add(object);
+    if (seen.has(object)) return seen.get(object);
 
-    if (Array.isArray(object)) {
-      visitEntries(object, depth);
-      return;
-    }
-    if (object instanceof Date) return;
-    if (object instanceof RegExp) {
-      accountString(object.source);
-      accountString(object.flags);
-      return;
-    }
-    if (object instanceof Map) {
-      for (const [key, nested] of object) {
-        visit(key, depth + 1);
-        visit(nested, depth + 1);
-      }
-      return;
-    }
-    if (object instanceof Set) {
-      for (const nested of object) visit(nested, depth + 1);
-      return;
-    }
-    if (object instanceof ArrayBuffer) {
-      accountBytes(object.byteLength);
-      return;
-    }
+    const isArray = Array.isArray(object);
+    const prototype = Object.getPrototypeOf(object);
+
     if (
       typeof SharedArrayBuffer !== 'undefined' &&
-      object instanceof SharedArrayBuffer
+      prototype === SharedArrayBuffer.prototype
     ) {
       throw new AxAgentSessionSerializationError(
         'snapshot integrity cannot authenticate mutable SharedArrayBuffer values'
       );
+    }
+
+    if (isArray) {
+      if (prototype !== Array.prototype) {
+        throw new AxAgentSessionSerializationError(
+          'snapshot import only supports ordinary arrays'
+        );
+      }
+      const keys = ownKeys(object);
+      const lengthKey = keys.find((key) => key === 'length');
+      if (lengthKey === undefined) {
+        throw new AxAgentSessionSerializationError(
+          'snapshot array is missing its intrinsic length'
+        );
+      }
+      const length = assertDataDescriptor(
+        descriptor(object, lengthKey),
+        lengthKey,
+        true
+      );
+      if (
+        !Number.isSafeInteger(length) ||
+        Number(length) < 0 ||
+        Number(length) > 0xffff_ffff
+      ) {
+        throw new AxAgentSessionSerializationError(
+          'snapshot array has an invalid intrinsic length'
+        );
+      }
+      const captured: unknown[] = new Array(Number(length));
+      seen.set(object, captured);
+      captureEntries(
+        object,
+        captured,
+        depth,
+        keys.filter((key) => key !== 'length')
+      );
+      return captured;
+    }
+
+    if (prototype === Date.prototype) {
+      assertNoOwnKeys(object, 'Date');
+      const captured = new Date(Date.prototype.getTime.call(object));
+      seen.set(object, captured);
+      return captured;
+    }
+    if (prototype === RegExp.prototype) {
+      const keys = ownKeys(object);
+      if (keys.length !== 1 || keys[0] !== 'lastIndex') {
+        throw new AxAgentSessionSerializationError(
+          'snapshot import does not support custom own keys on RegExp'
+        );
+      }
+      const lastIndex = assertDataDescriptor(
+        descriptor(object, 'lastIndex'),
+        'lastIndex',
+        true
+      );
+      if (typeof lastIndex !== 'number') {
+        throw new AxAgentSessionSerializationError(
+          'snapshot RegExp has an invalid intrinsic lastIndex'
+        );
+      }
+      const source = Object.getOwnPropertyDescriptor(
+        RegExp.prototype,
+        'source'
+      )?.get?.call(object) as string;
+      const flags = Object.getOwnPropertyDescriptor(
+        RegExp.prototype,
+        'flags'
+      )?.get?.call(object) as string;
+      accountString(source);
+      accountString(flags);
+      const captured = new RegExp(source, flags);
+      captured.lastIndex = lastIndex;
+      seen.set(object, captured);
+      return captured;
+    }
+    if (prototype === Map.prototype) {
+      assertNoOwnKeys(object, 'Map');
+      const captured = new Map<unknown, unknown>();
+      seen.set(object, captured);
+      for (const [key, nested] of Map.prototype.entries.call(object)) {
+        captured.set(visit(key, depth + 1), visit(nested, depth + 1));
+      }
+      return captured;
+    }
+    if (prototype === Set.prototype) {
+      assertNoOwnKeys(object, 'Set');
+      const captured = new Set<unknown>();
+      seen.set(object, captured);
+      for (const nested of Set.prototype.values.call(object)) {
+        captured.add(visit(nested, depth + 1));
+      }
+      return captured;
+    }
+    if (prototype === ArrayBuffer.prototype) {
+      assertNoOwnKeys(object, 'ArrayBuffer');
+      const byteLength = Object.getOwnPropertyDescriptor(
+        ArrayBuffer.prototype,
+        'byteLength'
+      )?.get?.call(object) as number;
+      accountBytes(byteLength);
+      const captured = ArrayBuffer.prototype.slice.call(object, 0);
+      seen.set(object, captured);
+      return captured;
     }
     if (ArrayBuffer.isView(object)) {
       const view = object as ArrayBufferView;
@@ -574,50 +773,220 @@ function assertSnapshotImportLimits(value: unknown): void {
           'snapshot integrity cannot authenticate views over mutable SharedArrayBuffer values'
         );
       }
-      visit(view.buffer, depth + 1);
-      return;
-    }
-    if (typeof Blob !== 'undefined' && object instanceof Blob) {
-      accountBytes(object.size);
-      accountString(object.type);
-      if (typeof File !== 'undefined' && object instanceof File) {
-        accountString(object.name);
+      const capturedBuffer = visit(view.buffer, depth + 1) as ArrayBuffer;
+      if (prototype === DataView.prototype) {
+        assertNoOwnKeys(object, 'DataView');
+        const captured = new DataView(
+          capturedBuffer,
+          view.byteOffset,
+          view.byteLength
+        );
+        seen.set(object, captured);
+        return captured;
       }
-      return;
-    }
-    if (object instanceof Error) {
-      accountString(object.name);
-      accountString(object.message);
-      if (object.stack !== undefined) accountString(object.stack);
-      visit(object.cause, depth + 1);
-      visitEntries(object, depth);
-      return;
+      const viewConstructor = TYPED_ARRAY_CONSTRUCTORS.find(
+        (candidate) => prototype === candidate.prototype
+      );
+      if (!viewConstructor) {
+        throw new AxAgentSessionSerializationError(
+          'snapshot import cannot capture an unsupported array-buffer view'
+        );
+      }
+      const length = (object as ArrayBufferView & { length: number }).length;
+      if (
+        !Number.isSafeInteger(length) ||
+        length < 0 ||
+        length > SNAPSHOT_IMPORT_LIMITS.maxValues - values
+      ) {
+        throw new AxAgentSessionSerializationError(
+          `snapshot import exceeds maxValues ${SNAPSHOT_IMPORT_LIMITS.maxValues}`
+        );
+      }
+      values += length;
+      const keys = Reflect.ownKeys(object);
+      if (
+        keys.length !== length ||
+        keys.some((key, index) => key !== String(index))
+      ) {
+        throw new AxAgentSessionSerializationError(
+          'snapshot import does not support custom own keys on typed arrays'
+        );
+      }
+      const captured = new viewConstructor(
+        capturedBuffer,
+        view.byteOffset,
+        length
+      );
+      seen.set(object, captured);
+      return captured;
     }
 
-    const prototype = Object.getPrototypeOf(object);
+    const isBlob =
+      typeof Blob !== 'undefined' &&
+      (prototype === Blob.prototype ||
+        (typeof File !== 'undefined' && prototype === File.prototype));
+    if (isBlob) {
+      const sourceBlob = object as Blob;
+      const size = Object.getOwnPropertyDescriptor(
+        Blob.prototype,
+        'size'
+      )?.get?.call(object) as number;
+      const type = Object.getOwnPropertyDescriptor(
+        Blob.prototype,
+        'type'
+      )?.get?.call(object) as string;
+      accountBytes(size);
+      accountString(type);
+      let captured: Blob;
+      if (typeof File !== 'undefined' && prototype === File.prototype) {
+        const name = Object.getOwnPropertyDescriptor(
+          File.prototype,
+          'name'
+        )?.get?.call(object) as string;
+        const lastModified = Object.getOwnPropertyDescriptor(
+          File.prototype,
+          'lastModified'
+        )?.get?.call(object) as number;
+        accountString(name);
+        captured = new File([sourceBlob], name, { lastModified, type });
+      } else {
+        captured = new Blob([sourceBlob], { type });
+      }
+      assertSameIntrinsicOwnKeys(object, captured, captured.constructor.name);
+      seen.set(object, captured);
+      return captured;
+    }
+
+    const errorName = ERROR_PROTOTYPES.get(prototype);
+    if (errorName) {
+      const keys = ownKeys(object);
+      if (
+        keys.some(
+          (key) =>
+            typeof key !== 'string' ||
+            !['cause', 'message', 'stack'].includes(key)
+        )
+      ) {
+        throw new AxAgentSessionSerializationError(
+          'snapshot import does not support custom own keys on Error'
+        );
+      }
+      const descriptors = new Map(
+        keys.map((key) => [key, descriptor(object, key)] as const)
+      );
+      for (const [key, current] of descriptors) {
+        if (key !== 'stack' || 'value' in current) {
+          assertDataDescriptor(current, key, true);
+        }
+        if (current.enumerable) {
+          throw new AxAgentSessionSerializationError(
+            `snapshot Error has an enumerable intrinsic own key "${String(key)}"`
+          );
+        }
+      }
+      const message = descriptors.get('message')?.value;
+      const stack = descriptors.get('stack')?.value;
+      if (message !== undefined && typeof message !== 'string') {
+        throw new AxAgentSessionSerializationError(
+          'snapshot Error has a non-string message'
+        );
+      }
+      if (stack !== undefined && typeof stack !== 'string') {
+        throw new AxAgentSessionSerializationError(
+          'snapshot Error has a non-string stack'
+        );
+      }
+      accountString(errorName);
+      if (message !== undefined) accountString(message);
+      if (stack !== undefined) accountString(stack);
+      const captured = new Error();
+      Object.setPrototypeOf(captured, prototype);
+      seen.set(object, captured);
+      for (const key of Reflect.ownKeys(captured)) {
+        Reflect.deleteProperty(captured, key);
+      }
+      for (const [key, current] of descriptors) {
+        if (key === 'stack' && !('value' in current)) {
+          Object.defineProperty(captured, key, {
+            get: () => undefined,
+            enumerable: false,
+            configurable: true,
+          });
+        } else {
+          Object.defineProperty(captured, key, {
+            value:
+              key === 'cause' ? visit(current.value, depth + 1) : current.value,
+            configurable: true,
+            writable: true,
+          });
+        }
+      }
+      return captured;
+    }
+
     if (prototype !== Object.prototype && prototype !== null) {
       throw new AxAgentSessionSerializationError(
         'snapshot integrity cannot encode unsupported platform values'
       );
     }
-    visitEntries(object, depth);
+    const captured = Object.create(prototype) as Record<string, unknown>;
+    seen.set(object, captured);
+    captureEntries(object, captured, depth);
+    return captured;
   }
 
-  visit(value, 0);
+  try {
+    return visit(value, 0) as T;
+  } catch (error) {
+    if (error instanceof AxAgentSessionSerializationError) throw error;
+    throw new AxAgentSessionSerializationError(errorMessage(error));
+  }
 }
 
 async function canonicalSnapshotValue(value: unknown): Promise<unknown> {
   const seen = new Map<object, number>();
+  let values = 0;
+  let bytes = 0;
 
-  const entries = async (record: object) => {
+  const accountBytes = (amount: number) => {
+    if (
+      !Number.isSafeInteger(amount) ||
+      amount < 0 ||
+      bytes > SNAPSHOT_IMPORT_LIMITS.maxBytes - amount
+    ) {
+      throw new AxAgentSessionSerializationError(
+        `snapshot import exceeds maxBytes ${SNAPSHOT_IMPORT_LIMITS.maxBytes}`
+      );
+    }
+    bytes += amount;
+  };
+
+  const accountString = (text: string) => accountBytes(text.length * 2);
+
+  const entries = async (record: object, depth: number) => {
     const out: [string, unknown][] = [];
     for (const key of Object.keys(record)) {
-      out.push([key, await encode((record as Record<string, unknown>)[key])]);
+      accountString(key);
+      out.push([
+        key,
+        await encode((record as Record<string, unknown>)[key], depth + 1),
+      ]);
     }
     return out;
   };
 
-  const encode = async (current: unknown): Promise<unknown> => {
+  const encode = async (current: unknown, depth: number): Promise<unknown> => {
+    values++;
+    if (values > SNAPSHOT_IMPORT_LIMITS.maxValues) {
+      throw new AxAgentSessionSerializationError(
+        `snapshot import exceeds maxValues ${SNAPSHOT_IMPORT_LIMITS.maxValues}`
+      );
+    }
+    if (depth > SNAPSHOT_IMPORT_LIMITS.maxDepth) {
+      throw new AxAgentSessionSerializationError(
+        `snapshot import exceeds maxDepth ${SNAPSHOT_IMPORT_LIMITS.maxDepth}`
+      );
+    }
     if (current === null) return ['null'];
     switch (typeof current) {
       case 'undefined':
@@ -625,6 +994,7 @@ async function canonicalSnapshotValue(value: unknown): Promise<unknown> {
       case 'boolean':
         return ['boolean', current];
       case 'string':
+        accountString(current);
         return ['string', current];
       case 'number':
         if (Number.isNaN(current)) return ['number', 'nan'];
@@ -635,6 +1005,12 @@ async function canonicalSnapshotValue(value: unknown): Promise<unknown> {
         if (Object.is(current, -0)) return ['number', 'negative-zero'];
         return ['number', current];
       case 'bigint':
+        if (current > MAX_SNAPSHOT_BIGINT || current < -MAX_SNAPSHOT_BIGINT) {
+          throw new AxAgentSessionSerializationError(
+            `snapshot import exceeds maxBigIntBits ${SNAPSHOT_IMPORT_LIMITS.maxBigIntBits}`
+          );
+        }
+        accountString(current.toString());
         return ['bigint', current.toString()];
       case 'function':
       case 'symbol':
@@ -650,27 +1026,33 @@ async function canonicalSnapshotValue(value: unknown): Promise<unknown> {
     seen.set(object, id);
 
     if (Array.isArray(object)) {
-      return ['array', id, object.length, await entries(object)];
+      return ['array', id, object.length, await entries(object, depth)];
     }
     if (object instanceof Date) {
-      return ['date', id, await encode(object.getTime())];
+      return ['date', id, await encode(object.getTime(), depth + 1)];
     }
     if (object instanceof RegExp) {
+      accountString(object.source);
+      accountString(object.flags);
       return ['regexp', id, object.source, object.flags, object.lastIndex];
     }
     if (object instanceof Map) {
       const mapped: [unknown, unknown][] = [];
       for (const [key, nested] of object) {
-        mapped.push([await encode(key), await encode(nested)]);
+        mapped.push([
+          await encode(key, depth + 1),
+          await encode(nested, depth + 1),
+        ]);
       }
       return ['map', id, mapped];
     }
     if (object instanceof Set) {
       const values: unknown[] = [];
-      for (const nested of object) values.push(await encode(nested));
+      for (const nested of object) values.push(await encode(nested, depth + 1));
       return ['set', id, values];
     }
     if (object instanceof ArrayBuffer) {
+      accountBytes(object.byteLength);
       return ['array-buffer', id, object.byteLength, await sha256(object)];
     }
     if (
@@ -691,20 +1073,32 @@ async function canonicalSnapshotValue(value: unknown): Promise<unknown> {
           'snapshot integrity cannot authenticate views over mutable SharedArrayBuffer values'
         );
       }
+      if (!(object instanceof DataView)) {
+        const length = (object as ArrayBufferView & { length: number }).length;
+        if (length > SNAPSHOT_IMPORT_LIMITS.maxValues - values) {
+          throw new AxAgentSessionSerializationError(
+            `snapshot import exceeds maxValues ${SNAPSHOT_IMPORT_LIMITS.maxValues}`
+          );
+        }
+        values += length;
+      }
       return [
         'array-buffer-view',
         id,
         object.constructor.name,
         view.byteOffset,
         view.byteLength,
-        await encode(view.buffer),
+        await encode(view.buffer, depth + 1),
       ];
     }
     if (typeof Blob !== 'undefined' && object instanceof Blob) {
-      const file =
+      const file: [string, number] | undefined =
         typeof File !== 'undefined' && object instanceof File
           ? [object.name, object.lastModified]
           : undefined;
+      accountBytes(object.size);
+      accountString(object.type);
+      if (file) accountString(file[0]);
       return [
         'blob',
         id,
@@ -715,14 +1109,66 @@ async function canonicalSnapshotValue(value: unknown): Promise<unknown> {
       ];
     }
     if (object instanceof Error) {
+      const keys = Reflect.ownKeys(object);
+      if (
+        keys.some(
+          (key) =>
+            typeof key !== 'string' ||
+            !['cause', 'message', 'stack'].includes(key)
+        )
+      ) {
+        throw new AxAgentSessionSerializationError(
+          'snapshot integrity cannot encode custom own keys on Error'
+        );
+      }
+      for (const key of keys) accountString(key as string);
+      const descriptors = new Map(
+        keys.map(
+          (key) =>
+            [key, Reflect.getOwnPropertyDescriptor(object, key)!] as const
+        )
+      );
+      for (const [key, current] of descriptors) {
+        if (current.enumerable) {
+          throw new AxAgentSessionSerializationError(
+            `snapshot Error has an enumerable intrinsic own key "${String(key)}"`
+          );
+        }
+        if (key !== 'stack' && !('value' in current)) {
+          throw new AxAgentSessionSerializationError(
+            `snapshot integrity cannot encode accessor own key "${String(key)}" on Error`
+          );
+        }
+      }
+      const message = descriptors.get('message')?.value;
+      const stackDescriptor = descriptors.get('stack');
+      const stack = stackDescriptor
+        ? 'value' in stackDescriptor
+          ? ['value', stackDescriptor.value]
+          : ['native-accessor']
+        : ['absent'];
+      const cause = descriptors.get('cause')?.value;
+      if (message !== undefined && typeof message !== 'string') {
+        throw new AxAgentSessionSerializationError(
+          'snapshot Error has a non-string message'
+        );
+      }
+      if (stack[0] === 'value' && typeof stack[1] !== 'string') {
+        throw new AxAgentSessionSerializationError(
+          'snapshot Error has a non-string stack'
+        );
+      }
+      accountString(object.name);
+      if (message !== undefined) accountString(message);
+      if (stack[0] === 'value') accountString(stack[1] as string);
       return [
         'error',
         id,
         object.name,
-        object.message,
-        object.stack,
-        await encode(object.cause),
-        await entries(object),
+        message,
+        stack,
+        keys,
+        await encode(cause, depth + 1),
       ];
     }
 
@@ -732,10 +1178,10 @@ async function canonicalSnapshotValue(value: unknown): Promise<unknown> {
         `snapshot integrity cannot encode ${object.constructor?.name ?? 'platform'} values`
       );
     }
-    return ['object', id, prototype === null, await entries(object)];
+    return ['object', id, prototype === null, await entries(object, depth)];
   };
 
-  return encode(value);
+  return encode(value, 0);
 }
 
 function canonicalPolicy(snapshot: Readonly<AxAgentSessionRegistrySnapshot>) {
@@ -749,7 +1195,6 @@ async function digestPolicy(
   snapshot: Readonly<AxAgentSessionRegistrySnapshot>
 ): Promise<string> {
   const canonical = canonicalPolicy(snapshot);
-  assertSnapshotImportLimits(canonical);
   return sha256(JSON.stringify(await canonicalSnapshotValue(canonical)));
 }
 
@@ -1120,8 +1565,9 @@ export class AxAgentSessionHost {
     options: Readonly<AxAgentSessionRestoreOptions>
   ): Promise<AxAgentSessionClient> {
     this.assertOpen();
-    assertSnapshotImportLimits(snapshot);
-    const restored: AxAgentSessionRegistrySnapshot = cloneStructured(snapshot);
+    const restored = captureSnapshotImport(
+      snapshot
+    ) as AxAgentSessionRegistrySnapshot;
     await this.validateSnapshot(restored, options.expectedPolicyDigest);
     restored.revision = 0;
     this.interruptRunning(restored);

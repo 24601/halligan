@@ -487,6 +487,76 @@ const unknownOwnKeyTamperCases: ReadonlyArray<
   ],
 ];
 
+const unsupportedOwnKeyCases: ReadonlyArray<
+  readonly [
+    keyKind: string,
+    level: string,
+    mutate: (
+      snapshot: AxAgentSessionRegistrySnapshot,
+      sessionId: string
+    ) => void,
+  ]
+> = [
+  [
+    'non-enumerable',
+    'root',
+    (snapshot) => {
+      Object.defineProperty(snapshot.root, 'injected', { value: 'forged' });
+    },
+  ],
+  [
+    'non-enumerable',
+    'session',
+    (snapshot, sessionId) => {
+      Object.defineProperty(snapshot.sessions[sessionId]!, 'injected', {
+        value: 'forged',
+      });
+    },
+  ],
+  [
+    'non-enumerable',
+    'mailbox message',
+    (snapshot, sessionId) => {
+      Object.defineProperty(
+        snapshot.sessions[sessionId]!.mailbox[0]!,
+        'injected',
+        { value: 'forged' }
+      );
+    },
+  ],
+  [
+    'symbol',
+    'root',
+    (snapshot) => {
+      Object.defineProperty(snapshot.root, Symbol('injected'), {
+        value: 'forged',
+        enumerable: true,
+      });
+    },
+  ],
+  [
+    'symbol',
+    'session',
+    (snapshot, sessionId) => {
+      Object.defineProperty(snapshot.sessions[sessionId]!, Symbol('injected'), {
+        value: 'forged',
+        enumerable: true,
+      });
+    },
+  ],
+  [
+    'symbol',
+    'mailbox message',
+    (snapshot, sessionId) => {
+      Object.defineProperty(
+        snapshot.sessions[sessionId]!.mailbox[0]!,
+        Symbol('injected'),
+        { value: 'forged', enumerable: true }
+      );
+    },
+  ],
+];
+
 const snapshotImportLimitCases: ReadonlyArray<
   readonly [
     limit: string,
@@ -887,6 +957,126 @@ describe('retained child agent sessions', () => {
     }
   );
 
+  it.each(unsupportedOwnKeyCases)(
+    'rejects unsupported %s own keys on the %s instead of silently dropping them',
+    async (keyKind, _level, mutate) => {
+      const sourceHost = host();
+      const root = await sourceHost.createRoot({
+        authorizedChildren: ['worker'],
+      });
+      const handle = await root.spawn('worker', { value: 'authenticated' });
+      await completed(root, handle);
+      const snapshot = await sourceHost.snapshot(handle.rootId);
+      const tampered = structuredClone(snapshot);
+      mutate(tampered, handle.id);
+
+      await expect(
+        host().restore(tampered, {
+          expectedPolicyDigest: snapshot.policyDigest,
+        })
+      ).rejects.toThrow(
+        new RegExp(
+          `snapshot import does not support ${keyKind.replace('-', '[- ]')} own keys?`
+        )
+      );
+    }
+  );
+
+  it('rejects accessor restore input without invoking a size-changing getter', async () => {
+    const sourceHost = host();
+    const root = await sourceHost.createRoot({
+      authorizedChildren: ['worker'],
+    });
+    const handle = await root.spawn('worker', { value: 'bounded' });
+    await completed(root, handle);
+    const snapshot = await sourceHost.snapshot(handle.rootId);
+    const accessor = structuredClone(snapshot);
+    const input = accessor.sessions[handle.id]!.mailbox[0]!.input as WorkInput;
+    let getterCalls = 0;
+    let allocatedOversizedValue = false;
+    Object.defineProperty(input, 'value', {
+      enumerable: true,
+      get() {
+        getterCalls++;
+        if (getterCalls === 1) return 'bounded';
+        allocatedOversizedValue = true;
+        return new ArrayBuffer(20 * 1024 * 1024) as unknown as string;
+      },
+    });
+
+    await expect(
+      host().restore(accessor, {
+        expectedPolicyDigest: snapshot.policyDigest,
+      })
+    ).rejects.toThrow(/does not support accessor own key "value"/);
+    expect(getterCalls).toBe(0);
+    expect(allocatedOversizedValue).toBe(false);
+  });
+
+  it('captures nested Proxy descriptors once and never re-reads their values', async () => {
+    const sourceHost = host();
+    const root = await sourceHost.createRoot({
+      authorizedChildren: ['worker'],
+    });
+    const handle = await root.spawn('worker', {
+      value: 'bounded',
+      metadata: { retained: true },
+    });
+    await completed(root, handle);
+    const snapshot = await sourceHost.snapshot(handle.rootId);
+    const proxied = structuredClone(snapshot);
+    const input = proxied.sessions[handle.id]!.mailbox[0]!
+      .input as WorkInput & {
+      metadata: { retained: boolean };
+    };
+    let prototypeCalls = 0;
+    let ownKeysCalls = 0;
+    let descriptorCalls = 0;
+    let valueReads = 0;
+    let allocatedOversizedValue = false;
+    input.metadata = new Proxy(
+      { retained: true },
+      {
+        getPrototypeOf(target) {
+          prototypeCalls++;
+          return Reflect.getPrototypeOf(target);
+        },
+        ownKeys(target) {
+          ownKeysCalls++;
+          return Reflect.ownKeys(target);
+        },
+        getOwnPropertyDescriptor(target, key) {
+          descriptorCalls++;
+          if (descriptorCalls > 1) {
+            allocatedOversizedValue = true;
+            return {
+              value: new ArrayBuffer(20 * 1024 * 1024),
+              enumerable: true,
+              configurable: true,
+              writable: true,
+            };
+          }
+          return Reflect.getOwnPropertyDescriptor(target, key);
+        },
+        get(target, key, receiver) {
+          valueReads++;
+          return Reflect.get(target, key, receiver);
+        },
+      }
+    );
+
+    await expect(
+      host().restore(proxied, {
+        expectedPolicyDigest: snapshot.policyDigest,
+      })
+    ).resolves.toMatchObject({ sessionId: snapshot.root.id });
+    expect(prototypeCalls).toBe(1);
+    expect(ownKeysCalls).toBe(1);
+    expect(descriptorCalls).toBe(1);
+    expect(valueReads).toBe(0);
+    expect(allocatedOversizedValue).toBe(false);
+  });
+
   it('authenticates observable object key order in restored payloads', async () => {
     const sourceHost = host();
     const root = await sourceHost.createRoot({
@@ -914,7 +1104,7 @@ describe('retained child agent sessions', () => {
   });
 
   it.each(snapshotImportLimitCases)(
-    'rejects snapshot imports beyond %s before cloning',
+    'rejects snapshot imports beyond %s during bounded capture',
     async (limit, mutate) => {
       const sourceHost = host();
       const root = await sourceHost.createRoot({
@@ -939,23 +1129,60 @@ describe('retained child agent sessions', () => {
     const root = await sourceHost.createRoot({
       authorizedChildren: ['worker'],
     });
+    const shared: Record<string, unknown> = { label: 'shared' };
+    shared.self = shared;
+    const buffer = new ArrayBuffer(4);
+    new Uint8Array(buffer).set([1, 2, 3, 4]);
     const input: WorkInput & { metadata: Map<string, unknown> } = {
       value: 'structured',
       metadata: new Map<string, unknown>([
         ['count', 1n],
         ['time', new Date(0)],
-        ['bytes', new Uint8Array([1, 2, 3])],
+        ['pattern', /retained/gi],
+        ['ordered', new Set(['first', 'second'])],
+        ['buffer', buffer],
+        ['bytes', new Uint8Array(buffer, 1, 2)],
+        ['blob', new Blob(['retained'], { type: 'text/plain' })],
+        ['error', new Error('retained error', { cause: 'test' })],
+        ['shared-first', shared],
+        ['shared-second', shared],
       ]),
     };
     const handle = await root.spawn('worker', input);
     await completed(root, handle);
     const snapshot = await sourceHost.snapshot(handle.rootId);
 
+    const destinationHost = host();
     await expect(
-      host().restore(snapshot, {
+      destinationHost.restore(snapshot, {
         expectedPolicyDigest: snapshot.policyDigest,
       })
     ).resolves.toMatchObject({ sessionId: snapshot.root.id });
+    const restoredSnapshot = await destinationHost.snapshot(snapshot.root.id);
+    const restoredMetadata = restoredSnapshot.sessions[handle.id]!.mailbox[0]!
+      .input as typeof input;
+    const restoredMap = restoredMetadata.metadata;
+    const restoredBuffer = restoredMap.get('buffer') as ArrayBuffer;
+    const restoredBytes = restoredMap.get('bytes') as Uint8Array;
+    const restoredShared = restoredMap.get('shared-first') as Record<
+      string,
+      unknown
+    >;
+    expect([...restoredMap.keys()]).toEqual([...input.metadata.keys()]);
+    expect([...(restoredMap.get('ordered') as Set<string>)]).toEqual([
+      'first',
+      'second',
+    ]);
+    expect((restoredMap.get('pattern') as RegExp).flags).toBe('gi');
+    expect(restoredBytes.buffer).toBe(restoredBuffer);
+    expect([...restoredBytes]).toEqual([2, 3]);
+    expect(await (restoredMap.get('blob') as Blob).text()).toBe('retained');
+    expect(restoredMap.get('error')).toMatchObject({
+      message: 'retained error',
+      cause: 'test',
+    });
+    expect(restoredMap.get('shared-second')).toBe(restoredShared);
+    expect(restoredShared.self).toBe(restoredShared);
 
     const tampered = structuredClone(snapshot);
     const tamperedInput = tampered.sessions[handle.id]!.mailbox[0]!

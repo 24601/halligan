@@ -437,9 +437,17 @@ before sending more mail; executor closures from the previous owner are stale.
 Ambiguous running work keeps its pre-dispatch token reservation charged.
 Explicit snapshot restore also rotates destination authority, and its
 separately trusted digest covers canonical policy, lifecycle diagnostics,
-mailbox payloads, retained state/artifacts, unknown keys/key order, and
-accounting aggregates. Import is capped at depth 64, 100,000 visited values,
-16 MiB aggregate string/binary data, and 4,096-bit bigints before cloning.
+mailbox payloads, retained state/artifacts, enumerable string data keys/key
+order, and accounting aggregates. Ordinary objects/arrays reject
+non-enumerable or symbol keys and accessors (apart from intrinsic array
+`length`); intrinsic values reject custom own keys. One bounded
+descriptor-based capture creates detached trusted data without invoking caller
+getters or cloning the live graph; import is capped at depth 64, 100,000
+visited values/typed-array elements, 16 MiB aggregate string/binary data, and
+4,096-bit bigints. Proxy reflection traps remain executable host code, so
+restore accepts host-owned snapshots only. A lazy `Error.stack` accessor is
+discarded without invocation and replaced by an inert marker; it is not durable
+stack text.
 
 This mechanism does not expose a second interpreter, inherit parent tools, or
 change `llmQuery(...)` budgets. The host independently bounds child count,
