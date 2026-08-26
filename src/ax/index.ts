@@ -1266,6 +1266,11 @@ import {
   type AxJSRuntimeOutputMode,
   AxJSRuntimePermission,
   type AxJSRuntimeResourceLimits,
+  type AxJSRuntimeSpeculationEvent,
+  type AxJSRuntimeSpeculationEventKind,
+  type AxJSRuntimeSpeculationEventReason,
+  type AxJSRuntimeSpeculationOptions,
+  type AxJSRuntimeSpeculationPolicy,
   axCreateJSRuntime,
 } from './funcs/jsRuntime.js';
 import {
@@ -2505,6 +2510,11 @@ export type { AxInputFunctionType };
 export type { AxJSRuntimeNodePermissionAllowlist };
 export type { AxJSRuntimeOutputMode };
 export type { AxJSRuntimeResourceLimits };
+export type { AxJSRuntimeSpeculationEvent };
+export type { AxJSRuntimeSpeculationEventKind };
+export type { AxJSRuntimeSpeculationEventReason };
+export type { AxJSRuntimeSpeculationOptions };
+export type { AxJSRuntimeSpeculationPolicy };
 export type { AxJudgeForwardOptions };
 export type { AxJudgeOptions };
 export type { AxLlmQueryBudgetState };

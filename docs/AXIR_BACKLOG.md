@@ -92,6 +92,12 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
   - TS paths: `src/ax/agent/retainedSessions.ts`, `src/ax/agent/retainedSessions.test.ts`, `src/ax/agent/retainedSessions.test-d.ts`, `src/ax/agent/benchmarks/retainedSessions.eval.ts`, `src/ax/agent/index.ts`
   - Impact: TypeScript now exposes an opt-in AxAgentSessionHost for authorized factory-created AxAgent children with immediate stable handles, retained mailbox/state/artifacts, follow-up versus steer semantics, CAS-fenced host store and scheduler adapters, crash recovery, cancellation, tree budgets, and descendant usage attribution. AxIR and generated Python/Java/C++/Go/Rust packages have only synchronous child-agent functions and event-run continuations, so they lack this retained session lifecycle and security boundary.
   - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+- `axir-2026-08-25-port-speculative-programmatic-tool-calling-runtime-semantics` [axagent] Port speculative programmatic tool calling runtime semantics
+  - Status: open
+  - Source commit: `ca760294f5ea4f207052c39c2218e1195103bc2a`
+  - TS paths: `src/ax/agent/agentInternal/runtimeGlobals.ts`, `src/ax/agent/agentInternal/runtimeGlobals.authority.test.ts`, `src/ax/agent/agentInternal/runtimeExecutionLlmQuery.ts`, `src/ax/agent/agentInternal/runtimeExecutionLlmQuery.test.ts`, `src/ax/agent/agent.test.ts`
+  - Impact: TypeScript AxAgent external functions and llmQuery can opt into bounded, cancellable speculative execution inside AxJSRuntime with exact-path purity policies, stable deterministic/nondeterministic matching, and fail-closed parsing; generated Python, Java, C++, Go, and Rust agent runtimes do not expose equivalent semantics.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 - `axir-2026-08-25-port-structured-native-tool-aware-react-module` [axgen] Port structured native-tool-aware ReAct module
   - Status: open
   - Source PR: #10

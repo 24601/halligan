@@ -19,6 +19,8 @@ import {
   type AxExecutableSkillSelection,
   type AxFunction,
   type AxFunctionHandler,
+  AxJSRuntime,
+  type AxJSRuntimeSpeculationEvent,
   type AxMetricFn,
   type AxMetricResult,
   type AxMultiMetricFn,
@@ -38,6 +40,28 @@ import {
   react,
 } from './index.js';
 import type { Equal, Expect, Flatten } from './util/typetest.js';
+
+// === AxJSRuntime speculation public surface ===
+const speculationEvents: AxJSRuntimeSpeculationEvent[] = [];
+new AxJSRuntime({
+  speculation: {
+    callables: {
+      'tools.lookup': { purity: 'pure', deterministic: true },
+      llmQuery: { purity: 'pure', deterministic: false },
+    },
+    maxConcurrency: 4,
+    maxCallsPerExecution: 16,
+    onEvent: (event) => speculationEvents.push(event),
+  },
+});
+new AxJSRuntime({
+  speculation: {
+    callables: {
+      // @ts-expect-error speculation requires an explicit pure attestation
+      'tools.write': { purity: 'impure', deterministic: true },
+    },
+  },
+});
 
 const componentManager = axEventComponentManager();
 const componentDefinition = {
