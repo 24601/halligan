@@ -865,6 +865,8 @@ export type AxSerializedOptimizedProgram<OUT = any> = Omit<
   'applyTo'
 >;
 
+const causalEvidenceAlreadyIssued = Symbol();
+
 // Concrete implementation of AxOptimizedProgram
 export class AxOptimizedProgramImpl<OUT = any>
   implements AxOptimizedProgram<OUT>
@@ -902,7 +904,7 @@ export class AxOptimizedProgramImpl<OUT = any>
     selectorState?: Record<string, AxGEPAComponentBanditState>;
     causalCandidateEvidence?: AxCausalCandidateEvidenceManifest;
     causalEvidenceVerifier?: AxCausalEvidenceAuthorityVerifier;
-    causalEvidenceAlreadyIssued?: boolean;
+    causalEvidenceAlreadyIssued?: symbol;
     demos?: AxProgramDemos<any, OUT>[];
     examples?: AxExample[];
     modelConfig?: AxOptimizedProgram<OUT>['modelConfig'];
@@ -923,7 +925,7 @@ export class AxOptimizedProgramImpl<OUT = any>
       throw new Error('causal evidence verifier is required');
     }
     this.causalCandidateEvidence = config.causalCandidateEvidence
-      ? config.causalEvidenceAlreadyIssued
+      ? config.causalEvidenceAlreadyIssued === causalEvidenceAlreadyIssued
         ? config.causalCandidateEvidence
         : axCloneCausalCandidateEvidenceManifest(
             config.causalCandidateEvidence,
@@ -1031,7 +1033,7 @@ export function axAttachCausalCandidateEvidence<OUT = any>(
     ...serialized,
     causalCandidateEvidence: manifest,
     causalEvidenceVerifier: options.verifyAuthority,
-    causalEvidenceAlreadyIssued: true,
+    causalEvidenceAlreadyIssued,
   });
 }
 

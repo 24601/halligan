@@ -210,6 +210,34 @@ describe('causal candidate evidence', () => {
     ).toThrow(/authority verification failed/);
   });
 
+  it('does not accept a forged already-issued capability', () => {
+    const receipt = hostReceipt('receipt-bypass');
+    const forged = axSerializeOptimizedProgram(
+      axAttachCausalCandidateEvidence(artifact(), [record()], receipt.options)
+    ) as any;
+    forged.causalCandidateEvidence.records[0].hypothesis = 'FORGED HYPOTHESIS';
+    forged.causalEvidenceAlreadyIssued = true;
+    let verifierCalls = 0;
+
+    expect(() =>
+      axDeserializeOptimizedProgram(forged, {
+        causalEvidenceVerifier: (...args) => {
+          verifierCalls += 1;
+          return receipt.verify(...args);
+        },
+      })
+    ).toThrow(/authority verification failed/);
+    expect(verifierCalls).toBeGreaterThan(0);
+    expect(
+      () =>
+        new AxOptimizedProgramImpl({
+          ...forged,
+          causalEvidenceVerifier: () => false,
+          causalEvidenceAlreadyIssued: Symbol('forged'),
+        } as any)
+    ).toThrow(/authority verification failed/);
+  });
+
   it('rejects an unknown inherited receipt while appending', () => {
     const attacker = hostReceiptRegistry();
     const forgedPrior = Object.assign(artifact(), {
