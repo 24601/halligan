@@ -631,6 +631,21 @@ import {
   axValidateChatResponseResult,
 } from './ai/validate.js';
 import {
+  AxFrameSampler,
+  axFrameSampler,
+  axVisualPerceptualDigest,
+} from './ai/visual/sampler.js';
+import type {
+  AxFrameSamplerBudget,
+  AxFrameSamplerDecision,
+  AxFrameSamplerOptions,
+  AxFrameSamplerReason,
+  AxVisualAuthority,
+  AxVisualChangeDigest,
+  AxVisualObservation,
+  AxVisualPerceptualInput,
+} from './ai/visual/types.js';
+import {
   AxAIWebLLM,
   type AxAIWebLLMArgs,
   axAIWebLLMCreativeConfig,
@@ -1399,6 +1414,7 @@ export { AxEventTargetBuilder };
 export { AxFlow };
 export { AxFlowMermaidError };
 export { AxFluentFieldType };
+export { AxFrameSampler };
 export { AxFunctionError };
 export { AxFunctionProcessor };
 export { AxGEPA };
@@ -1523,6 +1539,7 @@ export { axEventSizeBytes };
 export { axExecutableSkillRef };
 export { axFetchJsonSpeech };
 export { axFetchMultipartTranscription };
+export { axFrameSampler };
 export { axGetAIProfile };
 export { axGetCompatibilityReport };
 export { axGetFormatCompatibility };
@@ -1604,6 +1621,7 @@ export { axValidateChatResponseResult };
 export { axValidateEventEnvelope };
 export { axValidateGeminiLiveAudioInput };
 export { axValidateProviderCapabilities };
+export { axVisualPerceptualDigest };
 export { axWorkerRuntime };
 export { bestOfN };
 export { eventInput };
@@ -2100,6 +2118,10 @@ export type { AxFlowTypedSubContext };
 export type { AxFlowable };
 export type { AxFluentFieldInfo };
 export type { AxForwardable };
+export type { AxFrameSamplerBudget };
+export type { AxFrameSamplerDecision };
+export type { AxFrameSamplerOptions };
+export type { AxFrameSamplerReason };
 export type { AxFunction };
 export type { AxFunctionCallRecord };
 export type { AxFunctionCallTrace };
@@ -2437,4 +2459,8 @@ export type { AxUsable };
 export type { AxUsageContext };
 export type { AxUsageEvent };
 export type { AxUsageObserver };
+export type { AxVisualAuthority };
+export type { AxVisualChangeDigest };
+export type { AxVisualObservation };
+export type { AxVisualPerceptualInput };
 export type { AxWorkerRuntimeConfig };
