@@ -673,18 +673,21 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
     ) {
       return;
     }
-    await new Promise<void>((resolve, reject) => {
-      const waiter = { resolve, reject };
-      this.workWaiters.add(waiter);
-      signal?.addEventListener(
-        'abort',
-        () => {
-          this.workWaiters.delete(waiter);
-          reject(signal.reason);
-        },
-        { once: true }
-      );
-    });
+    let waiter: Waiter | undefined;
+    const abort = () => {
+      if (waiter) this.workWaiters.delete(waiter);
+      waiter?.reject(signal?.reason);
+    };
+    try {
+      await new Promise<void>((resolve, reject) => {
+        waiter = { resolve, reject };
+        this.workWaiters.add(waiter);
+        signal?.addEventListener('abort', abort, { once: true });
+      });
+    } finally {
+      if (waiter) this.workWaiters.delete(waiter);
+      signal?.removeEventListener('abort', abort);
+    }
   }
 
   async isIdle(): Promise<boolean> {

@@ -507,6 +507,64 @@ describe('AxEventRuntime', () => {
     await runtime.close({ drain: false });
   });
 
+  it('contains synchronous and asynchronous onSourceError failures', async () => {
+    const unhandledRejection = vi.fn();
+    const onSourceError = vi
+      .fn()
+      .mockImplementationOnce(() => {
+        throw new Error('sync callback failure');
+      })
+      .mockRejectedValueOnce(new Error('async callback failure'));
+    process.on('unhandledRejection', unhandledRejection);
+    const runtime = new AxEventRuntime({
+      routes: [],
+      sources: [
+        {
+          id: 'failing-error-observer',
+          start: ({ reportError }) => {
+            reportError(new Error('first source failure'));
+            reportError(new Error('second source failure'));
+          },
+        },
+      ],
+      onSourceError,
+    });
+    try {
+      await runtime.start();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(onSourceError).toHaveBeenCalledTimes(2);
+      expect(unhandledRejection).not.toHaveBeenCalled();
+    } finally {
+      process.off('unhandledRejection', unhandledRejection);
+      await runtime.close({ drain: false });
+    }
+  });
+
+  it('removes waitForWork abort listeners after each normal wake', async () => {
+    const store = new AxInMemoryEventStore();
+    const controller = new AbortController();
+    const add = vi.spyOn(controller.signal, 'addEventListener');
+    const remove = vi.spyOn(controller.signal, 'removeEventListener');
+
+    for (let index = 0; index < 3; index++) {
+      const waiting = store.waitForWork(controller.signal);
+      await store.enqueue({
+        ingress: ingress(`waiter-wake-${index}`, 'waiter.wake'),
+        deliveries: [],
+        acceptedAt: Date.now(),
+        publishTimeoutMs: 100,
+      });
+      await waiting;
+    }
+
+    expect(add).toHaveBeenCalledTimes(3);
+    expect(remove).toHaveBeenCalledTimes(3);
+    expect(
+      remove.mock.calls.map(([type, listener]) => [type, listener])
+    ).toEqual(add.mock.calls.map(([type, listener]) => [type, listener]));
+    await store.close();
+  });
+
   it('bounds only the return from a source close that later performs side effects', async () => {
     let sourceSignal: AbortSignal | undefined;
     let lateSideEffects = 0;

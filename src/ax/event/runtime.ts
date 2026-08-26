@@ -385,7 +385,9 @@ export class AxEventRuntime {
           signal: this.sourceController.signal,
           publish: (ingress, signal) => this.publish(ingress, signal),
           reportError: (error) => {
-            void this.options.onSourceError?.(source.id, error);
+            void Promise.resolve()
+              .then(() => this.options.onSourceError?.(source.id, error))
+              .catch(() => undefined);
           },
         });
         if (handle) this.sourceHandles.push(handle);
@@ -1015,6 +1017,27 @@ export class AxEventRuntime {
           };
         }
 
+        const completionEffectParkReason =
+          await this.parkUnsettledCompletionEffects(claimed, controller.signal);
+        this.assertRunActive(controller.signal);
+        if (completionEffectParkReason) {
+          run = {
+            ...run,
+            status: 'parked',
+            finishedAt: this.clock.now(),
+            error: completionEffectParkReason,
+          };
+          await this.store.saveRun(run);
+          this.assertRunActive(controller.signal);
+          await this.parkDelivery(
+            { ...claimed, attempt, runId },
+            completionEffectParkReason,
+            false
+          );
+          this.assertRunActive(controller.signal);
+          return;
+        }
+
         const registrations = eventContext.takeRegistrations();
         const continuations: AxEventContinuation[] = [];
         for (const registration of registrations) {
@@ -1054,6 +1077,29 @@ export class AxEventRuntime {
         if (!waiting && target && run.output !== undefined) {
           run = await this.dispatchFinalSinks(target, run, eventContext);
           this.assertRunActive(controller.signal);
+          const sinkEffectParkReason =
+            await this.parkUnsettledCompletionEffects(
+              claimed,
+              controller.signal
+            );
+          this.assertRunActive(controller.signal);
+          if (sinkEffectParkReason) {
+            run = {
+              ...run,
+              status: 'parked',
+              finishedAt: this.clock.now(),
+              error: sinkEffectParkReason,
+            };
+            await this.store.saveRun(run);
+            this.assertRunActive(controller.signal);
+            await this.parkDelivery(
+              { ...claimed, attempt, runId },
+              sinkEffectParkReason,
+              false
+            );
+            this.assertRunActive(controller.signal);
+            return;
+          }
           await this.store.saveRun(run);
         }
         this.assertRunActive(controller.signal);
@@ -1314,6 +1360,13 @@ export class AxEventRuntime {
       this.assertRunActive(controller.signal);
       if (effectParkReason) {
         await this.parkDelivery(claimed, effectParkReason);
+        return true;
+      }
+      const completionEffectParkReason =
+        await this.parkUnsettledCompletionEffects(claimed, controller.signal);
+      this.assertRunActive(controller.signal);
+      if (completionEffectParkReason) {
+        await this.parkDelivery(claimed, completionEffectParkReason);
         return true;
       }
       const context = new AxRuntimeEventContext(
@@ -1952,6 +2005,35 @@ export class AxEventRuntime {
       }
     }
     return parkedReasons[0];
+  }
+
+  private async parkUnsettledCompletionEffects(
+    delivery: Readonly<AxEventDelivery>,
+    abortSignal: AbortSignal
+  ): Promise<string | undefined> {
+    if (!isEffectStore(this.store)) return;
+    const fence = this.effectFence(delivery);
+    const effects = await this.store.listEffects(delivery.id);
+    this.assertRunActive(abortSignal);
+    let firstReason: string | undefined;
+    for (const effect of effects) {
+      if (effect.status === 'succeeded' || effect.status === 'failed') continue;
+      const reason =
+        effect.parkedReason ??
+        this.effectReason(
+          `Target completed with unsettled effect ${effect.operation}:${effect.idempotencyKey} (${effect.status})`
+        );
+      firstReason ??= reason;
+      if (effect.status === 'parked') continue;
+      await this.store.transitionEffect(
+        effect.id,
+        effect.version,
+        { type: 'parked', at: this.clock.now(), reason },
+        fence
+      );
+      this.assertRunActive(abortSignal);
+    }
+    return firstReason;
   }
 
   private async resolveEffect(

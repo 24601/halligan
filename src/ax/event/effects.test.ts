@@ -341,6 +341,69 @@ describe('AxEventRuntime effects', () => {
     await runtime.close();
   });
 
+  it('parks and recovers a target completion with an unsettled dispatched effect', async () => {
+    const store = new AxInMemoryEventStore();
+    const forward = vi.fn(async (context: Readonly<AxEventContext>) => {
+      const effect = await context.declareEffect({
+        operation: 'messages.send',
+        idempotencyKey: 'completion-receipt-42',
+      });
+      if (effect.status === 'intent') {
+        await context.markEffectDispatched(effect.id, effect.version);
+      }
+      return { handled: true };
+    });
+    const runtime = runtimeFor(store, forward, {
+      effectResolver: () => ({
+        status: 'succeeded',
+        receipt: { providerId: 'recovered' },
+      }),
+    });
+    await runtime.start();
+    const receipt = await runtime.publish(ingress('unsettled-completion'));
+    await runtime.waitForIdle();
+
+    const deliveryId = receipt.deliveryIds[0]!;
+    const parkedDelivery = await store.getDelivery(deliveryId);
+    expect(parkedDelivery).toEqual(
+      expect.objectContaining({
+        status: 'parked',
+        error: expect.stringContaining(
+          'Target completed with unsettled effect messages.send:completion-receipt-42 (dispatched)'
+        ),
+      })
+    );
+    expect(await store.getRun(parkedDelivery!.runId!)).toEqual(
+      expect.objectContaining({ status: 'parked' })
+    );
+    expect((await runtime.getEffects(deliveryId))[0]).toEqual(
+      expect.objectContaining({
+        status: 'parked',
+        parkedReason: expect.stringContaining(
+          'Target completed with unsettled effect'
+        ),
+      })
+    );
+    const [deadLetter] = await runtime.listDeadLetters();
+    expect(deadLetter).toEqual(
+      expect.objectContaining({ kind: 'delivery', deliveryId })
+    );
+    await runtime.redrive(deadLetter!.id);
+    await runtime.waitForIdle();
+
+    expect(await store.getDelivery(deliveryId)).toEqual(
+      expect.objectContaining({ status: 'succeeded' })
+    );
+    expect((await runtime.getEffects(deliveryId))[0]).toEqual(
+      expect.objectContaining({
+        status: 'succeeded',
+        receipt: { providerId: 'recovered' },
+      })
+    );
+    expect(forward).toHaveBeenCalledTimes(2);
+    await runtime.close();
+  });
+
   it.each<{
     name: string;
     resolution: AxEventEffectResolution;
