@@ -99,7 +99,7 @@
     "@vitest/coverage-v8": "^3.2.1",
     "cspell": "^8.17.3",
     "lefthook": "^2.1.10",
-    "mermaid": "^11.17.0",
+    "mermaid": "^11.17.2",
     "npm-run-all2": "^8.0.4",
     "pagefind": "^1.5.2",
     "release-it": "^19.0.3",
