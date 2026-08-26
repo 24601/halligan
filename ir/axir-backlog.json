@@ -1300,6 +1300,28 @@
       "completedAt": null,
       "completedByCommit": null,
       "verification": null
+    },
+    {
+      "id": "axir-2026-08-26-port-gepa-built-in-maxexamples-0-optional-reflectiveexamples",
+      "status": "open",
+      "title": "Port GEPA built-in maxExamples 0 optional reflectiveExamples",
+      "createdAt": "2026-08-26",
+      "sourcePR": 53,
+      "sourceCommit": "4d030474326461ea03c6d081508dc3128d2f1a76",
+      "tsPaths": [
+        "src/ax/dsp/optimizers/gepaReflection.ts",
+        "src/ax/dsp/optimizers/gepaReflection.test.ts"
+      ],
+      "portableSurface": "axoptimize",
+      "impact": "Built-in GEPA proposal policy now omits optional reflectiveExamples when maxExamples is 0 so the teacher still runs with zero real examples; generated backends still treat a required empty JSON array as missing and would abort the proposal.",
+      "suggestedAxirWork": [
+        "Add or update the TS-derived conformance fixture.",
+        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
+        "Run npm run axir:conformance:check and npm run test:axir."
+      ],
+      "completedAt": null,
+      "completedByCommit": null,
+      "verification": null
     }
   ],
   "nonPortableExemptions": [
