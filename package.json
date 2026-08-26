@@ -78,7 +78,8 @@
     "lint": "biome lint .",
     "format": "biome format .",
     "check": "biome check .",
-    "init-package": "node scripts/initPackage.js"
+    "init-package": "node scripts/initPackage.js",
+    "eval:frame-sampler": "node --import=tsx scripts/evaluate-frame-sampler.ts"
   },
   "engines": {
     "node": ">=20"
