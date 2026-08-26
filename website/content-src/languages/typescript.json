@@ -58,6 +58,8 @@
     "ax": [
       "ax",
       "AxGen",
+      "react",
+      "AxReact",
       "AxProgram",
       "PromptTemplate",
       "FunctionProcessor",

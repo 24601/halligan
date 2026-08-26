@@ -7,15 +7,26 @@ import {
   type AxAgentFunction,
   type AxAgentFunctionGroup,
   type AxAgentJudgeOutput,
+  type AxAgentPlaybookEvolveOptions,
   type AxAgentState,
   type AxAgentTestResult,
   type AxCodeRuntime,
   type AxFunction,
   type AxFunctionProvider,
+  type AxMetricResult,
   agent,
   f,
   s,
 } from '../index.js';
+
+const structuredPlaybookMetricOptions: AxAgentPlaybookEvolveOptions = {
+  metric: async (): Promise<AxMetricResult<'quality'>> => ({
+    score: 0.8,
+    feedback: 'Available to GEPA; ignored by playbook evolution.',
+    scores: { quality: 1 },
+  }),
+};
+void structuredPlaybookMetricOptions;
 
 // Basic agent with string signature — forward() returns typed output
 {
@@ -300,6 +311,30 @@ import {
       onEarlyStop: () => {},
       judgeAI,
       judgeOptions: { model: 'override-judge-model' },
+    }
+  );
+}
+
+// Agent playbook strict promotion keeps taskId typed to the agent input
+{
+  const runtime = {} as AxCodeRuntime;
+  const ai = {} as import('../ai/types.js').AxAIService;
+  const a = agent('query:string -> answer:string', {
+    contextFields: [] as const,
+    runtime,
+    ai,
+  });
+
+  a.playbook().evolve(
+    {
+      train: [{ input: { query: 'train' }, criteria: 'Correct', id: 'train' }],
+      validation: [
+        { input: { query: 'held-out' }, criteria: 'Correct', id: 'held-out' },
+      ],
+    },
+    {
+      requireHeldOut: true,
+      taskId: (task) => task.input.query,
     }
   );
 }

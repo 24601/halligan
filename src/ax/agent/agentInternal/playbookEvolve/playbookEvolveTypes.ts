@@ -180,6 +180,7 @@ export type AxAgentPlaybookRetentionReceipt = {
 
 export type AxAgentPlaybookEvolveOutcome = {
   proposal: AxAgentPlaybookEvolveProposal;
+  status: 'accepted' | 'rejected';
   accepted: boolean;
   reason: string;
   heldIn: { before: number; after: number };
@@ -194,7 +195,7 @@ export type AxAgentPlaybookEvolveProgressEvent = {
   metricCallsUsed: number;
 };
 
-export type AxAgentPlaybookEvolveOptions = {
+export type AxAgentPlaybookEvolveOptions<IN extends AxGenIn = AxGenIn> = {
   /**
    * Keep only proposals that provably help — re-score train + held-out after
    * each candidate bullet and accept only on a held-in gain without a
@@ -202,6 +203,22 @@ export type AxAgentPlaybookEvolveOptions = {
    * mined lessons are applied without the gate (fast trust-batch).
    */
   verify?: boolean;
+  /**
+   * Require a non-empty held-out set, prove it is disjoint from training, and
+   * fail closed unless every baseline and candidate evaluation completes.
+   * Also requires enough metric budget for one complete baseline + candidate
+   * evaluation. Task weights must be finite and non-negative with a positive
+   * finite total weight per split. Default false for backward compatibility.
+   * Cannot be combined with `verify: false`.
+   */
+  requireHeldOut?: boolean;
+  /**
+   * Stable semantic task identity used to prove train/validation disjointness
+   * when `requireHeldOut` is enabled. Defaults to each task's `id`. Ax does not
+   * infer independence from object references or serialized task contents.
+   * IDs must be non-empty strings; runtime non-string values are rejected.
+   */
+  taskId?: (task: Readonly<AxAgentEvalTask<IN>>) => string | undefined;
   /** Runs the agent during evaluation. Defaults to the agent's `ai`. */
   studentAI?: Readonly<AxAIService>;
   /** Mines weaknesses. Defaults to `judgeAI`, then the student. */
@@ -209,7 +226,11 @@ export type AxAgentPlaybookEvolveOptions = {
   /** Scores runs via the built-in judge. Resolution mirrors `optimize()`. */
   judgeAI?: Readonly<AxAIService>;
   judgeOptions?: AxAgentJudgeOptions;
-  /** Optional deterministic scorer replacing the LLM judge. */
+  /**
+   * Optional deterministic scorer replacing the LLM judge. Structured metric
+   * results use their scalar score; playbook evolution does not consume their
+   * feedback or named objectives.
+   */
   metric?: AxMetricFn;
   /** Maximum weaknesses mined / proposals evaluated. Default 4. */
   maxProposals?: number;

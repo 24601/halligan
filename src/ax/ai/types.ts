@@ -333,6 +333,12 @@ export type AxFunctionHandler = (
     protocol?: AxAgentCompletionProtocol;
     /** Immutable event provenance for autonomous or resumed execution. */
     eventContext?: import('../event/types.js').AxEventContext;
+    /** Exactly-bound host authorization receipt for this function invocation. */
+    authorityReceipt?: import('../authority/types.js').AxAuthorizationReceipt;
+    /** @internal Host authority propagated only to nested programmable functions. */
+    authority?: import('../authority/types.js').AxAuthorityContext;
+    /** @internal Explicit authority attenuation for nested programmable functions. */
+    authorityInheritance?: import('../authority/types.js').AxAuthorityInheritance;
     /** @internal Shared native MCP state for nested programmable functions. */
     _mcpExecutionContext?: import('../mcp/execution.js').AxMCPExecutionContext;
   }>
