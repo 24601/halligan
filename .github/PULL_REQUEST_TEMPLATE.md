@@ -10,7 +10,11 @@
 - **Evaluation**:
   Behavioral features and changes require a meaningful, truthful evaluation suited to the claim.
   - Claim and declared baseline:
-  - Method (use a held-out hill-climbing comparison for claimed outcome improvement; a reproducible benchmark for latency/cost; fault injection for recovery/durability; or audit-fidelity and overhead checks for infrastructure):
+  - Method:
+    - Claimed outcome improvement: a held-out hill-climbing comparison against a declared baseline.
+    - Latency or cost: a reproducible benchmark against a declared baseline.
+    - Recovery or durability: fault injection covering the claimed failure mode.
+    - Infrastructure: audit-fidelity and overhead checks.
   - Bounded budget (calls, tokens, wall-clock time, and cost):
   - Exact commands and artifacts:
   - Results, including negative or regression results:
