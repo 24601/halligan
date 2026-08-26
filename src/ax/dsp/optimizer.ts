@@ -996,28 +996,32 @@ export function axAttachCausalCandidateEvidence<OUT = any>(
         maxSummaryChars: existing.privacy.maxSummaryChars,
       }
     : undefined;
-  const definedOptions = Object.fromEntries(
-    Object.entries(options).filter(([, value]) => value !== undefined)
-  ) as AxCausalCandidateEvidenceOptions;
+  const effectiveOptions: AxCausalCandidateEvidenceOptions = {
+    ...options,
+    maxRecords: options.maxRecords ?? inheritedOptions?.maxRecords,
+    maxArtifactBytes:
+      options.maxArtifactBytes ?? inheritedOptions?.maxArtifactBytes,
+    includeEvidenceSummaries:
+      options.includeEvidenceSummaries ??
+      inheritedOptions?.includeEvidenceSummaries,
+    maxSummaryChars:
+      options.maxSummaryChars ?? inheritedOptions?.maxSummaryChars,
+  };
   if (
     existing &&
     JSON.stringify({
       ...inheritedOptions,
-      maxRecords: definedOptions.maxRecords ?? inheritedOptions?.maxRecords,
-      maxArtifactBytes:
-        definedOptions.maxArtifactBytes ?? inheritedOptions?.maxArtifactBytes,
-      includeEvidenceSummaries:
-        definedOptions.includeEvidenceSummaries ??
-        inheritedOptions?.includeEvidenceSummaries,
-      maxSummaryChars:
-        definedOptions.maxSummaryChars ?? inheritedOptions?.maxSummaryChars,
+      maxRecords: effectiveOptions.maxRecords,
+      maxArtifactBytes: effectiveOptions.maxArtifactBytes,
+      includeEvidenceSummaries: effectiveOptions.includeEvidenceSummaries,
+      maxSummaryChars: effectiveOptions.maxSummaryChars,
     }) !== JSON.stringify(inheritedOptions)
   ) {
     throw new Error('cannot change causal evidence retention while appending');
   }
   const manifest = axCreateCausalCandidateEvidenceManifest(
     [...(existing?.records ?? []), ...records],
-    { ...inheritedOptions, ...definedOptions },
+    effectiveOptions,
     existing?.receipts
   );
   if (manifest.omittedRecordCount > 0) {
