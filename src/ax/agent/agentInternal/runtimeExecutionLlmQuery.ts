@@ -2,6 +2,7 @@ import type { AxAIService } from '../../ai/types.js';
 import { AxGen } from '../../dsp/generate.js';
 import type { AxSignature } from '../../dsp/sig.js';
 import type { AxFieldValue, AxProgramForwardOptions } from '../../dsp/types.js';
+import { setJSRuntimeHostFunctionSpeculationAdapter } from '../../funcs/jsRuntimeHostFunction.js';
 import { axMCPChildExecutionOptions } from '../../mcp/execution.js';
 import { mergeAbortSignals } from '../../util/abort.js';
 import { AxAIServiceAbortedError } from '../../util/apicall.js';
@@ -43,6 +44,10 @@ export interface LlmQueryBindings {
   ) => Promise<string | string[]>;
 }
 
+type LlmQueryDebitReservation = {
+  register(release: () => void): void;
+};
+
 export function buildLlmQueryBindings(
   deps: LlmQueryBindingsDeps
 ): LlmQueryBindings {
@@ -67,12 +72,14 @@ export function buildLlmQueryBindings(
       recursionForwardOptions
     );
 
-  const llmQuery = async (
+  const runLlmQuery = async (
     queryOrQueries:
       | string
       | { query: string; context?: unknown }
       | readonly { query: string; context?: unknown }[],
-    ctx?: unknown
+    ctx?: unknown,
+    invocationAbortSignal: AbortSignal | undefined = effectiveAbortSignal,
+    reservation?: LlmQueryDebitReservation
   ): Promise<string | string[]> => {
     if (
       !Array.isArray(queryOrQueries) &&
@@ -80,14 +87,19 @@ export function buildLlmQueryBindings(
       queryOrQueries !== null &&
       'query' in queryOrQueries
     ) {
-      return llmQuery(queryOrQueries.query, queryOrQueries.context ?? ctx);
+      return runLlmQuery(
+        queryOrQueries.query,
+        queryOrQueries.context ?? ctx,
+        invocationAbortSignal,
+        reservation
+      );
     }
 
-    if (effectiveAbortSignal?.aborted) {
+    if (invocationAbortSignal?.aborted) {
       throw new AxAIServiceAbortedError(
         'rlm-llm-query',
-        effectiveAbortSignal.reason
-          ? String(effectiveAbortSignal.reason)
+        invocationAbortSignal.reason
+          ? String(invocationAbortSignal.reason)
           : 'Aborted'
       );
     }
@@ -115,7 +127,7 @@ export function buildLlmQueryBindings(
     const runSingleLlmQuery = async (
       singleQuery: string,
       singleCtx?: unknown,
-      abortSignal: AbortSignal | undefined = effectiveAbortSignal
+      abortSignal: AbortSignal | undefined = invocationAbortSignal
     ): Promise<string> => {
       if (abortSignal?.aborted) {
         throw new AxAIServiceAbortedError(
@@ -143,6 +155,18 @@ export function buildLlmQueryBindings(
       }
       llmQueryBudgetState.global.used++;
       llmQueryBudgetState.localUsed++;
+      const debit = {
+        global: 1,
+        local: 1,
+        released: false,
+      };
+      const releaseOwnDebit = () => {
+        if (debit.released) return;
+        debit.released = true;
+        llmQueryBudgetState.global.used -= debit.global;
+        llmQueryBudgetState.localUsed -= debit.local;
+      };
+      reservation?.register(releaseOwnDebit);
 
       const maxAttempts = 3;
       let lastError: unknown;
@@ -253,7 +277,7 @@ export function buildLlmQueryBindings(
     if (Array.isArray(queryOrQueries)) {
       const batchAbortController = new AbortController();
       const batchAbortSignal =
-        mergeAbortSignals(effectiveAbortSignal, batchAbortController.signal) ??
+        mergeAbortSignals(invocationAbortSignal, batchAbortController.signal) ??
         batchAbortController.signal;
       let terminalBatchError:
         | AxAgentClarificationError
@@ -307,7 +331,7 @@ export function buildLlmQueryBindings(
       }
     }
 
-    const result = await runSingleLlmQuery(query, ctx);
+    const result = await runSingleLlmQuery(query, ctx, invocationAbortSignal);
     if (llmQueryBudgetState.localUsed === llmCallWarnThreshold) {
       const remaining =
         llmQueryBudgetState.localMax - llmQueryBudgetState.localUsed;
@@ -315,6 +339,55 @@ export function buildLlmQueryBindings(
     }
     return result;
   };
+
+  const llmQuery: LlmQueryBindings['llmQuery'] = (queryOrQueries, ctx) =>
+    runLlmQuery(queryOrQueries, ctx);
+  setJSRuntimeHostFunctionSpeculationAdapter(llmQuery, {
+    launch: (args, signal) => {
+      let retained = false;
+      const ownedDebits: Array<() => void> = [];
+      const reservation: LlmQueryDebitReservation = {
+        register(release) {
+          ownedDebits.push(release);
+        },
+      };
+      const invocationSignal = mergeAbortSignals(effectiveAbortSignal, signal);
+      const result = runLlmQuery(
+        args[0] as Parameters<LlmQueryBindings['llmQuery']>[0],
+        args[1],
+        invocationSignal,
+        reservation
+      );
+      const refundIfAbandoned = () => {
+        if (retained) return;
+        for (const release of ownedDebits) release();
+        ownedDebits.length = 0;
+      };
+      // A rejected launch remains claimable: a worker claim can arrive after
+      // settlement and must retain the billed logical call.
+      // Only execution-owned abandonment (abort/release) refunds the debit.
+      void result.catch(() => {});
+      const onAbort = () => {
+        refundIfAbandoned();
+      };
+      if (signal.aborted) {
+        onAbort();
+      } else {
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
+      return {
+        result,
+        retain: () => {
+          retained = true;
+        },
+        releaseDebit: refundIfAbandoned,
+      };
+    },
+    commit: (_args, launch) => {
+      launch.retain?.();
+      return launch.result;
+    },
+  });
 
   return { llmQuery };
 }

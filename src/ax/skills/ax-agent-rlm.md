@@ -1,6 +1,6 @@
 ---
 name: ax-agent-rlm
-description: This skill helps an LLM generate correct AxAgent RLM/runtime code using @ax-llm/ax. Use when the user asks about RLM code execution, AxJSRuntime, contextFields, contextPolicy, liveRuntimeState, promptLevel, stage prompt controls, executorModelPolicy, maxRuntimeChars, agent.test(...), llmQuery(...), recursionOptions, or long-running agent runtime behavior.
+description: This skill helps an LLM generate correct AxAgent RLM/runtime code using @ax-llm/ax. Use when the user asks about RLM code execution, AxJSRuntime, speculative programmatic tool calling, contextFields, contextPolicy, liveRuntimeState, promptLevel, stage prompt controls, executorModelPolicy, maxRuntimeChars, agent.test(...), llmQuery(...), recursionOptions, or long-running agent runtime behavior.
 version: "__VERSION__"
 ---
 
@@ -325,6 +325,92 @@ Rules for the LLM author:
 - Treat `allowUnsafeNodeHostAccess: true` as a red flag; only use it when the user is authoring trusted code in their own process.
 - `preventGlobalThisExtensions: true` breaks top-level `var`/`let`/`const` persistence across turns; never set it for stdout-mode RLM where persistence is load-bearing.
 - On Deno, `blockDynamicImport` is a no-op; the defense is the worker permission sandbox. Pass `allowDenoRemoteImport: true` only if remote module loading is genuinely required.
+
+## Speculative Programmatic Tool Calling
+
+`AxJSRuntime` has an opt-in speculative programmatic tool calling (sPTC) mode, adapted from [Alex Zhang's design](https://alexzhang13.github.io/blog/2026/spec-ptc/) and [reference implementation](https://github.com/alexzhang13/spec-ptc). It conservatively reads the complete code string passed to `execute()` before normal worker execution and starts independent, explicitly authorized host calls early. This can overlap calls that ordinary JavaScript would await serially. It does not overlap tool execution with model-token streaming and does not change worker sandboxing.
+
+Configure exact runtime paths on the runtime; do not put speculative authority in model-visible function metadata:
+
+```typescript
+import {
+  AxJSRuntime,
+  agent,
+  f,
+  fn,
+  type AxJSRuntimeSpeculationEvent,
+} from '@ax-llm/ax';
+
+const events: AxJSRuntimeSpeculationEvent[] = [];
+const runtime = new AxJSRuntime({
+  speculation: {
+    callables: {
+      'catalog.lookup': { purity: 'pure', deterministic: true },
+      llmQuery: { purity: 'pure', deterministic: false },
+    },
+    maxConcurrency: 4,
+    maxCallsPerExecution: 16,
+    onEvent: (event) => events.push(event),
+  },
+});
+
+const lookup = fn('lookup')
+  .namespace('catalog')
+  .description('Read one immutable catalog record')
+  .arg('id', f.string('Catalog id'))
+  .handler(async ({ id }, extra) => {
+    return readImmutableCatalog(id, { signal: extra?.abortSignal });
+  })
+  .build();
+
+const assistant = agent('query:string -> answer:string', {
+  runtime,
+  functions: [lookup],
+  contextFields: [],
+});
+```
+
+Eligibility is fail-closed:
+
+- A path is eligible only when `callables` contains that exact dot-qualified path and the policy explicitly says `purity: 'pure'` plus `deterministic: boolean`. There are no wildcards or default eligibility.
+- Planning is not a sandbox and the allowlist does not make a callable safe. Unlike the reference design's shadow-REPL/deepcopy approach, Ax does not execute generated source in a second host REPL. Unsafe syntax, open or unresolved dependencies, and non-cancellable host functions are blocked or missed rather than made safe.
+- `purity: 'pure'` is the application's attestation that starting and abandoning the call is safe: no writes, messages, transactions, or other durable application effects before claim. The speculative AxFunction adapter supplies an isolated completion protocol whose effects queue during launch and replay only after the real call claims the launch; status methods replay in awaited order. The handler must honor `abortSignal` and tolerate cancellation.
+- Speculation can still consume CPU, network quota, rate limits, or provider tokens. In particular, authorizing `llmQuery` can bill an unclaimed sub-query and consumes the normal Ax sub-query budget. Only opt in when that bounded waste is acceptable.
+- Set `deterministic: true` only when equivalent structural arguments always produce an equivalent result. Equivalent duplicates share one physical result but retain two logical calls and observations. With `false`, matching keys include program occurrence: repeated calls remain distinct and claim their independently launched results FIFO.
+- AxAgent external functions and its `llmQuery` binding provide the cancellable host adapter. Exact MCP/UCP paths can qualify only when the application makes the same purity attestation. Child agents are intentionally ineligible because their nested tools and budgets are not proven pure. A raw function injected directly into `createSession()` has no speculative adapter and falls back normally.
+- Each physical launch receives its own validated structured clone of the complete argument graph, matching the worker callback boundary. Mutable host references are never shared between speculative occurrences; graphs with observable shared references fail closed.
+- When an Ax host authority context is active, Ax deeply captures and freezes the original principal, actor, delegation, grants, lease epoch, and exact operation/resource tuple before authorization. The speculative physical call receives that same immutable snapshot and its bound receipt. A denial is claimed with zero physical function work and, matching normal authorization order, no logical call observer or recorder. Host-side mutation during `authorize` cannot retarget the request. Authority changes made after the execution snapshot are intentionally visible only to a later execution, matching ordinary Ax authority semantics rather than invalidating one in-flight snapshot.
+
+The conservative planner supports only top-level direct calls to configured exact paths, optionally assigned to a simple `const`, `let`, or `var`. Arguments may use strings, finite numbers, booleans, `null`, `undefined`, arrays, plain objects, safe plain-object/array/string member reads, unary `-`, addition/string concatenation with `+`, serializable initial host globals, and results from a prior **awaited** planned call. A dependent launch waits for its predecessor future and uses a validated structured clone of the worker-visible result. Separate multiple top-level statements with semicolons.
+
+Everything else keeps ordinary runtime behavior. Unsupported examples include control flow and loops containing calls, functions/classes, aliases or other indirect calls, computed tool paths, nested calls, destructuring, spread, interpolated templates, regex/division syntax, method calls/transforms, semicolonless multi-statement cells, and dependencies on an unapproved call or a variable created only inside an earlier worker cell. The planner never uses host `eval` or `Function`; unsafe or incomplete parsing simply misses, and the hardened worker executes the original code.
+
+Operational semantics:
+
+- Each `execute()` defaults to at most 4 concurrent speculative host operations and 16 planned calls; configurable hard maxima are 32 and 256. Code over 100,000 characters and canonical arguments over 50,000 characters are not planned.
+- Each `execute()` gets an isolated, bounded match store that is discarded at completion rather than retained as a cache. Results are never matched across cells, so a previous failed or completed execution cannot create a stale hit.
+- Real worker execution claims by exact callable reference, canonical arguments, and nondeterministic occurrence. A hit adopts the already-started promise without retrying; a miss invokes the ordinary host function once. Its normal function-call observer and recorder commit exactly once at the real worker call. The adapter keeps independent pre-call and post-settlement argument snapshots so observers see ordinary pre-call values while the recorder sees tool-local mutations exactly as it does without speculation. Unclaimed work is cancelled and never committed as a logical function call.
+- Planning never writes worker globals or evaluates generated source on the host. If the worker rejects incomplete or erroneous code, no partial planner state is committed to the persistent runtime session; only explicitly pure speculative requests may have been started and are then cancelled.
+- Execution completion cancels unclaimed work; execution failure or abort, including closing a session while it executes, cancels all calls active in that execution. A successfully claimed but deliberately unawaited call retains ordinary JavaScript semantics and may outlive the cell. Rejections are always observed. A non-cooperative pure handler may continue consuming resources after cancellation, which is why eligibility remains an application responsibility.
+- `onEvent` receives best-effort `dispatch`, `hit`, `miss`, `blocked`, and `cancelled` diagnostics with bounded reason codes, including launch invalidation misses. Callback errors are ignored; diagnostics are not an authorization mechanism.
+
+### Offline evaluation
+
+The zero-cost fixture compares enabled and disabled execution, checks result/tool-call equivalence, and covers hit, miss, unsafe, duplicate, failure, and cancellation behavior:
+
+```bash
+AX_PRINT_METRICS=1 ./node_modules/.bin/vitest run src/ax/funcs/benchmarks/jsRuntimeSpeculation.test.ts
+```
+
+One five-repetition median run in the Ax development orb produced:
+
+| workload | disabled median | enabled median | disabled / enabled |
+|---|---:|---:|---:|
+| three independent 40 ms calls | 123.3 ms | 41.6 ms | 2.97x |
+| two dependent 30 ms calls | 62.6 ms | 61.3 ms | 1.02x |
+| twenty zero-delay alias misses | 27.5 ms | 28.0 ms | 0.98x |
+
+The independent workload demonstrates latency overlap. The dependent chain shows essentially no speedup, and the parser-miss workload records small negative overhead. Accounting in the same run was: deterministic duplicates 2 physical / 2 logical when disabled versus 1 / 2 enabled; nondeterministic duplicates 2 / 2 in both modes; an unapproved side effect 2 / 2 in both modes and executed its write once; claimed failure 1 / 1 in both modes; claimed cancellation 1 / 1 and aborted; and an unreached pure call after `throw` launched 1 physical / 0 logical call versus 0 / 0 disabled, then aborted it. The source article separately reports only five author runs and roughly 1.0–1.2x on specific OOLONG/RLM/8xH100 setups; Ax does not generalize that evidence. These controlled fixtures do not establish model-quality improvement, cost reduction, or universal latency speedup.
 
 ## Custom Code Runtimes
 

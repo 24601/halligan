@@ -1,7 +1,82 @@
 import { describe, expect, it } from 'vitest';
 import type { AxFunction } from '../../ai/types.js';
 import type { AxAuthorityContext } from '../../authority/types.js';
+import { AxJSRuntime } from '../../funcs/jsRuntime.js';
 import { buildRuntimeGlobals, wrapFunction } from './runtimeGlobals.js';
+
+function authorityFixture(decision: 'allow' | 'deny' = 'allow') {
+  let authorizationCalls = 0;
+  const authority: AxAuthorityContext = {
+    principal: { id: 'principal-a', tenantId: 'tenant-a' },
+    actor: { id: 'agent-a', kind: 'agent' },
+    grants: [
+      {
+        version: 1,
+        id: 'grant-a',
+        principalId: 'principal-a',
+        operations: ['function.call'],
+        resources: [
+          {
+            type: 'function',
+            id: 'records:lookup',
+            tenantId: 'tenant-a',
+          },
+        ],
+        leaseEpoch: 1,
+      },
+    ],
+    leaseEpoch: 1,
+    now: () => 100,
+    authorize: (operation, context) => {
+      authorizationCalls++;
+      return {
+        version: 1,
+        receiptId: `receipt-${authorizationCalls}`,
+        requestId: context.requestId,
+        decision,
+        operation,
+        resource: context.resource,
+        principalId: context.principal.id,
+        actor: { id: context.actor.id, kind: context.actor.kind },
+        grantIds: context.grants.map((grant) => grant.id),
+        leaseEpoch: context.leaseEpoch,
+        authorizedAt: context.now,
+      };
+    },
+  };
+  return { authority, authorizationCalls: () => authorizationCalls };
+}
+
+async function executeWithSpeculation(
+  callable: (...args: unknown[]) => Promise<unknown>
+) {
+  const events: Array<{ kind: string; reason?: string }> = [];
+  const runtime = new AxJSRuntime({
+    outputMode: 'return',
+    useNodePermissionModel: false,
+    speculation: {
+      callables: {
+        'tools.lookup': { purity: 'pure', deterministic: true },
+      },
+      onEvent: (event) => events.push(event),
+    },
+  });
+  const session = runtime.createSession({ tools: { lookup: callable } });
+  try {
+    try {
+      return {
+        value: await session.execute(
+          'const value = await tools.lookup({ id: "record-a" }); return value;'
+        ),
+        events,
+      };
+    } catch (error) {
+      return { error, events };
+    }
+  } finally {
+    session.close();
+  }
+}
 
 describe('live runtime function authority', () => {
   it('authorizes before executing and passes only the bound receipt', async () => {
@@ -75,6 +150,91 @@ describe('live runtime function authority', () => {
       grantIds: ['grant-a'],
     });
     expect(JSON.stringify(seenReceipt)).not.toContain('forged-by-model');
+  });
+
+  it('authorizes speculative work before launch without double authorization', async () => {
+    const fixture = authorityFixture();
+    let executions = 0;
+    let observations = 0;
+    let seenReceipt: unknown;
+    const callable = wrapFunction(
+      {
+        name: 'lookup',
+        componentId: 'records:lookup',
+        description: 'lookup a synthetic record',
+        parameters: { type: 'object', additionalProperties: true },
+        func: (_args, extra) => {
+          executions++;
+          seenReceipt = extra?.authorityReceipt;
+          return 'value';
+        },
+      },
+      undefined,
+      undefined,
+      undefined,
+      'tools.lookup',
+      undefined,
+      'external',
+      () => {
+        observations++;
+      },
+      undefined,
+      fixture.authority
+    );
+
+    const execution = await executeWithSpeculation(callable);
+
+    expect(execution.value).toBe('value');
+    expect(
+      execution.events.filter((event) => event.kind === 'hit')
+    ).toHaveLength(1);
+    expect(fixture.authorizationCalls()).toBe(1);
+    expect(executions).toBe(1);
+    expect(observations).toBe(1);
+    expect(seenReceipt).toMatchObject({
+      decision: 'allow',
+      operation: 'function.call',
+      resource: { id: 'records:lookup' },
+      leaseEpoch: 1,
+    });
+  });
+
+  it('launches no physical or logical work when speculative authorization is denied', async () => {
+    const fixture = authorityFixture('deny');
+    let executions = 0;
+    let observations = 0;
+    const callable = wrapFunction(
+      {
+        name: 'lookup',
+        componentId: 'records:lookup',
+        description: 'lookup a synthetic record',
+        parameters: { type: 'object', additionalProperties: true },
+        func: () => {
+          executions++;
+          return 'must-not-run';
+        },
+      },
+      undefined,
+      undefined,
+      undefined,
+      'tools.lookup',
+      undefined,
+      'external',
+      () => {
+        observations++;
+      },
+      undefined,
+      fixture.authority
+    );
+
+    const execution = await executeWithSpeculation(callable);
+
+    expect(execution.error).toMatchObject({
+      message: 'Host denied function.call',
+    });
+    expect(fixture.authorizationCalls()).toBe(1);
+    expect(executions).toBe(0);
+    expect(observations).toBe(0);
   });
 
   it('authorizes every model-callable MCP and UCP runtime operation', async () => {

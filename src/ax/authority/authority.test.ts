@@ -314,6 +314,36 @@ describe('Ax host authority boundary', () => {
     }
   });
 
+  it('keeps the original requested tuple authoritative when the host callback attempts mutation', async () => {
+    const sourceResource = { ...resource };
+    const sourceGrant = grant({ resources: [{ ...resource }] });
+    const context = authority({
+      grants: [sourceGrant],
+      authorize: (operation, request) => {
+        expect(Object.isFrozen(request.resource)).toBe(true);
+        expect(Object.isFrozen(request.grants[0]?.resources[0])).toBe(true);
+        expect(() => {
+          (request.resource as AxResourceScope).id = 'doc-forged';
+        }).toThrow(TypeError);
+        expect(() => {
+          (request.grants[0]!.resources[0] as AxResourceScope).id =
+            'doc-forged';
+        }).toThrow(TypeError);
+        sourceResource.id = 'doc-source-mutated';
+        (sourceGrant.resources[0] as AxResourceScope).id = 'doc-grant-mutated';
+        return allow(operation, request);
+      },
+    });
+
+    await expect(
+      axAuthorize(context, 'document.read', sourceResource)
+    ).resolves.toMatchObject({
+      operation: 'document.read',
+      resource: { type: 'document', id: 'doc-1', tenantId: 'tenant-a' },
+      grantIds: ['grant-1'],
+    });
+  });
+
   it('reports malformed host receipts as invalid without exposing runtime errors', async () => {
     const audits: unknown[] = [];
     for (const malformed of [
