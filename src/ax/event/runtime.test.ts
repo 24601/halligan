@@ -7,7 +7,9 @@ import { AxEventRuntime, eventRoute, eventTarget } from './runtime.js';
 import { AxPushEventSource, AxTimerEventSource } from './sources.js';
 import {
   AxEventBackpressureError,
+  type AxEventContinuation,
   type AxEventIngress,
+  type AxEventRun,
   type AxEventSink,
   AxManualEventClock,
 } from './types.js';
@@ -539,7 +541,33 @@ describe('AxEventRuntime', () => {
     expect(lateSideEffects).toBe(1);
   });
 
-  it('shares bounded close, requests stream return, and suppresses late chunks', async () => {
+  it('bounds close independently from a manual event clock', async () => {
+    const clock = new AxManualEventClock(0);
+    const runtime = new AxEventRuntime({
+      clock,
+      routes: [],
+      sources: [
+        {
+          id: 'manual-clock-hung-close',
+          start: () => ({ close: () => new Promise<never>(() => {}) }),
+        },
+      ],
+    });
+    await runtime.start();
+
+    const outcome = await Promise.race([
+      runtime
+        .close({ drain: false, timeoutMs: 10 })
+        .then(() => 'closed' as const),
+      new Promise<'wall-timeout'>((resolve) =>
+        setTimeout(() => resolve('wall-timeout'), 75)
+      ),
+    ]);
+    expect(outcome).toBe('closed');
+    expect(clock.now()).toBe(0);
+  });
+
+  it('shares bounded close, swallows stream return throws, and suppresses late chunks', async () => {
     let releaseNext!: (value: {
       done: false;
       value: { version: number; index: number; delta: { handled: boolean } };
@@ -574,7 +602,7 @@ describe('AxEventRuntime', () => {
         },
         return: () => {
           returnCalls++;
-          return new Promise<never>(() => {});
+          throw new Error('return-fail');
         },
       }),
     } as unknown as AxProgrammable<any, any>;
@@ -627,6 +655,170 @@ describe('AxEventRuntime', () => {
     });
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(lateChunkSinks).toBe(0);
+  });
+
+  it('supervises a transient claim failure and continues the worker loop', async () => {
+    const store = new AxInMemoryEventStore();
+    const claim = store.claim.bind(store);
+    let claimAttempts = 0;
+    store.claim = async (...args) => {
+      claimAttempts++;
+      if (claimAttempts === 1) throw new Error('transient claim failure');
+      return claim(...args);
+    };
+    let targetCalls = 0;
+    const runtime = new AxEventRuntime({
+      store,
+      routes: [
+        eventRoute({
+          id: 'claim-retry',
+          match: { types: ['claim.retry'] },
+          action: 'wake',
+          target: eventTarget({
+            id: 'claim-retry-target',
+            ai,
+            program: program(() => {
+              targetCalls++;
+              return { handled: true };
+            }),
+            mapInput: () => ({}),
+            retrySafety: 'idempotent',
+          }),
+        }),
+      ],
+    });
+    await store.enqueue({
+      ingress: ingress('claim-retry-1', 'claim.retry'),
+      deliveries: [
+        {
+          routeId: 'claim-retry',
+          action: 'wake',
+          targetId: 'claim-retry-target',
+          instanceKey: 'claim-retry-1',
+          sizeBytes: 1,
+          retrySafety: 'idempotent',
+          ordering: 'strict',
+        },
+      ],
+      acceptedAt: Date.now(),
+      publishTimeoutMs: 100,
+    });
+    await runtime.start();
+    await runtime.waitForIdle(1_000);
+    expect(claimAttempts).toBeGreaterThan(1);
+    expect(targetCalls).toBe(1);
+    await runtime.close({ drain: false });
+  });
+
+  it('preserves the admitted continuation during sink-only recovery', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const store = new AxInMemoryEventStore({ clock });
+    let targetCalls = 0;
+    let sinkContinuation: Readonly<AxEventContinuation> | undefined;
+    const target = eventTarget({
+      id: 'resume-recovery-target',
+      ai,
+      program: program(() => {
+        targetCalls++;
+        return { handled: false };
+      }),
+      mapInput: () => ({}),
+      retrySafety: 'idempotent',
+      sinks: [
+        {
+          id: 'resume-recovery-sink',
+          write: (_output, context) => {
+            sinkContinuation = context.eventContext.continuation;
+          },
+        },
+      ],
+    });
+    const runtime = new AxEventRuntime({
+      clock,
+      store,
+      leaseMs: 100,
+      heartbeatMs: 25,
+      routes: [
+        eventRoute({
+          id: 'resume-recovery',
+          match: { types: ['resume.recovery'] },
+          action: 'resume',
+          target,
+          correlation: () => ({ kind: 'job', value: 'job-42' }),
+        }),
+      ],
+    });
+    const receipt = await store.enqueue({
+      ingress: ingress('resume-recovery-1', 'resume.recovery'),
+      deliveries: [
+        {
+          routeId: 'resume-recovery',
+          action: 'resume',
+          targetId: target.id,
+          instanceKey: 'resume-recovery-1',
+          sizeBytes: 1,
+          retrySafety: 'idempotent',
+          ordering: 'strict',
+        },
+      ],
+      acceptedAt: clock.now(),
+      publishTimeoutMs: 100,
+    });
+    const claimed = (await store.claim('worker-a', clock.now(), 100))!;
+    const run: AxEventRun = {
+      id: 'resume-recovery-run',
+      deliveryId: claimed.id,
+      routeId: claimed.routeId,
+      targetId: target.id,
+      instanceKey: claimed.instanceKey,
+      claimedBy: claimed.claimedBy,
+      fencingToken: claimed.fencingToken,
+      status: 'succeeded',
+      attempt: 1,
+      startedAt: clock.now(),
+      finishedAt: clock.now(),
+      output: { handled: true },
+    };
+    await store.saveDelivery({
+      ...claimed,
+      status: 'running',
+      attempt: 1,
+      runId: run.id,
+      invocationStarted: true,
+    });
+    await store.saveRun(run);
+    const continuation: AxEventContinuation = {
+      id: 'resume-recovery-continuation',
+      targetId: target.id,
+      routeId: 'start-recovery',
+      instanceKey: claimed.instanceKey,
+      identityScope: 'anonymous',
+      correlation: [{ kind: 'job', value: 'job-42' }],
+      createdAt: clock.now(),
+      metadata: { admitted: 'yes' },
+    };
+    await store.registerContinuation(continuation);
+    clock.advanceBy(101);
+
+    await runtime.start();
+    for (let index = 0; index < 50; index++) {
+      if (
+        (await store.getDelivery(receipt.deliveryIds[0]!))?.status ===
+        'succeeded'
+      )
+        break;
+      await Promise.resolve();
+    }
+    expect(targetCalls).toBe(0);
+    expect(sinkContinuation).toEqual(continuation);
+    expect(await store.getDelivery(receipt.deliveryIds[0]!)).toEqual(
+      expect.objectContaining({
+        status: 'succeeded',
+        runId: run.id,
+        fencingToken: 2,
+      })
+    );
+    await runtime.close({ drain: false });
   });
 
   it('refuses durable sources on the volatile store by default', async () => {

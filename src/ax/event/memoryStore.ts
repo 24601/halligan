@@ -473,9 +473,18 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
   async nextAvailableAt(_now: number): Promise<number | undefined> {
     let next: number | undefined;
     for (const delivery of this.deliveries.values()) {
-      if (delivery.status !== 'queued') continue;
-      if (next === undefined || delivery.availableAt < next) {
-        next = delivery.availableAt;
+      const availableAt =
+        delivery.status === 'queued'
+          ? delivery.availableAt
+          : (delivery.status === 'claimed' || delivery.status === 'running') &&
+              delivery.leaseExpiresAt !== undefined
+            ? delivery.leaseExpiresAt
+            : undefined;
+      if (
+        availableAt !== undefined &&
+        (next === undefined || availableAt < next)
+      ) {
+        next = availableAt;
       }
     }
     return next;
@@ -485,7 +494,10 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
     if (signal?.aborted) throw signal.reason;
     if (
       [...this.deliveries.values()].some(
-        (delivery) => delivery.status === 'queued'
+        (delivery) =>
+          delivery.status === 'queued' ||
+          ((delivery.status === 'claimed' || delivery.status === 'running') &&
+            delivery.leaseExpiresAt !== undefined)
       )
     ) {
       return;

@@ -348,8 +348,11 @@ memory and SQLite stores do.
 stops sources, drains by default, then aborts remaining workers. The close
 `timeoutMs` is one overall return deadline for source close, optional drain,
 worker settlement, and store close. Concurrent/repeated calls join the same
-shutdown. Ax retains active stream iterators, requests `return()` after abort,
-and suppresses chunks that arrive after the abort signal. This bounds when
+shutdown. The return deadline uses a host-native timer independent of an
+injected replay/manual event clock. Ax retains active stream iterators,
+best-effort requests `return()` after abort, ignores synchronous or asynchronous
+iterator cancellation failures, and suppresses chunks that arrive after the
+abort signal. This bounds when
 `close()` returns only: Ax cannot terminate non-cooperative JavaScript, revoke
 capabilities it already captured, or prevent its later host side effects.
 Sources, iterators, tools, and stores must cooperate with abort or use a
@@ -394,10 +397,16 @@ that offload payloads use `AxEventStagedPayloadStore`, not legacy
 `AxEventPayloadStore.put`. The host reserves a unique stage ID before upload,
 revalidates ownership after staging, journals `commit_pending` with the run,
 then idempotently commits that stage. Restart reconciles the journal before a
-claim or run read. A successful recovery atomically commits the stage and binds
+claim or run read. Every unresolved staging, commit, or abort record excludes
+its delivery from claim. Expired staging/abort ownership atomically marks the
+fenced delivery `output_persistence_failed` before cleanup, so a
+completed target is never replayed. Malformed rows are quarantined per delivery
+without blocking unrelated claims, reads, close, or the supervised worker loop.
+A successful recovery atomically commits the stage and binds
 the existing succeeded run to its delivery; lease takeover then dispatches only
 final sinks from that persisted output and never invokes the target again. A
-live provider-commit acknowledgement must still hold the exact active,
+resume route preserves its admitted continuation in the recovered sink context.
+A live provider-commit acknowledgement must still hold the exact active,
 unexpired owner/token. Stale acknowledgements and every failure after staging
 begins use structural output-persistence phases. Failed provider reconciliation
 leaves `commit_pending` quarantined from claim while unrelated deliveries keep
@@ -451,6 +460,11 @@ journal is `commit_pending`; recovery retries it, and expiry fails closed as
 `output_persistence_failed` rather than replaying the target. Until provider
 commit is acknowledged, the delivery is excluded from claim; after recovery it
 resumes from the persisted succeeded run in sink-only mode.
+
+The volatile in-memory store also schedules expired claimed/running leases as
+future work. A runtime already waiting before lease expiry wakes at that lease
+deadline, advances the safe fencing token, and applies the same recovery policy
+as a direct claim.
 
 ### Fault-injection evaluation
 

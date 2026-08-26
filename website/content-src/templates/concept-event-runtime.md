@@ -131,15 +131,19 @@ event-store conformance kit before advertising those capabilities.
 
 Oversized output uses an explicit staged-payload ownership protocol. SQLite
 reserves a bounded stage ID before upload, rechecks the active lease before
-committing the run, and reconciles pending commits after restart. Aborting a
+committing the run, and reconciles pending commits after restart. Every
+unresolved stage state blocks claim. Expired staging or abort ownership
+marks the fenced delivery terminal before cleanup, and malformed rows are isolated
+without stopping unrelated work. Aborting a
 stale stage releases only that stage's ownership, not a possibly shared content
 reference. Legacy `put/delete` payload stores therefore fail closed before
 upload. Count, byte, payload-size, TTL, and operation-time limits are required;
 this is recoverable coordination, not an atomic commit across SQLite and the
 payload provider. Recovery atomically binds committed payload ownership to the
 existing succeeded run; lease takeover then performs sink-only resume without
-invoking the target. Failed provider reconciliation quarantines that delivery
-without blocking unrelated claims.
+invoking the target. Resume-route sink contexts preserve the admitted
+continuation. Failed provider reconciliation quarantines that delivery without
+blocking unrelated claims.
 
 The runtime persists output before dispatching sinks. Sink retries use the
 stable `(runId, sinkId)` key and redrive only the failed sink; they never repeat
@@ -179,8 +183,10 @@ separately and is not implied by the existing single-worker event capability.
 
 `cancelRun(runId)` aborts an active program and its nested calls. `close()`
 stops sources, drains by default, and then aborts remaining workers. One timeout
-bounds the overall returned shutdown promise, and concurrent calls join it. Ax
-requests `return()` on active stream iterators and suppresses post-abort chunks,
+on a native timer, independent of a manual event clock, bounds the overall
+returned shutdown promise, and concurrent calls join it. Ax best-effort requests
+`return()` on active stream iterators, ignores cancellation failures, and
+suppresses post-abort chunks,
 but timed-out host work may continue and perform later side effects because Ax
 cannot terminate JavaScript.
 Caller-owned protocol clients must still be closed by the caller. For

@@ -776,4 +776,55 @@ describe('AxEventRuntime effects', () => {
       store.saveDelivery({ ...first, status: 'succeeded' })
     ).rejects.toThrow('Stale or expired event claim');
   });
+
+  it('wakes a waiting runtime when an in-memory claim lease expires', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const store = new AxInMemoryEventStore({ clock });
+    const receipt = await store.enqueue({
+      ingress: ingress('memory-runtime-expired-claim'),
+      deliveries: [
+        {
+          routeId: 'effect-route',
+          action: 'wake',
+          targetId: 'effect-target',
+          instanceKey: 'memory-runtime-expired-claim',
+          sizeBytes: 1,
+          retrySafety: 'idempotent',
+          ordering: 'strict',
+        },
+      ],
+      acceptedAt: clock.now(),
+      publishTimeoutMs: 100,
+    });
+    await store.claim('worker-a', clock.now(), 100);
+    let targetCalls = 0;
+    const runtime = runtimeFor(
+      store,
+      () => {
+        targetCalls++;
+        return { handled: true };
+      },
+      { clock, leaseMs: 100, heartbeatMs: 25 },
+      'idempotent'
+    );
+    await runtime.start();
+    for (let index = 0; index < 10; index++) await Promise.resolve();
+    expect(targetCalls).toBe(0);
+
+    clock.advanceBy(101);
+    for (let index = 0; index < 50; index++) {
+      if (
+        (await store.getDelivery(receipt.deliveryIds[0]!))?.status ===
+        'succeeded'
+      ) {
+        break;
+      }
+      await Promise.resolve();
+    }
+    expect(targetCalls).toBe(1);
+    expect(await store.getDelivery(receipt.deliveryIds[0]!)).toEqual(
+      expect.objectContaining({ status: 'succeeded', fencingToken: 2 })
+    );
+    await runtime.close({ drain: false });
+  });
 });

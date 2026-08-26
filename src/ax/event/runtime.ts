@@ -73,6 +73,10 @@ function isEffectStore(store: AxEventStore): store is AxEventEffectStore {
   );
 }
 
+function closeTimerNow(): number {
+  return typeof performance === 'undefined' ? Date.now() : performance.now();
+}
+
 class AxRuntimeEventContext implements AxEventContext {
   private readonly registrations: Array<{
     id: string;
@@ -500,7 +504,9 @@ export class AxEventRuntime {
     options: Readonly<AxEventCloseOptions>,
     timeoutMs: number
   ): Promise<void> {
-    const deadline = this.clock.now() + timeoutMs;
+    // Shutdown's return guarantee must not depend on a replay/manual event
+    // clock advancing. Host timers remain independent from event-time control.
+    const deadline = closeTimerNow() + timeoutMs;
     this.closing = true;
     this.sourceController.abort('AxEventRuntime closing');
     const sourceClose = Promise.allSettled(
@@ -525,13 +531,15 @@ export class AxEventRuntime {
       controller.abort('AxEventRuntime closed');
     }
     for (const iterator of this.activeStreamIterators.values()) {
-      void Promise.resolve(iterator.return?.()).catch(() => undefined);
+      void Promise.resolve()
+        .then(() => iterator.return?.())
+        .catch(() => undefined);
     }
     const workers = Promise.allSettled(this.workerPromises);
     await this.waitUntilCloseDeadline(workers, deadline);
     const storeClose = workers.then(() => this.store.close?.());
     await this.waitUntilCloseDeadline(storeClose, deadline);
-    if (this.clock.now() < deadline) this.started = false;
+    if (closeTimerNow() < deadline) this.started = false;
     else {
       void storeClose.then(
         () => {
@@ -549,19 +557,21 @@ export class AxEventRuntime {
     deadline: number
   ): Promise<void> {
     const settled = Promise.resolve(operation);
-    const remaining = Math.max(0, deadline - this.clock.now());
+    const remaining = Math.max(0, deadline - closeTimerNow());
     if (remaining === 0) {
       void settled.catch(() => undefined);
       return;
     }
-    const timeout = new AbortController();
+    let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([
         settled,
-        this.clock.sleep(remaining, timeout.signal),
+        new Promise<void>((resolve) => {
+          timeout = setTimeout(resolve, remaining);
+        }),
       ]);
     } finally {
-      timeout.abort('AxEventRuntime close phase completed');
+      if (timeout !== undefined) clearTimeout(timeout);
     }
   }
 
@@ -587,11 +597,22 @@ export class AxEventRuntime {
   private async workerLoop(workerId: string): Promise<void> {
     const signal = this.workerController.signal;
     while (!signal.aborted) {
-      const delivery = await this.store.claim(
-        workerId,
-        this.clock.now(),
-        this.options.leaseMs ?? 30_000
-      );
+      let delivery: Readonly<AxEventDelivery> | undefined;
+      try {
+        delivery = await this.store.claim(
+          workerId,
+          this.clock.now(),
+          this.options.leaseMs ?? 30_000
+        );
+      } catch {
+        if (signal.aborted) return;
+        try {
+          await this.clock.sleep(25, signal);
+        } catch {
+          return;
+        }
+        continue;
+      }
       if (!delivery) {
         try {
           const now = this.clock.now();
@@ -602,7 +623,12 @@ export class AxEventRuntime {
             await this.clock.sleep(Math.max(1, next - now), signal);
           }
         } catch {
-          return;
+          if (signal.aborted) return;
+          try {
+            await this.clock.sleep(25, signal);
+          } catch {
+            return;
+          }
         }
         continue;
       }
@@ -687,7 +713,8 @@ export class AxEventRuntime {
           route,
           target,
           targetId,
-          instanceKey
+          instanceKey,
+          continuation
         )
       ) {
         if (continuation)
@@ -904,6 +931,13 @@ export class AxEventRuntime {
             // fenced sink-only recovery; never overwrite it or rerun the target.
             return;
           }
+          const persistedDelivery = await this.store.getDelivery(claimed.id);
+          if (persistedDelivery?.status === 'output_persistence_failed') {
+            // Staged stores mark the delivery terminal before releasing stage
+            // ownership, closing the crash window before this caller observes
+            // the structural error.
+            return;
+          }
           run = {
             ...run,
             output: undefined,
@@ -1034,7 +1068,8 @@ export class AxEventRuntime {
     route: Readonly<AxEventRoute>,
     target: Readonly<AxEventTarget<any, any>> | undefined,
     targetId: string | undefined,
-    instanceKey: string
+    instanceKey: string,
+    continuation: Readonly<AxEventContinuation> | undefined
   ): Promise<boolean> {
     if (!claimed.recoveredFromExpiredLease || !claimed.runId) return false;
     const persisted = await this.store.getRun(claimed.runId);
@@ -1071,7 +1106,7 @@ export class AxEventRuntime {
         persisted.attempt,
         claimed.id,
         controller.signal,
-        undefined,
+        continuation,
         claimed.fencingToken,
         this.store,
         () => this.clock.now()
@@ -1229,7 +1264,9 @@ export class AxEventRuntime {
         } finally {
           this.activeStreamIterators.delete(run.id);
           if (eventContext.abortSignal.aborted) {
-            void Promise.resolve(iterator.return?.()).catch(() => undefined);
+            void Promise.resolve()
+              .then(() => iterator.return?.())
+              .catch(() => undefined);
           }
         }
       } else {

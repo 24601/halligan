@@ -206,7 +206,7 @@ export class AxSQLiteEventStore
            AND NOT EXISTS (
              SELECT 1 FROM event_payload_stages payload
              WHERE payload.delivery_id=d.id
-               AND payload.state='commit_pending'
+               AND payload.state!='committed'
            )
            AND (
              d.ordering_mode = 'relaxed'
@@ -850,7 +850,7 @@ export class AxSQLiteEventStore
       reference = staged.reference;
     } catch (error) {
       try {
-        this.markPayloadStageAbortPending(stageId);
+        this.quarantinePayloadStageById(stageId, 'payload staging failed');
         await this.abortPayloadStage(stageId, payloadStore);
       } catch {
         // The typed error below remains the stable runtime classification.
@@ -901,7 +901,10 @@ export class AxSQLiteEventStore
         .immediate();
     } catch (error) {
       try {
-        this.markPayloadStageAbortPending(stageId);
+        this.quarantinePayloadStageById(
+          stageId,
+          'payload ownership was lost after staging'
+        );
         await this.abortPayloadStage(stageId, payloadStore);
       } catch {
         // The typed error below remains the stable runtime classification.
@@ -1016,36 +1019,54 @@ export class AxSQLiteEventStore
       )
       .all() as PayloadStageRow[];
     if (!rows.length) return;
-    const payloadStore = this.stagedPayloadStore('recovery');
+    let payloadStore: AxEventStagedPayloadStore;
+    try {
+      payloadStore = this.stagedPayloadStore('recovery');
+    } catch {
+      for (const row of rows) {
+        try {
+          this.quarantinePayloadStage(
+            row,
+            'staged payload recovery is unavailable'
+          );
+        } catch {}
+      }
+      return;
+    }
     for (const row of rows) {
-      if (row.state === 'staging') {
-        if (row.expires_at > this.clock.now()) continue;
-        this.markPayloadStageAbortPending(row.stage_id);
-        await this.abortPayloadStage(row.stage_id, payloadStore);
-        continue;
-      }
-      if (row.state === 'abort_pending') {
-        await this.abortPayloadStage(row.stage_id, payloadStore);
-        continue;
-      }
-      if (row.expires_at <= this.clock.now()) {
-        this.expirePayloadStage(row);
-        await this.abortPayloadStage(row.stage_id, payloadStore);
-        continue;
-      }
       try {
-        await this.withPayloadDeadline(
-          'recovery',
-          this.payloadStaging!.persistenceTimeoutMs,
-          (signal) => payloadStore.commit(row.stage_id, signal)
-        );
-      } catch (error) {
-        // Leave commit_pending quarantined. Claim excludes this delivery, so a
-        // provider outage cannot poison unrelated work or replay the target.
-        void this.outputPersistenceError('recovery', row.run_id, error);
-        continue;
-      }
-      try {
+        if (row.state === 'staging') {
+          if (row.expires_at > this.clock.now()) continue;
+          this.quarantinePayloadStage(row, 'payload staging expired');
+          await this.abortPayloadStage(row.stage_id, payloadStore);
+          continue;
+        }
+        if (row.state === 'abort_pending') {
+          if (this.isSupersededPayloadStage(row)) {
+            await this.abortPayloadStage(row.stage_id, payloadStore);
+            continue;
+          }
+          this.quarantinePayloadStage(row, 'payload staging was aborted');
+          await this.abortPayloadStage(row.stage_id, payloadStore);
+          continue;
+        }
+        if (row.expires_at <= this.clock.now()) {
+          this.quarantinePayloadStage(row, 'staged payload recovery expired');
+          await this.abortPayloadStage(row.stage_id, payloadStore);
+          continue;
+        }
+        try {
+          await this.withPayloadDeadline(
+            'recovery',
+            this.payloadStaging!.persistenceTimeoutMs,
+            (signal) => payloadStore.commit(row.stage_id, signal)
+          );
+        } catch (error) {
+          // Leave commit_pending quarantined. Claim excludes this delivery, so
+          // a provider outage cannot poison unrelated work or replay the target.
+          void this.outputPersistenceError('recovery', row.run_id, error);
+          continue;
+        }
         this.db
           .transaction(() => {
             const runRow = this.db
@@ -1085,48 +1106,76 @@ export class AxSQLiteEventStore
             }
           })
           .immediate();
-      } catch {}
+      } catch {
+        // Corruption or a failed local recovery acknowledgement is isolated to
+        // its owning delivery. Preserve unrelated claim/getRun/close liveness.
+        try {
+          this.quarantinePayloadStage(
+            row,
+            'payload recovery record is invalid'
+          );
+        } catch {}
+        await this.abortPayloadStage(row.stage_id, payloadStore);
+      }
     }
-    await this.abortSupersededPayloadStages();
+    try {
+      await this.abortSupersededPayloadStages();
+    } catch {}
   }
 
-  private expirePayloadStage(row: Readonly<PayloadStageRow>): void {
-    const message = `output_persistence_failed: staged payload expired before recovery for run ${row.run_id}`;
+  private quarantinePayloadStage(
+    row: Readonly<PayloadStageRow>,
+    reason: string
+  ): void {
+    const message = `output_persistence_failed: ${reason} for run ${row.run_id}`;
     this.db
       .transaction(() => {
         const runRow = this.db
           .prepare('SELECT run_json FROM event_runs WHERE id=?')
           .get(row.run_id) as { run_json: string } | undefined;
         if (runRow) {
-          const run = JSON.parse(runRow.run_json) as AxEventRun;
-          const failed: AxEventRun = {
-            ...run,
-            output: undefined,
-            chunks: undefined,
-            outputRef: undefined,
-            status: 'output_persistence_failed',
-            finishedAt: this.clock.now(),
-            error: message,
-          };
-          this.db
-            .prepare(
-              `UPDATE event_runs SET run_json=?, updated_at=?, finished_at=?
-               WHERE id=?`
-            )
-            .run(
-              JSON.stringify(failed),
-              this.clock.now(),
-              failed.finishedAt,
-              row.run_id
-            );
+          try {
+            const run = JSON.parse(runRow.run_json) as AxEventRun;
+            if (
+              run &&
+              typeof run === 'object' &&
+              !Array.isArray(run) &&
+              run.deliveryId === row.delivery_id
+            ) {
+              const failed: AxEventRun = {
+                ...run,
+                output: undefined,
+                chunks: undefined,
+                outputRef: undefined,
+                status: 'output_persistence_failed',
+                finishedAt: this.clock.now(),
+                error: message,
+              };
+              this.db
+                .prepare(
+                  `UPDATE event_runs SET run_json=?, updated_at=?, finished_at=?
+                   WHERE id=?`
+                )
+                .run(
+                  JSON.stringify(failed),
+                  this.clock.now(),
+                  failed.finishedAt,
+                  row.run_id
+                );
+            }
+          } catch {
+            // The fenced delivery and stage journal remain authoritative even
+            // when optional diagnostic run metadata is corrupt.
+          }
         }
         this.db
           .prepare(
             `UPDATE event_deliveries
-             SET status='output_persistence_failed', error=?
+             SET status='output_persistence_failed', error=?,
+                 run_id=COALESCE(run_id, ?), invocation_started=1
              WHERE id=? AND fencing_token=? AND status IN ('claimed','running')`
           )
-          .run(message, row.delivery_id, row.fencing_token);
+          .run(message, row.run_id, row.delivery_id, row.fencing_token);
         this.db
           .prepare(
             `UPDATE event_payload_stages SET state='abort_pending', updated_at=?
@@ -1135,6 +1184,37 @@ export class AxSQLiteEventStore
           .run(this.clock.now(), row.stage_id);
       })
       .immediate();
+  }
+
+  private quarantinePayloadStageById(stageId: string, reason: string): void {
+    const row = this.db
+      .prepare(
+        `SELECT stage_id, run_id, delivery_id, fencing_token, reference,
+                size_bytes, expires_at, state
+         FROM event_payload_stages WHERE stage_id=?`
+      )
+      .get(stageId) as PayloadStageRow | undefined;
+    if (row) this.quarantinePayloadStage(row, reason);
+  }
+
+  private isSupersededPayloadStage(row: Readonly<PayloadStageRow>): boolean {
+    if (row.reference === null) return false;
+    const runRow = this.db
+      .prepare('SELECT run_json FROM event_runs WHERE id=?')
+      .get(row.run_id) as { run_json: string } | undefined;
+    if (!runRow) return false;
+    try {
+      const run = JSON.parse(runRow.run_json) as AxEventRun;
+      return (
+        run !== null &&
+        typeof run === 'object' &&
+        !Array.isArray(run) &&
+        run.deliveryId === row.delivery_id &&
+        run.outputRef !== row.reference
+      );
+    } catch {
+      return false;
+    }
   }
 
   private async abortSupersededPayloadStages(
@@ -1168,15 +1248,6 @@ export class AxSQLiteEventStore
     }
   }
 
-  private markPayloadStageAbortPending(stageId: string): void {
-    this.db
-      .prepare(
-        `UPDATE event_payload_stages SET state='abort_pending', updated_at=?
-         WHERE stage_id=? AND state!='committed'`
-      )
-      .run(this.clock.now(), stageId);
-  }
-
   private async abortPayloadStage(
     stageId: string,
     payloadStore: AxEventStagedPayloadStore
@@ -1187,15 +1258,13 @@ export class AxSQLiteEventStore
         this.payloadStaging!.persistenceTimeoutMs,
         (signal) => payloadStore.abort(stageId, signal)
       );
-    } catch {
-      return;
-    }
-    this.db
-      .prepare(
-        `DELETE FROM event_payload_stages
-         WHERE stage_id=? AND state='abort_pending'`
-      )
-      .run(stageId);
+      this.db
+        .prepare(
+          `DELETE FROM event_payload_stages
+           WHERE stage_id=? AND state='abort_pending'`
+        )
+        .run(stageId);
+    } catch {}
   }
 
   private stagedPayloadStore(

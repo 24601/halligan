@@ -99,11 +99,15 @@ await source.publish({ event, identity, trust: 'authenticated' });
   events is part of the route's declared policy.
 - Observe source failures with `onSourceError`.
 - `close({ timeoutMs })` uses one overall deadline for source close, drain,
-  workers, and store settlement; concurrent calls join one shutdown. Ax requests
-  `return()` on active streams and suppresses post-abort chunks. This is
-  return-bounded only: non-cooperative host work may continue and perform later
-  side effects; use cooperative abort or a host revocation check before writes.
+  workers, and store settlement; concurrent calls join one shutdown. Its native
+  timer is independent of `AxManualEventClock`. Ax best-effort requests
+  `return()` on active streams, swallows sync/async cancellation failures, and
+  suppresses post-abort chunks. This is return-bounded only: non-cooperative
+  host work may continue and perform later side effects; use cooperative abort
+  or a host revocation check before writes.
 - The in-memory store is volatile and single-process.
+  Waiting runtimes schedule claimed/running lease expiry and reclaim with a new
+  safe fencing token instead of wedging expired work.
 - For cooperating Node processes on one local disk, use
   `AxSQLiteEventStore` from `@ax-llm/ax-tools/event/sqlite` with explicit
   retention and `coordination: 'multi-worker'`. Never recommend SQLite on a
@@ -158,9 +162,13 @@ delivery/run writes, and revalidates after awaited payload staging. Oversized
 outputs require `AxEventStagedPayloadStore` plus explicit count, byte, payload,
 TTL, and timeout limits. Host-assigned stage IDs make abort ownership-specific
 even when content references are shared; restart reconciles `commit_pending`
-before claims and run reads. Recovery atomically binds the persisted succeeded
+before claims and run reads. Every unresolved stage state blocks claim;
+staging/abort expiry marks its fenced delivery terminal before owned cleanup.
+Malformed recovery rows are isolated so unrelated work and worker loops remain
+live. Recovery atomically binds the persisted succeeded
 run to the delivery, then takeover resumes final sinks only; target invocation
-is never repeated. Live commit acknowledgement requires the current unexpired
+is never repeated, and resume-route sinks retain the admitted continuation.
+Live commit acknowledgement requires the current unexpired
 owner/token. Failed reconciliation quarantines that delivery without stopping
 unrelated claims. Legacy `put/delete` stores are never uploaded to
 because they cannot safely reclaim a stale shared reference. Staging failure is
