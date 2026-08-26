@@ -456,6 +456,78 @@ const restoredFieldTamperCases: ReadonlyArray<
   ],
 ];
 
+const unknownOwnKeyTamperCases: ReadonlyArray<
+  readonly [
+    level: string,
+    mutate: (
+      snapshot: AxAgentSessionRegistrySnapshot,
+      sessionId: string
+    ) => void,
+  ]
+> = [
+  [
+    'root',
+    (snapshot) => {
+      Object.assign(snapshot.root, { injected: 'forged' });
+    },
+  ],
+  [
+    'session',
+    (snapshot, sessionId) => {
+      Object.assign(snapshot.sessions[sessionId]!, { injected: 'forged' });
+    },
+  ],
+  [
+    'mailbox message',
+    (snapshot, sessionId) => {
+      Object.assign(snapshot.sessions[sessionId]!.mailbox[0]!, {
+        injected: 'forged',
+      });
+    },
+  ],
+];
+
+const snapshotImportLimitCases: ReadonlyArray<
+  readonly [
+    limit: string,
+    mutate: (
+      snapshot: AxAgentSessionRegistrySnapshot,
+      sessionId: string
+    ) => void,
+  ]
+> = [
+  [
+    'maxDepth',
+    (snapshot, sessionId) => {
+      let nested: Record<string, unknown> = {};
+      for (let depth = 0; depth < 80; depth++) nested = { nested };
+      snapshot.sessions[sessionId]!.mailbox[0]!.input = nested;
+    },
+  ],
+  [
+    'maxValues',
+    (snapshot, sessionId) => {
+      snapshot.sessions[sessionId]!.mailbox[0]!.input = new Array(100_001).fill(
+        null
+      );
+    },
+  ],
+  [
+    'maxBytes',
+    (snapshot, sessionId) => {
+      snapshot.sessions[sessionId]!.mailbox[0]!.input = 'x'.repeat(
+        8 * 1024 * 1024 + 1
+      );
+    },
+  ],
+  [
+    'maxBigIntBits',
+    (snapshot, sessionId) => {
+      snapshot.sessions[sessionId]!.mailbox[0]!.input = 1n << 4097n;
+    },
+  ],
+];
+
 describe('retained child agent sessions', () => {
   it('admits concurrent children immediately without blocking on results', async () => {
     DeterministicAgent.active = 0;
@@ -791,6 +863,74 @@ describe('retained child agent sessions', () => {
           expectedPolicyDigest: snapshot.policyDigest,
         })
       ).rejects.toThrow(/policy digest is invalid/);
+    }
+  );
+
+  it.each(unknownOwnKeyTamperCases)(
+    'rejects unauthenticated unknown own keys on the %s',
+    async (_level, mutate) => {
+      const sourceHost = host();
+      const root = await sourceHost.createRoot({
+        authorizedChildren: ['worker'],
+      });
+      const handle = await root.spawn('worker', { value: 'authenticated' });
+      await completed(root, handle);
+      const snapshot = await sourceHost.snapshot(handle.rootId);
+      const tampered = structuredClone(snapshot);
+      mutate(tampered, handle.id);
+
+      await expect(
+        host().restore(tampered, {
+          expectedPolicyDigest: snapshot.policyDigest,
+        })
+      ).rejects.toThrow(/policy digest is invalid/);
+    }
+  );
+
+  it('authenticates observable object key order in restored payloads', async () => {
+    const sourceHost = host();
+    const root = await sourceHost.createRoot({
+      authorizedChildren: ['worker'],
+    });
+    const handle = await root.spawn('worker', {
+      value: 'ordered',
+      metadata: { a: 1, b: 2 },
+    });
+    await completed(root, handle);
+    const snapshot = await sourceHost.snapshot(handle.rootId);
+    const tampered = structuredClone(snapshot);
+    const input = tampered.sessions[handle.id]!.mailbox[0]!.input as {
+      value: string;
+      metadata: Record<string, number>;
+    };
+    input.metadata = { b: 2, a: 1 };
+    expect(Object.keys(input.metadata)).toEqual(['b', 'a']);
+
+    await expect(
+      host().restore(tampered, {
+        expectedPolicyDigest: snapshot.policyDigest,
+      })
+    ).rejects.toThrow(/policy digest is invalid/);
+  });
+
+  it.each(snapshotImportLimitCases)(
+    'rejects snapshot imports beyond %s before cloning',
+    async (limit, mutate) => {
+      const sourceHost = host();
+      const root = await sourceHost.createRoot({
+        authorizedChildren: ['worker'],
+      });
+      const handle = await root.spawn('worker', { value: 'bounded' });
+      await completed(root, handle);
+      const snapshot = await sourceHost.snapshot(handle.rootId);
+      const oversized = structuredClone(snapshot);
+      mutate(oversized, handle.id);
+
+      await expect(
+        host().restore(oversized, {
+          expectedPolicyDigest: snapshot.policyDigest,
+        })
+      ).rejects.toThrow(new RegExp(`snapshot import exceeds ${limit}`));
     }
   );
 

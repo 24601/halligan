@@ -161,13 +161,24 @@ Application tools should still use stable idempotency keys when retry is safe.
 explicit state transfer with the same uncertainty rule. Store the expected
 digest separately in trusted host metadata; do not read it from the candidate
 snapshot at restore time. The expected SHA-256 digest authenticates canonical
-root/child authority, lifecycle timestamps and diagnostics, complete mailbox
+cloned snapshot state except the store-derived revision and the digest field
+itself. This includes unknown own keys, observable object-key order, root/child
+authority, lifecycle timestamps and diagnostics, complete mailbox
 inputs/results, retained agent state/artifacts, and accounting state. The
 canonical encoder preserves structured-clone identity and common structured
 values rather than relying on lossy JSON conversion. Restore then reconciles
 direct usage from per-attempt usage, descendant usage through the tree,
 retired/disposed ledgers, reservations, outcome-unknown charges, subcalls,
 mailbox counts, concurrency, and budget status before accepting the snapshot.
+
+Snapshot import and canonicalization have fixed, non-configurable safety caps:
+depth 64, 100,000 visited values/edges, 16 MiB of aggregate strings, property
+keys, blobs, and buffers (strings count as two bytes per code unit), and 4,096
+bits per bigint. Binary content is hashed directly rather than expanded to hex.
+Restore performs the synchronous limits preflight first, then pays for one
+bounded `structuredClone` before asynchronous digest/semantic validation; this
+ordering closes caller-mutation races, but an invalid in-bounds snapshot still
+incurs that clone. Do not pass client- or network-supplied registry documents.
 
 Restore is an ownership transfer, not a clone of live authority. It always
 advances the destination epoch, rotates root and child bearer capabilities,

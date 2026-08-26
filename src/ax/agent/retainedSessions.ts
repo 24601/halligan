@@ -449,10 +449,161 @@ function equalUsage(
   );
 }
 
-function bytesToHex(bytes: Uint8Array): string {
-  let hex = '';
-  for (const byte of bytes) hex += byte.toString(16).padStart(2, '0');
-  return hex;
+const SNAPSHOT_IMPORT_LIMITS = {
+  maxDepth: 64,
+  maxValues: 100_000,
+  maxBytes: 16 * 1024 * 1024,
+  maxBigIntBits: 4096,
+} as const;
+
+const MAX_SNAPSHOT_BIGINT =
+  (1n << BigInt(SNAPSHOT_IMPORT_LIMITS.maxBigIntBits)) - 1n;
+
+function assertSnapshotImportLimits(value: unknown): void {
+  let values = 0;
+  let bytes = 0;
+  const seen = new Set<object>();
+
+  const accountBytes = (amount: number) => {
+    if (
+      !Number.isSafeInteger(amount) ||
+      amount < 0 ||
+      bytes > SNAPSHOT_IMPORT_LIMITS.maxBytes - amount
+    ) {
+      throw new AxAgentSessionSerializationError(
+        `snapshot import exceeds maxBytes ${SNAPSHOT_IMPORT_LIMITS.maxBytes}`
+      );
+    }
+    bytes += amount;
+  };
+
+  const accountString = (text: string) => accountBytes(text.length * 2);
+
+  const visitEntries = (record: object, depth: number) => {
+    for (const key in record) {
+      if (!Object.hasOwn(record, key)) continue;
+      accountString(key);
+      visit((record as Record<string, unknown>)[key], depth + 1);
+    }
+  };
+
+  function visit(current: unknown, depth: number): void {
+    values++;
+    if (values > SNAPSHOT_IMPORT_LIMITS.maxValues) {
+      throw new AxAgentSessionSerializationError(
+        `snapshot import exceeds maxValues ${SNAPSHOT_IMPORT_LIMITS.maxValues}`
+      );
+    }
+    if (depth > SNAPSHOT_IMPORT_LIMITS.maxDepth) {
+      throw new AxAgentSessionSerializationError(
+        `snapshot import exceeds maxDepth ${SNAPSHOT_IMPORT_LIMITS.maxDepth}`
+      );
+    }
+
+    if (typeof current === 'string') {
+      accountString(current);
+      return;
+    }
+    if (typeof current === 'bigint') {
+      if (current > MAX_SNAPSHOT_BIGINT || current < -MAX_SNAPSHOT_BIGINT) {
+        throw new AxAgentSessionSerializationError(
+          `snapshot import exceeds maxBigIntBits ${SNAPSHOT_IMPORT_LIMITS.maxBigIntBits}`
+        );
+      }
+      accountString(current.toString());
+      return;
+    }
+    if (
+      current === null ||
+      current === undefined ||
+      typeof current === 'boolean' ||
+      typeof current === 'number'
+    ) {
+      return;
+    }
+    if (typeof current === 'function' || typeof current === 'symbol') {
+      throw new AxAgentSessionSerializationError(
+        `snapshot integrity cannot encode ${typeof current} values`
+      );
+    }
+
+    const object = current as object;
+    if (seen.has(object)) return;
+    seen.add(object);
+
+    if (Array.isArray(object)) {
+      visitEntries(object, depth);
+      return;
+    }
+    if (object instanceof Date) return;
+    if (object instanceof RegExp) {
+      accountString(object.source);
+      accountString(object.flags);
+      return;
+    }
+    if (object instanceof Map) {
+      for (const [key, nested] of object) {
+        visit(key, depth + 1);
+        visit(nested, depth + 1);
+      }
+      return;
+    }
+    if (object instanceof Set) {
+      for (const nested of object) visit(nested, depth + 1);
+      return;
+    }
+    if (object instanceof ArrayBuffer) {
+      accountBytes(object.byteLength);
+      return;
+    }
+    if (
+      typeof SharedArrayBuffer !== 'undefined' &&
+      object instanceof SharedArrayBuffer
+    ) {
+      throw new AxAgentSessionSerializationError(
+        'snapshot integrity cannot authenticate mutable SharedArrayBuffer values'
+      );
+    }
+    if (ArrayBuffer.isView(object)) {
+      const view = object as ArrayBufferView;
+      if (
+        typeof SharedArrayBuffer !== 'undefined' &&
+        view.buffer instanceof SharedArrayBuffer
+      ) {
+        throw new AxAgentSessionSerializationError(
+          'snapshot integrity cannot authenticate views over mutable SharedArrayBuffer values'
+        );
+      }
+      visit(view.buffer, depth + 1);
+      return;
+    }
+    if (typeof Blob !== 'undefined' && object instanceof Blob) {
+      accountBytes(object.size);
+      accountString(object.type);
+      if (typeof File !== 'undefined' && object instanceof File) {
+        accountString(object.name);
+      }
+      return;
+    }
+    if (object instanceof Error) {
+      accountString(object.name);
+      accountString(object.message);
+      if (object.stack !== undefined) accountString(object.stack);
+      visit(object.cause, depth + 1);
+      visitEntries(object, depth);
+      return;
+    }
+
+    const prototype = Object.getPrototypeOf(object);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw new AxAgentSessionSerializationError(
+        'snapshot integrity cannot encode unsupported platform values'
+      );
+    }
+    visitEntries(object, depth);
+  }
+
+  visit(value, 0);
 }
 
 async function canonicalSnapshotValue(value: unknown): Promise<unknown> {
@@ -460,7 +611,7 @@ async function canonicalSnapshotValue(value: unknown): Promise<unknown> {
 
   const entries = async (record: object) => {
     const out: [string, unknown][] = [];
-    for (const key of Object.keys(record).sort()) {
+    for (const key of Object.keys(record)) {
       out.push([key, await encode((record as Record<string, unknown>)[key])]);
     }
     return out;
@@ -520,7 +671,7 @@ async function canonicalSnapshotValue(value: unknown): Promise<unknown> {
       return ['set', id, values];
     }
     if (object instanceof ArrayBuffer) {
-      return ['array-buffer', id, bytesToHex(new Uint8Array(object))];
+      return ['array-buffer', id, object.byteLength, await sha256(object)];
     }
     if (
       typeof SharedArrayBuffer !== 'undefined' &&
@@ -559,7 +710,8 @@ async function canonicalSnapshotValue(value: unknown): Promise<unknown> {
         id,
         object.type,
         file,
-        bytesToHex(new Uint8Array(await object.arrayBuffer())),
+        object.size,
+        await sha256(await object.arrayBuffer()),
       ];
     }
     if (object instanceof Error) {
@@ -587,88 +739,18 @@ async function canonicalSnapshotValue(value: unknown): Promise<unknown> {
 }
 
 function canonicalPolicy(snapshot: Readonly<AxAgentSessionRegistrySnapshot>) {
-  const sessions = Object.keys(snapshot.sessions)
-    .sort()
-    .map((id) => {
-      const record = snapshot.sessions[id]!;
-      return {
-        version: record.handle.version,
-        id,
-        parentId: record.handle.parentId,
-        rootId: record.handle.rootId,
-        registrationKey: record.handle.registrationKey,
-        epoch: record.handle.epoch,
-        capability: record.handle.capability,
-        depth: record.depth,
-        authorizedChildren: canonicalKeys(record.authorizedChildren),
-        status: record.status,
-        createdAt: record.createdAt,
-        updatedAt: record.updatedAt,
-        activeMessageId: record.activeMessageId,
-        state: record.state,
-        artifacts: record.artifacts,
-        usage: record.usage,
-        descendantUsage: record.descendantUsage,
-        retiredDescendantUsage: record.retiredDescendantUsage,
-        lastError: record.lastError,
-        mailbox: record.mailbox.map((message) => ({
-          id: message.id,
-          jobId: message.jobId,
-          mode: message.mode,
-          status: message.status,
-          input: message.input,
-          createdAt: message.createdAt,
-          startedAt: message.startedAt,
-          completedAt: message.completedAt,
-          result: message.result,
-          error: message.error,
-          attemptId: message.attemptId,
-          cancelRequested: message.cancelRequested,
-          tokenReservation: message.tokenReservation,
-          usage: message.usage,
-        })),
-      };
-    });
-  return {
-    version: snapshot.version,
-    root: {
-      id: snapshot.root.id,
-      capability: snapshot.root.capability,
-      epoch: snapshot.root.epoch,
-      authorizedChildren: canonicalKeys(snapshot.root.authorizedChildren),
-      status: snapshot.root.status,
-      createdAt: snapshot.root.createdAt,
-      updatedAt: snapshot.root.updatedAt,
-      limits: {
-        maxChildren: snapshot.root.limits.maxChildren,
-        maxDepth: snapshot.root.limits.maxDepth,
-        maxConcurrency: snapshot.root.limits.maxConcurrency,
-        maxPendingMessages: snapshot.root.limits.maxPendingMessages,
-        maxRetainedMessages: snapshot.root.limits.maxRetainedMessages,
-        maxTokens: snapshot.root.limits.maxTokens,
-        maxTokensPerMessage: snapshot.root.limits.maxTokensPerMessage,
-        maxSubcalls: snapshot.root.limits.maxSubcalls,
-      },
-      admittedChildren: snapshot.root.admittedChildren,
-      admittedSubcalls: snapshot.root.admittedSubcalls,
-      descendantUsage: snapshot.root.descendantUsage,
-      retiredDescendantUsage: snapshot.root.retiredDescendantUsage,
-      reservedTokens: snapshot.root.reservedTokens,
-      outcomeUnknownTokens: snapshot.root.outcomeUnknownTokens,
-      retiredOutcomeUnknownTokens: snapshot.root.retiredOutcomeUnknownTokens,
-      retiredSubcalls: snapshot.root.retiredSubcalls,
-      budgetExceeded: snapshot.root.budgetExceeded,
-    },
-    sessions,
-  };
+  const authenticated = { ...snapshot } as Record<string, unknown>;
+  delete authenticated.revision;
+  delete authenticated.policyDigest;
+  return authenticated;
 }
 
 async function digestPolicy(
   snapshot: Readonly<AxAgentSessionRegistrySnapshot>
 ): Promise<string> {
-  return sha256(
-    JSON.stringify(await canonicalSnapshotValue(canonicalPolicy(snapshot)))
-  );
+  const canonical = canonicalPolicy(snapshot);
+  assertSnapshotImportLimits(canonical);
+  return sha256(JSON.stringify(await canonicalSnapshotValue(canonical)));
 }
 
 function timingSafeEqual(left: string, right: string): boolean {
@@ -1038,6 +1120,7 @@ export class AxAgentSessionHost {
     options: Readonly<AxAgentSessionRestoreOptions>
   ): Promise<AxAgentSessionClient> {
     this.assertOpen();
+    assertSnapshotImportLimits(snapshot);
     const restored: AxAgentSessionRegistrySnapshot = cloneStructured(snapshot);
     await this.validateSnapshot(restored, options.expectedPolicyDigest);
     restored.revision = 0;

@@ -437,7 +437,9 @@ before sending more mail; executor closures from the previous owner are stale.
 Ambiguous running work keeps its pre-dispatch token reservation charged.
 Explicit snapshot restore also rotates destination authority, and its
 separately trusted digest covers canonical policy, lifecycle diagnostics,
-mailbox payloads, retained state/artifacts, and accounting aggregates.
+mailbox payloads, retained state/artifacts, unknown keys/key order, and
+accounting aggregates. Import is capped at depth 64, 100,000 visited values,
+16 MiB aggregate string/binary data, and 4,096-bit bigints before cloning.
 
 This mechanism does not expose a second interpreter, inherit parent tools, or
 change `llmQuery(...)` budgets. The host independently bounds child count,

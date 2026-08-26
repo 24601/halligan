@@ -199,6 +199,10 @@ Rules:
   and accounting. Restore reconciles usage/reservations/subcalls and rotates
   destination epoch, capabilities, and pending job authority; dispatch checks
   both epoch and job ID. Refresh handles after transfer.
+- Snapshot import authenticates unknown own keys and observable object-key
+  order. A pre-clone safety pass caps depth 64, 100,000 visited values, 16 MiB
+  of aggregate string/binary data, and 4,096-bit bigints. Invalid in-bounds
+  imports still incur one bounded clone before asynchronous digest validation.
 - Existing synchronous namespaced child calls remain the smallest choice when
   the parent needs the answer now.
 
