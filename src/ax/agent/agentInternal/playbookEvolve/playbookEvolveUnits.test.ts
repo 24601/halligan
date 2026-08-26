@@ -346,19 +346,19 @@ describe('proposals', () => {
     }
   });
 
-  it('restores exactly once when post-update state readback fails', async () => {
+  it('restores exactly once when post-update state retrieval fails', async () => {
     const proposal = buildProposal(weakness);
     const before: {
       value: string;
       artifact: { history: { updatedBulletIds: string[] }[] };
     } = { value: 'before', artifact: { history: [] } };
     let state = structuredClone(before);
-    const readbackError = new Error('post-update state readback failed');
+    const retrievalError = new Error('post-update state retrieval failed');
     const getState = vi
       .fn()
       .mockImplementationOnce(() => structuredClone(state))
       .mockImplementationOnce(() => {
-        throw readbackError;
+        throw retrievalError;
       });
     const load = vi.fn((snapshot: typeof before) => {
       state = structuredClone(snapshot);
@@ -376,26 +376,26 @@ describe('proposals', () => {
 
     await expect(
       applyProposal({ proposal, playbookHandle: handle })
-    ).rejects.toBe(readbackError);
+    ).rejects.toBe(retrievalError);
     expect(load).toHaveBeenCalledTimes(1);
     expect(load).toHaveBeenCalledWith(before);
     expect(state).toEqual(before);
   });
 
-  it('surfaces post-update readback and restoration failures without retry', async () => {
+  it('surfaces post-update retrieval and restoration failures without retry', async () => {
     const proposal = buildProposal(weakness);
     const before: {
       value: string;
       artifact: { history: { updatedBulletIds: string[] }[] };
     } = { value: 'before', artifact: { history: [] } };
     let state = structuredClone(before);
-    const readbackError = new Error('post-update state readback failed');
+    const retrievalError = new Error('post-update state retrieval failed');
     const rollbackError = new Error('snapshot restoration failed');
     const getState = vi
       .fn()
       .mockImplementationOnce(() => structuredClone(state))
       .mockImplementationOnce(() => {
-        throw readbackError;
+        throw retrievalError;
       });
     const load = vi.fn(() => {
       throw rollbackError;
@@ -417,7 +417,7 @@ describe('proposals', () => {
     } catch (error) {
       expect(error).toBeInstanceOf(AggregateError);
       expect((error as AggregateError).errors).toEqual([
-        readbackError,
+        retrievalError,
         rollbackError,
       ]);
     }
