@@ -315,6 +315,21 @@ export function wrapFunction(
     } catch {}
 
     if (onFunctionCall) await observeCall(normalizeCallArgs(observerArgs));
+    let canClaim = true;
+    try {
+      canClaim = speculative.canClaim?.() ?? true;
+    } catch {
+      canClaim = false;
+    }
+    if (!canClaim) {
+      speculative.abort?.('speculative authority invalidated');
+      return observeResult(
+        normalizeCallArgs(args),
+        Promise.reject(new Error('speculative authority invalidated')),
+        speculative.serializedArgumentsAfter
+      );
+    }
+    speculative.retain?.();
     return observeResult(
       normalizeCallArgs(args),
       speculative.result,
@@ -336,7 +351,7 @@ export function wrapFunction(
           const result = launchFunction(
             callArgs,
             invocationSignal,
-            false,
+            true,
             authorization
           );
           const serializedArgumentsAfter = result.then(
@@ -349,6 +364,7 @@ export function wrapFunction(
             argumentsBefore,
             serializedArgumentsAfter,
             signal: invocationSignal,
+            canClaim: () => invocationSignal?.aborted !== true,
           };
         } catch (error) {
           const result = Promise.reject(error);

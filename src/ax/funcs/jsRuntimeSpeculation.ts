@@ -450,8 +450,6 @@ class ExpressionParser {
           return { kind: 'literal', value: false };
         case 'null':
           return { kind: 'literal', value: null };
-        case 'undefined':
-          return { kind: 'literal', value: undefined };
         default:
           return { kind: 'reference', name: String(token.value) };
       }
@@ -646,6 +644,7 @@ async function evaluateExpression(
         if (typeof value === 'function') throw new UnsafeDependencyError();
         return value;
       }
+      if (expression.name === 'undefined') return undefined;
       throw new UnsafeDependencyError();
     }
     case 'member': {
@@ -908,6 +907,7 @@ type SpeculationEntry = {
   launchReady: Promise<JSRuntimeHostFunctionSpeculationLaunch>;
   result: Promise<unknown>;
   claimed: boolean;
+  reserving: boolean;
   dispatched: boolean;
   cancelled: boolean;
 };
@@ -1140,6 +1140,7 @@ export class JSRuntimeSpeculationTurn {
         launchReady,
         result,
         claimed: false,
+        reserving: false,
         dispatched: false,
         cancelled: false,
       } satisfies SpeculationEntry);
@@ -1196,21 +1197,27 @@ export class JSRuntimeSpeculationTurn {
     // readiness one candidate at a time so a later dependent call cannot
     // deadlock an earlier claim.
     for (const entry of this.entries) {
-      if (
-        entry.ref !== ref ||
-        (!entry.deterministic && entry.claimed) ||
-        entry.cancelled
-      ) {
+      if (entry.ref !== ref || entry.cancelled) continue;
+      if (!entry.deterministic && (entry.claimed || entry.reserving)) {
         continue;
       }
+      // Reserve before the first await so overlapping claims cannot share one
+      // nondeterministic launch. Deterministic entries remain shareable.
+      if (!entry.deterministic) entry.reserving = true;
       const key = await entry.keyReady;
-      // Another worker callback may have claimed this occurrence while this
-      // claim awaited dependency/key readiness. Deterministic entries may be
-      // shared; nondeterministic occurrences must be reserved exactly once.
-      if ((!entry.deterministic && entry.claimed) || entry.cancelled) continue;
-      if (key !== actualKey) continue;
+      if (entry.cancelled) {
+        if (!entry.deterministic) entry.reserving = false;
+        continue;
+      }
+      if (key !== actualKey) {
+        if (!entry.deterministic) entry.reserving = false;
+        continue;
+      }
       const launch = await entry.launchReady;
-      if ((!entry.deterministic && entry.claimed) || entry.cancelled) continue;
+      if (entry.cancelled) {
+        if (!entry.deterministic) entry.reserving = false;
+        continue;
+      }
       let canClaim = true;
       try {
         canClaim = launch.canClaim?.() ?? true;
@@ -1218,6 +1225,7 @@ export class JSRuntimeSpeculationTurn {
         canClaim = false;
       }
       if (!canClaim) {
+        entry.reserving = false;
         entry.cancelled = true;
         entry.controller.abort('speculative authority invalidated');
         this.emit({
@@ -1230,6 +1238,8 @@ export class JSRuntimeSpeculationTurn {
         return { hit: false };
       }
       entry.claimed = true;
+      entry.reserving = false;
+      launch.retain?.();
       this.emit({
         kind: 'hit',
         tool,

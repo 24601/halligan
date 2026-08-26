@@ -325,14 +325,47 @@ export function buildLlmQueryBindings(
   const llmQuery: LlmQueryBindings['llmQuery'] = (queryOrQueries, ctx) =>
     runLlmQuery(queryOrQueries, ctx);
   setJSRuntimeHostFunctionSpeculationAdapter(llmQuery, {
-    launch: (args, signal) => ({
-      result: runLlmQuery(
+    launch: (args, signal) => {
+      let retained = false;
+      const usedBefore = {
+        global: llmQueryBudgetState.global.used,
+        local: llmQueryBudgetState.localUsed,
+      };
+      const refundIfAbandoned = () => {
+        if (retained) return;
+        if (llmQueryBudgetState.global.used > usedBefore.global) {
+          llmQueryBudgetState.global.used = usedBefore.global;
+        }
+        if (llmQueryBudgetState.localUsed > usedBefore.local) {
+          llmQueryBudgetState.localUsed = usedBefore.local;
+        }
+      };
+      const result = runLlmQuery(
         args[0] as Parameters<LlmQueryBindings['llmQuery']>[0],
         args[1],
         mergeAbortSignals(effectiveAbortSignal, signal)
-      ),
-    }),
-    commit: (_args, launch) => launch.result,
+      );
+      void result.catch(() => {
+        refundIfAbandoned();
+      });
+      signal.addEventListener(
+        'abort',
+        () => {
+          refundIfAbandoned();
+        },
+        { once: true }
+      );
+      return {
+        result,
+        retain: () => {
+          retained = true;
+        },
+      };
+    },
+    commit: (_args, launch) => {
+      launch.retain?.();
+      return launch.result;
+    },
   });
 
   return { llmQuery };

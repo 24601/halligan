@@ -21,6 +21,10 @@ export type JSRuntimeHostFunctionSpeculationLaunch = Readonly<{
   invalidReason?: 'launch-invalidated';
   /** Execution-scoped cancellation used if claim must fall back normally. */
   signal?: AbortSignal;
+  /** Mark the launch as claimed so abort no longer refunds speculative reservations. */
+  retain?: () => void;
+  /** Abort the physical speculative launch without starting a second call. */
+  abort?: (reason?: unknown) => void;
 }>;
 
 export type JSRuntimeHostFunctionSpeculationAdapter = Readonly<{

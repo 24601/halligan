@@ -318,6 +318,7 @@ export class AxJSRuntime implements AxCodeRuntime {
       number,
       { resolve: (v: unknown) => void; reject: (e: Error) => void }
     >();
+    const inFlightHostCalls = new Set<Promise<unknown>>();
     let nextId = 0;
     type QueuedSessionOperation = {
       started: boolean;
@@ -393,7 +394,7 @@ export class AxJSRuntime implements AxCodeRuntime {
           });
           return;
         }
-        Promise.resolve()
+        const hostCall = Promise.resolve()
           .then(async () => {
             const args = typedMsg.args ?? [];
             if (activeSpeculationTurn) {
@@ -430,7 +431,11 @@ export class AxJSRuntime implements AxCodeRuntime {
               id: typedMsg.id,
               error: serializeError(err) as SerializedError,
             });
+          })
+          .finally(() => {
+            inFlightHostCalls.delete(hostCall);
           });
+        inFlightHostCalls.add(hostCall);
       }
     };
 
@@ -863,6 +868,9 @@ export class AxJSRuntime implements AxCodeRuntime {
                 timeoutMessage: 'Execution timed out',
               }
             );
+            if (inFlightHostCalls.size > 0) {
+              await Promise.allSettled([...inFlightHostCalls]);
+            }
             completed = true;
             return value;
           } finally {

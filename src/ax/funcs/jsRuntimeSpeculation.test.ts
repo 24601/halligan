@@ -580,6 +580,67 @@ describe('AxJSRuntime speculative programmatic tool calling', () => {
     expect(events.filter((event) => event.kind === 'dispatch')).toHaveLength(2);
   });
 
+  it('does not share one nondeterministic launch across overlapping claims', async () => {
+    const events: AxJSRuntimeSpeculationEvent[] = [];
+    let executions = 0;
+    const tool = createTestCallable(async () => {
+      const id = ++executions;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return `sample-${id}`;
+    });
+
+    await expect(
+      run(
+        'const a = tools.sample({ value: 1 }); const b = tools.sample({ value: 1 }); return [await a, await b];',
+        { tools: { sample: tool } },
+        speculation(events, { 'tools.sample': pure(false) })
+      )
+    ).resolves.toEqual(['sample-1', 'sample-2']);
+    expect(executions).toBe(2);
+    expect(events.filter((event) => event.kind === 'hit')).toHaveLength(2);
+  });
+
+  it('uses a lexical undefined binding instead of the primitive', async () => {
+    const events: AxJSRuntimeSpeculationEvent[] = [];
+    const other = createTestCallable(async ([input]) => {
+      return (input as { value: unknown }).value;
+    });
+
+    await expect(
+      run(
+        'const undefined = await tools.read({ value: "x" }); const y = await tools.other({ value: undefined }); return y;',
+        {
+          tools: {
+            read: createTestCallable(async ([input]) => {
+              return (input as { value: unknown }).value;
+            }),
+            other,
+          },
+        },
+        speculation(events, {
+          'tools.read': pure(true),
+          'tools.other': pure(true),
+        })
+      )
+    ).resolves.toBe('x');
+  });
+
+  it('settles unawaited planned calls before finishing the speculation turn', async () => {
+    const events: AxJSRuntimeSpeculationEvent[] = [];
+    let executions = 0;
+    const tool = createTestCallable(async () => ++executions);
+
+    await expect(
+      run(
+        'tools.read({ value: "a" }); return await Promise.resolve("done");',
+        { tools: { read: tool } },
+        speculation(events, { 'tools.read': pure(true) })
+      )
+    ).resolves.toBe('done');
+    expect(executions).toBe(1);
+    expect(events.filter((event) => event.kind === 'hit')).toHaveLength(1);
+  });
+
   it('never speculates an unapproved side-effecting callable', async () => {
     const events: AxJSRuntimeSpeculationEvent[] = [];
     let writes = 0;
@@ -909,5 +970,41 @@ describe('AxJSRuntime speculative programmatic tool calling', () => {
           },
         })
     ).toThrow('speculation.maxConcurrency');
+  });
+
+  it('forwards extra.protocol on speculative launches of allowlisted functions', async () => {
+    const events: AxJSRuntimeSpeculationEvent[] = [];
+    let sawProtocol = false;
+    const fn: AxFunction = {
+      name: 'lookup',
+      description: 'lookup',
+      parameters: { type: 'object', additionalProperties: true },
+      func: (_args, extra) => {
+        sawProtocol = extra?.protocol !== undefined;
+        extra?.protocol?.final?.({ ok: true });
+        return 'unused';
+      },
+    };
+    const callable = wrapFunction(
+      fn,
+      undefined,
+      undefined,
+      () =>
+        ({
+          final: () => {
+            throw new Error('final');
+          },
+        }) as never
+    );
+
+    await expect(
+      run(
+        'const value = await tools.lookup({ id: "record-a" }); return value;',
+        { tools: { lookup: callable } },
+        speculation(events, { 'tools.lookup': pure(true) })
+      )
+    ).rejects.toThrow('final');
+    expect(sawProtocol).toBe(true);
+    expect(events.some((event) => event.kind === 'hit')).toBe(true);
   });
 });
