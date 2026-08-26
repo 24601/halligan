@@ -759,6 +759,7 @@ describe('AxInteractionTimeline', () => {
     const timeline = AxInteractionTimeline.create({ sessionId: 'session-1' });
     let sessionReads = 0;
     let kindReads = 0;
+    let serialized = '';
     Object.defineProperty(Object.prototype, 'sessionId', {
       configurable: true,
       get: () => {
@@ -785,12 +786,21 @@ describe('AxInteractionTimeline', () => {
       expect(() =>
         timeline.append(missingKind as unknown as AxTemporalEnvelope)
       ).toThrow(AxTemporalValidationError);
+
+      const accepted = timeline.append(
+        envelope({ eventId: 'own-data-round-trip' })
+      );
+      expect(accepted.accepted).toBe(true);
+      serialized = accepted.timeline.serialize();
     } finally {
       delete (Object.prototype as Record<string, unknown>).sessionId;
       delete (Object.prototype as Record<string, unknown>).kind;
     }
     expect(sessionReads).toBe(0);
     expect(kindReads).toBe(0);
+    expect(AxInteractionTimeline.deserialize(serialized).serialize()).toBe(
+      serialized
+    );
   });
 
   it('enforces the retained byte budget before processing later events', () => {
