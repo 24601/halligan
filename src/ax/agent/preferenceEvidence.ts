@@ -122,6 +122,7 @@ export type AxPreferenceEvidenceStreamBinding = Readonly<{
 export type AxPreferenceEvidenceStreamRequest =
   AxPreferenceEvidenceStreamBinding &
     Readonly<{
+      /** streamVersion identifies the current snapshot being verified. */
       /** Detached, frozen snapshot for comparison with host-owned state. */
       record: AxPreferenceEvidenceRecord;
     }>;
@@ -129,6 +130,7 @@ export type AxPreferenceEvidenceStreamRequest =
 export type AxPreferenceEvidenceReceiptRequest =
   AxPreferenceEvidenceStreamBinding &
     Readonly<{
+      /** streamVersion identifies the immutable stream version that emitted event. */
       purpose: AxPreferenceEvidenceReceiptPurpose;
       receiptRef: string;
       /** Detached, frozen event payload for exact receipt verification. */
@@ -263,11 +265,15 @@ function deepFreeze<T>(value: T): T {
   return value;
 }
 
-function cloneEvidence(value: unknown): unknown {
-  const serialized = JSON.stringify(value);
-  return serialized === undefined
-    ? value
-    : deepFreeze(JSON.parse(serialized) as unknown);
+function recordIdOrUnknown(value: unknown): string {
+  try {
+    return isPlainObject(value) &&
+      boundedString(value.id, AX_PREFERENCE_EVIDENCE_LIMITS.idChars)
+      ? value.id
+      : '<unknown>';
+  } catch {
+    return '<unknown>';
+  }
 }
 
 function validRef(value: unknown): value is string {
@@ -482,7 +488,7 @@ function effectiveClaim(record: AxPreferenceEvidenceRecord): Readonly<{
   };
 }
 
-function streamBinding(
+function currentStreamBinding(
   record: AxPreferenceEvidenceRecord,
   revision: AxPreferenceEvidenceRevision
 ): AxPreferenceEvidenceStreamBinding {
@@ -496,6 +502,13 @@ function streamBinding(
     eventId: revision.eventId,
     operation: revision.operation,
   });
+}
+
+function historicalReceiptBinding(
+  current: AxPreferenceEvidenceStreamBinding,
+  revision: AxPreferenceEvidenceRevision
+): AxPreferenceEvidenceStreamBinding {
+  return deepFreeze({ ...current, streamVersion: revision.revision });
 }
 
 function verify(
@@ -612,14 +625,41 @@ function validateContext(context: AxPreferenceEvidenceContext): void {
   }
 }
 
-function boundedRecords(records: readonly unknown[]): unknown[] {
+type BoundedRecord = Readonly<{
+  value: unknown;
+  recordId: string;
+  malformedStructure: boolean;
+}>;
+
+function boundedRecords(records: readonly unknown[]): BoundedRecord[] {
   if (records.length > AX_PREFERENCE_EVIDENCE_LIMITS.records) {
     throw new Error('Preference evidence exceeds the record count limit.');
   }
   let totalBytes = 0;
   return records.map((record) => {
-    assertBoundedStructure(record);
-    const bytes = textEncoder.encode(JSON.stringify(record)).byteLength;
+    let serialized: string | undefined;
+    try {
+      assertBoundedStructure(record);
+      serialized = JSON.stringify(record);
+    } catch {
+      totalBytes += AX_PREFERENCE_EVIDENCE_LIMITS.recordBytes + 1;
+      if (totalBytes > AX_PREFERENCE_EVIDENCE_LIMITS.totalBytes) {
+        throw new Error('Preference evidence exceeds the total byte limit.');
+      }
+      return {
+        value: undefined,
+        recordId: recordIdOrUnknown(record),
+        malformedStructure: true,
+      };
+    }
+    if (serialized === undefined) {
+      return {
+        value: undefined,
+        recordId: recordIdOrUnknown(record),
+        malformedStructure: true,
+      };
+    }
+    const bytes = textEncoder.encode(serialized).byteLength;
     if (bytes > AX_PREFERENCE_EVIDENCE_LIMITS.recordBytes) {
       throw new Error('Preference evidence exceeds the per-record byte limit.');
     }
@@ -627,7 +667,11 @@ function boundedRecords(records: readonly unknown[]): unknown[] {
     if (totalBytes > AX_PREFERENCE_EVIDENCE_LIMITS.totalBytes) {
       throw new Error('Preference evidence exceeds the total byte limit.');
     }
-    return cloneEvidence(record);
+    return {
+      value: deepFreeze(JSON.parse(serialized) as unknown),
+      recordId: recordIdOrUnknown(record),
+      malformedStructure: false,
+    };
   });
 }
 
@@ -642,22 +686,22 @@ export function axSelectPreferenceEvidence(
   const now = Date.parse(context.now);
   const minConfidence = context.minConfidence ?? 0;
   const idCounts = new Map<string, number>();
-  for (const record of records) {
+  for (const { value: record, malformedStructure } of records) {
+    if (malformedStructure) continue;
     if (isPlainObject(record) && nonEmpty(record.id)) {
       idCounts.set(record.id, (idCounts.get(record.id) ?? 0) + 1);
     }
   }
 
-  for (const candidate of records) {
+  for (const bounded of records) {
+    const candidate = bounded.value;
     if (
+      bounded.malformedStructure ||
       !validRecord(candidate as AxPreferenceEvidenceRecord) ||
       (idCounts.get((candidate as AxPreferenceEvidenceRecord).id) ?? 0) > 1
     ) {
       excluded.push({
-        recordId:
-          isPlainObject(candidate) && nonEmpty(candidate.id)
-            ? candidate.id
-            : '<unknown>',
+        recordId: bounded.recordId,
         reason: 'malformed',
       });
       continue;
@@ -669,11 +713,12 @@ export function axSelectPreferenceEvidence(
     }
     const effective = effectiveClaim(record);
     const latest = effective.revision;
-    const binding = streamBinding(record, latest);
-    if (!verifyStream(context.verifyStreamState, binding, record)) {
+    const streamBinding = currentStreamBinding(record, latest);
+    if (!verifyStream(context.verifyStreamState, streamBinding, record)) {
       excluded.push({ recordId: record.id, reason: 'stale-stream' });
       continue;
     }
+    const receiptBinding = historicalReceiptBinding(streamBinding, latest);
     if (Date.parse(latest.recordedAt) > now) {
       excluded.push({ recordId: record.id, reason: 'future' });
       continue;
@@ -681,7 +726,7 @@ export function axSelectPreferenceEvidence(
     if (
       !verify(
         context.verifyReceipt,
-        binding,
+        receiptBinding,
         latest,
         'source',
         latest.sourceReceiptRef
@@ -694,7 +739,7 @@ export function axSelectPreferenceEvidence(
       if (
         !verify(
           context.verifyDestructiveLifecycleReceipt,
-          binding,
+          receiptBinding,
           latest,
           'destructive-lifecycle',
           latest.destructiveAuthorityReceiptRef
@@ -713,7 +758,7 @@ export function axSelectPreferenceEvidence(
       if (
         !verify(
           context.verifyReceipt,
-          binding,
+          receiptBinding,
           latest,
           'authority',
           latest.authorityReceiptRef
@@ -729,7 +774,7 @@ export function axSelectPreferenceEvidence(
       if (
         !verify(
           context.verifyReceipt,
-          binding,
+          receiptBinding,
           latest,
           'epoch-authority',
           latest.authorityReceiptRef
@@ -741,7 +786,7 @@ export function axSelectPreferenceEvidence(
       if (
         !verify(
           context.verifyReceipt,
-          binding,
+          receiptBinding,
           latest,
           'consent',
           latest.consentReceiptRef
@@ -754,7 +799,7 @@ export function axSelectPreferenceEvidence(
       if (
         !verify(
           context.verifyReceipt,
-          binding,
+          receiptBinding,
           latest,
           'authority',
           latest.authorityReceiptRef as string
@@ -766,7 +811,7 @@ export function axSelectPreferenceEvidence(
       if (
         !verify(
           context.verifyReceipt,
-          binding,
+          receiptBinding,
           latest,
           'consent',
           latest.consentReceiptRef as string
@@ -933,7 +978,9 @@ function latestRevision(
 function publishLifecycleRecord(
   record: AxPreferenceEvidenceRecord
 ): AxPreferenceEvidenceRecord {
-  const published = boundedRecords([record])[0] as AxPreferenceEvidenceRecord;
+  const published = boundedRecords([record])[0]?.value as
+    | AxPreferenceEvidenceRecord
+    | undefined;
   if (!published || !validRecord(published)) {
     throw new Error(
       'Lifecycle operation produced invalid preference evidence.'

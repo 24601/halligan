@@ -287,6 +287,11 @@ by authority kind (`confirmed-preference` over `observation` over `inference`),
 then confidence; an equal-strength or otherwise unresolved conflict still fails
 closed. This prevents a weak later inference from silently displacing a
 stronger confirmed preference.
+Stream-state verification binds the selected claim to the current durable
+snapshot and its current `streamVersion`. Receipt verification instead binds
+each event to the immutable `streamVersion` that emitted it (equal to that
+event's `revision`), so later revisions cannot rewrite historical source,
+authority, or consent receipts.
 Only `applied` confirmed preferences convert to memory; observations and
 inferences remain available for host inspection under `informational`.
 Convert the returned selection directly; the memory adapter rejects copied or
@@ -357,7 +362,7 @@ forged consent/provenance and destructive authority, retraction, erasure and
 stale replay, explicit epoch renewal, uncertain inference, unseen
 harmful/sycophantic paraphrases, equal-time ambiguity, no-benefit, and noisy
 small-data. Separate stress probes exercise count, query, total-byte, and
-cyclic-shape rejection before callbacks.
+cyclic-shape isolation before callbacks.
 
 On the 17-case artifact, static/no personalization scores 14/17 exact with
 three missed-personalization cases; naive latest-value scores 16/17 with two

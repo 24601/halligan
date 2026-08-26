@@ -16,6 +16,7 @@ import {
 type HostReceiptDescriptor = Readonly<{
   receiptRef: string;
   principalId: string;
+  streamVersion: number;
   eventId: string;
   operationClass: string;
   epoch?: number;
@@ -209,7 +210,7 @@ function requestFor(
     principalId: record.principalId,
     recordId: record.id,
     streamId: record.streamId,
-    streamVersion: record.streamVersion,
+    streamVersion: revision.revision,
     epoch: revision.epoch,
     revision: revision.revision,
     eventId: revision.eventId,
@@ -234,6 +235,7 @@ function descriptorAllows(
 ): boolean {
   return (
     descriptor.principalId === request.principalId &&
+    descriptor.streamVersion === request.streamVersion &&
     descriptor.eventId === request.eventId &&
     descriptorPurpose(descriptor.operationClass) === request.purpose &&
     (descriptor.epoch === undefined || descriptor.epoch === request.epoch)
@@ -508,14 +510,17 @@ function runStressChecks() {
     nested?: unknown;
   };
   cyclic.nested = cyclic;
-  const shapeBound = rejects(() =>
-    axSelectPreferenceEvidence([cyclic], baseContext)
-  );
+  const shapeSelection = axSelectPreferenceEvidence([cyclic], baseContext);
+  const shapeIsolated =
+    shapeSelection.applied.length === 0 &&
+    shapeSelection.informational.length === 0 &&
+    JSON.stringify(shapeSelection.excluded) ===
+      JSON.stringify([{ recordId: 'stress-seed', reason: 'malformed' }]);
   return Object.freeze({
     countBound,
     queryBound,
     totalByteBound,
-    shapeBound,
+    shapeIsolated,
     callbacksBeforeRejection: callbacks,
   });
 }

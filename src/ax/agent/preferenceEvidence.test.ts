@@ -112,7 +112,7 @@ function requestFor(
     principalId: record.principalId,
     recordId: record.id,
     streamId: record.streamId,
-    streamVersion: record.streamVersion,
+    streamVersion: revision.revision,
     epoch: revision.epoch,
     revision: revision.revision,
     eventId: revision.eventId,
@@ -132,12 +132,13 @@ function context(
   );
   const receipts = new Map<string, string>();
   for (const entry of admittedRecords) {
-    const latest = entry.revisions.at(-1) as AxPreferenceEvidenceRevision;
-    for (const [purpose, receiptRef] of receiptRefs(latest)) {
-      receipts.set(
-        receiptRef,
-        receiptKey(requestFor(entry, latest, purpose, receiptRef))
-      );
+    for (const revision of entry.revisions) {
+      for (const [purpose, receiptRef] of receiptRefs(revision)) {
+        receipts.set(
+          receiptRef,
+          receiptKey(requestFor(entry, revision, purpose, receiptRef))
+        );
+      }
     }
   }
   return {
@@ -479,7 +480,7 @@ describe('axSelectPreferenceEvidence', () => {
     expect(Object.isFrozen(result.applied[0]?.revision)).toBe(true);
   });
 
-  it('fails closed before callbacks when count, query, and shape limits are exceeded', () => {
+  it('fails closed before callbacks when count and query limits are exceeded', () => {
     const verifyStreamState = vi.fn(() => true);
     const base = record('bounded');
     const boundedContext = context([base], { verifyStreamState });
@@ -498,13 +499,29 @@ describe('axSelectPreferenceEvidence', () => {
         query: 'q'.repeat(AX_PREFERENCE_EVIDENCE_LIMITS.queryChars + 1),
       })
     ).toThrow(/bounded host context/);
+    expect(verifyStreamState).not.toHaveBeenCalled();
+  });
+
+  it('isolates malformed nested structures before callbacks without denying valid records', () => {
+    const valid = record('valid-beside-malformed');
+    const verifyStreamState = vi.fn(context([valid]).verifyStreamState);
+    const boundedContext = context([valid], { verifyStreamState });
     const cyclic = record('cyclic') as AxPreferenceEvidenceRecord & {
       nested?: unknown;
     };
     cyclic.nested = cyclic;
-    expect(() => axSelectPreferenceEvidence([cyclic], boundedContext)).toThrow(
-      /cycles/
+    const cyclicResult = axSelectPreferenceEvidence(
+      [valid, cyclic],
+      boundedContext
     );
+    expect(cyclicResult.applied.map((entry) => entry.recordId)).toEqual([
+      'valid-beside-malformed',
+    ]);
+    expect(cyclicResult.excluded).toEqual([
+      { recordId: 'cyclic', reason: 'malformed' },
+    ]);
+    expect(verifyStreamState).toHaveBeenCalledTimes(1);
+
     let nested: Record<string, unknown> = {};
     const deep = nested;
     for (
@@ -515,25 +532,28 @@ describe('axSelectPreferenceEvidence', () => {
       nested.child = {};
       nested = nested.child as Record<string, unknown>;
     }
-    expect(() =>
-      axSelectPreferenceEvidence(
-        [{ ...base, nested: deep } as AxPreferenceEvidenceRecord],
-        boundedContext
-      )
-    ).toThrow(/object depth limit/);
+    const deepResult = axSelectPreferenceEvidence(
+      [{ ...valid, id: 'deep', nested: deep } as AxPreferenceEvidenceRecord],
+      boundedContext
+    );
+    expect(deepResult.excluded).toEqual([
+      { recordId: 'deep', reason: 'malformed' },
+    ]);
+
     const wide = Object.fromEntries(
       Array.from(
         { length: AX_PREFERENCE_EVIDENCE_LIMITS.objectWidth + 1 },
         (_, index) => [`field-${index}`, index]
       )
     );
-    expect(() =>
-      axSelectPreferenceEvidence(
-        [{ ...base, wide } as AxPreferenceEvidenceRecord],
-        boundedContext
-      )
-    ).toThrow(/object width limit/);
-    expect(verifyStreamState).not.toHaveBeenCalled();
+    const wideResult = axSelectPreferenceEvidence(
+      [{ ...valid, id: 'wide', wide } as AxPreferenceEvidenceRecord],
+      boundedContext
+    );
+    expect(wideResult.excluded).toEqual([
+      { recordId: 'wide', reason: 'malformed' },
+    ]);
+    expect(verifyStreamState).toHaveBeenCalledTimes(1);
   });
 
   it('excludes null records and revisions as malformed without denying valid records', () => {
@@ -577,6 +597,7 @@ describe('axSelectPreferenceEvidence', () => {
           recordedAt: '2026-08-21T12:00:00.000Z',
           kind: 'inference',
           value: 'Possibly add extensive background.',
+          sourceReceiptRef: 'source:noisy:2',
           confidence: 0.22,
           contradicts: ['noisy'],
           authorityReceiptRef: undefined,
@@ -584,13 +605,25 @@ describe('axSelectPreferenceEvidence', () => {
         }),
       ],
     } as AxPreferenceEvidenceRecord;
+    const trusted = context([noisy]);
+    const streamVersions: number[] = [];
+    const receiptVersions: number[] = [];
     const result = axSelectPreferenceEvidence(
       [noisy],
       context([noisy], {
-        verifyReceipt: () => true,
+        verifyStreamState: (request) => {
+          streamVersions.push(request.streamVersion);
+          return trusted.verifyStreamState(request);
+        },
+        verifyReceipt: (request) => {
+          receiptVersions.push(request.streamVersion);
+          expect(request.streamVersion).toBe(request.event.revision);
+          return trusted.verifyReceipt(request);
+        },
         allowApplication: () => true,
       })
     );
+    expect(result.excluded).toEqual([]);
     expect(result.applied).toMatchObject([
       {
         recordId: 'noisy',
@@ -601,7 +634,8 @@ describe('axSelectPreferenceEvidence', () => {
         },
       },
     ]);
-    expect(result.excluded).toEqual([]);
+    expect(streamVersions).toEqual([2]);
+    expect(receiptVersions).toEqual([1, 1, 1]);
   });
 
   it('enforces value, applicability, relation, revision, byte, and attribute limits', () => {
@@ -659,12 +693,12 @@ describe('axSelectPreferenceEvidence', () => {
       streamVersion: revisions.length,
       revisions,
     };
-    expect(() =>
+    expect(
       axSelectPreferenceEvidence(
         [tooManyRevisions],
         context([tooManyRevisions])
-      )
-    ).toThrow(/array width limit/);
+      ).excluded
+    ).toEqual([{ recordId: 'revisions', reason: 'malformed' }]);
 
     const largeHistoryRevisions = Array.from(
       { length: AX_PREFERENCE_EVIDENCE_LIMITS.revisionsPerRecord },

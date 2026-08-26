@@ -382,12 +382,14 @@
         {
           "receiptRef": "receipt-copied-consent",
           "principalId": "principal-development-cobalt",
+          "streamVersion": 1,
           "eventId": "evt-other-host",
           "operationClass": "consent"
         },
         {
           "receiptRef": "receipt-copied-source",
           "principalId": "principal-development-cobalt",
+          "streamVersion": 1,
           "eventId": "evt-other-host",
           "operationClass": "provenance"
         }
@@ -673,6 +675,32 @@
           ]
         }
       ],
+      "hostReceiptRecords": [
+        {
+          "receiptRef": "receipt-source-na",
+          "principalId": "principal-held-aurora",
+          "streamVersion": 1,
+          "eventId": "evt-noisy-a",
+          "operationClass": "provenance",
+          "epoch": 1
+        },
+        {
+          "receiptRef": "receipt-authority-na",
+          "principalId": "principal-held-aurora",
+          "streamVersion": 1,
+          "eventId": "evt-noisy-a",
+          "operationClass": "authority",
+          "epoch": 1
+        },
+        {
+          "receiptRef": "receipt-consent-na",
+          "principalId": "principal-held-aurora",
+          "streamVersion": 1,
+          "eventId": "evt-noisy-a",
+          "operationClass": "consent",
+          "epoch": 1
+        }
+      ],
       "expectedApplied": ["rec-noisy"],
       "expectedFailure": null,
       "expectedCallbacks": {
@@ -721,6 +749,7 @@
         {
           "receiptRef": "receipt-authority-retract-only",
           "principalId": "principal-held-aurora",
+          "streamVersion": 2,
           "eventId": "evt-wrong-erase",
           "operationClass": "retract"
         }
@@ -824,6 +853,7 @@
         {
           "receiptRef": "receipt-consent-renew-fresh",
           "principalId": "principal-held-aurora",
+          "streamVersion": 3,
           "eventId": "evt-renew-fresh",
           "operationClass": "fresh-consent",
           "epoch": 2
@@ -831,6 +861,7 @@
         {
           "receiptRef": "receipt-authority-renew-fresh",
           "principalId": "principal-held-aurora",
+          "streamVersion": 3,
           "eventId": "evt-renew-fresh",
           "operationClass": "renew",
           "epoch": 2

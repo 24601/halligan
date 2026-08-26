@@ -57,7 +57,7 @@ describe('preference evidence evaluation', () => {
       countBound: true,
       queryBound: true,
       totalByteBound: true,
-      shapeBound: true,
+      shapeIsolated: true,
       callbacksBeforeRejection: 0,
     });
     expect(result.negativeResults).toMatchObject({
