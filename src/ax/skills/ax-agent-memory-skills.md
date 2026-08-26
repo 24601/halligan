@@ -350,9 +350,9 @@ npm run evaluate:preference-evidence
 The final corpus, expected outcomes, and event-bound host policy live in the
 separately authored post-baseline artifact
 `scripts/fixtures/preference-evidence-later-v1.json`. The artifact was committed
-at `45ac57e0f6757da1995c9ded36442dcd5ca1e837` after mechanism baseline
+at `0f70af1aa9723c7059c0850b034918ba733ee958` after mechanism baseline
 `8e1152f8974231ea7e81d8078acbd7e84386c438`; its frozen SHA-256 is
-`fda0ff1679f511eecaf5c1477a7ab6226ee709a4ca03a57c95d8dc6ab2298f05`.
+`756d76538ab5733c86894b8aecb62af7218563f301a80c599970c1d5922daa9f`.
 The evaluator checks that digest before parsing and records the provenance in
 its output. Artifact-owned expectations include exact exclusions and callback
 counts/purposes for successful and rejected cases, so a callback regression or
@@ -374,7 +374,7 @@ contradiction, an explicitly configured `minConfidence: 0.5` uncertain
 inference rejection, equal-time observation supersession, and preservation of
 a stronger confirmed preference over a weak later inference. Retention/expiry,
 retraction/erasure, stale replay, renewal, authority, and stress checks also
-pass. The artifact is 27,649 UTF-8 bytes. The evaluator reports measured
+pass. The artifact is 28,572 UTF-8 bytes. The evaluator reports measured
 latency and every exclusion/callback check, exits nonzero on any failure, and
 does not suppress or golden known failures.
 
