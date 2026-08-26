@@ -1,8 +1,9 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   AxEventBackpressureError,
   type AxEventClock,
   type AxEventContinuation,
+  type AxEventContinuationEnqueueRequest,
   type AxEventCorrelationKey,
   type AxEventDeadLetter,
   type AxEventDelivery,
@@ -11,21 +12,26 @@ import {
   type AxEventPublishReceipt,
   type AxEventRun,
   type AxEventStore,
+  type AxEventVerifierTransitionRecord,
+  type AxEventVerifierTransitionRequest,
   type AxProgramStateEnvelope,
   type AxProgramStateStore,
   AxSystemEventClock,
+  axEventCanonicalJson,
   axEventIdentityScope,
   axEventScopedCorrelationKey,
   axEventScopedDedupeKey,
 } from '@ax-llm/ax';
 import Database from 'better-sqlite3';
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 4;
 const MULTI_WORKER_CONFORMANCE = 'axevent-store-v1';
+const VERIFIER_MIGRATION_CLEANUP_KEY = 'verifier-v2-cleanup-pending';
 const TERMINAL = [
   'waiting_event',
   'succeeded',
   'failed',
+  'verification_failed',
   'cancelled',
   'dead_lettered',
   'output_persistence_failed',
@@ -93,6 +99,7 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
       multiWorker: MULTI_WORKER_CONFORMANCE,
       schemaVersion: SCHEMA_VERSION,
     },
+    verifierTransitions: 'axevent-verifier-transition-v2',
   } as const;
 
   private readonly db: Database.Database;
@@ -116,7 +123,9 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
     this.db.pragma(`busy_timeout = ${options.busyTimeoutMs ?? 5_000}`);
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
+    this.db.pragma('secure_delete = ON');
     this.migrate();
+    this.completeVerifierMigrationCleanup();
     this.prune(this.clock.now());
   }
 
@@ -139,6 +148,168 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
       if (remaining <= 0) throw new AxEventBackpressureError();
       await this.clock.sleep(Math.min(25, remaining), signal);
     }
+  }
+
+  async enqueueContinuation(
+    request: Readonly<AxEventContinuationEnqueueRequest>,
+    signal?: AbortSignal
+  ): Promise<AxEventPublishReceipt> {
+    const eventBytes = Buffer.byteLength(
+      JSON.stringify(request.enqueue.ingress)
+    );
+    if (eventBytes > this.maxEventBytes) {
+      throw new AxEventBackpressureError(
+        `Event is ${eventBytes} bytes; maximum is ${this.maxEventBytes}`
+      );
+    }
+    const deadline = this.clock.now() + request.enqueue.publishTimeoutMs;
+    for (;;) {
+      if (signal?.aborted) throw signal.reason;
+      const result = this.db.transaction(() => {
+        const receipt = this.tryEnqueue(request.enqueue);
+        if (!receipt) return;
+        if (receipt.duplicate) {
+          this.assertContinuationMatch(request.continuation);
+        } else {
+          this.insertContinuation(request.continuation);
+        }
+        return receipt;
+      })();
+      if (result) return result;
+      const remaining = deadline - this.clock.now();
+      if (remaining <= 0) throw new AxEventBackpressureError();
+      await this.clock.sleep(Math.min(25, remaining), signal);
+    }
+  }
+
+  async transitionVerifier(
+    request: Readonly<AxEventVerifierTransitionRequest>,
+    signal?: AbortSignal
+  ): Promise<AxEventPublishReceipt> {
+    if (signal?.aborted) {
+      throw signal.reason ?? new Error('Verifier transition cancelled');
+    }
+    const eventBytes = Buffer.byteLength(JSON.stringify(request.child.ingress));
+    if (eventBytes > this.maxEventBytes) {
+      throw new AxEventBackpressureError(
+        `Event is ${eventBytes} bytes; maximum is ${this.maxEventBytes}`
+      );
+    }
+    const requestCommitment = this.canonicalCommitment(request);
+    const expectedChildCommitment = this.canonicalCommitment(
+      this.verifierChildProjection(request)
+    );
+    return this.db.transaction(() => {
+      const journal = this.readVerifierTransition(request.operationId);
+      if (journal) {
+        this.assertVerifierTransitionRequest(
+          journal,
+          request,
+          requestCommitment,
+          expectedChildCommitment
+        );
+        return { ...journal.receipt, duplicate: true };
+      }
+      const parent = this.db
+        .prepare('SELECT * FROM event_deliveries WHERE id=?')
+        .get(request.parent.delivery.id) as DeliveryRow | undefined;
+      if (
+        !parent ||
+        parent.fencing_token !== request.parent.expectedFencingToken ||
+        (parent.status !== 'claimed' && parent.status !== 'running')
+      ) {
+        throw new Error(
+          `Stale verifier transition for ${request.parent.delivery.id}`
+        );
+      }
+      if (
+        request.parent.delivery.status !== 'waiting_event' ||
+        request.parent.run.status !== 'waiting_event' ||
+        request.child.deliveries.length !== 1
+      ) {
+        throw new Error('Verifier transition requires one waiting child');
+      }
+
+      this.updateDelivery(request.parent.delivery);
+      const receipt = this.tryEnqueue(request.child, [request.childDeliveryId]);
+      if (!receipt) throw new AxEventBackpressureError();
+      if (receipt.duplicate) {
+        throw new Error(
+          `Verifier transition child is already owned: ${request.childDeliveryId}`
+        );
+      }
+      this.insertContinuation(request.continuation);
+      if (request.consumeContinuationId) {
+        this.completeContinuationNow(request.consumeContinuationId);
+      }
+      this.saveTransitionRun(request.parent.run);
+      const child = this.db
+        .prepare('SELECT * FROM event_deliveries WHERE id=?')
+        .get(request.childDeliveryId) as DeliveryRow | undefined;
+      if (!child)
+        throw new Error('Verifier transition child was not persisted');
+      const persistedChild = this.rowToDelivery(child);
+      const childCommitment = this.canonicalCommitment(
+        this.persistedChildProjection(persistedChild)
+      );
+      if (childCommitment !== expectedChildCommitment) {
+        throw new Error('Verifier transition child does not match request');
+      }
+      const record: AxEventVerifierTransitionRecord = {
+        operationId: request.operationId,
+        requestCommitment,
+        receipt,
+        childDeliveryId: request.childDeliveryId,
+        childCommitment,
+      };
+      this.db
+        .prepare(
+          `INSERT INTO event_verifier_transitions
+           (operation_id, request_commitment, receipt_json, child_delivery_id,
+            child_commitment, created_at)
+           VALUES(?,?,?,?,?,?)`
+        )
+        .run(
+          request.operationId,
+          record.requestCommitment,
+          JSON.stringify(record.receipt),
+          record.childDeliveryId,
+          record.childCommitment,
+          this.clock.now()
+        );
+      return receipt;
+    })();
+  }
+
+  async confirmVerifierTransition(
+    request: Readonly<AxEventVerifierTransitionRequest>
+  ): Promise<Readonly<AxEventPublishReceipt> | undefined> {
+    const requestCommitment = this.canonicalCommitment(request);
+    const expectedChildCommitment = this.canonicalCommitment(
+      this.verifierChildProjection(request)
+    );
+    const record = this.readVerifierTransition(request.operationId);
+    if (!record) return;
+    this.assertVerifierTransitionRequest(
+      record,
+      request,
+      requestCommitment,
+      expectedChildCommitment
+    );
+    const child = this.db
+      .prepare('SELECT * FROM event_deliveries WHERE id=?')
+      .get(record.childDeliveryId) as DeliveryRow | undefined;
+    if (
+      child &&
+      this.canonicalCommitment(
+        this.persistedChildProjection(this.rowToDelivery(child))
+      ) !== record.childCommitment
+    ) {
+      throw new Error(
+        `Verifier transition child is corrupt: ${request.operationId}`
+      );
+    }
+    return record.receipt;
   }
 
   async claim(
@@ -219,6 +390,10 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
   }
 
   async saveDelivery(delivery: Readonly<AxEventDelivery>): Promise<void> {
+    this.updateDelivery(delivery);
+  }
+
+  private updateDelivery(delivery: Readonly<AxEventDelivery>): void {
     const result = this.db
       .prepare(
         `UPDATE event_deliveries SET
@@ -306,34 +481,7 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
   async registerContinuation(
     continuation: Readonly<AxEventContinuation>
   ): Promise<void> {
-    this.db.transaction(() => {
-      this.db
-        .prepare(
-          `INSERT INTO event_continuations
-           (id, identity_scope, continuation_json, created_at, expires_at)
-           VALUES(?,?,?,?,?)`
-        )
-        .run(
-          continuation.id,
-          continuation.identityScope,
-          JSON.stringify(continuation),
-          continuation.createdAt,
-          continuation.expiresAt ?? null
-        );
-      const insert = this.db.prepare(
-        'INSERT INTO event_continuation_keys(correlation_key, continuation_id) VALUES(?,?)'
-      );
-      for (const correlation of continuation.correlation) {
-        insert.run(
-          axEventScopedCorrelationKey(
-            continuation.identityScope,
-            correlation.kind,
-            correlation.value
-          ),
-          continuation.id
-        );
-      }
-    })();
+    this.db.transaction(() => this.insertContinuation(continuation))();
   }
 
   async findContinuation(
@@ -366,16 +514,7 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
   }
 
   async completeContinuation(id: string): Promise<void> {
-    this.db.transaction(() => {
-      this.db
-        .prepare('DELETE FROM event_continuation_keys WHERE continuation_id=?')
-        .run(id);
-      this.db
-        .prepare(
-          'UPDATE event_continuations SET completed_at=? WHERE id=? AND completed_at IS NULL'
-        )
-        .run(this.clock.now(), id);
-    })();
+    this.db.transaction(() => this.completeContinuationNow(id))();
   }
 
   async addDeadLetter(deadLetter: Readonly<AxEventDeadLetter>): Promise<void> {
@@ -517,7 +656,8 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
   }
 
   private tryEnqueue(
-    request: Readonly<AxEventEnqueueRequest>
+    request: Readonly<AxEventEnqueueRequest>,
+    deliveryIdsOverride?: readonly string[]
   ): AxEventPublishReceipt | undefined {
     return this.db.transaction((): AxEventPublishReceipt | undefined => {
       const dedupeKey = axEventScopedDedupeKey(request.ingress);
@@ -554,6 +694,12 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
         return;
       }
       const deliveryIds: string[] = [];
+      if (
+        deliveryIdsOverride &&
+        deliveryIdsOverride.length !== request.deliveries.length
+      ) {
+        throw new Error('Explicit event delivery IDs do not match deliveries');
+      }
       const insert = this.db.prepare(
         `INSERT INTO event_deliveries(
           id, ingress_json, identity_scope, route_id, action, target_id,
@@ -561,8 +707,8 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
           retry_safety, ordering_mode
         ) VALUES(?,?,?,?,?,?,?,'queued',0,?,?,?,?,?)`
       );
-      for (const descriptor of request.deliveries) {
-        const id = randomUUID();
+      for (const [index, descriptor] of request.deliveries.entries()) {
+        const id = deliveryIdsOverride?.[index] ?? randomUUID();
         deliveryIds.push(id);
         insert.run(
           id,
@@ -597,6 +743,238 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
         deliveryIds,
       };
     })();
+  }
+
+  private insertContinuation(
+    continuation: Readonly<AxEventContinuation>
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO event_continuations
+         (id, identity_scope, continuation_json, created_at, expires_at)
+         VALUES(?,?,?,?,?)`
+      )
+      .run(
+        continuation.id,
+        continuation.identityScope,
+        JSON.stringify(continuation),
+        continuation.createdAt,
+        continuation.expiresAt ?? null
+      );
+    const insert = this.db.prepare(
+      'INSERT INTO event_continuation_keys(correlation_key, continuation_id) VALUES(?,?)'
+    );
+    for (const correlation of continuation.correlation) {
+      insert.run(
+        axEventScopedCorrelationKey(
+          continuation.identityScope,
+          correlation.kind,
+          correlation.value
+        ),
+        continuation.id
+      );
+    }
+  }
+
+  private completeContinuationNow(id: string): void {
+    this.db
+      .prepare('DELETE FROM event_continuation_keys WHERE continuation_id=?')
+      .run(id);
+    this.db
+      .prepare(
+        'UPDATE event_continuations SET completed_at=? WHERE id=? AND completed_at IS NULL'
+      )
+      .run(this.clock.now(), id);
+  }
+
+  private getDuplicateReceipt(
+    ingress: Readonly<AxEventEnqueueRequest['ingress']>
+  ): AxEventPublishReceipt | undefined {
+    const row = this.db
+      .prepare(
+        'SELECT event_id, delivery_ids_json FROM event_dedupe WHERE dedupe_key=?'
+      )
+      .get(axEventScopedDedupeKey(ingress)) as
+      | { event_id: string; delivery_ids_json: string }
+      | undefined;
+    return row
+      ? {
+          eventId: row.event_id,
+          accepted: true,
+          duplicate: true,
+          durability: 'persistent',
+          deliveryIds: JSON.parse(row.delivery_ids_json) as string[],
+        }
+      : undefined;
+  }
+
+  private saveTransitionRun(run: Readonly<AxEventRun>): void {
+    const existing = this.db
+      .prepare('SELECT run_json FROM event_runs WHERE id=?')
+      .get(run.id) as { run_json: string } | undefined;
+    if (!existing) throw new Error(`Unknown event run: ${run.id}`);
+    const previous = JSON.parse(existing.run_json) as AxEventRun;
+    const stored = previous.outputRef
+      ? {
+          ...run,
+          output: undefined,
+          chunks: undefined,
+          outputRef: previous.outputRef,
+        }
+      : run;
+    if (
+      Buffer.byteLength(JSON.stringify(stored)) > this.maxInlinePayloadBytes
+    ) {
+      throw new Error(
+        `output_persistence_failed: run ${run.id} metadata exceeded ${this.maxInlinePayloadBytes} inline bytes`
+      );
+    }
+    this.db
+      .prepare(
+        `UPDATE event_runs SET run_json=?, updated_at=?, finished_at=?
+         WHERE id=? AND delivery_id=?`
+      )
+      .run(
+        JSON.stringify(stored),
+        this.clock.now(),
+        run.finishedAt ?? null,
+        run.id,
+        run.deliveryId
+      );
+  }
+
+  private assertContinuationMatch(
+    requested: Readonly<AxEventContinuation>
+  ): void {
+    const row = this.db
+      .prepare(
+        `SELECT continuation_json FROM event_continuations
+         WHERE id=? AND completed_at IS NULL`
+      )
+      .get(requested.id) as { continuation_json: string } | undefined;
+    if (!row) {
+      throw new Error(
+        `Duplicate resume event has no active continuation: ${requested.id}`
+      );
+    }
+    const existing = JSON.parse(row.continuation_json) as AxEventContinuation;
+    if (JSON.stringify(existing) !== JSON.stringify(requested)) {
+      throw new Error(
+        `Event continuation id is already owned: ${requested.id}`
+      );
+    }
+  }
+
+  private readVerifierTransition(
+    operationId: string
+  ): AxEventVerifierTransitionRecord | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT operation_id, request_commitment, receipt_json,
+                child_delivery_id, child_commitment
+         FROM event_verifier_transitions
+         WHERE operation_id=?`
+      )
+      .get(operationId) as
+      | {
+          operation_id: string;
+          request_commitment: string;
+          receipt_json: string;
+          child_delivery_id: string;
+          child_commitment: string;
+        }
+      | undefined;
+    if (!row) return;
+    return {
+      operationId: row.operation_id,
+      requestCommitment: row.request_commitment,
+      receipt: JSON.parse(row.receipt_json) as AxEventPublishReceipt,
+      childDeliveryId: row.child_delivery_id,
+      childCommitment: row.child_commitment,
+    };
+  }
+
+  private assertVerifierTransitionRequest(
+    record: Readonly<AxEventVerifierTransitionRecord>,
+    request: Readonly<AxEventVerifierTransitionRequest>,
+    requestCommitment: string,
+    childCommitment: string
+  ): void {
+    if (
+      record.operationId !== request.operationId ||
+      record.requestCommitment !== requestCommitment ||
+      record.childDeliveryId !== request.childDeliveryId ||
+      record.childCommitment !== childCommitment ||
+      axEventCanonicalJson(record.receipt) !==
+        axEventCanonicalJson({
+          eventId: request.child.ingress.event.id,
+          accepted: true,
+          duplicate: false,
+          durability: 'persistent',
+          deliveryIds: [request.childDeliveryId],
+        })
+    ) {
+      throw new Error(
+        `Verifier transition operation is already owned: ${request.operationId}`
+      );
+    }
+  }
+
+  private verifierChildProjection(
+    request: Readonly<AxEventVerifierTransitionRequest>
+  ): Omit<
+    AxEventDelivery,
+    | 'sequence'
+    | 'status'
+    | 'attempt'
+    | 'claimedBy'
+    | 'runId'
+    | 'error'
+    | 'leaseExpiresAt'
+    | 'fencingToken'
+    | 'invocationStarted'
+    | 'recoveredFromExpiredLease'
+  > {
+    const descriptor = request.child.deliveries[0]!;
+    return {
+      id: request.childDeliveryId,
+      ingress: request.child.ingress,
+      identityScope: axEventIdentityScope(request.child.ingress.identity),
+      routeId: descriptor.routeId,
+      action: descriptor.action,
+      ...(descriptor.targetId ? { targetId: descriptor.targetId } : {}),
+      instanceKey: descriptor.instanceKey,
+      availableAt: descriptor.availableAt ?? request.child.acceptedAt,
+      acceptedAt: request.child.acceptedAt,
+      sizeBytes: descriptor.sizeBytes,
+      retrySafety: descriptor.retrySafety ?? 'unknown',
+      ordering: descriptor.ordering ?? 'strict',
+    };
+  }
+
+  private persistedChildProjection(
+    delivery: Readonly<AxEventDelivery>
+  ): ReturnType<AxSQLiteEventStore['verifierChildProjection']> {
+    return {
+      id: delivery.id,
+      ingress: delivery.ingress,
+      identityScope: delivery.identityScope,
+      routeId: delivery.routeId,
+      action: delivery.action,
+      ...(delivery.targetId ? { targetId: delivery.targetId } : {}),
+      instanceKey: delivery.instanceKey,
+      availableAt: delivery.availableAt,
+      acceptedAt: delivery.acceptedAt,
+      sizeBytes: delivery.sizeBytes,
+      retrySafety: delivery.retrySafety,
+      ordering: delivery.ordering,
+    };
+  }
+
+  private canonicalCommitment(value: unknown): string {
+    return createHash('sha256')
+      .update(axEventCanonicalJson(value))
+      .digest('hex');
   }
 
   private rowToDelivery(row: DeliveryRow): AxEventDelivery {
@@ -705,9 +1083,126 @@ export class AxSQLiteEventStore implements AxEventStore, AxProgramStateStore {
           state_json TEXT NOT NULL,
           updated_at INTEGER NOT NULL
         );
-        PRAGMA user_version = 1;
+        CREATE TABLE event_verifier_transitions (
+          operation_id TEXT PRIMARY KEY,
+          request_commitment TEXT NOT NULL,
+          receipt_json TEXT NOT NULL,
+          child_delivery_id TEXT NOT NULL,
+          child_commitment TEXT NOT NULL,
+          created_at INTEGER NOT NULL
+        );
+        CREATE TABLE event_store_metadata (
+          metadata_key TEXT PRIMARY KEY,
+          metadata_value TEXT NOT NULL
+        );
+        PRAGMA user_version = 4;
+      `);
+    } else if (version === 1) {
+      this.db.exec(`
+        CREATE TABLE event_verifier_transitions (
+          operation_id TEXT PRIMARY KEY,
+          request_commitment TEXT NOT NULL,
+          receipt_json TEXT NOT NULL,
+          child_delivery_id TEXT NOT NULL,
+          child_commitment TEXT NOT NULL,
+          created_at INTEGER NOT NULL
+        );
+        CREATE TABLE event_store_metadata (
+          metadata_key TEXT PRIMARY KEY,
+          metadata_value TEXT NOT NULL
+        );
+        PRAGMA user_version = 4;
+      `);
+    } else if (version === 2) {
+      this.db.transaction(() => {
+        const rows = this.db
+          .prepare(
+            `SELECT operation_id, request_json, record_json, created_at
+             FROM event_verifier_transitions`
+          )
+          .all() as Array<{
+          operation_id: string;
+          request_json: string;
+          record_json: string;
+          created_at: number;
+        }>;
+        this.db.exec(`
+          ALTER TABLE event_verifier_transitions
+            RENAME TO event_verifier_transitions_v2;
+          CREATE TABLE event_verifier_transitions (
+            operation_id TEXT PRIMARY KEY,
+            request_commitment TEXT NOT NULL,
+            receipt_json TEXT NOT NULL,
+            child_delivery_id TEXT NOT NULL,
+            child_commitment TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS event_store_metadata (
+            metadata_key TEXT PRIMARY KEY,
+            metadata_value TEXT NOT NULL
+          );
+        `);
+        const insert = this.db.prepare(
+          `INSERT INTO event_verifier_transitions
+           (operation_id, request_commitment, receipt_json, child_delivery_id,
+            child_commitment, created_at)
+           VALUES(?,?,?,?,?,?)`
+        );
+        for (const row of rows) {
+          const request = JSON.parse(
+            row.request_json
+          ) as AxEventVerifierTransitionRequest;
+          const legacy = JSON.parse(row.record_json) as {
+            receipt: AxEventPublishReceipt;
+            child: AxEventDelivery;
+          };
+          insert.run(
+            row.operation_id,
+            this.canonicalCommitment(request),
+            JSON.stringify(legacy.receipt),
+            legacy.child.id,
+            this.canonicalCommitment(
+              this.persistedChildProjection(legacy.child)
+            ),
+            row.created_at
+          );
+        }
+        this.db.exec(`
+          DROP TABLE event_verifier_transitions_v2;
+          INSERT INTO event_store_metadata(metadata_key, metadata_value)
+          VALUES('${VERIFIER_MIGRATION_CLEANUP_KEY}', '1');
+          PRAGMA user_version = 4;
+        `);
+      })();
+    } else if (version === 3) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS event_store_metadata (
+          metadata_key TEXT PRIMARY KEY,
+          metadata_value TEXT NOT NULL
+        );
+        INSERT OR REPLACE INTO event_store_metadata(metadata_key, metadata_value)
+        VALUES('${VERIFIER_MIGRATION_CLEANUP_KEY}', '1');
+        PRAGMA user_version = 4;
       `);
     }
+  }
+
+  private completeVerifierMigrationCleanup(): void {
+    const pending = this.db
+      .prepare(
+        'SELECT 1 FROM event_store_metadata WHERE metadata_key=? AND metadata_value=?'
+      )
+      .get(VERIFIER_MIGRATION_CLEANUP_KEY, '1');
+    if (!pending) return;
+    const [checkpoint] = this.db.pragma('wal_checkpoint(TRUNCATE)') as Array<{
+      busy: number;
+    }>;
+    if (checkpoint?.busy) {
+      throw new Error('Verifier journal migration cleanup is still pending');
+    }
+    this.db
+      .prepare('DELETE FROM event_store_metadata WHERE metadata_key=?')
+      .run(VERIFIER_MIGRATION_CLEANUP_KEY);
   }
 
   private prune(now: number): void {
