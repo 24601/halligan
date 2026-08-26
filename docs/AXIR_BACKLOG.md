@@ -24,6 +24,13 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
   - TS paths: `src/ax/event/components.ts`
   - Impact: TypeScript exposes a trusted process-local event integration manager with stable component IDs and versions, dependency ordering, scoped reverse disposers, transactional activation rollback, serialized transitions, cooperative abort, inspectable diagnostics, and manager-visible hot replacement. Generated Python, Java, C++, Go, and Rust event runtimes retain their existing source lifecycle but do not expose this generic host component API.
   - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+- `axir-2026-08-25-port-gepa-proposal-policy-guidance-and-references` [axoptimize] Port GEPA proposal-policy guidance and references
+  - Status: open
+  - Source PR: #2
+  - Source commit: `ca760294f5ea4f207052c39c2218e1195103bc2a`
+  - TS paths: `src/ax/agent/agent.test.ts`, `src/ax/agent/agentInternal/optimizer.ts`, `src/ax/dsp/common_types.ts`, `src/ax/dsp/optimizers/gepa.test.ts`, `src/ax/dsp/optimizers/gepa.ts`, `src/ax/dsp/optimizers/gepaReflection.test.ts`, `src/ax/dsp/optimizers/gepaReflection.ts`
+  - Impact: AxGEPA now supports custom proposal policies, trusted in-memory optimization references, additive guidance, and bounded reflective examples; generated backends need equivalent proposal-boundary options and validation semantics.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 - `axir-2026-08-25-port-provider-neutral-visual-observation-sampling-policy` [axai] Port provider-neutral visual observation sampling policy
   - Status: open
   - Source PR: #18
@@ -31,3 +38,487 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
   - TS paths: `src/ax/ai/index.ts`, `src/ax/ai/visual`
   - Impact: TypeScript hosts can apply revision-, freshness-, authority-, change-, and rolling-budget-aware selection to host-captured visual observations; generated language packages do not yet expose the AxVisualObservation or AxFrameSampler policy.
   - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+
+## Done
+
+- `axir-2026-06-07-port-mcp-client-and-transports` [axmcp] Port MCP client and transports
+  - Status: done
+  - Source commit: `4e8da4ba`
+  - TS paths: `src/ax/mcp`
+  - Impact: Generated Python, Java, C++, Go, and Rust packages do not yet expose the modern MCP client, transports, OAuth discovery, or SSRF guard behavior.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-06-07
+  - Completed by: `working-tree`
+  - Verification: `npm run test:axir`
+- `axir-2026-06-16-match-gepa-best-candidate-tie-break-to-prefer-the-accepted-evolu` [axoptimize] Match GEPA best-candidate tie-break to prefer the accepted evolution
+  - Status: done
+  - Source PR: #546
+  - Source commit: `d7570019ba945edb4a733345cc63a080463fdc3a`
+  - TS paths: `src/ax/dsp/optimizers/gepa.ts`, `src/ax/dsp/optimizers/gepa.test.ts`
+  - Impact: GEPA compile() now breaks a scalarized-score tie on the Pareto front toward the later-discovered candidate, so an accepted evolution that only ties the seed surfaces in componentMap instead of the seed text. Generated Python/Java/C++/Go/Rust AxGEPA selection still breaks ties toward the earlier candidate (the seed) and can return the original instruction, drifting from the TS optimizer.
+  - Suggested AxIR work: Update the AxGEPA candidate-selection lowering so a scalarized-score tie selects the later candidate.; Add a TS-derived axoptimize conformance fixture for a tie between the seed and an accepted evolution.; Run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-06-28
+  - Completed by: `working-tree`
+  - Verification: `npm run test:axir; npm run axir:check-packages`
+- `axir-2026-06-24-port-anthropic-transient-error-classification-streaming-retry-fa` [axai] Port Anthropic transient-error classification + streaming retry/failover
+  - Status: done
+  - Source PR: #556
+  - Source commit: `2d1a5f96f033640bf4e892e866fde99bc92e8268`
+  - TS paths: `src/ax/ai`
+  - Impact: Generated Python/Java/C++/Go/Rust packages still map Anthropic streaming error events (overloaded_error/api_error/rate_limit_error) to refusals instead of retryable status errors, and lack the balancer's 529 retryability, pre-content streaming-overload retry-with-backoff, and mid-stream failure recording — so transient Anthropic errors hard-fail there with no retry or failover.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-06-25
+  - Completed by: `working-tree`
+  - Verification: `npm run test:axir`
+- `axir-2026-06-26-port-ace-agentic-context-engineering-optimizer` [axoptimize] Port ACE agentic context engineering optimizer
+  - Status: done
+  - Source commit: `1b26efd014295c7dd88b8544268d807a521b1679`
+  - TS paths: `src/ax/dsp/optimizers/ace.ts`, `src/ax/dsp/optimizers/acePlaybook.ts`, `src/ax/dsp/optimizers/aceTypes.ts`, `src/ax/dsp/playbook.ts`
+  - Impact: TypeScript exposes the AxACE optimizer plus the public playbook() concept (an AxPlaybook handle with evolve/update/applyTo/render/load, and agent.playbook()), wrapping ACE's structured playbook artifact, offline compile loop, and online playbook update. Generated Python/Java/C++/Go/Rust expose optimize()/AxGEPA but no matching ACE engine or playbook() concept yet.
+  - Suggested AxIR work: Author ACE deterministic playbook semantics (apply curator operations, prune, dedupe, render, stats, bullet feedback) as ax.optimize.semantic ops in ir/axcore/optimize.axir and add TS-derived axoptimize conformance fixtures.; Add the AxACE engine (reflector/curator sub-programs, compile loop, online update, hydrate, artifact) to each language template, mirroring AxGEPA.; Expose the public surface per language: playbook(program, options) factory + AxPlaybook handle + agent.playbook(), mirroring optimize()/agent.optimize(); register symbols in runtime_model.go.; Add per-language ax-{lang}-playbook skills and an ace_playbook example, then run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-06-28
+  - Completed by: `working-tree`
+  - Verification: `npm run test:axir; npm run axir:check-packages`
+- `axir-2026-06-30-port-claude-sonnet-5-adaptive-thinking-request-mapping` [axai] Port Claude Sonnet 5 adaptive-thinking request mapping
+  - Status: done
+  - Source PR: #558
+  - Source commit: `e53ca54bee275d3627035e4d99dcd97c261d7c13`
+  - TS paths: `src/ax/ai/anthropic/api.ts`, `src/ax/ai/anthropic/api.test.ts`, `src/ax/ai/anthropic/info.ts`, `src/ax/ai/anthropic/types.ts`
+  - Impact: TS routes claude-sonnet-5 (direct + Vertex) through the adaptive thinking surface: thinking { type: 'adaptive' } + output_config.effort, with no budget_tokens (the legacy thinking.type.enabled / budget_tokens shape is rejected with 400 by the model). Generated Python/Java/C++/Go/Rust packages still emit budget_tokens for Sonnet 5 (or lack the model entirely), so they build requests the model rejects and never map thinkingTokenBudget -> effort for it.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-06-30
+  - Completed by: `working-tree`
+  - Verification: `npm run axir:conformance:check; npm run axir:check-packages; npm run test:axir`
+- `axir-2026-07-01-preserve-the-memories-prompt-cache-breakpoint-across-setsignatur` [axagent] Preserve the memories prompt-cache breakpoint across setSignature()
+  - Status: done
+  - Source commit: `6d7286ce`
+  - TS paths: `src/ax/agent/agentInternal/coordinator.ts`
+  - Impact: In TS the memories block keeps its prompt-cache breakpoint after the agent rebuilds its signature via setSignature(); a narrow coordinator fix restored this. Generated Python/Java/C++/Go/Rust ports may drop the memories cache breakpoint when the signature is rebuilt mid-run, losing prompt-cache reuse for the memories section and paying full tokens for it every turn.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-07-04
+  - Completed by: `working-tree`
+  - Verification: `npm run axir:conformance:check; npm run axir:generate-packages; npm run axir:check-packages; npm run test:axir; npm run axir:backlog:validate; npm run example -- list --json; npm run website:prepare; npm run website:check; npm run test:examples:generated; git diff --check`
+- `axir-2026-07-02-port-the-shared-distiller-executor-runtime-session-and-evidence-` [axagent] Port the shared distiller/executor runtime session and evidence-by-reference handoff
+  - Status: done
+  - Source commit: `23953349`
+  - TS paths: `src/ax/agent/agentInternal/sharedSession.ts`, `src/ax/agent/agentInternal/runtimeExecution.ts`, `src/ax/agent/agentInternal/runtimeExecutionSession.ts`, `src/ax/agent/agentInternal/pipelineForward.ts`, `src/ax/agent/agentInternal/stagePolicy.ts`, `src/ax/agent/agentInternal/coordinator.ts`, `src/ax/agent/rlm.ts`, `src/ax/agent/templates/rlm/distiller.md`, `src/ax/agent/templates/rlm/executor.md`
+  - Impact: Historical impact before completion: generated Python/Java/C++/Go/Rust agents ran the distiller and executor as isolated stages and materialized distilled evidence into the executor prompt. This completed port now keeps one shared runtime session for JavaScript-capable runtimes, exposes evidence by reference as inputs.distilledContext, sends only a compact Distilled Context Summary in the executor prompt, preserves real shape hints, and keeps the fallback prompt-summary contract for non-JavaScript runtimes.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-07-04
+  - Completed by: `working-tree`
+  - Verification: `npm run axir:conformance:check; npm run axir:generate-packages; npm run axir:check-packages; npm run test:axir; npm run axir:backlog:validate; npm run example -- list --json; npm run website:prepare; npm run website:check; npm run test:examples:generated; git diff --check`
+- `axir-2026-07-02-port-the-unified-relevance-ranker-catalog-backed-search-and-advi` [axagent] Port the unified relevance ranker, catalog-backed search, and advisory relevance hints
+  - Status: done
+  - Source commit: `6840ab39`
+  - TS paths: `src/ax/agent/agentInternal/relevanceRanker.ts`, `src/ax/agent/agentInternal/skillsHelpers.ts`, `src/ax/agent/agentInternal/skillsTypes.ts`, `src/ax/agent/agentInternal/memoriesHelpers.ts`
+  - Impact: The local relevance ranker (rankDocuments), catalog-backed skills/memories search with host precedence, the advisory relevanceHints input field, and the Available Skills index are TS-only and default-ON in TypeScript (RELEVANCE_RANKING_DEFAULT). The five generated ports do not ship the ranker, so module/skill/memory discovery is unranked there and discover precision-at-1 plus substance accuracy on weaker models diverge from TS. config.ts documents this as the tracked follow-up.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-07-04
+  - Completed by: `working-tree`
+  - Verification: `npm run axir:conformance:check; npm run axir:generate-packages; npm run axir:check-packages; npm run test:axir; npm run axir:backlog:validate; npm run example -- list --json; npm run website:prepare; npm run website:check; npm run test:examples:generated; git diff --check`
+- `axir-2026-07-03-port-autoupgrade-smart-defaults-auto-function-discovery-and-runt` [axagent] Port autoUpgrade smart defaults: auto function-discovery and runtime-only oversized inputs
+  - Status: done
+  - Source commit: `c1143238`
+  - TS paths: `src/ax/agent/agentInternal/runtimeInputState.ts`, `src/ax/agent/agentInternal/runtimeDiscovery.ts`, `src/ax/agent/runtime.ts`, `src/ax/agent/config.ts`
+  - Impact: autoUpgrade (ON by default in TS) auto-enables functionDiscovery once inline tool docs get large, and keeps any oversized input value runtime-only (a truncated preview plus a shape summary in the prompt while the full value stays live on inputs.<field>) even when the field is not declared in contextFields. The generated ports do not implement autoUpgrade, so they neither switch to discovery for large tool catalogs nor auto-protect oversized inputs, diverging from TS on prompt size and discovery behavior for the same agent config.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-07-04
+  - Completed by: `working-tree`
+  - Verification: `npm run axir:conformance:check; npm run axir:generate-packages; npm run axir:check-packages; npm run test:axir; npm run axir:backlog:validate; npm run example -- list --json; npm run website:prepare; npm run website:check; npm run test:examples:generated; git diff --check`
+- `axir-2026-07-04-direct-respond-distiller-skip-of-the-executor-stage` [axagent] Direct-respond: distiller respond(task, evidence) skips the executor stage
+  - Status: done
+  - TS paths: `src/ax/agent/completion.ts`, `src/ax/agent/runtimePrimitives.ts`, `src/ax/agent/agentInternal/pipelineForward.ts`, `src/ax/agent/agentInternal/actorLoop.ts`, `src/ax/agent/templates/rlm/distiller.md`
+  - Impact: Without the port, generated agents would always run the executor stage even when the distiller answered from context, and the respond primitive in TS prompts would be a dangling reference in ports.
+  - Suggested AxIR work: Landed lockstep in the same change: agent.axir @agent_forward skip branch + respond payload normalization + directRespond policy flags (stage-scoped clone for the executor renderer); rlm-prompts.json: respond primitive + final disabledBy:directRespondOnly + distiller template byte-sync + discover.stages drift fix; Real-engine bootstraps (goja, quickjs java/cpp/rust, python quickjs) install the respond global; Conformance: direct-respond-skip / direct-respond-covenant-with-functions / direct-respond-kill-switch + axagent-real/agent-runtime-real-javascript-respond; ledger capability agent.pipeline.direct_respond
+  - Completed at: 2026-07-04
+  - Completed by: `working-tree`
+  - Verification: `go -C tools/axir test -count=1 ./... (all 5 language conformance incl. the 3 new direct-respond fixtures and the G2 anti-facade self-test); packages/go: go run ./conformance ir/conformance/axagent-real (real goja engine executes model-authored respond() and skips the executor); npx vitest run src/ax/agent (663 tests incl. agent.directRespond.test.ts 20 cases + rlmPromptsSync primitives-parity test); node scripts/axir-prompt-sync-check.mjs`
+- `axir-2026-07-12-ace-reflector-bullettags-shape-guard` [axoptimize] Mirror the ACE reflector bulletTags shape guard in optimize.axir
+  - Status: done
+  - TS paths: `src/ax/dsp/optimizers/ace.ts`, `src/ax/dsp/optimizers/ace.test.ts`, `src/ax/dsp/optimizers/aceTypes.ts`, `src/ax/dsp/optimizers/acePlaybook.ts`, `src/ax/dsp/playbook.test.ts`
+  - Impact: TS now normalizes the reflector's model-produced bulletTags (single object or junk instead of an array) before tag application and curator target resolution; live gpt-5.4-mini reflections triggered the unguarded for...of crash mid-update. optimize.axir reads %reflection["bulletTags"] with only a missing-key default (optimize.axir:1725), so ported ACE updates can still crash or mis-iterate on the same malformed reflector output. Additionally, TS delta-history entries now record updatedBulletIds (ADD ids are assigned at apply time and were unrecoverable from the operations alone); the agent playbook dedupe uses it so pruned lessons re-learn — ports' artifact shape lacks the field. Review follow-ups: renderPlaybook now returns empty string for a zero-bullet/no-description playbook (ports must match to avoid injecting a bare "## Context Playbook" header).
+  - Suggested AxIR work: Add an is-array guard (wrap single objects, drop malformed entries) around the bulletTags read in optimize.axir's reflection handling.; Record updatedBulletIds on delta-history entries in optimize.axir's apply path.; Add or update the TS-derived conformance fixture, then run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-07-20
+  - Completed by: `1e1e849eb2c09f36068f15f885e2f0e66fddf68d`
+  - Verification: `AxIR normalizes scalar and string bulletTags shapes; five-target conformance, release verify, and perturbation checks passed.`
+- `axir-2026-07-12-playbook-config-attach-and-run-end-failure-learning` [axagent] Port the agent playbook config option and run-end failure learning
+  - Status: done
+  - TS paths: `src/ax/agent/playbookConfig.ts`, `src/ax/agent/agentInternal/failureReport.ts`, `src/ax/agent/agentInternal/coordinator.ts`, `src/ax/agent/agentInternal/actorLoop.ts`, `src/ax/agent/agentInternal/pipelineForward.ts`, `src/ax/agent/agentInternal/agentOptimizeTypes.ts`, `src/ax/agent/agentPlaybookLearning.test.ts`
+  - Impact: TS agents accept a construction-time `playbook` option: the rendered playbook is injected into the actor prompt and a run-end node harvests deterministic failure signals (error turns, repeated dead-ends, tool errors) into one bounded ACE update whose curated avoidance rules persist via onUpdate snapshots (signature dedupe rides the snapshot artifact). The five generated ports have neither the playbook attachment nor the failure harvest, so ported agents repeat failures TS agents learn to avoid. agentOptimizeTypes.ts documents the option as TS-first. Review follow-ups: dedupe re-learns after a transient reflector failure (curator-undefined guard); the recorded covered-signature set is capped to the shown digest; buildFailureReport is non-fatal.
+  - Suggested AxIR work: Decide whether ports get the full ACE engine or consume TS-produced playbook snapshots (render-only attach + failure harvest without curation).; Add the run-end failure-report op to agent.axir and mirror the digest/dedupe semantics.; Add or update the TS-derived conformance fixture, then run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-07-20
+  - Completed by: `1e1e849eb2c09f36068f15f885e2f0e66fddf68d`
+  - Verification: `AxIR attaches configured playbooks and records run-end failure signals; shared fixtures and five-target release verify passed.`
+- `axir-2026-07-12-port-axeventruntime-deterministic-single-worker-semantics` [axprogram] Port AxEventRuntime deterministic single-worker semantics
+  - Status: done
+  - Source commit: `9c0520371669a553eed605351fdd5417a734da1f`
+  - TS paths: `src/ax/event`
+  - Impact: Generated Python, Java, C++, Go, and Rust now enforce strict same-instance retry ordering and normalize callback/default event input through the destination signature, including cloning accepted values, stripping undeclared fields, and rejecting invalid values before invocation.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-07-14
+  - Completed by: `working-tree`
+  - Verification: `npm run test:axir; five generated axevent lifecycle runners; npm run axir:check-packages`
+- `axir-2026-07-12-port-mcp-event-listening-and-axeventruntime-adapter-semantics` [axmcp] Port MCP event listening and AxEventRuntime adapter semantics
+  - Status: done
+  - Source commit: `47856347b35aed15f2ec0f7884c235f0868c3f88`
+  - TS paths: `src/ax/mcp/client.ts`
+  - Impact: Generated Python, Java, C++, Go, and Rust now expose catalog snapshots, explicit/all/selector subscription policies, logical ownership, dynamic catalog reconciliation, reconnect restoration, and real Streamable HTTP/SSE wake/resume behavior.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-07-14
+  - Completed by: `working-tree`
+  - Verification: `npm run test:axir; node --import=tsx scripts/test-generated-mcp-events.ts --languages=python,java,cpp,go,rust; npm run axir:check-packages`
+- `axir-2026-07-12-responder-chain-of-evidence-citations` [axagent] Port the responder chain-of-evidence citations option
+  - Status: done
+  - TS paths: `src/ax/agent/config.ts`, `src/ax/agent/synthesizer.ts`, `src/ax/agent/agentInternal/synthesizerSignature.ts`, `src/ax/agent/agentInternal/coordinator.ts`, `src/ax/agent/agentInternal/agentOptimizeTypes.ts`, `src/ax/agent/agentCitations.test.ts`
+  - Impact: TS agents accept an opt-in `citations` option: the responder signature gains an optional evidenceCitations string[] output field (instruction carried in the field description, no template change), citations are validated subset-only against the final/respond evidence object's top-level keys plus nested record ids, violations re-prompt via the validation-retry loop, and the field can be surfaced or hidden with an onCitations observer. The five generated ports build the responder signature without the field and have no citation validation, so ported agents cannot produce grounded, validated citations. Review follow-ups: valid citation ids now include numeric ids and ids nested in keyed objects (not only arrays); an empty-{} evidence object rejects fabricated citations while an absent evidence arg skips validation; the field description is conditional on includeMemoryIds; streaming onCitations accumulates array slices.
+  - Suggested AxIR work: Mirror the optional citations output field in agent.axir's @build_responder_signature and add the citation policy flag.; Port the subset validation as a responder validation rule (ports already run validation_retries: 2).; Add or update the TS-derived conformance fixture, then run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-07-20
+  - Completed by: `1e1e849eb2c09f36068f15f885e2f0e66fddf68d`
+  - Verification: `AxIR collects, validates, retries, and hides nested citation IDs; shared fixtures and five-target release verify passed.`
+- `axir-2026-07-12-stage-instruction-component-dead-knob-fix` [axagent] Mirror the stage-owned ::instruction component fix (dead knob) in ports
+  - Status: done
+  - TS paths: `src/ax/agent/AxAgent.ts`, `src/ax/agent/agentInternal/signatureBuilders.ts`
+  - Impact: TS agent stages previously exposed instruction optimizable components on their inner split programs; values set there were silently wiped by _buildSplitPrograms rebuilds and never rendered in the actor prompt, so optimizers tuned a dead surface. TS now backs ::instruction on the stage itself (agent.setInstruction()), filters the dead split-program knobs, and composes the value at the top of the actor definition. TS also gained a sibling additive instruction channel: agent.addActorInstruction() appends to stage.instructionAddenda[], composed into the actor definition after the ::instruction value. If ports expose equivalent instruction components on generated agents, they have the same dead-knob behavior and optimizer budget waste, and lack the additive addenda channel.
+  - Suggested AxIR work: Check whether generated agents expose instruction components; if so, mirror the stage-owned backing + actor-definition compose in agent.axir.; Mirror the additive instructionAddenda channel (addActorInstruction()) in the ports' actor-definition builder.; Add or update the TS-derived conformance fixture, then run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-07-20
+  - Completed by: `1e1e849eb2c09f36068f15f885e2f0e66fddf68d`
+  - Verification: `AxIR composes stage-owned instructions into actor prompts; shared fixtures and five-target release verify passed.`
+- `axir-2026-07-13-agent-playbook-verified-evolve` [axagent] Port agent.playbook().evolve() — verified playbook learning from a task set
+  - Status: done
+  - TS paths: `src/ax/agent/agentInternal/agentPlaybook.ts`, `src/ax/agent/agentInternal/playbookEvolve/playbookEvolve.ts`, `src/ax/agent/agentInternal/playbookEvolve/playbookEvolveTypes.ts`, `src/ax/agent/agentInternal/playbookEvolve/evalHarness.ts`, `src/ax/agent/agentInternal/playbookEvolve/failureClusters.ts`, `src/ax/agent/agentInternal/playbookEvolve/weaknessMiner.ts`, `src/ax/agent/agentInternal/playbookEvolve/proposals.ts`, `src/ax/agent/agentInternal/coordinator.ts`, `src/ax/agent/agentInternal/pipelineForwardForEvaluation.ts`, `src/ax/agent/agentInternal/agentOptimizeTypes.ts`, `src/ax/agent/agentInternal/playbookEvolve/playbookEvolveUnits.test.ts`, `src/ax/agent/agentInternal/playbookEvolve/playbookEvolve.test.ts`
+  - Impact: TS agents gain agent.playbook().evolve(dataset, options): agent.playbook() returns an agent-aware handle (AxAgentPlaybook wrapping the stage AxPlaybook) whose evolve() runs a sequential batch eval over an AxAgentEvalDataset, clusters failures deterministically by the run's structured failureSignals (also threaded onto AxAgentEvalPrediction), mines each cluster for a grounded weakness (evidence quotes must substring-match real run excerpts), and proposes ONE playbook bullet per weakness. With verify (default on) a bullet is kept only when held-in gain >= minHeldInGain AND held-out non-regression within epsilon, else it rolls back exactly; verify:false applies the mined lessons without the gate. Bullets-only — no instruction editing. The five generated ports have neither the agent-aware playbook handle nor evolve(), and their eval predictions lack failureSignals; ported agents cannot verify-learn from a failing task set.
+  - Suggested AxIR work: Decide the port shape: full evolve() loop vs consuming TS-produced playbook snapshots.; Thread failureSignals through the ports' eval prediction shape; expose an agent-aware playbook handle with evolve() over the existing ACE playbook.; Add or update the TS-derived conformance fixture, then run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-07-20
+  - Completed by: `1e1e849eb2c09f36068f15f885e2f0e66fddf68d`
+  - Verification: `Generated runtimes implement batch evaluation, weakness mining, held-in and held-out gates, metric budgets, and rollback; five-target release examples passed.`
+- `axir-2026-07-13-anthropic-ir-never-suppresses-sampling-params-on-adaptive-models` [axai] Anthropic: IR never suppresses sampling params on adaptive models
+  - Status: done
+  - Source PR: #560
+  - Source commit: `4d1db6531edbfe47bc378f325c00a492111631d7`
+  - TS paths: `src/ax/ai/anthropic/api.ts`, `src/ax/ai/anthropic/api.test.ts`
+  - Impact: anthropic_apply_model_config_impl copies temperature/top_p/top_k into the payload unconditionally, with no adaptive-model guard anywhere in the Anthropic IR. Anthropic rejects sampling params on adaptive models (Opus 4.6/4.7/4.8, Sonnet 5) with an unconditional HTTP 400: '`temperature` is deprecated for this model.' So generated Python/Java/C++/Go/Rust targets 400 on every adaptive-model call. This is broader than the TS bug fixed in this PR: TS at least guarded Opus 4.7+, the IR guards nothing. Fix: mirror the TS guard by deleting temperature/top_p/top_k in anthropic_apply_model_config_impl when the model matches the adaptive set (the same is_adaptive detection already exists in anthropic_thinking_config_impl).
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-07-20
+  - Completed by: `1e1e849eb2c09f36068f15f885e2f0e66fddf68d`
+  - Verification: `AxIR suppresses unsupported sampling parameters for qualified adaptive Anthropic model IDs; shared fixtures and five-target release verify passed.`
+- `axir-2026-07-14-anthropic-ir-never-requests-summarized-thinking-display-on-adapt` [axai] Anthropic: IR never requests summarized thinking display on adaptive models
+  - Status: done
+  - Source PR: #561
+  - Source commit: `5dfd044af5b6ac2c1839a40262286fec7c55e2ec`
+  - TS paths: `src/ax/ai/anthropic/types.ts`, `src/ax/ai/anthropic/api.ts`
+  - Impact: TS now sets thinking.display on the adaptive request: display='summarized' by default (gated on showThoughts) so the human-readable reasoning summary is returned, or 'omitted' when showThoughts===false. The Anthropic IR's adaptive branch (provider.axir, is_adaptive) builds thinking={type:'adaptive'} with no display field, so generated Python/Java/C++/Go/Rust targets inherit Anthropic's server default of display='omitted' on Sonnet 5 / Opus 4.7+ — the model still thinks and bills, but streams empty thinking text, and there is no way to request the summary. Fix: mirror the TS derivation by setting thinking['display'] in the is_adaptive block from the showThoughts option (summarized unless showThoughts is false).
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-07-20
+  - Completed by: `1e1e849eb2c09f36068f15f885e2f0e66fddf68d`
+  - Verification: `AxIR emits adaptive thinking display summarized or omitted from showThoughts and preserves streamed thinking text; shared fixtures and five-target release verify passed.`
+- `axir-2026-07-18-port-axflow-mermaid-dialect-tomermaid-frommermaid` [axflow] Port AxFlow mermaid dialect (flow(text) + toString)
+  - Status: done
+  - Source commit: `e7a8e3a8445f1611807d2d8e2447c7fa95534f93`
+  - TS paths: `src/ax/flow/dependencyAnalyzer.ts`, `src/ax/flow/flow.fromMermaid.test.ts`, `src/ax/flow/flow.toMermaid.test.ts`, `src/ax/flow/flow.ts`, `src/ax/flow/mermaid.parse.test.ts`, `src/ax/flow/mermaid.ts`, `src/ax/flow/steps.ts`, `src/ax/flow/subContext.ts`
+  - Impact: TS AxFlow steps now carry inspectable build-time meta (branch bodies, loop bodies, feedback targets); the TS surface is ONLY the shorthand: flow(mermaidText, bindings?) compiles a mermaid flowchart with %%ax signature directives into a runnable flow, and AxFlow.toString(renderOptions?) renders any flow back (String(wf) round-trips via flow(String(wf))). The explicit toMermaid/fromMermaid aliases were removed before any release. Generated Python/Java/C++/Go/Rust flow surfaces cannot emit or load the dialect. Parity means tools/axir template + codegen builder + golden updates: each language's idiomatic equivalent of the shorthand only (factory string arg + str dunder/ToString/Display with render options) — do NOT add explicit toMermaid/fromMermaid names. The diagram text is language-neutral by design (signatures in %%ax comments + edges); parity is one implementation in tools/axir generated into all five ports, not five hand-written parsers. Depends on the extended-grammar entry.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-07-20
+  - Completed by: `3e88dbf03237645723aef7261d86177d2eec20f5`
+  - Verification: `Shared AxIR Mermaid parser/compiler/renderer, 14 cross-language fixtures, offline examples, package freshness, five-target release verification, perturbation gates, website checks, and full npm test.`
+- `axir-2026-07-18-port-extended-signature-string-grammar-modifier-bags-nested-obje` [axgen] Port extended signature string grammar (modifier bags, nested objects, code language)
+  - Status: done
+  - Source commit: `31f293d0ebe925f398e3310055e4d2b6ef3b1b2e`
+  - TS paths: `src/ax/dsp/complex_object_validation.test.ts`, `src/ax/dsp/parser.test.ts`, `src/ax/dsp/parser.ts`, `src/ax/dsp/sig-string-roundtrip.test.ts`, `src/ax/dsp/sig-string-vs-fluent.test.ts`, `src/ax/dsp/sig.ts`, `src/ax/dsp/sigtypes.ts`
+  - Impact: TS string signatures now accept type modifier bags — min/max, format, pattern, cache, item, code language — and nested object{...} field lists, and AxSignature.toString() serializes them losslessly. Generated Python/Java/C++/Go/Rust string-signature parsers cannot parse the new grammar and their renderers cannot emit it; their FieldType models already carry min/max/format/fields slots (e.g. packages/python/axllm/signature.py) so only the string grammar and serializer lag TS. PORTABILITY-CRITICAL: signature strings are the cross-language contract and TS toString() now emits this grammar, so until ported, signatures/diagrams authored or serialized in TS are unreadable by the other five languages.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-07-20
+  - Completed by: `08d64949a801a03ae531352a29e4406c7d053112`
+  - Verification: `npm run test:axir; npm run axir:check-packages; npm run axir:gate:ledger`
+- `axir-2026-07-21-adaptive-axbalancer-provider-routing` [axai] Adaptive AxBalancer provider routing
+  - Status: done
+  - Source commit: `f1d93bbcc79a4223e21c4197cf875a23e889c37f`
+  - TS paths: `src/ax/ai/balance.ts`, `src/ax/ai/balance_adaptive.ts`
+  - Impact: Adds opt-in chat routing based on shared failure EWMA, log-latency Thompson sampling, deadline risk, and estimated provider cost.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-07-22
+  - Completed by: `1b74dc0c`
+  - Verification: `Focused AxBalancer tests; deterministic AxIR conformance and package checks; test:axir release verifier; coverage and anti-facade gates; package build; generated examples; TypeDoc; website prepare/check; formatting; backlog validation; git diff check`
+- `axir-2026-07-21-port-gemini-3-6-flash-and-3-5-flash-lite-model-support` [axai] Port Gemini 3.6 Flash and 3.5 Flash-Lite model support
+  - Status: done
+  - Source commit: `1acfd7dede33f7de6c9e2c56a6457bfcec9c95a0`
+  - TS paths: `src/ax/ai/google-gemini`
+  - Impact: TypeScript exposes the new Gemini 3.6 Flash and 3.5 Flash-Lite model IDs, catalog pricing and limits, explicit context caching, and server-managed sampling behavior. Generated Python, Java, C++, Go, and Rust providers do not yet expose equivalent model metadata or omit temperature, top_p, and top_k for these models.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-07-21
+  - Completed by: `d25acf280d7f7e8c8a44cc93bab813af9dacf766`
+  - Verification: `npm run test:axir; npm run axir:check-packages; npm run axir:conformance:check`
+- `axir-2026-07-23-propagate-usage-context-to-internal-agent-summaries` [axagent] Conformance for internal agent summary usage attribution
+  - Status: done
+  - TS paths: `src/ax/agent/runtime.ts`, `src/ax/agent/runtimeOptions.test.ts`
+  - Impact: TypeScript previously omitted request-scoped usageContext when rebuilding forward options for internal tombstone and checkpoint summarizers. AxIR and the generated agents already pass the full option map to equivalent internal model calls, but axagent conformance does not explicitly guard this attribution path against future drift.
+  - Suggested AxIR work: Add an axagent conformance fixture proving that internal summary model calls retain request-scoped usageContext.; Confirm the existing generated Python, Java, C++, Go, and Rust behavior against the fixture.; Run npm run axir:conformance:check and npm run test:axir, then close this entry if all backends pass.
+  - Completed at: 2026-07-24
+  - Completed by: `0d10c4308fc48d8d77e700bc36c649f9cef84b24`
+  - Verification: `npm run test:axir; npm run axir:check-packages; npm run axir:conformance:check`
+- `axir-2026-07-28-port-actor-multi-fence-rejection-before-execution` [axagent] Port actor multi-fence rejection before execution
+  - Status: done
+  - Source PR: #563
+  - Source commit: `eec609f8789e6fe22956e15006c260dbf634f86c`
+  - TS paths: `src/ax/agent/agent.test.ts`, `src/ax/agent/agentInternal/actorLoopTurn.ts`
+  - Impact: Generated Python, Java, C++, Go, and Rust agents may still normalize malformed multi-block actor responses to the first fenced block and execute a partial program.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-07-30
+  - Completed by: `e872fbb9`
+  - Verification: `npm run test:axir; agent-runtime-real-multi-fence-reject passed with real engines on Python, Java, C++, Go, and Rust; npm run axir:check-packages; npm run axir:conformance:check`
+- `axir-2026-07-28-port-managed-context-cache-refresh-recovery` [axai] Port managed context-cache refresh recovery
+  - Status: done
+  - Source commit: `906d8c57`
+  - TS paths: `src/ax/ai/base.ts`, `src/ax/ai/google-gemini/api.ts`, `src/ax/ai/types.ts`
+  - Impact: TypeScript now sends explicit cache TTL updates with PATCH, invalidates failed refreshes, and retries provider-rejected managed caches once without cachedContent; generated languages still treat explicit Vertex cache-resource lifecycle as host-owned.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-07-30
+  - Completed by: `e8434104`
+  - Verification: `npm run test:axir; five generated context_cache_recovery examples; live Gemini cache create, PATCH refresh, and expiry metadata`
+- `axir-2026-07-29-mcp-2026-07-28-modern-era-client` [axmcp] MCP 2026-07-28 modern-era client
+  - Status: done
+  - Source commit: `8b69691ef0fb0d957428f198de38354b46b26069`
+  - TS paths: `src/ax/mcp`
+  - Impact: TypeScript gains a dual-era MCP client for the stateless 2026-07-28 protocol while generated Python, Java, C++, Go, and Rust clients remain on the 2025-11-25 lifecycle.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-07-30
+  - Completed by: `c32c41a8`
+  - Verification: `npm run test:axir; npm run axir:gate:ledger; all D-K tranches closed; legacy and modern localhost harness plus mcp_modern_roundtrip examples passed in Python, Java, C++, Go, and Rust`
+- `axir-2026-07-29-port-dual-era-mcp-discovery-and-classification` [axmcp] Port dual-era MCP discovery and classification
+  - Status: done
+  - Source commit: `4d479b97f933b977c6c79d98fe2fc4b984fb7b96`
+  - TS paths: `src/ax/mcp/client.ts`
+  - Impact: Generated Python, Java, C++, Go, and Rust clients still initialize only the 2025-11-25 stateful lifecycle and do not probe server/discover, classify and cache an endpoint era, retry -32022 with a mutual version, or expose discover and getEra.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-07-30
+  - Completed by: `e43afb35854c370a637f13acf416668f263c7efb`
+  - Verification: `Five-port discover-auto-fallback and discover-modern conformance plus real mcp_sse_roundtrip auto fallback in Python, Java, C++, Go, and Rust; npm run test:axir; 2026-07-30 production evidence: Pipedream reachable and classified legacy 2024-11-05 with tools/resources but strict catalog incomplete because resources/templates/list returned -32601, DeepWiki PASS legacy 2025-11-25 with 3 tools, Cloudflare Docs PASS modern 2026-07-28 with 2 tools and 1 prompt`
+- `axir-2026-07-29-port-mcp-2026-07-28-required-http-headers` [axmcp] Port MCP 2026-07-28 required HTTP headers
+  - Status: done
+  - Source commit: `4d479b97f933b977c6c79d98fe2fc4b984fb7b96`
+  - TS paths: `src/ax/mcp/transports/httpStreamTransport.ts`
+  - Impact: Generated Python, Java, C++, Go, and Rust Streamable HTTP transports still build legacy session headers and do not derive Mcp-Method or Mcp-Name, validate RFC 9110 header values, or omit Mcp-Session-Id for modern requests.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-07-30
+  - Completed by: `afaae693`
+  - Verification: `npm run test:axir; npm run axir:check-packages; modern-transport-headers fixture across python, java, cpp, go, rust`
+- `axir-2026-07-29-port-mcp-cacheable-result-metadata` [axmcp] Port MCP cacheable result metadata
+  - Status: done
+  - Source commit: `4d479b97f933b977c6c79d98fe2fc4b984fb7b96`
+  - TS paths: `src/ax/mcp/cache.ts`
+  - Impact: Generated Python, Java, C++, Go, and Rust catalog and resource readers ignore 2026-07-28 ttlMs and cacheScope metadata and lack the CacheableResult refresh and cache-expiry contract.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-07-30
+  - Completed by: `2067e579`
+  - Verification: `cache-fold.json and read-cache.json pass across Python, Java, C++, Go, and Rust; npm run test:axir; npm run axir:check-packages; npm run axir:conformance:check`
+- `axir-2026-07-29-port-mcp-oauth-rfc-9207-issuer-validation` [axmcp] Port MCP OAuth RFC 9207 issuer validation
+  - Status: done
+  - Source commit: `4d479b97f933b977c6c79d98fe2fc4b984fb7b96`
+  - TS paths: `src/ax/mcp/oauth/oauthHelper.ts`
+  - Impact: Generated Python, Java, C++, Go, and Rust OAuth surfaces are currently stubs, so the RFC 9207 authorization-response iss check is a near-noop until their OAuth authorization-code flows become functional.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-07-30
+  - Completed by: `82272c59`
+  - Verification: `oauth-issuer.json and oauth.json pass in generated Python, Java, C++, Go, and Rust; shared state/issuer validation is now consumed by real authorization-code flows, with host interaction isolated to onAuthCode(url)`
+- `axir-2026-07-29-port-mcp-tasks-extension-v2` [axmcp] Port MCP tasks extension v2
+  - Status: done
+  - Source commit: `4d479b97f933b977c6c79d98fe2fc4b984fb7b96`
+  - TS paths: `src/ax/mcp/tasksV2.ts`
+  - Impact: Generated Python, Java, C++, Go, and Rust clients implement the legacy task draft only and do not negotiate io.modelcontextprotocol/tasks, expose task outcomes and tasks/update input, or consume embedded terminal results and errors.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-07-30
+  - Completed by: `bfe2f5ab`
+  - Verification: `tasks-v2-modern + tasks-v2-violations across Python/Go/Java/C++/Rust; npm run test:axir; npm run axir:check-packages; npm run axir:conformance:check`
+- `axir-2026-07-29-port-modern-mcp-per-request-metadata` [axmcp] Port modern MCP per-request metadata
+  - Status: done
+  - Source commit: `4d479b97f933b977c6c79d98fe2fc4b984fb7b96`
+  - TS paths: `src/ax/mcp/meta.ts`
+  - Impact: Generated Python, Java, C++, Go, and Rust clients do not attach 2026-07-28 protocolVersion and clientCapabilities metadata to every request, leaving a zero-footprint modern metadata boundary in the generated ports.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-07-30
+  - Completed by: `e43afb35854c370a637f13acf416668f263c7efb`
+  - Verification: `Five-port discover-modern conformance covers required _meta, bounded -32022 version retry, Mcp-Param headers, and one-shot -32020 catalog refresh; npm run test:axir`
+- `axir-2026-07-29-port-modern-mcp-subscriptions-listen` [axmcp] Port modern MCP subscriptions listen
+  - Status: done
+  - Source commit: `4d479b97f933b977c6c79d98fe2fc4b984fb7b96`
+  - TS paths: `src/ax/mcp/client.ts`
+  - Impact: Generated Python, Java, C++, Go, and Rust event adapters still use legacy resources/subscribe plus GET/SSE and Last-Event-ID; they do not issue or restart subscriptions/listen POST streams with modern interests.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-07-30
+  - Completed by: `c6253f57`
+  - Verification: `npm run test:axir; legacy and modern MCP event harness across Python, Java, C++, Go, and Rust; mcp_modern_roundtrip examples`
+- `axir-2026-07-29-port-roots-first-mcp-multi-round-trip-requests` [axmcp] Port roots-first MCP multi round-trip requests
+  - Status: done
+  - Source commit: `4d479b97f933b977c6c79d98fe2fc4b984fb7b96`
+  - TS paths: `src/ax/mcp/mrtr.ts`
+  - Impact: Generated Python, Java, C++, Go, and Rust clients initially could not fulfill modern input_required rounds. This completed first tranche deliberately covered roots only and is superseded by the MRTR elicitation host-callback tranche; sampling remains outside the generated-port scope.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-07-30
+  - Completed by: `09354114`
+  - Verification: `mrtr-roots + mrtr-violations across Python/Go/Java/C++/Rust; fresh IDs, byte-exact requestState, current-round-only inputs; npm run test:axir; npm run axir:check-packages; npm run axir:conformance:check; superseded by axir-2026-07-30-port-mcp-mrtr-elicitation-host-callbacks`
+- `axir-2026-07-30-port-legacy-inbound-mcp-elicitation` [axmcp] Port legacy inbound MCP elicitation
+  - Status: done
+  - Source commit: `4f0d018f`
+  - TS paths: `src/ax/mcp/client.ts`
+  - Impact: TypeScript can dispatch a legacy server-initiated elicitation/create request through the host handler, while generated clients currently expose elicitation only inside modern MRTR input rounds; Rust and C++ also lack general inbound server-request plumbing.
+  - Suggested AxIR work: Define a portable inbound server-request dispatch contract and transport boundary.; Add legacy elicitation fixtures and explicit runner arms for all generated languages.; Advertise legacy elicitation only on ports whose transports can receive and answer the request.
+  - Completed at: 2026-07-31
+  - Completed by: `085e3747`
+  - Verification: `npm run test:axir; npm run axir:conformance:check; npm run axir:check-packages; npm run test:axir:tools; npm run website:check; npm run axir:gate:ledger`
+- `axir-2026-07-30-port-mcp-mrtr-elicitation-host-callbacks` [axmcp] Port MCP MRTR elicitation host callbacks
+  - Status: done
+  - Source commit: `4f0d018f`
+  - TS paths: `src/ax/mcp/mrtr.ts`, `src/ax/mcp/client.ts`
+  - Impact: The generated Python, Java, C++, Go, and Rust clients can fulfill roots-only modern MRTR rounds but lack host elicitation callbacks and can advertise sampling or elicitation option keys they cannot execute.
+  - Suggested AxIR work: Replace the roots-only fulfillment op with a shared roots and pending-host-request planner.; Add real elicitation callback surfaces and honest modern capability advertisement to every generated client.; Prove mixed roots and elicitation, requestState echo, sampling rejection, generated package lockstep, and five-language localhost event smoke.
+  - Completed at: 2026-07-30
+  - Completed by: `f053c737`
+  - Verification: `npm test; npm run axir:backlog:validate; generated five-language conformance release verifier; legacy and modern five-language MCP event smoke; TypeScript stdio and HTTP plus five-port foreign-server interop`
+- `axir-2026-07-30-port-task-input-required-fulfillment` [axmcp] Port MCP Tasks v2 input required fulfillment
+  - Status: done
+  - Source commit: `4f0d018f`
+  - TS paths: `src/ax/mcp/client.ts`
+  - Impact: TypeScript can fulfill input_required task status through tasks/update and continue polling, while generated clients currently auto-await only working and terminal task states and do not run the input-request fulfillment loop.
+  - Suggested AxIR work: Reuse the portable MRTR fulfillment planner for task inputRequests.; Add tasks/update request construction and continuation semantics to all generated clients.; Prove roots and elicitation task fulfillment plus missing-handler and sampling violations in five-language fixtures and live smoke.
+  - Completed at: 2026-07-31
+  - Completed by: `085e3747`
+  - Verification: `npm run test:axir; npm run axir:conformance:check; npm run axir:check-packages; npm run test:axir:tools; npm run website:check; npm run axir:gate:ledger`
+- `axir-2026-07-30-port-the-gpt-5-6-reasoning-effort-ladder` [axai] Port the GPT-5.6 reasoning-effort ladder
+  - Status: done
+  - Source commit: `cbaf70906d76c8534373451780b240e190a0f22c`
+  - TS paths: `src/ax/ai/openai/chat_types.ts`, `src/ax/ai/openai/effort.ts`, `src/ax/ai/openai/effort.test.ts`, `src/ax/ai/openai/api.ts`, `src/ax/ai/openai/api.reasoning.test.ts`, `src/ax/ai/openai/responses_api.ts`, `src/ax/ai/openai/responses_api.phase.test.ts`
+  - Impact: Generated Python/Java/C++/Go/Rust clients have no OpenAI thinkingTokenBudget -> reasoning.effort mapping; AxIR models only the DeepSeek and Grok quirk blocks, so the GPT-5.6 ladder is TS-only. The ladder is per API surface: highest reaches xhigh on Chat Completions, which rejects max, and max only on the Responses API.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-07-31
+  - Completed by: `38f1c438`
+  - Verification: `npx vitest run src/ax/ai/openai/api.reasoning.test.ts; npm run test:axir; npm run axir:conformance:check; npm run axir:check-packages; npm run website:check; npm run axir:gate:ledger`
+- `axir-2026-07-31-port-mcp-oauth-discovery-grants-and-refresh` [axmcp] Port MCP OAuth discovery, grants, and refresh
+  - Status: done
+  - Source commit: `9e4f3ed15f28dcc891556cc611ed7da997bb9aac`
+  - TS paths: `src/ax/mcp/oauth/oauthHelper.ts`
+  - Impact: Generated Python, Java, C++, Go, and Rust OAuth transports fabricate bearer tokens instead of performing RFC 9728 discovery, PKCE authorization-code or client-credentials exchange, 60-second-skew refresh, RFC 8707 resource binding, and RFC 9207 issuer validation against the discovered authorization server.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-07-31
+  - Completed by: `ca8619226fe91d893f0e5b51c3ce76a774057456`
+  - Verification: `npm test; npm run website:build; npm run website:check; 2026-07-30 localhost AS live evidence: Python, Java, C++, Go, and Rust passed well-known and 401-challenge authorization-code flows, refresh with 60-second skew, client credentials conformance, and wrong-iss rejection; Pipedream uses bearer-via-SDK and is not claimed as MCP-native OAuth proof`
+- `axir-2026-07-31-port-per-item-url-array-validation` [axgen] Port per-item URL array validation
+  - Status: done
+  - Source PR: #567
+  - Source commit: `d3bc713e4e58921e1346bfbe38625a55af008f62`
+  - TS paths: `src/ax/dsp/extract.test.ts`, `src/ax/dsp/extract/fieldValue.ts`, `src/ax/dsp/extract/structuredJson.ts`, `src/ax/dsp/structured.test.ts`
+  - Impact: Generated Python, Java, C++, Go, and Rust validators may still validate URL arrays as scalar values or skip per-item URL checks, diverging from TypeScript extraction and structured-output validation.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-07-31
+  - Completed by: `4229ba73`
+  - Verification: `npx vitest run src/ax/dsp/structured.test.ts; npm run test:axir; npm run axir:conformance:check; npm run axir:check-packages; npm run website:check; npm run axir:gate:ledger`
+- `axir-2026-07-31-port-structured-object-array-streaming-deduplication` [axgen] Port structured object-array streaming deduplication
+  - Status: done
+  - Source PR: #565
+  - Source commit: `e29c3316a7cbc1d06959eceb58b0d099882d8c52`
+  - TS paths: `src/ax/dsp/response/streaming.ts`, `src/ax/dsp/streaming_duplication.test.ts`
+  - Impact: Generated Python, Java, C++, Go, and Rust streaming runtimes may still run prompt extraction after structured JSON parsing for complex fields, re-emitting object-array items and returning duplicated results.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-07-31
+  - Completed by: `4229ba73`
+  - Verification: `npx vitest run src/ax/dsp/streaming_duplication.test.ts src/ax/dsp/structured.test.ts; npm run test:axir; npm run axir:conformance:check; npm run axir:check-packages; npm run website:check; npm run axir:gate:ledger`
+- `axir-2026-08-02-port-vertex-ai-multi-region-endpoint-routing` [axai] Port Vertex AI multi-region endpoint routing
+  - Status: done
+  - TS paths: `src/ax/ai/vertex.ts`, `src/ax/ai/google-gemini/api.ts`, `src/ax/ai/anthropic/api.ts`
+  - Impact: TypeScript now maps Vertex AI global, us/eu multi-region, and standard regional locations to their documented hosts for Gemini and Anthropic, including Gemini cache operations. Generated Python/Java/C++/Go/Rust providers do not expose equivalent project/region-aware Vertex endpoint selection.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-08-07
+  - Completed by: `486d7fbe7855be0fd50801d1d12c0acc2240252a`
+  - Verification: `npm run axir:check-packages; npm run axir:conformance:check; (cd tools/axir && GOCACHE=/tmp/axir-go-build go test ./internal/axir); npm run test:axir; npm run test:examples:generated; npm run axir:gate:ledger; npm run axir:gate:anti-facade; npm run axir:gate:prompt-sync; npm run skills:check; npm run website:check; npm run test:unit --workspace=@ax-llm/ax -- ai/openai/caching.test.ts ai/openai/usage.test.ts dsp/generate.promptCacheKey.test.ts ai/google-gemini/api.test.ts ai/anthropic/api.test.ts; git diff --check`
+- `axir-2026-08-05-forward-promptcachekey-from-axgen-options-to-the-provider` [axgen] Forward promptCacheKey from AxGen options to the provider
+  - Status: done
+  - Source commit: `d67fced2ea766f6ec392cdd98687b4f051fd8f45`
+  - TS paths: `src/ax/dsp/generate.ts`, `src/ax/dsp/generate.promptCacheKey.test.ts`
+  - Impact: AxGen builds the ai.chat options object field by field; promptCacheKey set in forward options was dropped, so generated Python/Java/C++/Go/Rust ports that mirror this list will also silently drop it and lose OpenAI prompt-cache key routing
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-08-07
+  - Completed by: `486d7fbe7855be0fd50801d1d12c0acc2240252a`
+  - Verification: `npm run axir:check-packages; npm run axir:conformance:check; (cd tools/axir && GOCACHE=/tmp/axir-go-build go test ./internal/axir); npm run test:axir; npm run test:examples:generated; npm run axir:gate:ledger; npm run axir:gate:anti-facade; npm run axir:gate:prompt-sync; npm run skills:check; npm run website:check; npm run test:unit --workspace=@ax-llm/ax -- ai/openai/caching.test.ts ai/openai/usage.test.ts dsp/generate.promptCacheKey.test.ts ai/google-gemini/api.test.ts ai/anthropic/api.test.ts; git diff --check`
+- `axir-2026-08-05-openai-prompt-caching-explicit-cache-breakpoints-and-cache-write` [axai] OpenAI prompt caching: explicit cache breakpoints and cache_write_tokens
+  - Status: done
+  - Source commit: `d67fced2ea766f6ec392cdd98687b4f051fd8f45`
+  - TS paths: `src/ax/ai/openai`, `src/ax/ai/base.ts`, `src/ax/ai/types.ts`
+  - Impact: AxAIOpenAI on GPT-5.6+ emits prompt_cache_key, prompt_cache_options and per-message prompt_cache_breakpoint markers when caching is requested; axNormalizeOpenAIUsage maps cache_write_tokens to cacheCreationTokens and excludes it from promptTokens; getEstimatedCost counts cacheCreationTokens toward the long-context threshold; AxAIServiceOptions gains promptCacheKey
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-08-07
+  - Completed by: `486d7fbe7855be0fd50801d1d12c0acc2240252a`
+  - Verification: `npm run axir:check-packages; npm run axir:conformance:check; (cd tools/axir && GOCACHE=/tmp/axir-go-build go test ./internal/axir); npm run test:axir; npm run test:examples:generated; npm run axir:gate:ledger; npm run axir:gate:anti-facade; npm run axir:gate:prompt-sync; npm run skills:check; npm run website:check; npm run test:unit --workspace=@ax-llm/ax -- ai/openai/caching.test.ts ai/openai/usage.test.ts dsp/generate.promptCacheKey.test.ts ai/google-gemini/api.test.ts ai/anthropic/api.test.ts; git diff --check`
+- `axir-2026-08-07-port-parallel-tool-call-accumulation-for-the-openai-responses-ap` [axai] Port parallel tool-call accumulation for the OpenAI Responses API
+  - Status: done
+  - Source PR: #574
+  - Source commit: `d0b59380`
+  - TS paths: `src/ax/ai/openai/responses_api.ts`, `src/ax/ai/openai/responses_api.tool_calls.test.ts`, `src/ax/ai/deepseek/responses_api.test.ts`
+  - Impact: The non-streaming and streaming OpenAI Responses mappers must preserve every function_call and its call_id so parallel tools execute and their outputs correlate correctly.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-08-15
+  - Completed by: `3a80c93e16e0a499c971bcb58f976d73e7799da3`
+  - Verification: `OpenAI Responses non-streaming and streaming parallel function-call accumulation is implemented and covered by focused tool-call tests; AxIR package and conformance checks pass.`
+- `axir-2026-08-12-port-claude-sonnet-5-permanent-token-pricing-to-generated-target` [axai] Port Claude Sonnet 5 permanent token pricing to generated targets
+  - Status: done
+  - Source PR: #576
+  - Source commit: `2215088b466141dc82c31b8db9206c64295ada6a`
+  - TS paths: `src/ax/ai/anthropic/info.ts`, `src/ax/ai/catalog.test.ts`
+  - Impact: Generated Python, Java, C++, Go, and Rust catalogs still embed the pre-correction Claude Sonnet 5 rates ($3/$15 per 1M, $0.30 cache read, $3.75 cache write), so cost estimates on those targets are ~50% high and cheapest-first model ordering ranks Sonnet 5 above its true cost.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-08-13
+  - Completed by: `526b8fc4`
+  - Verification: `Implemented in PR #576: corrected Anthropic and Vertex Sonnet 5 pricing to $2/$10 per 1M tokens with $0.20 cache read and $2.50 cache write; refreshed AxIR catalog, conformance fixtures, and generated Python, Java, C++, Go, and Rust packages.`
+- `axir-2026-08-13-add-gemini-3-7-flash-model-support` [axai] Add Gemini 3.7 Flash model support
+  - Status: done
+  - Source commit: `83468e8c20e760ece48dc921c67c2bc874860f3f`
+  - TS paths: `src/ax/ai/google-gemini`
+  - Impact: TypeScript should expose the Gemini 3.7 Flash model ID, catalog metadata, explicit context caching, and server-managed sampling behavior; generated language providers remain unchanged.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-08-13
+  - Completed by: `8cbad4e9`
+  - Verification: `Implemented Gemini 3.7 Flash in AxIR Gemini request mapping and conformance; regenerated Python, Java, C++, Go, and Rust packages. Verified with 310 TypeScript Gemini/catalog tests, Python AxAI conformance, Java/C++ generated compilation, axir:conformance:check, and axir:check-packages.`
+- `axir-2026-08-15-mark-deepseek-native-structured-outputs-unsupported` [axai] Mark DeepSeek native structured outputs unsupported
+  - Status: done
+  - Source commit: `3a80c93e16e0a499c971bcb58f976d73e7799da3`
+  - TS paths: `src/ax/ai/deepseek/info.ts`, `src/ax/ai/deepseek/api.ts`, `src/ax/ai/deepseek/responses_api.ts`
+  - Impact: DeepSeek Chat and Responses models reject json_schema response formats, so their portable provider descriptors must report structured_outputs false instead of allowing request planning to assume native schema support.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-08-15
+  - Completed by: `bdb08b78`
+  - Verification: `DeepSeek and DeepSeek Responses advertise structured_outputs false in AxIR descriptors, provider conformance fixtures, and regenerated Python, Java, C++, Go, and Rust packages; descriptor, package freshness, and provider conformance gates pass.`
+- `axir-2026-08-15-port-shape-aware-structured-output-fallback-and-provenance` [axgen] Port shape-aware structured-output fallback and provenance
+  - Status: done
+  - Source commit: `30ae9feee1833307577cc43408d9c0256f8693d7`
+  - TS paths: `src/ax/dsp/generate.ts`, `src/ax/dsp/extract/structuredJson.ts`, `src/ax/agent/agentInternal/signatureBuilders.ts`
+  - Impact: AxGen and Agent code stages must select native schema, validated JSON object, or the canonical __axOutput function by provider capability and output shape, preserve legacy replay, expose rung provenance, and use bounded generated-Agent validation retries.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-08-15
+  - Completed by: `73f1160dfe467c3feda0feb1d15f3f411197a70e`
+  - Verification: `Shape-aware native, validated json_object, and __axOutput rungs plus provenance are implemented in AxIR and regenerated across Python, Java, C++, Go, and Rust; release conformance, package freshness, Goja, QuickJS, semantic parity, ledger, anti-facade, and focused TS tests pass.`
+- `axir-2026-08-15-preserve-complete-output-contracts-when-composing-axgen-instruct` [axgen] Preserve complete output contracts when composing AxGen instructions
+  - Status: done
+  - Source commit: `30ae9feee1833307577cc43408d9c0256f8693d7`
+  - TS paths: `src/ax/dsp/prompt.ts`, `src/ax/agent/templates/dsp/dspy.md`
+  - Impact: Custom AxGen instructions must compose with identity, tools, exact output wire keys, nested shapes, examples, and formatting rules in TypeScript and every AxIR-generated package instead of replacing the structured prompt.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-08-15
+  - Completed by: `73f1160dfe467c3feda0feb1d15f3f411197a70e`
+  - Verification: `Instruction composition and exact output-wire contracts are implemented in AxIR and generated prompt hosts; prompt goldens, all-language conformance, semantic parity, package freshness, focused TS tests, and documentation checks pass.`
+- `axir-2026-08-16-rlm-actor-documents-native-mcp-tools-as-mcp-ns-tools-name` [axagent] RLM actor documents native protocol tools under their runtime paths
+  - Status: done
+  - Source PR: #578
+  - Source commit: `14939d9677621aaaae8f125cf46cc8630254e205`
+  - TS paths: `src/ax/agent/AxAgent.ts`, `src/ax/agent/agentInternal/actorLoop.ts`, `src/ax/agent/agentInternal/promptAssembly.ts`, `src/ax/mcp/execution.test.ts`
+  - Impact: Fixes issue #575: RLM actors must receive native MCP and UCP operations as their real runtime bindings (mcp.<ns>.tools.<name> and ucp.<ns>.<name>) without leaking bare provider-native functions into either actor stage. Generated Python/Java/C++/Go/Rust ports share this actor-definition behavior and must preserve the same namespace and execution-authority boundary.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-08-16
+  - Completed by: `43c98eceafbbefcb6cf9ed99086ced5a52ebb7f0`
+  - Verification: `Exact MCP/UCP runtime-module paths, dynamic executor authority, and no actor provider-native leakage are covered by the execution-context-ucp fixture across generated Python, Java, C++, Go, and Rust; axir:conformance:check, axir:check-packages, and the full generated-example matrix pass. npm run test:axir compiled the generated packages before unrelated audio HTTP examples hit the sandbox loopback-bind restriction.`
+- `axir-2026-08-18-preserve-native-image-content-in-provider-routing` [axai] Preserve native image content in provider routing
+  - Status: done
+  - Source PR: #580
+  - Source commit: `9ef377ef736a22d60164e807dcd51bc72b4e7498`
+  - TS paths: `src/ax/ai/processor.ts`, `src/ax/ai/router.test.ts`, `src/ax/ai/router.ts`
+  - Impact: TypeScript provider routing now keeps image payloads intact when the selected provider supports images, while generated Python, Java, C++, Go, and Rust routers may still replace supported images with text placeholders and lose image bytes, MIME type, ordering, and metadata.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+  - Completed at: 2026-08-22
+  - Completed by: `040f954bce9c7dca44f7fd3436886d036f9e358b`
+  - Verification: `TS-derived native-image routing fixture; five-language AxIR dev verifier; npm run axir:check-packages; go test ./internal/axir; focused TypeScript router tests`
