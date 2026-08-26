@@ -18,6 +18,13 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
 
 ## Open
 
+- `axir-2026-08-25-port-gepa-proposal-policy-guidance-and-references` [axoptimize] Port GEPA proposal-policy guidance and references
+  - Status: open
+  - Source PR: #2
+  - Source commit: `ca760294f5ea4f207052c39c2218e1195103bc2a`
+  - TS paths: `src/ax/agent/agent.test.ts`, `src/ax/agent/agentInternal/optimizer.ts`, `src/ax/dsp/common_types.ts`, `src/ax/dsp/optimizers/gepa.test.ts`, `src/ax/dsp/optimizers/gepa.ts`, `src/ax/dsp/optimizers/gepaReflection.test.ts`, `src/ax/dsp/optimizers/gepaReflection.ts`
+  - Impact: AxGEPA now supports custom proposal policies, trusted in-memory optimization references, additive guidance, and bounded reflective examples; generated backends need equivalent proposal-boundary options and validation semantics.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 - `axir-2026-08-25-port-provider-neutral-visual-observation-sampling-policy` [axai] Port provider-neutral visual observation sampling policy
   - Status: open
   - Source PR: #18
