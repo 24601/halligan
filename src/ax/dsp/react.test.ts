@@ -1161,6 +1161,106 @@ describe('react', () => {
     expect(result.history.events).toEqual([]);
   });
 
+  it('awaits sibling workers on abort so later rejections are handled', async () => {
+    const controller = new AbortController();
+    let started = 0;
+    let settled = 0;
+    const blocking = tool(
+      'blocking',
+      async (_args: unknown, options: { abortSignal?: AbortSignal }) => {
+        started++;
+        try {
+          await new Promise<void>((_resolve, reject) => {
+            options.abortSignal?.addEventListener(
+              'abort',
+              () => reject(new Error('cancelled')),
+              { once: true }
+            );
+          });
+        } finally {
+          settled++;
+        }
+      }
+    );
+    const ai = new AxMockAIService({
+      features: { functions: true },
+      chatResponse: async () =>
+        nativeTurn([
+          { name: 'blocking', args: { value: 1 } },
+          { name: 'blocking', args: { value: 2 } },
+        ]),
+    });
+    const promise = react('question:string -> answer:string', {
+      functions: [blocking],
+      maxParallelTools: 2,
+    }).forward(ai, { question: 'Abort both' }, { abortSignal: controller.signal });
+
+    await vi.waitFor(() => expect(started).toBe(2));
+    controller.abort('test abort');
+    const result = await promise;
+    await vi.waitFor(() => expect(settled).toBe(2));
+    expect(result.terminationReason).toBe('aborted');
+    expect(result.history.events).toEqual([]);
+  });
+
+  it('retains the newest group when it exceeds the character budget', async () => {
+    const requests: AxChatRequest<unknown>[] = [];
+    let turn = 0;
+    const large = tool('large', async () => ({
+      payload: 'x'.repeat(20_000),
+    }));
+    const ai = new AxMockAIService({
+      features: { functions: true },
+      chatResponse: async (request) => {
+        requests.push(request);
+        turn++;
+        if (turn === 1) {
+          return nativeTurn([
+            { name: 'large', args: { value: 1 } },
+            { name: 'large', args: { value: 2 } },
+            { name: 'large', args: { value: 3 } },
+            { name: 'large', args: { value: 4 } },
+            { name: 'large', args: { value: 5 } },
+            { name: 'large', args: { value: 6 } },
+          ]);
+        }
+        return nativeTurn([{ name: 'submit', args: { answer: 'kept' } }]);
+      },
+    });
+    const result = await react('question:string -> answer:string', {
+      functions: [large],
+      maxPromptHistoryCharacters: 8_000,
+      maxPromptValueCharacters: 12_000,
+      replayProfile: 'mock-native:newest-group:v1',
+    }).forward(ai, { question: 'Keep newest' });
+    expect(result.success).toBe(true);
+    const replay = requests.at(-1)?.chatPrompt ?? [];
+    const replayResults = replay.filter((message) => message.role === 'function');
+    expect(replayResults.length).toBeGreaterThan(0);
+  });
+
+  it('does not advertise MCP tools that require a live task', async () => {
+    const requested: string[] = [];
+    const ai = new AxMockAIService({
+      features: { functions: true },
+      chatResponse: async (request) => {
+        requested.push(
+          ...(request.functions ?? []).map((fn) => fn.name)
+        );
+        return nativeTurn([{ name: 'submit', args: { answer: 'none' } }]);
+      },
+    });
+    const taskTool = tool('long_job', async () => ({ status: 'running' }), {
+      protocol: { kind: 'mcp', namespace: 'jobs', name: 'long_job' },
+      execution: { taskSupport: 'required' },
+    } as Partial<AxFunction>);
+    const result = await react('question:string -> answer:string', {
+      functions: [taskTool],
+    }).forward(ai, { question: 'No tasks' });
+    expect(result.success).toBe(true);
+    expect(requested.flat()).not.toContain('long_job');
+  });
+
   it('compacts replay by complete assistant/tool groups', async () => {
     const requests: AxChatRequest<unknown>[] = [];
     let turn = 0;

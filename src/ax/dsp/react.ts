@@ -1000,11 +1000,23 @@ function compactHistoryMessages(
   for (let index = groups.length - 1; index >= 0; index--) {
     if (retainedGroups >= config.maxPromptHistoryGroups) break;
     const group = groups[index]!;
-    const messages = native
-      ? nativeMessagesForGroup(group, config.maxPromptValueCharacters)
-      : promptMessagesForGroup(group, config.maxPromptValueCharacters);
-    const size = axReactCanonicalJSON(messages).length;
-    if (characters + size > config.maxPromptHistoryCharacters) break;
+    let valueCharacters = config.maxPromptValueCharacters;
+    let messages = native
+      ? nativeMessagesForGroup(group, valueCharacters)
+      : promptMessagesForGroup(group, valueCharacters);
+    let size = axReactCanonicalJSON(messages).length;
+    if (characters + size > config.maxPromptHistoryCharacters) {
+      if (retainedGroups > 0) break;
+      // Always keep the newest complete group. Re-truncate its values until
+      // it fits the character budget rather than replaying an empty history.
+      while (valueCharacters > 1 && size > config.maxPromptHistoryCharacters) {
+        valueCharacters = Math.max(1, Math.floor(valueCharacters / 2));
+        messages = native
+          ? nativeMessagesForGroup(group, valueCharacters)
+          : promptMessagesForGroup(group, valueCharacters);
+        size = axReactCanonicalJSON(messages).length;
+      }
+    }
     retained.unshift(messages);
     characters += size;
     retainedGroups++;
@@ -1070,14 +1082,34 @@ function parsePromptTurn(content: string | undefined): ParsedModelTurn {
   };
 }
 
+function isTaskRequiredTool(tool: Readonly<AxFunction>): boolean {
+  return (
+    tool.protocol?.kind === 'mcp' &&
+    (tool as { execution?: { taskSupport?: string } }).execution
+      ?.taskSupport === 'required'
+  );
+}
+
 function parseNativeTurn(response: AxChatResponse): ParsedModelTurn {
   const result = response.results.find((candidate) => candidate.index === 0);
   if (!result) throw new Error('Native tool mode returned no primary result');
+  if (
+    result.finishReason === 'content_filter' ||
+    result.finishReason === 'error' ||
+    result.finishReason === 'length'
+  ) {
+    throw new Error(
+      `Native tool mode finished unsuccessfully: ${result.finishReason}`
+    );
+  }
   return {
     content: result.content,
     thought: result.thought,
     thoughtBlocks: result.thoughtBlocks,
     calls: (result.functionCalls ?? []).map((call) => {
+      if (!call.function) {
+        throw new Error('Native tool mode returned a call without a function');
+      }
       try {
         return {
           name: call.function.name,
@@ -1109,9 +1141,13 @@ async function mapBounded<T, R>(
       results[index] = await fn(values[index]!, index);
     }
   };
-  await Promise.all(
+  const settled = await Promise.allSettled(
     Array.from({ length: Math.min(concurrency, values.length) }, worker)
   );
+  const firstRejection = settled.find(
+    (result): result is PromiseRejectedResult => result.status === 'rejected'
+  );
+  if (firstRejection) throw firstRejection.reason;
   return results;
 }
 
@@ -1236,9 +1272,11 @@ export class AxReact<IN extends AxGenIn, OUT extends AxGenOut> {
 
     try {
       const mcpContext = await axResolveMCPExecutionContext(options, {});
-      const tools = mcpContext
-        ? [...configured, ...mcpContext.getToolBindings()]
-        : configured;
+      const tools = (
+        mcpContext
+          ? [...configured, ...mcpContext.getToolBindings()]
+          : configured
+      ).filter((tool) => !isTaskRequiredTool(tool));
       this.assertToolNames(tools);
       const allTools = [...tools, submit];
       const currentCatalogHash = await toolCatalogHash(allTools);
