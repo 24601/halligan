@@ -18,11 +18,25 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
 
 ## Open
 
+- `axir-2026-08-25-port-gepa-proposal-policy-guidance-and-references` [axoptimize] Port GEPA proposal-policy guidance and references
+  - Status: open
+  - Source PR: #2
+  - Source commit: `ca760294f5ea4f207052c39c2218e1195103bc2a`
+  - TS paths: `src/ax/agent/agent.test.ts`, `src/ax/agent/agentInternal/optimizer.ts`, `src/ax/dsp/common_types.ts`, `src/ax/dsp/optimizers/gepa.test.ts`, `src/ax/dsp/optimizers/gepa.ts`, `src/ax/dsp/optimizers/gepaReflection.test.ts`, `src/ax/dsp/optimizers/gepaReflection.ts`
+  - Impact: AxGEPA now supports custom proposal policies, trusted in-memory optimization references, additive guidance, and bounded reflective examples; generated backends need equivalent proposal-boundary options and validation semantics.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+- `axir-2026-08-25-port-provider-neutral-visual-observation-sampling-policy` [axai] Port provider-neutral visual observation sampling policy
+  - Status: open
+  - Source PR: #18
+  - Source commit: `ca760294f5ea4f207052c39c2218e1195103bc2a`
+  - TS paths: `src/ax/ai/index.ts`, `src/ax/ai/visual`
+  - Impact: TypeScript hosts can apply revision-, freshness-, authority-, change-, and rolling-budget-aware selection to host-captured visual observations; generated language packages do not yet expose the AxVisualObservation or AxFrameSampler policy.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 - `axir-2026-08-25-port-evidence-aware-ace-playbook-metadata-and-retrieval` [axoptimize] Port evidence-aware ACE playbook metadata and retrieval
   - Status: open
   - Source PR: #6
   - Source commit: `ca760294f5ea4f207052c39c2218e1195103bc2a`
-  - TS paths: `src/ax/dsp/optimizers/aceTypes.ts`, `src/ax/dsp/optimizers/acePlaybook.ts`, `src/ax/dsp/optimizers/ace.ts`, `src/ax/dsp/playbook.ts`, `src/ax/agent/agentInternal/agentPlaybook.ts`, `src/ax/agent/agentInternal/playbookEvolve/proposals.ts`, `src/ax/agent/agentInternal/playbookEvolve/playbookEvolve.ts`
+  - TS paths: `src/ax/dsp/optimizers/aceTypes.ts`, `src/ax/dsp/optimizers/acePlaybook.ts`, `src/ax/dsp/optimizers/ace.ts`, `src/ax/dsp/playbook.ts`, `src/ax/agent/agentInternal/agentPlaybook.ts`, `src/ax/agent/agentInternal/playbookEvolve/proposals.ts`, `src/ax/agent/agentInternal/playbookEvolve/playbookEvolve.ts`, `src/ax/agent/agentInternal/playbookEvolve/playbookEvolve.test.ts`, `src/ax/agent/agentPlaybook.test.ts`, `src/ax/agent/playbookConfig.ts`, `src/ax/dsp/optimizers/ace.test.ts`, `src/ax/dsp/optimizers/aceEvidenceEval.test.ts`, `src/ax/dsp/optimizers/acePlaybook.test.ts`, `src/ax/dsp/playbook.test.ts`
   - Impact: TypeScript ACE bullets now support optional provenance, confidence/evidence counts, declarative applicability, host-owned verifier receipts, lifecycle/supersession, revision lineage, auditable before/after deltas, condition-aware rendering, and verified-agent receipts. Legacy artifacts remain valid. Generated runtimes do not yet expose this schema, host evidence boundary, or inactive-entry filtering.
   - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 
