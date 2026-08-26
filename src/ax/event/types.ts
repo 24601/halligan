@@ -569,6 +569,7 @@ export interface AxEventDelivery {
 export type AxEventRunStatus =
   | 'queued'
   | 'running'
+  | 'finalizing'
   | 'waiting_event'
   | 'succeeded'
   | 'failed'
@@ -708,7 +709,11 @@ export interface AxEventStore {
   getDeadLetter(id: string): Promise<Readonly<AxEventDeadLetter> | undefined>;
   removeDeadLetter(id: string): Promise<void>;
   listDeadLetters(): Promise<readonly Readonly<AxEventDeadLetter>[]>;
-  redriveDelivery(deliveryId: string, now: number): Promise<void>;
+  redriveDelivery(
+    deliveryId: string,
+    now: number,
+    options?: Readonly<{ preserveRun?: boolean }>
+  ): Promise<void>;
   nextAvailableAt(now: number): Promise<number | undefined>;
   waitForWork(signal?: AbortSignal): Promise<void>;
   isIdle(): Promise<boolean>;

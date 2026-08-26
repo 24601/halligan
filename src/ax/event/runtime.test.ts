@@ -127,7 +127,7 @@ describe('AxEventRuntime', () => {
       get(target, property) {
         if (property === 'saveRun') {
           return async (run: Parameters<typeof backing.saveRun>[0]) => {
-            if (run.status === 'succeeded' && run.output !== undefined) {
+            if (run.status === 'finalizing' && run.output !== undefined) {
               completedWrites++;
               throw {
                 name: 'AxEventOutputPersistenceError',
@@ -1320,6 +1320,17 @@ describe('AxEventRuntime', () => {
       (deadLetter) => deadLetter.kind === 'sink'
     )!;
     await runtime.redrive(sinkDeadLetter.id);
+    await vi.waitFor(async () =>
+      expect({
+        sinkAdmissions,
+        status: (await store.getDelivery(receipt.deliveryIds[0]!))?.status,
+        deadLetters: await runtime.listDeadLetters(),
+      }).toEqual({
+        sinkAdmissions: [original.id, original.id],
+        status: 'succeeded',
+        deadLetters: [],
+      })
+    );
 
     expect(targetAdmissions).toEqual([original.id, original.id]);
     expect(targetInstances).toEqual([

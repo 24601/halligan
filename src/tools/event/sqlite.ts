@@ -294,7 +294,9 @@ export class AxSQLiteEventStore
         )
         .get(now, now, ...TERMINAL) as DeliveryRow | undefined;
       if (!row) return;
-      const recovered = row.status !== 'queued';
+      const recovered =
+        row.status !== 'queued' ||
+        (row.run_id !== null && row.invocation_started === 1);
       this.assertFencingTokenCanAdvance(row.id, row.fencing_token);
       const fencingToken = row.fencing_token + 1;
       const updated = this.db
@@ -1027,29 +1029,40 @@ export class AxSQLiteEventStore
     ).map((row) => JSON.parse(row.dead_letter_json) as AxEventDeadLetter);
   }
 
-  async redriveDelivery(deliveryId: string, now: number): Promise<void> {
+  async redriveDelivery(
+    deliveryId: string,
+    now: number,
+    options?: Readonly<{ preserveRun?: boolean }>
+  ): Promise<void> {
     const result = this.db
       .transaction(() => {
         const row = this.db
           .prepare(
-            `SELECT fencing_token FROM event_deliveries
+            `SELECT fencing_token, run_id FROM event_deliveries
              WHERE id=? AND status IN (${TERMINAL.map(() => '?').join(',')})`
           )
           .get(deliveryId, ...TERMINAL) as
-          | { fencing_token: number }
+          | { fencing_token: number; run_id: string | null }
           | undefined;
         if (!row) return;
+        if (options?.preserveRun && !row.run_id) {
+          throw new Error(
+            `Event delivery ${deliveryId} has no run to preserve`
+          );
+        }
         this.assertFencingTokenCanAdvance(deliveryId, row.fencing_token);
         return this.db
           .prepare(
             `UPDATE event_deliveries SET status='queued', attempt=0, available_at=?,
-             claimed_by=NULL, run_id=NULL, error=NULL, lease_expires_at=NULL,
-             invocation_started=0, fencing_token=?
+             claimed_by=NULL, run_id=?, error=NULL, lease_expires_at=NULL,
+             invocation_started=?, fencing_token=?
              WHERE id=? AND fencing_token=?
                AND status IN (${TERMINAL.map(() => '?').join(',')})`
           )
           .run(
             now,
+            options?.preserveRun ? row.run_id : null,
+            options?.preserveRun ? 1 : 0,
             row.fencing_token + 1,
             deliveryId,
             row.fencing_token,
@@ -1311,7 +1324,7 @@ export class AxSQLiteEventStore
       );
     } catch (error) {
       // Provider commit may have completed even when its response is lost.
-      // Keep commit_pending and the succeeded run for fenced restart recovery.
+      // Keep commit_pending and the finalizing run for fenced restart recovery.
       throw this.outputPersistenceError('commit', run.id, error);
     }
 
@@ -1467,7 +1480,10 @@ export class AxSQLiteEventStore
               throw new Error(`Missing staged event run ${row.run_id}`);
             }
             const run = JSON.parse(runRow.run_json) as AxEventRun;
-            if (run.status !== 'succeeded' || run.outputRef !== row.reference) {
+            if (
+              (run.status !== 'finalizing' && run.status !== 'succeeded') ||
+              run.outputRef !== row.reference
+            ) {
               throw new Error(`Invalid staged event run ${row.run_id}`);
             }
             this.db

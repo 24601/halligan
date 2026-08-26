@@ -432,10 +432,9 @@ describe('AxEventRuntime effects', () => {
       instanceKey: claimed.instanceKey,
       claimedBy: claimed.claimedBy,
       fencingToken: claimed.fencingToken,
-      status: 'succeeded',
+      status: 'finalizing',
       attempt: 1,
       startedAt: clock.now(),
-      finishedAt: clock.now(),
       output: { handled: true },
     };
     await store.saveDelivery({
@@ -510,6 +509,336 @@ describe('AxEventRuntime effects', () => {
     expect(await runtime.listDeadLetters()).toEqual([
       expect.objectContaining({ kind: 'delivery', deliveryId, runId: run.id }),
     ]);
+    await runtime.close();
+  });
+
+  it('recovers a crashed finalizing run with an unsettled sink effect without rerunning code', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const store = new AxInMemoryEventStore({ clock });
+    const receipt = await store.enqueue({
+      ingress: ingress('crashed-finalizing-effect'),
+      deliveries: [
+        {
+          routeId: 'effect-route',
+          action: 'wake',
+          targetId: 'effect-target',
+          instanceKey: 'crashed-finalizing-effect',
+          sizeBytes: 1,
+          retrySafety: 'effect-aware',
+          ordering: 'strict',
+        },
+      ],
+      acceptedAt: clock.now(),
+      publishTimeoutMs: 100,
+    });
+    const claimed = (await store.claim('crashed-worker', clock.now(), 100))!;
+    const run: AxEventRun = {
+      id: 'crashed-finalizing-run',
+      deliveryId: claimed.id,
+      routeId: claimed.routeId,
+      targetId: claimed.targetId,
+      instanceKey: claimed.instanceKey,
+      claimedBy: claimed.claimedBy,
+      fencingToken: claimed.fencingToken,
+      status: 'finalizing',
+      attempt: 1,
+      startedAt: clock.now(),
+      output: { handled: true },
+    };
+    await store.saveDelivery({
+      ...claimed,
+      status: 'running',
+      attempt: 1,
+      runId: run.id,
+      invocationStarted: true,
+    });
+    await store.saveRun(run);
+    const effect = await store.declareEffect(
+      {
+        id: 'crashed-sink-effect',
+        deliveryId: claimed.id,
+        runId: run.id,
+        identityScope: claimed.identityScope,
+        operation: 'sink.deliver',
+        idempotencyKey: 'crashed-sink-42',
+        createdAt: clock.now(),
+      },
+      { deliveryId: claimed.id, fencingToken: claimed.fencingToken! }
+    );
+    await store.transitionEffect(
+      effect.id,
+      effect.version,
+      { type: 'dispatched', at: clock.now() },
+      { deliveryId: claimed.id, fencingToken: claimed.fencingToken! }
+    );
+    clock.advanceBy(101);
+
+    const target = vi.fn(() => ({ handled: true }));
+    const sink = vi.fn();
+    const runtime = new AxEventRuntime({
+      clock,
+      store,
+      leaseMs: 100,
+      heartbeatMs: 25,
+      routes: [
+        eventRoute({
+          id: 'effect-route',
+          match: { types: ['effect.requested'] },
+          action: 'wake',
+          target: eventTarget({
+            id: 'effect-target',
+            ai,
+            program: effectProgram(target),
+            mapInput: () => ({}),
+            retrySafety: 'effect-aware',
+            sinks: [{ id: 'crashed-sink', write: sink }],
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    const deliveryId = receipt.deliveryIds[0]!;
+    await vi.waitFor(async () =>
+      expect((await store.getDelivery(deliveryId))?.status).toBe('parked')
+    );
+
+    expect(target).not.toHaveBeenCalled();
+    expect(sink).not.toHaveBeenCalled();
+    expect(await store.getRun(run.id)).toEqual(
+      expect.objectContaining({ status: 'parked' })
+    );
+    expect((await runtime.getEffects(deliveryId))[0]).toEqual(
+      expect.objectContaining({ status: 'parked' })
+    );
+    await runtime.close();
+  });
+
+  it('replays an idempotent sink effect from a crashed finalizing run', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const store = new AxInMemoryEventStore({ clock });
+    const receipt = await store.enqueue({
+      ingress: ingress('idempotent-finalizing-effect'),
+      deliveries: [
+        {
+          routeId: 'effect-route',
+          action: 'wake',
+          targetId: 'effect-target',
+          instanceKey: 'idempotent-finalizing-effect',
+          sizeBytes: 1,
+          retrySafety: 'effect-aware',
+          ordering: 'strict',
+        },
+      ],
+      acceptedAt: clock.now(),
+      publishTimeoutMs: 100,
+    });
+    const claimed = (await store.claim('crashed-worker', clock.now(), 100))!;
+    const run: AxEventRun = {
+      id: 'idempotent-finalizing-run',
+      deliveryId: claimed.id,
+      routeId: claimed.routeId,
+      targetId: claimed.targetId,
+      instanceKey: claimed.instanceKey,
+      claimedBy: claimed.claimedBy,
+      fencingToken: claimed.fencingToken,
+      status: 'finalizing',
+      attempt: 1,
+      startedAt: clock.now(),
+      output: { handled: true },
+    };
+    await store.saveDelivery({
+      ...claimed,
+      status: 'running',
+      attempt: 1,
+      runId: run.id,
+      invocationStarted: true,
+    });
+    await store.saveRun(run);
+    let effect = await store.declareEffect(
+      {
+        id: 'idempotent-sink-effect',
+        deliveryId: claimed.id,
+        runId: run.id,
+        identityScope: claimed.identityScope,
+        operation: 'sink.deliver',
+        idempotencyKey: 'idempotent-sink-42',
+        replaySafety: 'idempotent',
+        createdAt: clock.now(),
+      },
+      { deliveryId: claimed.id, fencingToken: claimed.fencingToken! }
+    );
+    effect = await store.transitionEffect(
+      effect.id,
+      effect.version,
+      { type: 'dispatched', at: clock.now() },
+      { deliveryId: claimed.id, fencingToken: claimed.fencingToken! }
+    );
+    clock.advanceBy(101);
+
+    const target = vi.fn(() => ({ handled: true }));
+    const sink = vi.fn(async (_output, context) => {
+      let recovered = await context.eventContext.declareEffect({
+        operation: 'sink.deliver',
+        idempotencyKey: 'idempotent-sink-42',
+        replaySafety: 'idempotent',
+      });
+      recovered = await context.eventContext.markEffectDispatched(
+        recovered.id,
+        recovered.version
+      );
+      await context.eventContext.settleEffect(recovered.id, recovered.version, {
+        status: 'succeeded',
+      });
+    });
+    const runtime = new AxEventRuntime({
+      clock,
+      store,
+      leaseMs: 100,
+      heartbeatMs: 25,
+      routes: [
+        eventRoute({
+          id: 'effect-route',
+          match: { types: ['effect.requested'] },
+          action: 'wake',
+          target: eventTarget({
+            id: 'effect-target',
+            ai,
+            program: effectProgram(target),
+            mapInput: () => ({}),
+            retrySafety: 'effect-aware',
+            sinks: [{ id: 'idempotent-sink', write: sink }],
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    const deliveryId = receipt.deliveryIds[0]!;
+    await vi.waitFor(async () =>
+      expect((await store.getDelivery(deliveryId))?.status).toBe('succeeded')
+    );
+
+    expect(target).not.toHaveBeenCalled();
+    expect(sink).toHaveBeenCalledOnce();
+    expect(await store.getRun(run.id)).toEqual(
+      expect.objectContaining({ status: 'succeeded' })
+    );
+    expect((await runtime.getEffects(deliveryId))[0]).toEqual(
+      expect.objectContaining({ status: 'succeeded', dispatchCount: 2 })
+    );
+    await runtime.close();
+  });
+
+  it('does not retry a final sink after an indeterminate non-idempotent dispatch', async () => {
+    const store = new AxInMemoryEventStore();
+    const providerDispatch = vi.fn();
+    const sink = vi.fn(async (_output, context) => {
+      const effect = await context.eventContext.declareEffect({
+        operation: 'sink.non-idempotent',
+        idempotencyKey: 'sink-non-idempotent-42',
+      });
+      await context.eventContext.markEffectDispatched(
+        effect.id,
+        effect.version
+      );
+      providerDispatch();
+      throw new Error('timeout after provider dispatch');
+    });
+    const runtime = new AxEventRuntime({
+      store,
+      retryBaseMs: 1,
+      retryMaxMs: 1,
+      maxAttempts: 3,
+      routes: [
+        eventRoute({
+          id: 'effect-route',
+          match: { types: ['effect.requested'] },
+          action: 'wake',
+          target: eventTarget({
+            id: 'effect-target',
+            ai,
+            program: effectProgram(() => ({ handled: true })),
+            mapInput: () => ({}),
+            retrySafety: 'effect-aware',
+            sinks: [{ id: 'non-idempotent-sink', write: sink }],
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    const receipt = await runtime.publish(
+      ingress('sink-timeout-after-dispatch')
+    );
+    await runtime.waitForIdle();
+
+    const deliveryId = receipt.deliveryIds[0]!;
+    expect(sink).toHaveBeenCalledOnce();
+    expect(providerDispatch).toHaveBeenCalledOnce();
+    expect(await store.getDelivery(deliveryId)).toEqual(
+      expect.objectContaining({ status: 'parked' })
+    );
+    expect((await runtime.getEffects(deliveryId))[0]).toEqual(
+      expect.objectContaining({ status: 'parked', dispatchCount: 1 })
+    );
+    await runtime.close();
+  });
+
+  it('retries a failed sink under a fresh fence with effect ledger access', async () => {
+    const store = new AxInMemoryEventStore();
+    const target = vi.fn(() => ({ handled: true }));
+    let sinkCalls = 0;
+    const sink = vi.fn(async (_output, context) => {
+      sinkCalls++;
+      if (sinkCalls === 1) throw new Error('failed before dispatch');
+      let effect = await context.eventContext.declareEffect({
+        operation: 'sink.redrive',
+        idempotencyKey: 'sink-redrive-42',
+      });
+      effect = await context.eventContext.markEffectDispatched(
+        effect.id,
+        effect.version
+      );
+      await context.eventContext.settleEffect(effect.id, effect.version, {
+        status: 'succeeded',
+      });
+    });
+    const runtime = new AxEventRuntime({
+      store,
+      maxAttempts: 1,
+      routes: [
+        eventRoute({
+          id: 'effect-route',
+          match: { types: ['effect.requested'] },
+          action: 'wake',
+          target: eventTarget({
+            id: 'effect-target',
+            ai,
+            program: effectProgram(target),
+            mapInput: () => ({}),
+            retrySafety: 'effect-aware',
+            sinks: [{ id: 'redrive-sink', write: sink }],
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    const receipt = await runtime.publish(ingress('effect-aware-sink-redrive'));
+    await runtime.waitForIdle();
+    const deadLetter = (await runtime.listDeadLetters()).find(
+      (value) => value.kind === 'sink'
+    )!;
+
+    await runtime.redrive(deadLetter.id);
+    await vi.waitFor(() => expect(sink).toHaveBeenCalledTimes(2));
+
+    const deliveryId = receipt.deliveryIds[0]!;
+    expect(target).toHaveBeenCalledOnce();
+    expect(await store.getDelivery(deliveryId)).toEqual(
+      expect.objectContaining({ status: 'succeeded' })
+    );
+    expect((await runtime.getEffects(deliveryId))[0]).toEqual(
+      expect.objectContaining({ status: 'succeeded' })
+    );
+    expect(await runtime.listDeadLetters()).toEqual([]);
     await runtime.close();
   });
 
@@ -899,7 +1228,7 @@ describe('AxEventRuntime effects', () => {
     await runtime.close();
   });
 
-  it('parks an indeterminate non-idempotent effect when its run is cancelled', async () => {
+  it('parks every unsettled effect when its run is cancelled', async () => {
     const store = new AxInMemoryEventStore();
     let runId = '';
     let startedResolve!: () => void;
@@ -908,9 +1237,14 @@ describe('AxEventRuntime effects', () => {
     });
     const runtime = runtimeFor(store, async (context) => {
       runId = context.runId;
+      await context.declareEffect({
+        operation: 'exports.prepare',
+        idempotencyKey: 'export-intent-42',
+      });
       const effect = await context.declareEffect({
         operation: 'exports.submit',
         idempotencyKey: 'export-42',
+        replaySafety: 'idempotent',
       });
       await context.markEffectDispatched(effect.id, effect.version);
       startedResolve();
@@ -931,12 +1265,16 @@ describe('AxEventRuntime effects', () => {
 
     const delivery = await store.getDelivery(receipt.deliveryIds[0]!);
     expect(delivery?.status).toBe('parked');
-    expect((await runtime.getEffects(delivery!.id))[0]).toEqual(
+    expect(await runtime.getEffects(delivery!.id)).toEqual([
       expect.objectContaining({
         status: 'parked',
         parkedReason: expect.stringContaining('operator cancelled'),
-      })
-    );
+      }),
+      expect.objectContaining({
+        status: 'parked',
+        parkedReason: expect.stringContaining('operator cancelled'),
+      }),
+    ]);
     expect(await runtime.listDeadLetters()).toEqual([
       expect.objectContaining({
         kind: 'delivery',

@@ -206,9 +206,12 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
       const delivery = this.deliveries.get(id);
       if (!delivery) continue;
       const recovered =
-        (delivery.status === 'claimed' || delivery.status === 'running') &&
-        delivery.leaseExpiresAt !== undefined &&
-        delivery.leaseExpiresAt <= now;
+        ((delivery.status === 'claimed' || delivery.status === 'running') &&
+          delivery.leaseExpiresAt !== undefined &&
+          delivery.leaseExpiresAt <= now) ||
+        (delivery.status === 'queued' &&
+          delivery.runId !== undefined &&
+          delivery.invocationStarted === true);
       if (delivery.status !== 'queued' && !recovered) continue;
       if (delivery.status === 'queued' && delivery.availableAt > now) continue;
       if (this.hasEarlierInstanceWork(delivery)) continue;
@@ -614,7 +617,11 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
       .map((value) => structuredClone(value));
   }
 
-  async redriveDelivery(deliveryId: string, now: number): Promise<void> {
+  async redriveDelivery(
+    deliveryId: string,
+    now: number,
+    options?: Readonly<{ preserveRun?: boolean }>
+  ): Promise<void> {
     this.assertWritable();
     const delivery = this.deliveries.get(deliveryId);
     if (!delivery) throw new Error(`Unknown event delivery: ${deliveryId}`);
@@ -623,6 +630,9 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
     }
     const fencingToken = delivery.fencingToken ?? 0;
     this.assertFencingTokenCanAdvance(delivery.id, fencingToken);
+    if (options?.preserveRun && !delivery.runId) {
+      throw new Error(`Event delivery ${deliveryId} has no run to preserve`);
+    }
     const redriven: AxEventDelivery = {
       ...delivery,
       status: 'queued',
@@ -630,9 +640,10 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
       availableAt: now,
       error: undefined,
       claimedBy: undefined,
-      runId: undefined,
+      runId: options?.preserveRun ? delivery.runId : undefined,
       leaseExpiresAt: undefined,
-      invocationStarted: undefined,
+      invocationStarted: options?.preserveRun ? true : undefined,
+      ...(options?.preserveRun ? { recoveredFromExpiredLease: true } : {}),
       fencingToken: fencingToken + 1,
     };
     this.deliveries.set(deliveryId, redriven);

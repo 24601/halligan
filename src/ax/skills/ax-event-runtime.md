@@ -182,14 +182,16 @@ even when content references are shared; restart reconciles `commit_pending`
 before claims and run reads. Every unresolved stage state blocks claim;
 staging/abort expiry marks its fenced delivery terminal before owned cleanup.
 Malformed recovery rows are isolated so unrelated work and worker loops remain
-live. Recovery atomically binds the persisted succeeded
-run to the delivery, then takeover resumes final sinks only; target invocation
-is never repeated. Resume admission is an exclusive fenced store transaction,
+live. Recovery atomically binds the persisted nonterminal `finalizing` run to
+the delivery, then takeover resumes final sinks only; target invocation is never
+repeated, and the run becomes `succeeded` only after sink effects settle. Resume
+admission is an exclusive fenced store transaction,
 persisted on both delivery and run before invocation. Competing deliveries
 cannot fire one continuation twice; delivery and sink redrive retain and
 validate the original continuation/target/instance even after correlation
-reuse. Terminal resume success atomically consumes/de-keys that admission with
-the delivery update; rollback leaves the succeeded run for completion-only
+reuse, and sink redrive reacquires a delivery fence before exposing effects.
+Terminal resume success atomically consumes/de-keys that admission with
+the delivery update; rollback leaves the finalizing run for completion-only
 recovery and never target replay. Legacy or malformed mismatched bindings fail
 closed; legacy wake
 recovery keeps its configured-target fallback. A never-invoked v5 resume

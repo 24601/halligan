@@ -430,16 +430,19 @@ fenced delivery `output_persistence_failed` before cleanup, so a
 completed target is never replayed. Malformed rows are quarantined per delivery
 without blocking unrelated claims, reads, close, or the supervised worker loop.
 A successful recovery atomically commits the stage and binds
-the existing succeeded run to its delivery; lease takeover then dispatches only
-final sinks from that persisted output and never invokes the target again. A
+the existing nonterminal `finalizing` run to its delivery; lease takeover then
+dispatches only final sinks from that persisted output and never invokes the
+target again. The run becomes `succeeded` only after every sink-created effect
+is settled. A
 resume route atomically binds the active continuation to its fenced delivery
 and persists the same snapshot on the run before invocation. Competing workers
 cannot admit the same one-shot continuation. Delivery redrive retains the
 delivery binding even though it starts a new run; sink redrive validates both
-persisted copies and reconstructs context from the original target, instance,
-and continuation. Terminal resume success and consumption/de-keying of that
+persisted copies, queues completion-only recovery under a fresh fence, and
+reconstructs context from the original target, instance, and continuation.
+Terminal resume success and consumption/de-keying of that
 admission are one fenced SQLite transaction (or one indivisible in-memory
-mutation). A failure rolls the whole boundary back; the persisted succeeded run
+mutation). A failure rolls the whole boundary back; the persisted finalizing run
 remains eligible only for sink/completion recovery, not target replay. An
 expired original plus a replacement under the same
 correlation key does not retarget output or consume the replacement. Legacy or
@@ -504,7 +507,7 @@ commit is not atomic: between the run-row transaction and provider commit the
 journal is `commit_pending`; recovery retries it, and expiry fails closed as
 `output_persistence_failed` rather than replaying the target. Until provider
 commit is acknowledged, the delivery is excluded from claim; after recovery it
-resumes from the persisted succeeded run in sink-only mode.
+resumes from the persisted finalizing run in sink-only mode.
 
 The volatile in-memory store also schedules expired claimed/running leases as
 future work. A runtime already waiting before lease expiry wakes at that lease

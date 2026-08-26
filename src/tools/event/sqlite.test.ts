@@ -1586,13 +1586,14 @@ describe('AxSQLiteEventStore', () => {
 
     db.exec('DROP TRIGGER fail_atomic_resume_completion');
     clock.advanceBy(101);
-    for (let index = 0; index < 100; index++) {
+    for (let index = 0; index < 20; index++) {
       if (
         (await store.getDelivery(receipt.deliveryIds[0]!))?.status ===
         'succeeded'
       ) {
         break;
       }
+      clock.advanceBy(25);
       await Promise.resolve();
     }
     expect(targetCalls).toBe(1);
@@ -2452,9 +2453,14 @@ describe('AxSQLiteEventStore', () => {
     await runtime.waitForIdle();
     expect(modelCalls).toBe(1);
     expect(sinkCalls).toBe(2);
-    expect(await runtime.listDeadLetters()).toEqual([
-      expect.objectContaining({ kind: 'sink', sinkId: 'failing-sink' }),
-    ]);
+    const [deadLetter] = await runtime.listDeadLetters();
+    expect(deadLetter).toEqual(
+      expect.objectContaining({ kind: 'sink', sinkId: 'failing-sink' })
+    );
+    await runtime.redrive(deadLetter!.id);
+    await runtime.waitForIdle();
+    expect(modelCalls).toBe(1);
+    expect(sinkCalls).toBe(4);
     await runtime.close({ drain: false });
   });
 

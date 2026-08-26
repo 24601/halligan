@@ -534,30 +534,8 @@ export class AxEventRuntime {
       if (!target || !sink) {
         throw new Error(`Sink ${deadLetter.sinkId} is no longer configured`);
       }
-      const context = new AxRuntimeEventContext(
-        this.id,
-        run.id,
-        delivery.id,
-        delivery.routeId,
-        target.id,
-        continuation?.instanceKey ?? run.instanceKey,
-        delivery.ingress,
-        delivery.ingress.identity ?? {},
-        delivery.ingress.trust ?? 'untrusted',
-        run.attempt,
-        delivery.id,
-        controller.signal,
-        continuation,
-        undefined,
-        undefined,
-        () => this.clock.now(),
-        () => this.storeShutdownStarted
-      );
-      await sink.write(run.output, {
-        run,
-        eventContext: context,
-        idempotencyKey: `${run.id}:${sink.id}`,
-        signal: controller.signal,
+      await this.store.redriveDelivery(delivery.id, this.clock.now(), {
+        preserveRun: true,
       });
       this.assertRunActive(controller.signal);
       await this.store.removeDeadLetter(deadLetterId);
@@ -744,8 +722,10 @@ export class AxEventRuntime {
           const next = await this.store.nextAvailableAt(now);
           if (next === undefined) {
             await this.store.waitForWork(signal);
+          } else if (next <= now) {
+            await Promise.resolve();
           } else {
-            await this.clock.sleep(Math.max(1, next - now), signal);
+            await this.clock.sleep(next - now, signal);
           }
         } catch {
           if (signal.aborted) return;
@@ -1062,10 +1042,16 @@ export class AxEventRuntime {
           continuations.push(value);
         }
         const waiting = result.waiting || continuations.length > 0;
+        const finalizing =
+          !waiting && target !== undefined && run.output !== undefined;
         run = {
           ...run,
-          status: waiting ? 'waiting_event' : 'succeeded',
-          finishedAt: this.clock.now(),
+          status: waiting
+            ? 'waiting_event'
+            : finalizing
+              ? 'finalizing'
+              : 'succeeded',
+          ...(!finalizing ? { finishedAt: this.clock.now() } : {}),
           ...(continuations.length
             ? { continuationIds: continuations.map((value) => value.id) }
             : {}),
@@ -1074,8 +1060,13 @@ export class AxEventRuntime {
         this.assertRunActive(controller.signal);
         await this.store.saveRun(run);
         this.assertRunActive(controller.signal);
-        if (!waiting && target && run.output !== undefined) {
-          run = await this.dispatchFinalSinks(target, run, eventContext);
+        if (finalizing && target) {
+          run = await this.dispatchFinalSinks(
+            target,
+            run,
+            eventContext,
+            claimed
+          );
           this.assertRunActive(controller.signal);
           const sinkEffectParkReason =
             await this.parkUnsettledCompletionEffects(
@@ -1100,6 +1091,11 @@ export class AxEventRuntime {
             this.assertRunActive(controller.signal);
             return;
           }
+          run = {
+            ...run,
+            status: 'succeeded',
+            finishedAt: this.clock.now(),
+          };
           await this.store.saveRun(run);
         }
         this.assertRunActive(controller.signal);
@@ -1157,7 +1153,7 @@ export class AxEventRuntime {
         if (axIsEventOutputPersistenceError(error)) {
           if (error.phase === 'commit' || error.phase === 'recovery') {
             // A staged provider commit may have succeeded even though its local
-            // acknowledgement did not. Keep the succeeded run and journal for
+            // acknowledgement did not. Keep the finalizing run and journal for
             // fenced sink-only recovery; never overwrite it or rerun the target.
             return;
           }
@@ -1307,7 +1303,7 @@ export class AxEventRuntime {
         axIsEventOutputPersistenceError(error) &&
         error.phase === 'recovery'
       ) {
-        // The persisted succeeded run and admitted continuation remain the
+        // The persisted finalizing/succeeded run and admitted continuation remain the
         // source of truth. Leave the active delivery non-terminal so an expired
         // lease can retry only atomic completion/sink recovery.
         return;
@@ -1324,7 +1320,7 @@ export class AxEventRuntime {
   ): Promise<boolean> {
     if (
       !claimed.recoveredFromExpiredLease ||
-      persisted?.status !== 'succeeded'
+      (persisted?.status !== 'finalizing' && persisted?.status !== 'succeeded')
     ) {
       return false;
     }
@@ -1362,12 +1358,14 @@ export class AxEventRuntime {
         await this.parkDelivery(claimed, effectParkReason);
         return true;
       }
-      const completionEffectParkReason =
-        await this.parkUnsettledCompletionEffects(claimed, controller.signal);
-      this.assertRunActive(controller.signal);
-      if (completionEffectParkReason) {
-        await this.parkDelivery(claimed, completionEffectParkReason);
-        return true;
+      if (persisted.status === 'succeeded') {
+        const completionEffectParkReason =
+          await this.parkUnsettledCompletionEffects(claimed, controller.signal);
+        this.assertRunActive(controller.signal);
+        if (completionEffectParkReason) {
+          await this.parkDelivery(claimed, completionEffectParkReason);
+          return true;
+        }
       }
       const context = new AxRuntimeEventContext(
         this.id,
@@ -1396,7 +1394,7 @@ export class AxEventRuntime {
           : {}),
       };
       if (target && run.output !== undefined) {
-        run = await this.dispatchFinalSinks(target, run, context);
+        run = await this.dispatchFinalSinks(target, run, context, claimed);
         this.assertRunActive(controller.signal);
         const sinkEffectParkReason = await this.parkUnsettledCompletionEffects(
           claimed,
@@ -1424,6 +1422,11 @@ export class AxEventRuntime {
           this.assertRunActive(controller.signal);
           return true;
         }
+        run = {
+          ...run,
+          status: 'succeeded',
+          finishedAt: this.clock.now(),
+        };
         await this.store.saveRun(run);
       }
       this.assertRunActive(controller.signal);
@@ -1798,7 +1801,8 @@ export class AxEventRuntime {
   private async dispatchFinalSinks(
     target: Readonly<AxEventTarget<any, any>>,
     run: AxEventRun,
-    eventContext: AxRuntimeEventContext
+    eventContext: AxRuntimeEventContext,
+    delivery: Readonly<AxEventDelivery>
   ): Promise<AxEventRun> {
     const attempts = [];
     for (const sink of target.sinks ?? []) {
@@ -1828,6 +1832,15 @@ export class AxEventRuntime {
             throw value;
           }
           error = value;
+          const effectParkReason = await this.reconcileEffects(
+            delivery,
+            eventContext.abortSignal
+          );
+          this.assertRunActive(eventContext.abortSignal);
+          if (effectParkReason) {
+            error = new Error(effectParkReason);
+            break;
+          }
           if (count + 1 < (this.options.maxAttempts ?? 5)) {
             await this.clock.sleep(
               Math.min(
@@ -2109,15 +2122,14 @@ export class AxEventRuntime {
     const effects = await this.store.listEffects(delivery.id);
     if (this.storeShutdownStarted) return;
     for (const effect of effects) {
-      if (
-        effect.status !== 'dispatched' ||
-        effect.replaySafety === 'idempotent'
-      ) {
-        continue;
-      }
-      parkedReason = this.effectReason(
-        `Cancelled with indeterminate effect: ${cancellationReason}`
-      );
+      if (effect.status === 'succeeded' || effect.status === 'failed') continue;
+      const reason =
+        effect.parkedReason ??
+        this.effectReason(
+          `Cancelled with unsettled effect ${effect.operation}:${effect.idempotencyKey} (${effect.status}): ${cancellationReason}`
+        );
+      parkedReason ??= reason;
+      if (effect.status === 'parked') continue;
       if (this.storeShutdownStarted) return;
       await this.store.transitionEffect(
         effect.id,
@@ -2125,7 +2137,7 @@ export class AxEventRuntime {
         {
           type: 'parked',
           at: this.clock.now(),
-          reason: parkedReason,
+          reason,
         },
         fence
       );
