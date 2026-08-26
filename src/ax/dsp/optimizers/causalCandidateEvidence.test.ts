@@ -210,6 +210,35 @@ describe('causal candidate evidence', () => {
     ).toThrow(/authority verification failed/);
   });
 
+  it('rejects an unknown inherited receipt while appending', () => {
+    const attacker = hostReceiptRegistry();
+    const forgedPrior = Object.assign(artifact(), {
+      causalCandidateEvidence: axCreateCausalCandidateEvidenceManifest(
+        [record()],
+        attacker.options('receipt-forged-prior')
+      ),
+    });
+    const host = hostReceiptRegistry();
+
+    expect(() =>
+      axAttachCausalCandidateEvidence(
+        forgedPrior,
+        [
+          record({
+            id: 'claim-2',
+            sequence: 1,
+            parentRecordId: 'claim-1',
+            candidateId: 'c2',
+            evidence: [
+              { id: 'trace-2', kind: 'trace', fingerprint: digest('d') },
+            ],
+          }),
+        ],
+        host.options('receipt-legit-new')
+      )
+    ).toThrow(/authority verification failed/);
+  });
+
   it('uses canonical UTF-8 SHA-256 rather than collision-prone FNV identity', async () => {
     const left = 'trace-1mf0zaf-23065';
     const right = 'trace-v4wu3d-67395';

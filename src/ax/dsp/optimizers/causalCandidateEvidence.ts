@@ -702,7 +702,7 @@ function canonicalizeReceipt(
 function validateReceiptChain(
   manifest: Readonly<AxCausalCandidateEvidenceManifest>,
   verifyAuthority: AxCausalEvidenceAuthorityVerifier,
-  purpose: 'issue' | 'replay'
+  finalReceiptPurpose: 'issue' | 'replay'
 ): void {
   if (manifest.receipts.length === 0) {
     throw new Error('causal candidate evidence requires an authority receipt');
@@ -739,6 +739,10 @@ function validateReceiptChain(
       throw new Error('invalid causal candidate evidence receipt chain');
     }
     const authority = normalizeAuthority(receipt.authority);
+    const purpose =
+      finalReceiptPurpose === 'issue' && index === manifest.receipts.length - 1
+        ? 'issue'
+        : 'replay';
     if (
       JSON.stringify(authority) !== JSON.stringify(receipt.authority) ||
       !verifyAuthority(canonicalizeReceipt(manifest, index), authority, purpose)
