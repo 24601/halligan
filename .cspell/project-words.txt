@@ -334,6 +334,10 @@ runpod
 sambanova
 scaleway
 siliconflow
+Subcall
+Subcalls
+subcall
+subcalls
 togethre
 vllm
 dhash
