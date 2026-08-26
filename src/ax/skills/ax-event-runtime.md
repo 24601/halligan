@@ -8,6 +8,18 @@ description: Use AxEventRuntime to ingest events, explicitly wake or resume AxGe
 Use this skill when an Ax program should react to notifications, webhooks,
 timers, queues, task completion, or application events.
 
+## Host-owned authority
+
+`AxEventRuntimeOptions.authority` optionally resolves host-verified authority
+for each delivery. When configured, Ax authorizes exact route/target/sink
+operations, binds tenant scope to verified ingress identity, and propagates the
+context into target programs and their tools. Authority-looking event data is
+ignored. Sink dead-letter redrive resolves authority again and requires a
+current `event.sink.write` receipt. Resolver waits are abortable and bounded;
+rejection or cancellation cannot leak `activeRuns` or wedge `close()`. The
+callback is absent by default, preserving existing behavior. See
+`docs/HOST_AUTHORITY.md` for grants, receipts, attenuation, and limitations.
+
 ## Mental Model
 
 ```text
@@ -89,6 +101,41 @@ eventContext.registerContinuation({
 
 Route progress to `observe`. Route `input_required`, completed, failed, or
 cancelled task events to `resume` when the owning program must run again.
+
+### Retained child session continuations
+
+When an event-driven AxAgent can admit retained children, expose
+`root.functions({ eventContinuations: true })`. Its `sessions.spawn` and
+`sessions.send` functions register a continuation owned by the current event
+target under:
+
+```ts
+AxAgentSessionHost.continuationKey(handle)
+// { kind: 'ax-agent-session', value: handle.id }
+```
+
+Publish terminal host `onEvent` notifications through an application-owned
+event source with that correlation, then route completed/failed/cancelled/
+interrupted events to `resume`. Do not store the continuation in the child
+registry as a second authority: AxEventRuntime owns continuation identity
+scope, persistence, expiry, and target restoration; the session host owns the
+child lifecycle and mailbox. The in-memory adapters on either side remain
+volatile.
+
+The retained session functions defer scheduler dispatch until AxEventRuntime
+has persisted the staged continuation. This is required even when the retained
+scheduler dispatches inline: registering the callback before scheduling is not
+enough because `registerContinuation(...)` is staged until the parent target
+returns.
+
+Recovery advances the retained tree's ownership epoch. Event handlers must
+restore the root and refresh the correlated child's handle before operating on
+it; a continuation may keep the stable child ID for correlation, but not an old
+epoch-bearing capability handle.
+
+Explicit snapshot restore likewise rotates destination epoch/capabilities and
+pending job IDs; dispatch checks both epoch and job ID. Correlation IDs remain
+stable, but source handles/jobs do not carry authority into the destination.
 
 ## MCP Adapter
 

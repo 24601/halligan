@@ -531,6 +531,194 @@ await releaseAgent.forward(
 
 You can use `skills` without setting `onSkillsSearch` at all. That is useful for static guides where the actor never needs to fetch more.
 
+## Host-Owned Executable Skill Artifacts
+
+`skills`, `skillsCatalog`, and `onSkillsSearch` load opaque Markdown guidance;
+they are not executable-skill registries. When a host has already built an
+`AxAgentFunction` and needs a compatibility/retirement gate before registering
+it, wrap it in `AxExecutableSkillArtifact` and call
+`axSelectExecutableSkills(...)`:
+
+```typescript
+import {
+  agent,
+  axExecutableSkillRef,
+  axSelectExecutableSkills,
+  type AxExecutableSkillArtifact,
+} from '@ax-llm/ax';
+
+const artifacts: AxExecutableSkillArtifact[] = [
+  {
+    id: 'browser-checkout',
+    version: '2',
+    name: 'Browser checkout',
+    description: 'Complete checkout in the current web store',
+    functionRef: 'functions/browser-checkout/2',
+    requirements: {
+      preconditions: ['authenticated'],
+      tools: ['browser.navigate@2'],
+      environments: ['web-store@2026-08'],
+      protocols: ['commerce@1'],
+      capabilities: ['browser'],
+      authorities: [
+        {
+          issuer: 'auth.example',
+          audience: 'agent:checkout',
+          principal: 'user:123',
+          tenant: 'shop:7',
+          resource: 'order:456',
+          action: 'purchase',
+          delegationRef: 'delegation:9',
+        },
+      ],
+    },
+    verification: {
+      mode: 'required',
+      evaluation: 'checkout-compatibility-v2',
+      receiptRefs: ['receipt:checkout:2'],
+      issuers: ['eval.example'],
+    },
+    provenance: { source: 'host-registry' },
+    knownFailureModes: ['Does not handle split shipment'],
+  },
+];
+
+const trustedFunctionRegistry = new Map([
+  ['functions/browser-checkout/2', checkoutFunction],
+]);
+const verificationNow = new Date();
+const receiptExpiresAt = new Date(
+  verificationNow.getTime() + 30 * 24 * 60 * 60 * 1000
+);
+
+const selection = axSelectExecutableSkills(
+  artifacts,
+  {
+    // Admission and accepted receipts are host-owned facts. Artifact metadata
+    // cannot add itself to either list.
+    admittedArtifacts: artifacts.map(axExecutableSkillRef),
+    principal: 'user:123',
+    audience: 'agent:checkout',
+    preconditions: ['authenticated'],
+    tools: ['browser.navigate@2'],
+    environment: 'web-store@2026-08',
+    protocols: ['commerce@1'],
+    capabilities: ['browser'],
+    grantedAuthorities: [
+      {
+        issuer: 'auth.example',
+        audience: 'agent:checkout',
+        principal: 'user:123',
+        tenant: 'shop:7',
+        resource: 'order:456',
+        action: 'purchase',
+        delegationRef: 'delegation:9',
+      },
+    ],
+    verifiedReceipts: [
+      {
+        ref: 'receipt:checkout:2',
+        artifact: { id: 'browser-checkout', version: '2' },
+        principal: 'user:123',
+        issuer: 'eval.example',
+        audience: 'agent:checkout',
+        evaluation: 'checkout-compatibility-v2',
+        verifiedAt: verificationNow.toISOString(),
+        expiresAt: receiptExpiresAt.toISOString(),
+      },
+    ],
+    now: verificationNow.toISOString(),
+    resolveFunction: (functionRef) => trustedFunctionRegistry.get(functionRef),
+  },
+  { query: 'complete checkout', topK: 1 }
+);
+
+const assistant = agent('task:string -> answer:string', {
+  contextFields: [],
+  functions: selection.artifacts.map((artifact) => artifact.function),
+});
+
+// Inactive/incompatible/malformed entries never enter `artifacts`; inspect
+// their exact exclusion reasons without exposing their functions to the agent.
+console.log(selection.inspection);
+```
+
+Requirements use exact host-canonicalized IDs. Include versions in tool,
+environment, and protocol IDs when compatibility depends on a version; Ax does
+not guess semver compatibility. Artifact admission and supersession use
+structured `{ id, version }` references, so delimiters inside either field cannot
+alias another revision. Every requirement is all-of except `environments`, where
+any listed environment may match. Authorities are exact structured grants bound
+to issuer, audience, principal, tenant, resource, action, and optional delegation.
+`expiresAt`,
+`deprecatedAt`, `lifecycle`, and `supersededBy` exclude revisions by default.
+Malformed chronology, self-supersession, duplicate references, invalid clocks,
+oversized inputs, and invalid `topK` fail closed but remain inspectable.
+Limits are 1,000 catalog entries, 128 entries per list, 256 UTF-16 code units
+per identifier, 2,048 per description or failure-mode string, 4,096 per query,
+and integer `topK` from 0 through 100. Unknown record fields are rejected rather
+than retained as unbounded extension metadata.
+
+`verification` is mandatory and explicit. Use `{ mode: 'receiptless' }` only
+when host policy permits an admitted artifact without evaluation evidence. In
+`required` mode, at least one host-supplied receipt must match an allowed receipt
+reference and issuer and be bound to the artifact revision, principal, audience,
+evaluation, verification time, and unexpired lifetime.
+
+This is only a selection and audit boundary. It does not load files, install
+packages, execute artifact code during selection, sandbox functions, authenticate
+receipt contents, or provide security isolation. The host must validate artifact
+and receipt sources, admit structured revisions, supply current principal,
+authority, capability, and receipt facts, and retain evaluation records outside
+Ax. `resolveFunction` is the trusted registry boundary; selected metadata and
+function schemas are copied and frozen, and the selected handler is bound to the
+resolved handler value so later registry-object mutation cannot swap it.
+Catalog, artifact, context, and option facts are detached and frozen before
+validation in one shared ingress session and then never reread from caller
+objects. Ingress and registry metadata must use own data properties; accessors
+are rejected without invocation, so one context, option, catalog, or registry
+getter cannot rewrite a fact that has not yet been detached. Supported metadata
+is limited to finite JSON-like primitives, dense arrays, and plain or
+null-prototype records. Arrays reject accessors, sparse entries, and keys outside
+their declared length; snapshots and selector result arrays define own entries
+without inherited assignment. Detached records and selected functions are
+normalized to a null prototype so inherited or later-added `Object.prototype`
+values cannot establish authority or alter function metadata. Callables, symbols,
+bigints, custom-prototype objects such as `Date`, and cyclic values fail closed.
+The trusted context resolver is the ingress exception. A selected function must
+be a plain or null-prototype record with an own data-property `func` whose value
+is callable and an own valid `name`. Its metadata is copied from own data
+properties without executing accessors or rereading `func`; the whole selected
+batch returns no artifacts if any selected root fails snapshot.
+Inherited handlers, class instances, callable aliases, missing function names,
+and accessor handlers or metadata fail closed; descriptions remain optional.
+JavaScript proxies cannot be identified portably in the same realm and are
+outside this boundary; hosts must not pass proxy-backed ingress or registry
+records.
+Select immediately before registration/invocation and select again whenever host
+principal, authority, capability, receipt, or compatibility facts change.
+`provenance` is informational and must never be populated from model output as
+proof of trust. Legacy prompt skills are unchanged; rollback is removing the
+selector and passing ordinary functions directly.
+
+The deterministic zero-cost evaluation is:
+
+```bash
+node --import=tsx src/examples/executable-skill-compatibility-eval.ts
+```
+
+It compares naive lexical retrieval with compatibility-aware retrieval over a
+controlled mechanism fixture containing task/tool/environment/protocol changes,
+missing capability/authority,
+unaccepted and forged receipt metadata, malformed legacy input, expiry,
+deprecation, supersession, and a no-benefit control. It reports exact retrieval,
+false application, serialized artifact/context bytes, prompt bytes (zero), and
+wall-clock selector latency. The task variants are deterministic test cases, not
+a statistically independent benchmark split. This fixture measures selector
+mechanics only,
+not model answer quality, function safety, verifier correctness, or real-world
+latency.
+
 ## Advisory Relevance Hints (`relevanceRanking`)
 
 `relevanceRanking` is ON by default — leave it unset; set `relevanceRanking: false` to opt out. The default was flipped after its A/B gate passed (substance-judged, 49 runs per variant per model: small-model first-lookup precision 24%→90% and answer accuracy 14%→29%; frontier-model control accuracy 63%→88% with fewer turns). The generated language ports implement the same advisory hint contract through AxIR Core.

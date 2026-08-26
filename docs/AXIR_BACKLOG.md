@@ -18,6 +18,24 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
 
 ## Open
 
+- `axir-2026-08-25-port-retained-asynchronous-child-agent-sessions` [axagent] Port retained asynchronous child agent sessions
+  - Status: open
+  - Source commit: `ca760294f5ea4f207052c39c2218e1195103bc2a`
+  - TS paths: `src/ax/agent/retainedSessions.ts`, `src/ax/agent/retainedSessions.test.ts`, `src/ax/agent/retainedSessions.test-d.ts`, `src/ax/agent/benchmarks/retainedSessions.eval.ts`, `src/ax/agent/index.ts`
+  - Impact: TypeScript now exposes an opt-in AxAgentSessionHost for authorized factory-created AxAgent children with immediate stable handles, retained mailbox/state/artifacts, follow-up versus steer semantics, CAS-fenced host store and scheduler adapters, crash recovery, cancellation, tree budgets, and descendant usage attribution. AxIR and generated Python/Java/C++/Go/Rust packages have only synchronous child-agent functions and event-run continuations, so they lack this retained session lifecycle and security boundary.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+- `axir-2026-08-25-port-host-owned-authority-boundary` [axai] Port host-owned authority boundary
+  - Status: open
+  - Source commit: `ca760294f5ea4f207052c39c2218e1195103bc2a`
+  - TS paths: `src/ax/authority`, `src/ax/agent/agentInternal/coordinator.ts`, `src/ax/agent/agentInternal/initialization.ts`, `src/ax/agent/agentInternal/runtimeExecution.ts`, `src/ax/agent/agentInternal/runtimeGlobals.authority.test.ts`, `src/ax/agent/agentInternal/runtimeGlobals.ts`, `src/ax/ai/types.ts`, `src/ax/dsp/functions.test.ts`, `src/ax/dsp/functions.ts`, `src/ax/dsp/generate.authority.test.ts`, `src/ax/dsp/generate.ts`, `src/ax/dsp/response/finalize.ts`, `src/ax/dsp/response/nonStreaming.ts`, `src/ax/dsp/response/types.ts`, `src/ax/dsp/types.ts`, `src/ax/mcp/execution.ts`
+  - Impact: Generated language backends need equivalent principal, scoped grant, receipt binding, event, tool, model-callable MCP/UCP runtime global, native DSP inheritance, and child attenuation behavior.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+- `axir-2026-08-26-port-post-registration-event-continuation-callbacks` [axprogram] Port post-registration event continuation callbacks
+  - Status: open
+  - Source commit: `ea3c3402eba063239e48fa132e0472dc3f908c96`
+  - TS paths: `src/ax/event/runtime.ts`, `src/ax/event/types.ts`
+  - Impact: TypeScript event targets can defer retained-session scheduler dispatch until staged continuations are durably registered, preventing inline terminal events from racing continuation ownership. Generated runtimes persist continuations only after invocation and do not expose or execute this post-registration callback boundary.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 - `axir-2026-08-25-port-gepa-proposal-policy-guidance-and-references` [axoptimize] Port GEPA proposal-policy guidance and references
   - Status: open
   - Source PR: #2
@@ -38,6 +56,34 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
   - Source commit: `28675e87cbf879510e7c61fac29a88e24e1dd4c0`
   - TS paths: `src/ax/agent/preferenceEvidence.ts`, `src/ax/agent/preferenceEvidence.test.ts`, `src/ax/agent/preferenceEvidence.test-d.ts`
   - Impact: Generated runtimes do not yet expose the optional principal-scoped preference evidence contract, nested and per-record-byte malformed isolation without consuming the valid corpus budget, current-stream versus immutable historical receipt binding, strong-claim self-contradiction resolution, content-free erase tombstones, allowlisted retraction invariants, monotonic stream/epoch lifecycle helpers, frozen publications, or memory adapter.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+- `axir-2026-08-25-port-evidence-aware-ace-playbook-metadata-and-retrieval` [axoptimize] Port evidence-aware ACE playbook metadata and retrieval
+  - Status: open
+  - Source PR: #6
+  - Source commit: `ca760294f5ea4f207052c39c2218e1195103bc2a`
+  - TS paths: `src/ax/dsp/optimizers/aceTypes.ts`, `src/ax/dsp/optimizers/acePlaybook.ts`, `src/ax/dsp/optimizers/ace.ts`, `src/ax/dsp/playbook.ts`, `src/ax/agent/agentInternal/agentPlaybook.ts`, `src/ax/agent/agentInternal/playbookEvolve/proposals.ts`, `src/ax/agent/agentInternal/playbookEvolve/playbookEvolve.ts`, `src/ax/agent/agentInternal/playbookEvolve/playbookEvolve.test.ts`, `src/ax/agent/agentPlaybook.test.ts`, `src/ax/agent/playbookConfig.ts`, `src/ax/dsp/optimizers/ace.test.ts`, `src/ax/dsp/optimizers/aceEvidenceEval.test.ts`, `src/ax/dsp/optimizers/acePlaybook.test.ts`, `src/ax/dsp/playbook.test.ts`
+  - Impact: TypeScript ACE bullets now support optional provenance, confidence/evidence counts, declarative applicability, host-owned verifier receipts, lifecycle/supersession, revision lineage, auditable before/after deltas, condition-aware rendering, inspection-only inactive rendering with executable apply stripping, and verified-agent receipts. Legacy artifacts remain valid. Generated runtimes do not yet expose this schema, host evidence boundary, inactive-entry filtering, executable apply stripping, or filtered-empty-section omission.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+- `axir-2026-08-25-port-structured-native-tool-aware-react-module` [axgen] Port structured native-tool-aware ReAct module
+  - Status: open
+  - Source PR: #10
+  - Source commit: `0c03834d19ec0bce695bc4d5a1310370ee4984f4`
+  - TS paths: `src/ax/dsp/react.test.ts`, `src/ax/dsp/react.ts`, `src/ax/mcp/execution.ts`
+  - Impact: TypeScript now exposes react() with native/prompt tool protocols, typed terminal submit, canonical resumable history, bounded parallel execution and compaction; generated Python/Java/C++/Go/Rust packages do not yet expose equivalent semantics.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+- `axir-2026-08-26-port-gepa-built-in-maxexamples-0-optional-reflectiveexamples` [axoptimize] Port GEPA built-in maxExamples 0 optional reflectiveExamples
+  - Status: open
+  - Source PR: #53
+  - Source commit: `4d030474326461ea03c6d081508dc3128d2f1a76`
+  - TS paths: `src/ax/dsp/optimizers/gepaReflection.ts`, `src/ax/dsp/optimizers/gepaReflection.test.ts`
+  - Impact: Built-in GEPA proposal policy now omits optional reflectiveExamples when maxExamples is 0 so the teacher still runs with zero real examples; generated backends still treat a required empty JSON array as missing and would abort the proposal.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+- `axir-2026-08-25-port-host-owned-executable-skill-compatibility-and-retirement-se` [axagent] Port host-owned executable skill compatibility and retirement selection
+  - Status: open
+  - Source PR: #13
+  - Source commit: `ca760294f5ea4f207052c39c2218e1195103bc2a`
+  - TS paths: `src/ax/agent/executableSkills.test.ts`, `src/ax/agent/executableSkills.ts`
+  - Impact: TypeScript hosts can gate reusable AxAgentFunction artifacts by admission, compatibility, authority, verifier receipts, and lifecycle before registration; generated Ax agent packages do not yet expose the same optional selector contract.
   - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 
 ## Done
