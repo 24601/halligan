@@ -283,10 +283,10 @@ export function wrapFunction(
 
   const createIsolatedCompletionProtocol = (): {
     protocol?: AxAgentCompletionProtocol;
-    claimProtocol: () => void;
+    claimProtocol: () => Promise<void>;
   } => {
     if (!protocolForTrigger) {
-      return { claimProtocol: () => {} };
+      return { claimProtocol: async () => {} };
     }
     const real = protocolForTrigger(normalizedQualifiedName);
     const queued: Array<
@@ -297,6 +297,7 @@ export function wrapFunction(
       | Readonly<{ kind: 'success' | 'failed'; message: string }>
     > = [];
     let claimed = false;
+    let replay: Promise<void> | undefined;
     const protocol: AxAgentCompletionProtocol = {
       final: (...args: unknown[]): never => {
         if (claimed) return real.final(...args);
@@ -325,36 +326,36 @@ export function wrapFunction(
     return {
       protocol,
       claimProtocol: () => {
-        if (claimed) return;
+        if (replay) return replay;
         claimed = true;
-        const replay = () => {
-          for (const item of queued) {
-            switch (item.kind) {
-              case 'success':
-                void real.success(item.message);
-                break;
-              case 'failed':
-                void real.failed(item.message);
-                break;
-              case 'final':
-                real.final(...item.args);
-                break;
-              case 'askClarification':
-                real.askClarification(...item.args);
-                break;
-              case 'guideAgent':
-                real.guideAgent(String(item.args[0] ?? ''));
-                break;
+        replay = (async () => {
+          try {
+            for (const item of queued) {
+              switch (item.kind) {
+                case 'success':
+                  await real.success(item.message);
+                  break;
+                case 'failed':
+                  await real.failed(item.message);
+                  break;
+                case 'final':
+                  real.final(...item.args);
+                  break;
+                case 'askClarification':
+                  real.askClarification(...item.args);
+                  break;
+                case 'guideAgent':
+                  real.guideAgent(String(item.args[0] ?? ''));
+                  break;
+              }
+            }
+          } catch (error) {
+            if (!(error instanceof AxAgentProtocolCompletionSignal)) {
+              throw error;
             }
           }
-        };
-        try {
-          replay();
-        } catch (error) {
-          if (!(error instanceof AxAgentProtocolCompletionSignal)) {
-            throw error;
-          }
-        }
+        })();
+        return replay;
       },
     };
   };
@@ -411,10 +412,12 @@ export function wrapFunction(
       );
     }
     speculative.retain?.();
-    speculative.claimProtocol?.();
+    const result = speculative.claimProtocol
+      ? speculative.claimProtocol().then(() => speculative.result)
+      : speculative.result;
     return observeResult(
       normalizeCallArgs(args),
-      speculative.result,
+      result,
       speculative.serializedArgumentsAfter
     );
   };

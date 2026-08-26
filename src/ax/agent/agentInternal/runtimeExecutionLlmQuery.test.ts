@@ -77,4 +77,45 @@ describe('llmQuery speculative debit accounting', () => {
     expect(budget.localUsed).toBe(1);
     await Promise.allSettled([stale.result, retained.result]);
   });
+
+  it('keeps a rejected launch debit when it is retained after settlement', async () => {
+    const budget: AxLlmQueryBudgetState = {
+      global: { used: 0 },
+      globalMax: 8,
+      localUsed: 0,
+      localMax: 8,
+    };
+    const { llmQuery } = buildLlmQueryBindings({
+      self: { shouldBubbleUserError: () => true },
+      ai: new AxMockAIService({
+        features: { functions: false, streaming: false },
+        chatResponse: async () => {
+          throw new Error('failed before claim');
+        },
+      }),
+      debug: false,
+      llmQueryBudgetState: budget,
+      maxBatchedLlmQueryConcurrency: 1,
+      recursionForwardOptions: {},
+      parentForwardOptions: {},
+      simpleChildSignature: f()
+        .input('task', f.string())
+        .output('answer', f.string())
+        .build(),
+      llmCallWarnThreshold: 8,
+      getMaxRuntimeChars: () => 1000,
+    });
+    const adapter = getJSRuntimeHostFunctionSpeculationAdapter(llmQuery);
+    expect(adapter).toBeDefined();
+
+    const controller = new AbortController();
+    const launch = await adapter!.launch(['failed'], controller.signal);
+    await expect(launch.result).rejects.toThrow('failed before claim');
+
+    launch.retain?.();
+    controller.abort('stale abort after claim');
+    launch.releaseDebit?.();
+    expect(budget.global.used).toBe(1);
+    expect(budget.localUsed).toBe(1);
+  });
 });

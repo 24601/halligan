@@ -31,7 +31,7 @@ export type JSRuntimeHostFunctionSpeculationLaunch = Readonly<{
    * Apply deferred protocol side effects only after this launch is claimed.
    * Unclaimed speculation must not mutate the shared completion payload.
    */
-  claimProtocol?: () => void;
+  claimProtocol?: () => Promise<void>;
 }>;
 
 export type JSRuntimeHostFunctionSpeculationAdapter = Readonly<{

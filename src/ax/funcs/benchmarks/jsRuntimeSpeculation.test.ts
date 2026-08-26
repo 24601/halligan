@@ -408,7 +408,13 @@ async function evaluateUnsafeCall(): Promise<{
   const speculation = await runUnsafe(true);
   expect(speculation.accounting.physicalCalls).toBe(2);
   expect(speculation.accounting.logicalCalls).toBe(2);
-  expect(countEvents(speculation, 'hit')).toBe(1);
+  expect(countEvents(speculation, 'hit')).toBe(0);
+  expect(
+    speculation.events.some(
+      (event) =>
+        event.kind === 'blocked' && event.reason === 'unsafe-dependency'
+    )
+  ).toBe(true);
   return {
     baseline: `${baseline.accounting.physicalCalls}/${baseline.accounting.logicalCalls}`,
     speculation: `${speculation.accounting.physicalCalls}/${speculation.accounting.logicalCalls}`,

@@ -363,9 +363,10 @@ export function buildLlmQueryBindings(
         for (const release of ownedDebits) release();
         ownedDebits.length = 0;
       };
-      void result.catch(() => {
-        refundIfAbandoned();
-      });
+      // A rejected launch remains claimable: a worker claim can arrive after
+      // settlement and must retain the billed logical call.
+      // Only execution-owned abandonment (abort/release) refunds the debit.
+      void result.catch(() => {});
       const onAbort = () => {
         refundIfAbandoned();
       };

@@ -646,6 +646,24 @@ function findConfiguredCalls(
   return [...found];
 }
 
+function hasPotentialCall(statement: readonly Token[]): boolean {
+  if (statement[0]?.value === 'throw' || statement[0]?.value === 'return') {
+    return false;
+  }
+  for (let index = 0; index < statement.length; index++) {
+    const qualified = parseQualifiedPath(statement, index);
+    const next = qualified ? statement[qualified.next] : undefined;
+    if (next?.value === '(' || next?.kind === 'string') return true;
+    if (
+      (statement[index]?.value === ')' || statement[index]?.value === ']') &&
+      statement[index + 1]?.value === '('
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 class ArgumentsTooLargeError extends Error {}
 class UnsafeDependencyError extends Error {}
 class SpeculationUnavailableError extends Error {}
@@ -1001,6 +1019,7 @@ export class JSRuntimeSpeculationTurn {
     const configuredTools = new Set(this.options.callables.keys());
     const bindings = new Map<string, Promise<unknown>>();
     let callLimitReported = false;
+    let unsafeCallBarrier = false;
 
     for (const statement of statements) {
       if (isUnsupportedMutation(statement)) {
@@ -1012,6 +1031,7 @@ export class JSRuntimeSpeculationTurn {
         parsed = parsePlannedCall(statement, configuredTools);
       } catch {
         this.emit({ kind: 'blocked', reason: 'unsupported-syntax' });
+        if (hasPotentialCall(statement)) unsafeCallBarrier = true;
         continue;
       }
       if (!parsed) {
@@ -1022,6 +1042,18 @@ export class JSRuntimeSpeculationTurn {
             reason: 'unsupported-syntax',
           });
         }
+        if (hasPotentialCall(statement)) unsafeCallBarrier = true;
+        continue;
+      }
+      const policy = this.options.callables.get(parsed.tool)!;
+      if (unsafeCallBarrier) {
+        this.emit({
+          kind: 'blocked',
+          tool: parsed.tool,
+          callIndex: this.entries.length,
+          deterministic: policy.deterministic,
+          reason: 'unsafe-dependency',
+        });
         continue;
       }
       if (this.entries.length >= this.options.maxCallsPerExecution) {
@@ -1036,7 +1068,6 @@ export class JSRuntimeSpeculationTurn {
         continue;
       }
 
-      const policy = this.options.callables.get(parsed.tool)!;
       const ref = this.fnPathToRef.get(parsed.tool);
       if (!ref) {
         this.emit({

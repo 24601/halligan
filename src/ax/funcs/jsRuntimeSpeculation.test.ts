@@ -658,6 +658,38 @@ describe('AxJSRuntime speculative programmatic tool calling', () => {
     expect(events).toEqual([]);
   });
 
+  it('does not speculate across an earlier unapproved stateful call', async () => {
+    const events: AxJSRuntimeSpeculationEvent[] = [];
+    const calls: string[] = [];
+    let value = 'old';
+    const write = async (input: { value: string }) => {
+      value = input.value;
+      calls.push(`write:${value}`);
+    };
+    const read = createTestCallable(async () => {
+      calls.push(`read:${value}`);
+      return value;
+    });
+
+    await expect(
+      run(
+        'await tools.write({ value: "new" }); const result = await tools.read({}); return result;',
+        { tools: { write, read } },
+        speculation(events, { 'tools.read': pure(true) })
+      )
+    ).resolves.toBe('new');
+    expect(calls).toEqual(['write:new', 'read:new']);
+    expect(events.some((event) => event.kind === 'dispatch')).toBe(false);
+    expect(events.some((event) => event.kind === 'hit')).toBe(false);
+    expect(events).toContainEqual({
+      kind: 'blocked',
+      tool: 'tools.read',
+      callIndex: 0,
+      deterministic: true,
+      reason: 'unsafe-dependency',
+    });
+  });
+
   it('executes calls inside branches and loops only in the worker', async () => {
     const events: AxJSRuntimeSpeculationEvent[] = [];
     const calls: string[] = [];
@@ -1078,5 +1110,95 @@ describe('AxJSRuntime speculative programmatic tool calling', () => {
       deterministic: false,
       reason: 'execution-failed',
     });
+  });
+
+  it('awaits replayed protocol status before applying final', async () => {
+    const events: AxJSRuntimeSpeculationEvent[] = [];
+    const order: string[] = [];
+    let releaseSuccess!: () => void;
+    const successGate = new Promise<void>((resolve) => {
+      releaseSuccess = resolve;
+    });
+    const bindings = createCompletionBindings(
+      () => {
+        order.push('final');
+      },
+      async () => {
+        order.push('success-start');
+        await successGate;
+        order.push('success-end');
+      }
+    );
+    const fn: AxFunction = {
+      name: 'complete',
+      description: 'Report status and complete the actor turn',
+      parameters: { type: 'object', additionalProperties: true },
+      func: async (_args, extra) => {
+        if (!extra?.protocol) throw new Error('missing protocol');
+        await extra.protocol.success('ready');
+        extra.protocol.final('DONE');
+      },
+    };
+    const callable = wrapFunction(
+      fn,
+      undefined,
+      undefined,
+      bindings.protocolForTrigger,
+      'tools.complete'
+    );
+
+    const execution = run(
+      'await tools.complete({}); return "unreachable";',
+      { tools: { complete: callable } },
+      speculation(events, { 'tools.complete': pure(false) })
+    );
+    await vi.waitFor(() => expect(order).toEqual(['success-start']));
+    releaseSuccess();
+
+    await expect(execution).rejects.toThrow(
+      'AxAgent protocol completion: final'
+    );
+    expect(order).toEqual(['success-start', 'success-end', 'final']);
+    expect(events.some((event) => event.kind === 'hit')).toBe(true);
+  });
+
+  it('observes and propagates a rejecting protocol replay', async () => {
+    const events: AxJSRuntimeSpeculationEvent[] = [];
+    const recorded: Array<{ error?: string }> = [];
+    const bindings = createCompletionBindings(
+      () => {},
+      async () => {
+        throw new Error('status replay failed');
+      }
+    );
+    const fn: AxFunction = {
+      name: 'report',
+      description: 'Report actor status',
+      parameters: { type: 'object', additionalProperties: true },
+      func: async (_args, extra) => {
+        if (!extra?.protocol) throw new Error('missing protocol');
+        await extra.protocol.success('ready');
+        return 'unreachable';
+      },
+    };
+    const callable = wrapFunction(
+      fn,
+      undefined,
+      undefined,
+      bindings.protocolForTrigger,
+      'tools.report',
+      (call) => recorded.push(call)
+    );
+
+    await expect(
+      run(
+        'const value = await tools.report({}); return value;',
+        { tools: { report: callable } },
+        speculation(events, { 'tools.report': pure(false) })
+      )
+    ).rejects.toThrow('status replay failed');
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]?.error).toBe('status replay failed');
+    expect(events.some((event) => event.kind === 'hit')).toBe(true);
   });
 });
