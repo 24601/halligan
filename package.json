@@ -49,6 +49,8 @@
     "skills:check": "node scripts/check-skills.mjs",
     "axir:verify:dev": "node scripts/run-axir.mjs verify --mode dev --jobs 0 --progress",
     "axir:verify:release": "node scripts/run-axir.mjs verify --mode release --jobs 0 --progress",
+    "benchmark:gepa-lineage": "node --import=tsx scripts/gepa-lineage-benchmark.ts",
+    "test:gepa-upstream-compatibility": "node --import=tsx scripts/gepa-upstream-compatibility.ts",
     "test:format": "biome format package.json .github/workflows/ci.yml scripts src --files-ignore-unknown=true",
     "test:lint": "biome lint .",
     "test:tests": "npm run test --workspaces --if-present",

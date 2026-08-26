@@ -23,6 +23,10 @@ import type {
 import { AxGen } from './generate.js';
 import { axGlobals } from './globals.js';
 import { axDefaultOptimizerLogger } from './optimizerLogging.js';
+import {
+  type AxGEPACandidateLineageManifest,
+  cloneAndFreezeGEPACandidateLineageManifest,
+} from './optimizers/gepaLineage.js';
 import type { AxGEPAComponentBanditState } from './optimizers/gepaSelection.js';
 import type { AxOptimizerLoggerFunction } from './optimizerTypes.js';
 import type { AxGenOut, AxProgramDemos } from './types.js';
@@ -851,6 +855,7 @@ export interface AxOptimizedProgram<OUT = any> {
    */
   componentMap?: Record<string, string>;
   selectorState?: Record<string, AxGEPAComponentBanditState>;
+  candidateLineage?: AxGEPACandidateLineageManifest;
   demos?: AxProgramDemos<any, OUT>[];
 
   // Model configuration
@@ -894,6 +899,7 @@ export class AxOptimizedProgramImpl<OUT = any>
   public readonly stats: AxOptimizationStats;
   public readonly componentMap?: Record<string, string>;
   public readonly selectorState?: Record<string, AxGEPAComponentBanditState>;
+  public declare readonly candidateLineage?: AxGEPACandidateLineageManifest;
   public readonly demos?: AxProgramDemos<any, OUT>[];
   public readonly examples?: AxExample[];
   public readonly modelConfig?: {
@@ -920,6 +926,7 @@ export class AxOptimizedProgramImpl<OUT = any>
     stats: AxOptimizationStats;
     componentMap?: Record<string, string>;
     selectorState?: Record<string, AxGEPAComponentBanditState>;
+    candidateLineage?: AxGEPACandidateLineageManifest;
     demos?: AxProgramDemos<any, OUT>[];
     examples?: AxExample[];
     modelConfig?: AxOptimizedProgram<OUT>['modelConfig'];
@@ -936,6 +943,11 @@ export class AxOptimizedProgramImpl<OUT = any>
     this.stats = config.stats;
     this.componentMap = config.componentMap;
     this.selectorState = config.selectorState;
+    if (config.candidateLineage) {
+      this.candidateLineage = cloneAndFreezeGEPACandidateLineageManifest(
+        config.candidateLineage
+      );
+    }
     this.demos = config.demos;
     this.examples = config.examples;
     this.modelConfig = config.modelConfig;

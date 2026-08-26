@@ -215,6 +215,12 @@ export async function proposeGEPAComponentValue(args: {
   traceDataset?: readonly unknown[];
   maxAttempts?: number;
   proposal?: Readonly<AxGEPAProposalOptions>;
+  onFailure?: (
+    failure: Readonly<{
+      kind: 'runtime' | 'validator';
+      message: string;
+    }>
+  ) => void;
 }): Promise<string | undefined> {
   const attempts = Math.max(1, args.maxAttempts ?? 2);
   let previousValidationError: string | undefined;
@@ -258,6 +264,7 @@ export async function proposeGEPAComponentValue(args: {
       if (isAbortError(error)) throw error;
       previousValidationError =
         error instanceof Error ? error.message : String(error);
+      args.onFailure?.({ kind: 'runtime', message: previousValidationError });
       continue;
     }
     if (!proposed) {
@@ -267,6 +274,7 @@ export async function proposeGEPAComponentValue(args: {
     const validation = validateGEPAComponentValue(args.target, proposed);
     if (validation === true) return proposed;
     previousValidationError = validation;
+    args.onFailure?.({ kind: 'validator', message: validation });
   }
   return undefined;
 }
