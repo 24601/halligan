@@ -47,7 +47,11 @@ fn main() -> AxResult<()> {
             .and_then(|p| p.get("answer"))
             .and_then(Value::as_str)
             .unwrap_or("");
-        if answer.is_empty() { json!(0.0) } else { json!(1.0) }
+        if answer.is_empty() {
+            json!(0.0)
+        } else {
+            json!(1.0)
+        }
     };
 
     let examples = vec![
@@ -57,7 +61,10 @@ fn main() -> AxResult<()> {
     let result = pb.evolve(&examples, &mut metric, &json!({}))?;
     let rendered = pb.render();
     let state = pb.to_json();
-    assert!(result.get("bestScore").is_some(), "missing bestScore: {result}");
+    assert!(
+        result.get("bestScore").is_some(),
+        "missing bestScore: {result}"
+    );
     assert!(state.get("playbook").is_some(), "missing playbook: {state}");
     assert!(state.get("artifact").is_some(), "missing artifact: {state}");
     println!("rendered: {rendered}");

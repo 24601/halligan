@@ -25,6 +25,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_namespace("checkout")
         .with_store(store.clone())
         .with_route_key(Arc::new(|service, _index| service.get_id()));
-    println!("{} {}", strategy.namespace, store.get(&key)?.unwrap().successes);
+    println!(
+        "{} {}",
+        strategy.namespace,
+        store.get(&key)?.unwrap().successes
+    );
     Ok(())
 }

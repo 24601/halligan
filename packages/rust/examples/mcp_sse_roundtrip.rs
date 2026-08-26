@@ -23,16 +23,27 @@ fn read_request(stream: &mut TcpStream) -> String {
     let mut expected = None;
     loop {
         let read = stream.read(&mut tmp).unwrap_or(0);
-        if read == 0 { break; }
+        if read == 0 {
+            break;
+        }
         request.extend_from_slice(&tmp[..read]);
         if expected.is_none() {
             if let Some(headers_end) = request.windows(4).position(|value| value == b"\r\n\r\n") {
                 let headers = String::from_utf8_lossy(&request[..headers_end + 4]);
-                let content_length = headers.lines().find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length:").map(|value| value.trim().parse::<usize>().unwrap_or(0))).unwrap_or(0);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(|value| value.trim().parse::<usize>().unwrap_or(0))
+                    })
+                    .unwrap_or(0);
                 expected = Some(headers_end + 4 + content_length);
             }
         }
-        if expected.is_some_and(|length| request.len() >= length) { break; }
+        if expected.is_some_and(|length| request.len() >= length) {
+            break;
+        }
     }
     String::from_utf8_lossy(&request).into_owned()
 }
@@ -52,7 +63,11 @@ fn main() -> AxResult<()> {
             } else if request.contains("notifications/initialized") || request.starts_with("GET ") {
                 ("application/json", String::new(), false)
             } else {
-                ("text/event-stream", SSE_BODY.replace("\"ax-sse-1\"", "3"), true)
+                (
+                    "text/event-stream",
+                    SSE_BODY.replace("\"ax-sse-1\"", "3"),
+                    true,
+                )
             };
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -61,7 +76,9 @@ fn main() -> AxResult<()> {
             );
             let _ = stream.write_all(response.as_bytes());
             let _ = stream.flush();
-            if done { break; }
+            if done {
+                break;
+            }
         }
     });
 
@@ -72,7 +89,11 @@ fn main() -> AxResult<()> {
     )?;
     let mut client = AxMCPClient::new(Box::new(transport), json!({}));
     client.init()?;
-    assert_eq!(client.get_era(), Some("legacy"), "auto discovery did not fall back");
+    assert_eq!(
+        client.get_era(),
+        Some("legacy"),
+        "auto discovery did not fall back"
+    );
     let response = client.call_tool("noop", json!({}))?;
     assert_eq!(
         response["ok"].as_bool(),

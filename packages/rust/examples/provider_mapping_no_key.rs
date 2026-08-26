@@ -45,6 +45,9 @@ fn main() -> AxResult<()> {
     let captured = events.lock().unwrap();
     assert_eq!(captured.len(), 1);
     assert_eq!(captured[0]["context"]["tenantId"], "tenant-1");
-    println!("rust-provider-mapping-no-key {}", result["results"][0]["content"].as_str().unwrap_or(""));
+    println!(
+        "rust-provider-mapping-no-key {}",
+        result["results"][0]["content"].as_str().unwrap_or("")
+    );
     Ok(())
 }

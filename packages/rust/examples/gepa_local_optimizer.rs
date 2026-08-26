@@ -23,7 +23,11 @@ fn main() -> AxResult<()> {
             .as_str()
             .or_else(|| candidate["candidate"]["qa::instruction"].as_str())
             .unwrap_or_default();
-        let quality = if instruction.to_lowercase().contains("concise") { 0.9 } else { 0.65 };
+        let quality = if instruction.to_lowercase().contains("concise") {
+            0.9
+        } else {
+            0.65
+        };
         let brevity = 0.8;
         Ok(json!({
             "rows": [{
