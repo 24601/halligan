@@ -381,7 +381,7 @@ latency and every exclusion/callback check, exits nonzero on any failure, and
 does not suppress or golden known failures.
 
 The default bound is 17 cases × 1,000 iterations = 17,000 local selections,
-four one-shot stress probes, zero provider calls/tokens, and $0 provider cost.
+five one-shot stress probes, zero provider calls/tokens, and $0 provider cost.
 Latency is descriptive and machine-dependent. This is deterministic
 adversarial mechanism regression coverage, not independent held-out
 personalization accuracy. It makes no model-quality, security-proof,

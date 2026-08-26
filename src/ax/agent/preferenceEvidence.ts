@@ -1033,7 +1033,10 @@ export function axRetractPreferenceEvidence(
         operation: 'retract',
         revision: record.streamVersion + 1,
         epoch: record.epoch,
-        ...event,
+        eventId: event.eventId,
+        recordedAt: event.recordedAt,
+        sourceReceiptRef: event.sourceReceiptRef,
+        authorityReceiptRef: event.authorityReceiptRef,
       },
     ],
   });

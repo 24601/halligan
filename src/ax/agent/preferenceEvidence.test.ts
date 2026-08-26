@@ -316,6 +316,43 @@ describe('axSelectPreferenceEvidence', () => {
     expect(JSON.stringify(erased)).not.toContain(original.revisions[0]?.value);
     expect(JSON.stringify(erased)).not.toContain('consent:lifecycle:1');
 
+    const widenedRetraction = axRetractPreferenceEvidence(original, {
+      ...original.revisions[0],
+      operation: 'assert',
+      revision: 99,
+      epoch: 99,
+      eventId: 'event:lifecycle:widened-retract',
+      recordedAt: '2026-08-21T12:00:00.000Z',
+      sourceReceiptRef: 'source:lifecycle:widened-retract',
+      authorityReceiptRef: 'authority:lifecycle:widened-retract',
+      value: 'Attacker replacement',
+      secretPayload: 'RETRACTION SECRET',
+    });
+    expect(widenedRetraction.revisions[1]).toEqual({
+      operation: 'retract',
+      revision: 2,
+      epoch: 1,
+      eventId: 'event:lifecycle:widened-retract',
+      recordedAt: '2026-08-21T12:00:00.000Z',
+      sourceReceiptRef: 'source:lifecycle:widened-retract',
+      authorityReceiptRef: 'authority:lifecycle:widened-retract',
+    });
+    expect(JSON.stringify(widenedRetraction)).not.toContain(
+      'Attacker replacement'
+    );
+    expect(JSON.stringify(widenedRetraction)).not.toContain(
+      'RETRACTION SECRET'
+    );
+    expect(
+      axSelectPreferenceEvidence(
+        [widenedRetraction],
+        context([widenedRetraction])
+      )
+    ).toMatchObject({
+      applied: [],
+      excluded: [{ recordId: 'lifecycle', reason: 'retracted' }],
+    });
+
     const widenedEvent = {
       ...original.revisions[0],
       eventId: 'event:lifecycle:widened-erase',
