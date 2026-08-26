@@ -93,7 +93,9 @@ iteration, wall-clock, JSON value, and Node worker-resource budgets. Timed-out
 execution epochs reject late bridge results, while already-dispatched external
 effects remain host-owned. Parse/bind failures reject the candidate, runtime
 failures are scored against their aligned examples, and the immutable signature
-strictly validates final output fields. Custom runtimes require explicit
+strictly validates final output fields. Predictor requests and selected host
+tool schemas are captured once as accessor-free bounded snapshots before budget
+consumption or AI/tool authority. Custom runtimes require explicit
 JavaScript/protocol compatibility but remain trusted adapters. This experimental
 API is not yet part of the generated-language AxIR surface.
 

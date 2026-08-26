@@ -148,16 +148,23 @@ the source string in `componentMap`; use `axSerializeOptimizedProgram(...)` and
   imports, ambient globals, or mutable cross-call state.
 - Predictor, tool-call, executed-statement/loop, continuation-step, source-size,
   nesting, and wall-clock limits are enforced.
-- Inputs, complete predictor requests (signature/instruction/tool-name metadata
-  plus input), tool arguments/results, and final outputs must be plain acyclic
-  JSON graphs within configurable UTF-8 byte, depth, and per-container width
-  limits. Defaults are 1,048,576 bytes, depth 24, and width 4,096. Predictor
-  requests fail before call-budget consumption, tool/schema resolution, or AI
-  dispatch; other values fail before their next bridge/runtime use.
+- Inputs, complete predictor requests (signature/instruction/tool-name metadata,
+  input, and selected host tool descriptions/parameter/return schemas), tool
+  arguments/results, and final outputs must be plain acyclic JSON graphs within
+  configurable UTF-8 byte, depth, and per-container width limits. Defaults are
+  1,048,576 bytes, depth 24, and width 4,096.
+- Ax captures each runtime-supplied predictor request into a detached snapshot
+  without invoking accessors, then resolves and snapshots the selected host tool
+  metadata into the same bounded request envelope. Only those snapshots reach
+  instruction binding, `AxGen`, tool-schema rendering, and tool execution.
+  Accessors, unstable/throwing Proxy inspection, oversized or deeply nested
+  schemas, and other invalid graphs fail before predictor-call budget
+  consumption, host schema getters, tool handlers, or AI dispatch.
 - Static binding separately caps the whole source at 50,000 characters, 128
   statements, and nesting depth 8. These limits are cumulative, not substitutes:
   source may bind successfully yet fail a tighter runtime `valueLimits` policy,
-  which takes precedence before host authority on each bridge call.
+  which takes precedence before host authority on each bridge call. A custom
+  runtime cannot bypass that policy by mutating request objects after capture.
 - Each execution has an epoch and abort signal. Timeout, caller abort, or close
   revokes that epoch: new bridge calls and late completions are rejected, and
   bounded late-event diagnostics are available through `getLateBridgeEvents()`.

@@ -474,7 +474,6 @@ describe('AxProgramSource', () => {
   it('bounds complete predictor requests before host authority', async () => {
     let predictorCalls = 0;
     let toolCalls = 0;
-    let schemaReads = 0;
     const ai = mockTextAI();
     ai.chat = async () => {
       predictorCalls += 1;
@@ -504,11 +503,11 @@ describe('AxProgramSource', () => {
         valueLimits: { maxBytes: 200 },
       }).forward(ai, { question: 'q' })
     ).rejects.toThrow(
-      /predictor '\$program' request exceeds serialized value byte limit: 200/
+      /predictor request exceeds serialized value byte limit: 200/
     );
 
     const guardedTool = (name: string): AxFunction => {
-      const tool: AxFunction = {
+      return {
         name,
         description: 'Must not be resolved for an oversized request.',
         parameters: { type: 'object', properties: {} },
@@ -518,15 +517,6 @@ describe('AxProgramSource', () => {
           return { answer: 'unexpected' };
         },
       };
-      Object.defineProperty(tool, 'description', {
-        configurable: true,
-        enumerable: true,
-        get: () => {
-          schemaReads += 1;
-          return 'Must not be resolved for an oversized request.';
-        },
-      });
-      return tool;
     };
     const tools = ['first', 'second', 'third'].map(guardedTool);
     const oversizedTools = source(
@@ -549,13 +539,284 @@ describe('AxProgramSource', () => {
         valueLimits: { maxWidth: 2 },
       }).forward(ai, { question: 'q' })
     ).rejects.toThrow(
-      /predictor '\$program' request exceeds value width limit: 2 at \$\.spec\.tools/
+      /predictor request exceeds value width limit: 2 at \$\.spec\.tools/
     );
-    expect({ predictorCalls, toolCalls, schemaReads }).toEqual({
+    expect({ predictorCalls, toolCalls }).toEqual({
       predictorCalls: 0,
       toolCalls: 0,
-      schemaReads: 0,
     });
+  });
+
+  it('snapshots custom-runtime predictor metadata once and rejects accessors and proxy failures', async () => {
+    let aiCalls = 0;
+    let getterCalls = 0;
+    let proxyGets = 0;
+    let instructionDescriptors = 0;
+    let renderedRequest = '';
+    const ai = mockTextAI();
+    ai.chat = async (request) => {
+      aiCalls += 1;
+      renderedRequest = JSON.stringify(request);
+      return {
+        results: [{ index: 0, content: 'Answer: safe', finishReason: 'stop' }],
+      } as AxChatResponse;
+    };
+    const stableSpec = new Proxy(
+      { signature: '$program', instruction: 'small', tools: [] },
+      {
+        get: (target, key, receiver) => {
+          proxyGets += 1;
+          if (key === 'instruction') return '😀'.repeat(1_000);
+          return Reflect.get(target, key, receiver);
+        },
+        getOwnPropertyDescriptor: (target, key) => {
+          if (key === 'instruction') instructionDescriptors += 1;
+          return Reflect.getOwnPropertyDescriptor(target, key);
+        },
+      }
+    );
+    const runtimeFor = (spec: object): AxCodeRuntime => ({
+      language: 'JavaScript',
+      getUsageInstructions: () => '',
+      createSession: (globals) => ({
+        execute: async () => {
+          const bridge = globals?.__axProgramSourcePredict as (
+            nextSpec: object,
+            input: object
+          ) => Promise<unknown>;
+          return await bridge(spec, { question: 'q' });
+        },
+        patchGlobals: async () => {},
+        close: () => {},
+      }),
+    });
+
+    await expect(
+      programSource('question:string -> answer:string', {
+        runtime: compatibleRuntime(runtimeFor(stableSpec)),
+        valueLimits: { maxBytes: 200 },
+      }).forward(ai, { question: 'q' })
+    ).resolves.toEqual({ answer: 'safe' });
+    expect({ aiCalls, proxyGets, instructionDescriptors }).toEqual({
+      aiCalls: 1,
+      proxyGets: 0,
+      instructionDescriptors: 1,
+    });
+    expect(renderedRequest).toMatch(/small/i);
+    expect(renderedRequest).not.toContain('😀');
+
+    const accessorSpec = { signature: '$program', tools: [] } as Record<
+      string,
+      unknown
+    >;
+    Object.defineProperty(accessorSpec, 'instruction', {
+      enumerable: true,
+      get: () => {
+        getterCalls += 1;
+        return '😀'.repeat(1_000);
+      },
+    });
+    await expect(
+      programSource('question:string -> answer:string', {
+        runtime: compatibleRuntime(runtimeFor(accessorSpec)),
+        valueLimits: { maxBytes: 200 },
+      }).forward(ai, { question: 'q' })
+    ).rejects.toThrow(/non-data property 'instruction'/);
+
+    const failingSpec = new Proxy(
+      {},
+      {
+        ownKeys: () => {
+          throw new Error('proxy inspection failed');
+        },
+      }
+    );
+    await expect(
+      programSource('question:string -> answer:string', {
+        runtime: compatibleRuntime(runtimeFor(failingSpec)),
+      }).forward(ai, { question: 'q' })
+    ).rejects.toThrow(/could not be inspected as a serializable value/);
+    expect({ aiCalls, getterCalls }).toEqual({ aiCalls: 1, getterCalls: 0 });
+  });
+
+  it('bounds selected host tool schemas before predictor budget or authority', async () => {
+    let aiCalls = 0;
+    let toolCalls = 0;
+    let schemaGetterCalls = 0;
+    const ai = mockTextAI();
+    ai.chat = async () => {
+      aiCalls += 1;
+      return {
+        results: [
+          { index: 0, content: 'Answer: called', finishReason: 'stop' },
+        ],
+      } as AxChatResponse;
+    };
+    const predictWith = (name: string) =>
+      source(
+        [
+          {
+            op: 'predict',
+            as: 'prediction',
+            signature: '$program',
+            tools: [name],
+            input: ref('inputs'),
+          },
+          returnAnswer(ref('prediction.answer')),
+        ],
+        ['predict', `tool:${name}`]
+      );
+    const tool = (
+      name: string,
+      parameters: AxFunction['parameters']
+    ): AxFunction => ({
+      name,
+      description: 'Schema boundary probe.',
+      parameters,
+      returns: { type: 'object' },
+      func: () => {
+        toolCalls += 1;
+        return { answer: 'unexpected' };
+      },
+    });
+
+    const wide = tool('wideSchema', {
+      type: 'object',
+      properties: Object.fromEntries(
+        Array.from({ length: 100 }, (_, index) => [
+          `field${index}`,
+          { type: 'string', description: `Field ${index}` },
+        ])
+      ),
+    });
+    await expect(
+      programSource('question:string -> answer:string', {
+        source: predictWith(wide.name),
+        tools: [wide],
+        maxPredictorCalls: 0,
+        valueLimits: { maxWidth: 10 },
+      }).forward(ai, { question: 'q' })
+    ).rejects.toThrow(/selected tool schemas exceeds value width limit: 10/);
+
+    let nested: AxFunction['parameters'] = { type: 'string' };
+    for (let index = 0; index < 12; index += 1) {
+      nested = { type: 'array', items: nested };
+    }
+    const deep = tool('deepSchema', nested);
+    await expect(
+      programSource('question:string -> answer:string', {
+        source: predictWith(deep.name),
+        tools: [deep],
+        maxPredictorCalls: 0,
+        valueLimits: { maxDepth: 10 },
+      }).forward(ai, { question: 'q' })
+    ).rejects.toThrow(/selected tool schemas exceeds value depth limit: 10/);
+
+    const accessorParameters = { type: 'object' } as AxFunction['parameters'];
+    Object.defineProperty(accessorParameters, 'properties', {
+      enumerable: true,
+      get: () => {
+        schemaGetterCalls += 1;
+        return { unsafe: { type: 'string', description: 'Unsafe' } };
+      },
+    });
+    const nestedAccessor = tool('nestedAccessorSchema', accessorParameters);
+    await expect(
+      programSource('question:string -> answer:string', {
+        source: predictWith(nestedAccessor.name),
+        tools: [nestedAccessor],
+        maxPredictorCalls: 0,
+      }).forward(ai, { question: 'q' })
+    ).rejects.toThrow(/non-data property 'properties'/);
+
+    const toolAccessor = tool('toolAccessorSchema', { type: 'object' });
+    Object.defineProperty(toolAccessor, 'parameters', {
+      enumerable: true,
+      get: () => {
+        schemaGetterCalls += 1;
+        return { type: 'object', properties: {} };
+      },
+    });
+    await expect(
+      programSource('question:string -> answer:string', {
+        source: predictWith(toolAccessor.name),
+        tools: [toolAccessor],
+        maxPredictorCalls: 0,
+      }).forward(ai, { question: 'q' })
+    ).rejects.toThrow(
+      /property 'parameters' must be an enumerable data property/
+    );
+    expect({ aiCalls, toolCalls, schemaGetterCalls }).toEqual({
+      aiCalls: 0,
+      toolCalls: 0,
+      schemaGetterCalls: 0,
+    });
+  });
+
+  it('does not consume predictor budget when selected tool schemas are rejected', async () => {
+    let aiCalls = 0;
+    let invalidError = '';
+    const ai = mockTextAI();
+    ai.chat = async () => {
+      aiCalls += 1;
+      return {
+        results: [{ index: 0, content: 'Answer: safe', finishReason: 'stop' }],
+      } as AxChatResponse;
+    };
+    const wideTool: AxFunction = {
+      name: 'wideSchema',
+      description: 'Rejected schema.',
+      parameters: {
+        type: 'object',
+        properties: Object.fromEntries(
+          Array.from({ length: 100 }, (_, index) => [
+            `field${index}`,
+            { type: 'string', description: `Field ${index}` },
+          ])
+        ),
+      },
+      func: () => ({ answer: 'unexpected' }),
+    };
+    const runtime: AxCodeRuntime = {
+      language: 'JavaScript',
+      getUsageInstructions: () => '',
+      createSession: (globals) => ({
+        execute: async () => {
+          const bridge = globals?.__axProgramSourcePredict as (
+            spec: object,
+            input: object
+          ) => Promise<unknown>;
+          try {
+            await bridge(
+              { signature: '$program', tools: ['wideSchema'] },
+              { question: 'q' }
+            );
+          } catch (error) {
+            invalidError =
+              error instanceof Error ? error.message : String(error);
+          }
+          return await bridge(
+            { signature: '$program', tools: [] },
+            { question: 'q' }
+          );
+        },
+        patchGlobals: async () => {},
+        close: () => {},
+      }),
+    };
+
+    await expect(
+      programSource('question:string -> answer:string', {
+        runtime: compatibleRuntime(runtime),
+        tools: [wideTool],
+        maxPredictorCalls: 1,
+        valueLimits: { maxWidth: 10 },
+      }).forward(ai, { question: 'q' })
+    ).resolves.toEqual({ answer: 'safe' });
+    expect(invalidError).toMatch(
+      /selected tool schemas exceeds value width limit/
+    );
+    expect(aiCalls).toBe(1);
   });
 
   it('bounds tool results and final outputs before crossing onward boundaries', async () => {

@@ -234,11 +234,11 @@ const jsonStringByteLength = (value: string): number => {
   return bytes;
 };
 
-const validateSerializableValue = (
-  value: unknown,
+const snapshotSerializableValue = <T>(
+  value: T,
   limits: Readonly<AxProgramSourceValueLimits>,
   label: string
-): void => {
+): T => {
   let bytes = 0;
   const ancestors = new WeakSet<object>();
   const consume = (amount: number) => {
@@ -249,7 +249,7 @@ const validateSerializableValue = (
       );
     }
   };
-  const visit = (current: unknown, depth: number, path: string): void => {
+  const visit = (current: unknown, depth: number, path: string): unknown => {
     if (depth > limits.maxDepth) {
       throw new AxProgramSourceBudgetError(
         `${label} exceeds value depth limit: ${limits.maxDepth} at ${path}`
@@ -257,12 +257,12 @@ const validateSerializableValue = (
     }
     if (current === null) {
       consume(4);
-      return;
+      return null;
     }
     switch (typeof current) {
       case 'string':
         consume(jsonStringByteLength(current));
-        return;
+        return current;
       case 'number':
         if (!Number.isFinite(current)) {
           throw new AxProgramSourceError(
@@ -270,10 +270,10 @@ const validateSerializableValue = (
           );
         }
         consume(Object.is(current, -0) ? 1 : String(current).length);
-        return;
+        return current;
       case 'boolean':
         consume(current ? 4 : 5);
-        return;
+        return current;
       case 'object':
         break;
       default:
@@ -290,31 +290,54 @@ const validateSerializableValue = (
     ancestors.add(current);
     try {
       if (Array.isArray(current)) {
-        if (current.length > limits.maxWidth) {
-          throw new AxProgramSourceBudgetError(
-            `${label} exceeds value width limit: ${limits.maxWidth} at ${path}`
-          );
-        }
-        if (Object.getOwnPropertySymbols(current).length > 0) {
+        const keys = Reflect.ownKeys(current);
+        if (keys.some((key) => typeof key !== 'string')) {
           throw new AxProgramSourceError(
             `${label} is not JSON-serializable: symbol key at ${path}`
           );
         }
-        const extraKeys = Object.keys(current).filter(
-          (key) =>
-            !/^0$|^[1-9][0-9]*$/.test(key) || Number(key) >= current.length
+        const descriptors = new Map<string, PropertyDescriptor>();
+        for (const key of keys as string[]) {
+          const descriptor = Object.getOwnPropertyDescriptor(current, key);
+          if (!descriptor) {
+            throw new AxProgramSourceError(
+              `${label} is not JSON-serializable: unstable array property '${key}' at ${path}`
+            );
+          }
+          descriptors.set(key, descriptor);
+        }
+        const lengthDescriptor = descriptors.get('length');
+        const length =
+          lengthDescriptor && 'value' in lengthDescriptor
+            ? lengthDescriptor.value
+            : undefined;
+        if (
+          typeof length !== 'number' ||
+          !Number.isSafeInteger(length) ||
+          length < 0
+        ) {
+          throw new AxProgramSourceError(
+            `${label} is not JSON-serializable: invalid array length at ${path}`
+          );
+        }
+        if (length > limits.maxWidth) {
+          throw new AxProgramSourceBudgetError(
+            `${label} exceeds value width limit: ${limits.maxWidth} at ${path}`
+          );
+        }
+        const itemKeys = (keys as string[]).filter((key) => key !== 'length');
+        const extraKeys = itemKeys.filter(
+          (key) => !/^0$|^[1-9][0-9]*$/.test(key) || Number(key) >= length
         );
         if (extraKeys.length > 0) {
           throw new AxProgramSourceError(
             `${label} is not JSON-serializable: array property '${extraKeys[0]}' at ${path}`
           );
         }
-        consume(2 + Math.max(0, current.length - 1));
-        for (let index = 0; index < current.length; index += 1) {
-          const descriptor = Object.getOwnPropertyDescriptor(
-            current,
-            String(index)
-          );
+        consume(2 + Math.max(0, length - 1));
+        const snapshot: unknown[] = [];
+        for (let index = 0; index < length; index += 1) {
+          const descriptor = descriptors.get(String(index));
           if (
             !descriptor ||
             !descriptor.enumerable ||
@@ -324,9 +347,11 @@ const validateSerializableValue = (
               `${label} is not JSON-serializable: sparse or accessor array value at ${path}[${index}]`
             );
           }
-          visit(descriptor.value, depth + 1, `${path}[${index}]`);
+          snapshot.push(
+            visit(descriptor.value, depth + 1, `${path}[${index}]`)
+          );
         }
-        return;
+        return snapshot;
       }
 
       const prototype = Object.getPrototypeOf(current);
@@ -347,6 +372,7 @@ const validateSerializableValue = (
         );
       }
       consume(2 + Math.max(0, keys.length - 1));
+      const snapshot: Record<string, unknown> = {};
       for (const key of keys as string[]) {
         if (FORBIDDEN_PATH_SEGMENTS.has(key)) {
           throw new AxProgramSourceError(
@@ -360,15 +386,16 @@ const validateSerializableValue = (
           );
         }
         consume(jsonStringByteLength(key) + 1);
-        visit(descriptor.value, depth + 1, `${path}.${key}`);
+        snapshot[key] = visit(descriptor.value, depth + 1, `${path}.${key}`);
       }
+      return snapshot;
     } finally {
       ancestors.delete(current);
     }
   };
 
   try {
-    visit(value, 0, '$');
+    return visit(value, 0, '$') as T;
   } catch (error) {
     if (error instanceof AxProgramSourceError) throw error;
     throw new AxProgramSourceError(
@@ -376,6 +403,63 @@ const validateSerializableValue = (
       { cause: error }
     );
   }
+};
+
+const captureFunction = (
+  value: Readonly<AxFunction>,
+  expectedName: string,
+  label: string
+): Readonly<{
+  metadata: Omit<AxFunction, 'func'>;
+  handler: AxFunction['func'];
+}> => {
+  const metadata: Record<string, unknown> = {};
+  let handler: unknown;
+  try {
+    const keys = Reflect.ownKeys(value);
+    if (keys.some((key) => typeof key !== 'string')) {
+      throw new AxProgramSourceError(`${label} contains a symbol property`);
+    }
+    for (const key of keys as string[]) {
+      if (FORBIDDEN_PATH_SEGMENTS.has(key)) {
+        throw new AxProgramSourceError(
+          `${label} contains unsafe metadata key '${key}'`
+        );
+      }
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor) {
+        throw new AxProgramSourceError(
+          `${label} property '${key}' could not be inspected`
+        );
+      }
+      if (!descriptor.enumerable || !('value' in descriptor)) {
+        throw new AxProgramSourceError(
+          `${label} property '${key}' must be an enumerable data property`
+        );
+      }
+      if (key === 'func') handler = descriptor.value;
+      else metadata[key] = descriptor.value;
+    }
+  } catch (error) {
+    if (error instanceof AxProgramSourceError) throw error;
+    throw new AxProgramSourceError(`${label} could not be inspected`, {
+      cause: error,
+    });
+  }
+  const name = metadata.name;
+  const description = metadata.description;
+  if (name !== expectedName || typeof description !== 'string') {
+    throw new AxProgramSourceError(`${label} metadata is invalid`);
+  }
+  if (typeof handler !== 'function') {
+    throw new AxProgramSourceError(
+      `${label} property 'func' must be a function`
+    );
+  }
+  return {
+    metadata: metadata as Omit<AxFunction, 'func'>,
+    handler: handler as AxFunction['func'],
+  };
 };
 
 function fail(path: string, message: string): never {
@@ -1299,7 +1383,7 @@ export class AxProgramSource<
       'The final top-level statement must return every required outer output and no undeclared outputs.',
       `Every forEach must declare maxIterations no greater than ${this.maxIterations}.`,
       `Runtime budgets per example: ${this.maxPredictorCalls} predictor calls, ${this.maxToolCalls} tool calls, ${this.maxIterations} executed statements/loop iterations, ${this.maxStepsPerPredictor} continuation steps per predictor.`,
-      `Every input, complete predictor request (metadata plus input), tool argument/result, and output is limited to ${this.valueLimits.maxBytes} serialized JSON bytes, depth ${this.valueLimits.maxDepth}, and width ${this.valueLimits.maxWidth}.`,
+      `Every input, immutable predictor request snapshot (metadata, input, and selected host tool descriptions/schemas), tool argument/result, and output is limited to ${this.valueLimits.maxBytes} serialized JSON bytes, depth ${this.valueLimits.maxDepth}, and width ${this.valueLimits.maxWidth}.`,
       'Source is a data-only control-flow AST. JavaScript, eval, Function, imports, filesystem, process, network, ambient globals, mutable cross-call state, and dynamic capability construction are unsupported.',
       'Do not hard-code train examples or expected answers. Prefer deterministic control flow only when it generalizes from the declared inputs.',
     ].join('\n');
@@ -1356,7 +1440,7 @@ export class AxProgramSource<
       }
       validateValue(field, value as never);
     }
-    validateSerializableValue(values, this.valueLimits, 'Program source input');
+    snapshotSerializableValue(values, this.valueLimits, 'Program source input');
 
     const epoch = ++this.nextSessionEpoch;
     const authorityStartedAt = Date.now();
@@ -1405,12 +1489,12 @@ export class AxProgramSource<
     const callTool = async (
       name: string,
       args: unknown,
-      emitTrace: boolean
+      emitTrace: boolean,
+      capturedTool?: Readonly<AxFunction>
     ): Promise<unknown> => {
       assertAuthority('tool', name, 'call');
-      const normalizedArgs = args ?? {};
-      validateSerializableValue(
-        normalizedArgs,
+      const normalizedArgs = snapshotSerializableValue(
+        args ?? {},
         this.valueLimits,
         `Program source tool '${name}' arguments`
       );
@@ -1420,7 +1504,7 @@ export class AxProgramSource<
           `Program source tool-call budget exceeded: ${this.maxToolCalls}`
         );
       }
-      const tool = this.tools.get(name);
+      const tool = capturedTool ?? this.tools.get(name);
       if (!tool) {
         throw new AxProgramSourceError(`Tool '${name}' is not available`);
       }
@@ -1436,7 +1520,7 @@ export class AxProgramSource<
           { ...options, ai, abortSignal: authorityAbort.signal }
         );
         assertAuthority('tool', name, 'completion');
-        validateSerializableValue(
+        const capturedResult = snapshotSerializableValue(
           result.rawResult,
           this.valueLimits,
           `Program source tool '${name}' result`
@@ -1446,13 +1530,13 @@ export class AxProgramSource<
             fn: name,
             componentId: tool.componentId ?? name,
             args: normalizedArgs,
-            result: result.rawResult,
+            result: capturedResult,
             ok: true,
             ms: Date.now() - startedAt,
           });
           assertAuthority('tool', name, 'completion');
         }
-        return result.rawResult;
+        return capturedResult;
       } catch (error) {
         if (!authorityActive) {
           if (!(error instanceof AxProgramSourceSessionExpiredError)) {
@@ -1474,48 +1558,95 @@ export class AxProgramSource<
       }
     };
 
+    type PredictorSpec = Readonly<{
+      signature: '$program' | string;
+      instruction?: string;
+      tools: readonly string[];
+    }>;
+    type PredictorRequest = Readonly<{ spec: PredictorSpec; input: unknown }>;
+
     const predict = async (
-      spec: Readonly<{
-        signature: '$program' | string;
-        instruction?: string;
-        tools: readonly string[];
-      }>,
+      spec: PredictorSpec,
       input: unknown
     ): Promise<unknown> => {
-      const predictorName =
-        spec.signature === '$program' ? '$program' : spec.signature;
-      assertAuthority('predictor', predictorName, 'call');
-      validateSerializableValue(
+      assertAuthority('predictor', '<unvalidated>', 'call');
+      const initialRequest = snapshotSerializableValue(
         { spec, input },
         this.valueLimits,
-        `Program source predictor '${predictorName}' request`
-      );
-      if (!isRecord(input)) {
+        'Program source predictor request'
+      ) as PredictorRequest;
+      if (
+        !isRecord(initialRequest.spec) ||
+        (initialRequest.spec.signature !== '$program' &&
+          typeof initialRequest.spec.signature !== 'string') ||
+        (initialRequest.spec.instruction !== undefined &&
+          typeof initialRequest.spec.instruction !== 'string') ||
+        !Array.isArray(initialRequest.spec.tools) ||
+        initialRequest.spec.tools.some((name) => typeof name !== 'string')
+      ) {
+        throw new AxProgramSourceError(
+          'Program source predictor request metadata is invalid'
+        );
+      }
+      if (!isRecord(initialRequest.input)) {
         throw new AxProgramSourceError(
           'Program source predictor input must evaluate to an object'
         );
       }
+
+      const capturedFunctions = initialRequest.spec.tools.map((name) => {
+        const tool = this.tools.get(name);
+        if (!tool)
+          throw new AxProgramSourceError(`Tool '${name}' is not available`);
+        return captureFunction(
+          tool,
+          name,
+          `Program source predictor tool '${name}'`
+        );
+      });
+      const capturedEnvelope = snapshotSerializableValue(
+        {
+          request: initialRequest,
+          selectedTools: capturedFunctions.map(({ metadata }) => metadata),
+        },
+        this.valueLimits,
+        'Program source predictor request with selected tool schemas'
+      );
+      const capturedRequest = capturedEnvelope.request as PredictorRequest;
+      const predictorName =
+        capturedRequest.spec.signature === '$program'
+          ? '$program'
+          : capturedRequest.spec.signature;
       predictorCalls += 1;
       if (predictorCalls > this.maxPredictorCalls) {
         throw new AxProgramSourceBudgetError(
           `Program source predictor-call budget exceeded: ${this.maxPredictorCalls}`
         );
       }
-      const predictorTools = spec.tools.map((name) => {
-        const tool = this.tools.get(name);
-        if (!tool)
-          throw new AxProgramSourceError(`Tool '${name}' is not available`);
-        return {
-          ...tool,
-          func: async (args?: unknown) => await callTool(name, args, false),
-        } satisfies AxFunction;
-      });
-      const predictor = new AxGen<any, any>(
-        spec.signature === '$program' ? this.signature : spec.signature
+      const predictorTools = capturedEnvelope.selectedTools.map(
+        (metadata, index) => {
+          const name = capturedRequest.spec.tools[index]!;
+          const executableTool = {
+            ...metadata,
+            func: capturedFunctions[index]!.handler,
+          } as AxFunction;
+          return {
+            ...metadata,
+            func: async (args?: unknown) =>
+              await callTool(name, args, false, executableTool),
+          } as AxFunction;
+        }
       );
-      if (spec.instruction) predictor.setInstruction(spec.instruction);
+      const predictor = new AxGen<any, any>(
+        capturedRequest.spec.signature === '$program'
+          ? this.signature
+          : capturedRequest.spec.signature
+      );
+      if (capturedRequest.spec.instruction) {
+        predictor.setInstruction(capturedRequest.spec.instruction);
+      }
       try {
-        const result = await predictor.forward(ai, input, {
+        const result = await predictor.forward(ai, capturedRequest.input, {
           ...options,
           functions: predictorTools,
           abortSignal: authorityAbort.signal,
@@ -1526,12 +1657,11 @@ export class AxProgramSource<
           stream: false,
         });
         assertAuthority('predictor', predictorName, 'completion');
-        validateSerializableValue(
+        return snapshotSerializableValue(
           result,
           this.valueLimits,
           `Program source predictor '${predictorName}' result`
         );
-        return result;
       } catch (error) {
         if (!authorityActive) {
           if (!(error instanceof AxProgramSourceSessionExpiredError)) {
@@ -1579,17 +1709,17 @@ export class AxProgramSource<
       });
       const rawOutput = await Promise.race([execution, expiration]);
       if (!authorityActive) throw expiredError();
-      validateSerializableValue(
+      const capturedOutput = snapshotSerializableValue(
         rawOutput,
         this.valueLimits,
         'Program source output'
       );
-      if (!isRecord(rawOutput)) {
+      if (!isRecord(capturedOutput)) {
         throw new AxProgramSourceError(
           'Program source must return an output object'
         );
       }
-      const output: Record<string, unknown> = { ...rawOutput };
+      const output: Record<string, unknown> = { ...capturedOutput };
       validateStructuredOutputValues(this.signature, output, {
         rejectUnknownFields: true,
       });
