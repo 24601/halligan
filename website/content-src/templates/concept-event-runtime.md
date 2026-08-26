@@ -91,8 +91,11 @@ restricted to `supports`, `contradicts`, or `neutral`.
 
 The built-in demand store is process-local and volatile. Supply an application
 store when cursor/backlog and dedupe must survive a restart or coordinate
-workers. The event runtime remains responsible for scheduling; this API does
-not add a timer, notification product, user profile, or autonomous loop.
+workers. Custom stores must atomically check the signal passed to
+`append(record, { signal })` immediately before commit and retain no new record
+when it is aborted. The event runtime remains responsible for scheduling; this
+API does not add a timer, notification product, user profile, or autonomous
+loop.
 Observations and detections are bounded; applications should map only
 consented, necessary evidence and apply their own redaction and retention
 policy.
