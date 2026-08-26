@@ -154,7 +154,6 @@ export async function evaluateGEPABatch<IN, OUT extends AxGenOut>(args: {
       );
       if (args.abortSignal?.aborted) {
         args.state.stopReason = 'aborted';
-        return undefined;
       }
       const rows: AxGEPABatchRow[] = [];
       for (const [index, ex] of args.set.entries()) {
@@ -208,9 +207,11 @@ export async function evaluateGEPABatch<IN, OUT extends AxGenOut>(args: {
     output?: unknown;
     error?: string;
   }> = [];
+  const batchCallsBefore = args.state.totalCalls;
   for (const [index, ex] of args.set.entries()) {
     if (args.abortSignal?.aborted) {
       args.state.stopReason = 'aborted';
+      args.state.totalCalls = batchCallsBefore;
       return undefined;
     }
     args.applyConfig(args.cfg);
@@ -243,6 +244,7 @@ export async function evaluateGEPABatch<IN, OUT extends AxGenOut>(args: {
     } catch (error) {
       if (args.abortSignal?.aborted) {
         args.state.stopReason = 'aborted';
+        args.state.totalCalls = batchCallsBefore;
         return undefined;
       }
       const message = error instanceof Error ? error.message : String(error);

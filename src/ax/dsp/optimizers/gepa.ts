@@ -1110,7 +1110,7 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       const mutationEvaluations: AxGEPACandidateEvaluation[] | undefined =
         lineageEnabled ? [] : undefined;
       const mutationFailures: AxGEPACandidateFailure[] | undefined =
-        lineageEnabled ? evaluationFailures!(parentMiniEval) : undefined;
+        lineageEnabled ? [] : undefined;
       const strategy: 'reflective_mutation' | 'system_merge' =
         'reflective_mutation';
       const target = componentSelector.pick(t, () => this.rand());
@@ -1289,57 +1289,72 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
         childMiniEval.sum > parentMiniEval.sum + this.minImprovementThreshold;
 
       this.currentRound = t + 1;
-      const progressConfiguration = {
-        instructionLen: targetGroup
-          .map((groupTarget) => proposedCfg[groupTarget.id]?.length ?? 0)
-          .reduce((sum, length) => sum + length, 0),
-        target: targetGroup.map((groupTarget) => groupTarget.id).join(','),
-        parent: parentIdx,
-        totalRounds: this.numTrials,
-        ...(lineageEnabled
-          ? {
-              candidateId: mutationCandidateId,
-              parentIds: [candidates[parentIdx]!.id!],
-              strategy,
-              decision: accepted
-                ? ('accepted' as const)
-                : ('rejected' as const),
-            }
-          : {}),
-      };
-      const checkpointLineage =
-        lineageEnabled && this.shouldSaveCheckpoint(this.currentRound)
-          ? buildLineageManifest()
-          : undefined;
-      await this.updateOptimizationProgress(
-        this.currentRound,
-        childMiniEval.sum,
-        progressConfiguration,
-        'GEPA',
-        {
-          strategy,
-          paretoSetSize: paretoSet.length,
-          tunableCount: targets.length,
-        },
-        childMiniEval.sum,
-        {
+      const serializableCompileOptions = (() => {
+        const {
+          abortSignal: _abortSignal,
+          candidateLineage: _candidateLineage,
+          ...rest
+        } = (options ?? {}) as AxCompileOptions & {
+          abortSignal?: AbortSignal;
+          candidateLineage?: unknown;
+        };
+        return rest;
+      })();
+      const publishDecision = async (
+        decision: 'accepted' | 'rejected' | 'aborted'
+      ) => {
+        const progressConfiguration = {
           instructionLen: targetGroup
-            .map(
-              (groupTarget) =>
-                candidates[parentIdx]!.cfg[groupTarget.id]?.length ?? 0
-            )
+            .map((groupTarget) => proposedCfg[groupTarget.id]?.length ?? 0)
             .reduce((sum, length) => sum + length, 0),
-          idx: parentIdx,
+          target: targetGroup.map((groupTarget) => groupTarget.id).join(','),
+          parent: parentIdx,
+          totalRounds: this.numTrials,
           ...(lineageEnabled
-            ? { candidateId: candidates[parentIdx]!.id! }
+            ? {
+                candidateId: mutationCandidateId,
+                parentIds: [candidates[parentIdx]!.id!],
+                strategy,
+                decision,
+              }
             : {}),
-        },
-        {
-          ...(options ?? {}),
-          maxIterations: this.numTrials,
-          ...(checkpointLineage ? { candidateLineage: checkpointLineage } : {}),
-        }
-      );
+        };
+        const checkpointLineage =
+          lineageEnabled && this.shouldSaveCheckpoint(this.currentRound)
+            ? buildLineageManifest()
+            : undefined;
+        await this.updateOptimizationProgress(
+          this.currentRound,
+          childMiniEval.sum,
+          progressConfiguration,
+          'GEPA',
+          {
+            strategy,
+            paretoSetSize: paretoSet.length,
+            tunableCount: targets.length,
+          },
+          childMiniEval.sum,
+          {
+            instructionLen: targetGroup
+              .map(
+                (groupTarget) =>
+                  candidates[parentIdx]!.cfg[groupTarget.id]?.length ?? 0
+              )
+              .reduce((sum, length) => sum + length, 0),
+            idx: parentIdx,
+            ...(lineageEnabled
+              ? { candidateId: candidates[parentIdx]!.id! }
+              : {}),
+          },
+          {
+            ...serializableCompileOptions,
+            maxIterations: this.numTrials,
+            ...(checkpointLineage
+              ? { candidateLineage: checkpointLineage }
+              : {}),
+          }
+        );
+      };
 
       if (!accepted) {
         for (const groupTarget of targetGroup) {
@@ -1373,6 +1388,7 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
             failures: mutationFailures!.length ? mutationFailures : undefined,
           };
         });
+        await publishDecision('rejected');
         if (++stagnation >= this.earlyStoppingTrials) {
           stoppedReason = 'early_stopping';
           terminationPhase = 'early_stopping';
@@ -1428,6 +1444,7 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
               failures: [...mutationFailures!, stopped.failure],
             };
           });
+          await publishDecision('aborted');
         }
         break;
       }
@@ -1475,6 +1492,7 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
           failures: mutationFailures!.length ? mutationFailures : undefined,
         };
       });
+      await publishDecision('accepted');
 
       // Reset stagnation if archive improved (hypervolume or size)
       if (archive.length > beforeSize || hvAfter > hvBefore + 1e-6) {
@@ -1585,7 +1603,21 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
         bestCandidateIdx === undefined
           ? undefined
           : { candidateId: candidates[bestCandidateIdx]!.id! },
-        { candidateLineage },
+        {
+          ...(() => {
+            const {
+              abortSignal: _abortSignal,
+              candidateLineage: _candidateLineage,
+              ...rest
+            } = (options ?? {}) as AxCompileOptions & {
+              abortSignal?: AbortSignal;
+              candidateLineage?: unknown;
+            };
+            return rest;
+          })(),
+          maxIterations: this.numTrials,
+          candidateLineage,
+        },
         options
       );
 

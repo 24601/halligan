@@ -184,9 +184,9 @@ export interface AxCompileOptions {
   perfectScore?: number;
   maxMetricCalls?: number;
   /**
-   * GEPA only: stop between evaluations and propagate cancellation to GEPA
-   * program calls. This is not a shared optimizer cancellation contract;
-   * other optimizers may ignore it.
+   * GEPA only: stop between candidate batch evaluations. Cancellation is
+   * not a shared optimizer contract and is not currently propagated into
+   * bootstrap or teacher-reflection program calls.
    */
   abortSignal?: AbortSignal;
   /** Opt in to GEPA candidate lineage with defaults or retention/privacy controls. */

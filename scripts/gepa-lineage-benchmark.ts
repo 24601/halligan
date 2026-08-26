@@ -1,4 +1,5 @@
 import { performance } from 'node:perf_hooks';
+import { pathToFileURL } from 'node:url';
 import type { AxAIService } from '../src/ax/ai/types.js';
 import { AxGEPA } from '../src/ax/dsp/optimizers/gepa.js';
 import type {
@@ -126,7 +127,10 @@ async function runManyRecordScenario(): Promise<AxGEPACandidateLineageManifest> 
       },
     }
   );
-  return result.optimizedProgram?.candidateLineage!;
+  if (!result.optimizedProgram?.candidateLineage) {
+    throw new Error('GEPA lineage benchmark failed: missing candidate lineage');
+  }
+  return result.optimizedProgram.candidateLineage;
 }
 
 async function runBudgetAbortScenario(): Promise<AxGEPACandidateLineageManifest> {
@@ -159,7 +163,10 @@ async function runBudgetAbortScenario(): Promise<AxGEPACandidateLineageManifest>
       candidateLineage: true,
     }
   );
-  return result.optimizedProgram?.candidateLineage!;
+  if (!result.optimizedProgram?.candidateLineage) {
+    throw new Error('GEPA lineage benchmark failed: missing candidate lineage');
+  }
+  return result.optimizedProgram.candidateLineage;
 }
 
 async function runNoProposalTerminationScenario(
@@ -188,7 +195,10 @@ async function runNoProposalTerminationScenario(
     async () => 0,
     { maxMetricCalls, skipPerfectScore: false, candidateLineage: true }
   );
-  return result.optimizedProgram?.candidateLineage!;
+  if (!result.optimizedProgram?.candidateLineage) {
+    throw new Error('GEPA lineage benchmark failed: missing candidate lineage');
+  }
+  return result.optimizedProgram.candidateLineage;
 }
 
 async function assertInitialAbortIsNarrowed(): Promise<void> {
@@ -252,7 +262,10 @@ async function runAbortSignalScenario(): Promise<AxGEPACandidateLineageManifest>
       candidateLineage: true,
     }
   );
-  return result.optimizedProgram?.candidateLineage!;
+  if (!result.optimizedProgram?.candidateLineage) {
+    throw new Error('GEPA lineage benchmark failed: missing candidate lineage');
+  }
+  return result.optimizedProgram.candidateLineage;
 }
 
 async function runFaultScenario(): Promise<AxGEPACandidateLineageManifest> {
@@ -272,7 +285,10 @@ async function runFaultScenario(): Promise<AxGEPACandidateLineageManifest> {
     async () => 0,
     { maxMetricCalls: 2, candidateLineage: true }
   );
-  const manifest = result.optimizedProgram?.candidateLineage!;
+  const manifest = result.optimizedProgram?.candidateLineage;
+  if (!manifest) {
+    throw new Error('GEPA lineage benchmark failed: missing candidate lineage');
+  }
   invariant(
     !JSON.stringify(manifest).includes(secret),
     'runtime secret leaked'
@@ -567,7 +583,10 @@ export async function runGEPALineageBenchmark(): Promise<{
   };
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(process.argv[1]).href
+) {
   const result = await runGEPALineageBenchmark();
   console.log(JSON.stringify(result, null, 2));
 }

@@ -244,12 +244,12 @@ export function buildGEPACandidateFailure(
   options: Readonly<AxGEPAResolvedLineageOptions>
 ): AxGEPACandidateFailure {
   if (!message) return { kind };
+  if (!options.includeFailureMessages) return { kind };
   const bounded = boundedValue(message, options.maxFailureMessageChars);
   return {
     kind,
     messageFingerprint: fingerprintGEPAValue(message),
-    message: options.includeFailureMessages ? bounded.value : undefined,
-    messageTruncated:
-      options.includeFailureMessages && bounded.truncated ? true : undefined,
+    message: bounded.value,
+    messageTruncated: bounded.truncated ? true : undefined,
   };
 }
