@@ -141,7 +141,10 @@ export class AxEventRuntime {
   private readonly targetSources = new Map<string, AxEventTarget<any, any>>();
   private readonly singletonTargetInstances = new Map<string, string>();
   private readonly activeRuns = new Map<string, AbortController>();
-  private readonly activeRedrives = new Map<string, AbortController>();
+  private readonly activeRedriveControllers = new Map<
+    string,
+    AbortController
+  >();
   private readonly sourceHandles: AxEventSourceHandle[] = [];
   private readonly sourceController = new AbortController();
   private readonly workerController = new AbortController();
@@ -328,7 +331,7 @@ export class AxEventRuntime {
     }
     if (this.closing) throw new Error('AxEventRuntime is closing');
     const controller = new AbortController();
-    this.activeRedrives.set(deadLetterId, controller);
+    this.activeRedriveControllers.set(deadLetterId, controller);
     try {
       if (this.closing) throw new Error('AxEventRuntime is closing');
       const authority = await this.resolveAuthority(
@@ -373,7 +376,7 @@ export class AxEventRuntime {
       }
       await this.store.removeDeadLetter(deadLetterId);
     } finally {
-      this.activeRedrives.delete(deadLetterId);
+      this.activeRedriveControllers.delete(deadLetterId);
     }
   }
 
@@ -415,7 +418,7 @@ export class AxEventRuntime {
     for (const controller of this.activeRuns.values()) {
       controller.abort('AxEventRuntime closed');
     }
-    for (const controller of this.activeRedrives.values()) {
+    for (const controller of this.activeRedriveControllers.values()) {
       controller.abort('AxEventRuntime closed');
     }
     await Promise.allSettled(this.workerPromises);
