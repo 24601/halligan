@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -7,13 +7,14 @@ import {
   type AxProgrammable,
   AxPushEventSource,
   AxUCPWebhookEventSource,
+  axEventCanonicalJson,
   eventPath,
   eventRoute,
   eventTarget,
   runAxEventStoreConformance,
   s,
 } from '@ax-llm/ax';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   AX_SQLITE_EVENT_STANDARD_RETENTION,
   AxSQLiteEventStore,
@@ -46,6 +47,10 @@ describe('AxSQLiteEventStore', () => {
     );
     expect(report.assertions).toBeGreaterThanOrEqual(20);
     expect(report.capability.conformance?.multiWorker).toBe('axevent-store-v1');
+    expect(report.capability.conformance?.schemaVersion).toBe(4);
+    expect(report.capability.verifierTransitions).toBe(
+      'axevent-verifier-transition-v2'
+    );
   });
 
   it('requires explicit retention and WAL-enabled local storage', () => {
@@ -57,6 +62,62 @@ describe('AxSQLiteEventStore', () => {
           filename: join(directory, 'missing-retention.sqlite'),
         } as never)
     ).toThrow('requires explicit retention');
+  });
+
+  it('migrates legacy event schemas to verifier-v4 journal metadata', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    for (const version of [1, 3]) {
+      const filename = join(directory, `verifier-v${version}.sqlite`);
+      let store = new AxSQLiteEventStore({
+        filename,
+        retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+      });
+      const legacyDb = (store as any).db;
+      if (version === 1) {
+        legacyDb.exec(`
+          DROP TABLE event_verifier_transitions;
+          DROP TABLE event_store_metadata;
+        `);
+      } else {
+        legacyDb.exec('DROP TABLE event_store_metadata;');
+      }
+      legacyDb.pragma(`user_version = ${version}`);
+      await store.close();
+
+      store = new AxSQLiteEventStore({
+        filename,
+        retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+      });
+      const migratedDb = (store as any).db;
+      expect(store.capabilities.conformance.schemaVersion).toBe(4);
+      expect(store.capabilities.verifierTransitions).toBe(
+        'axevent-verifier-transition-v2'
+      );
+      expect(migratedDb.pragma('user_version', { simple: true })).toBe(4);
+      expect(
+        migratedDb
+          .prepare(
+            `SELECT name FROM sqlite_master
+             WHERE type='table' AND name IN
+               ('event_verifier_transitions','event_store_metadata')
+             ORDER BY name`
+          )
+          .all()
+      ).toEqual([
+        { name: 'event_store_metadata' },
+        { name: 'event_verifier_transitions' },
+      ]);
+      expect(
+        migratedDb
+          .prepare(
+            `SELECT 1 FROM event_store_metadata
+             WHERE metadata_key='verifier-v2-cleanup-pending'`
+          )
+          .get()
+      ).toBeUndefined();
+      await store.close();
+    }
   });
 
   it('records oversized output failure without dispatching sinks or rerunning', async () => {
@@ -122,6 +183,419 @@ describe('AxSQLiteEventStore', () => {
     expect(calls).toBe(1);
     expect(sinkCalls).toBe(0);
     await runtime.close({ drain: false });
+  });
+
+  it('persists bounded huge Unicode verifier failures and errors', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const store = new AxSQLiteEventStore({
+      filename: join(directory, 'bounded-verifier.sqlite'),
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+      maxInlinePayloadBytes: 8_192,
+    });
+    const huge = '🔥'.repeat(20_000);
+    const runIds = new Map<string, string>();
+    const signature = s('trigger?:string -> resultText:string');
+    const program = {
+      getId: () => 'bounded-verifier-output',
+      getSignature: () => signature,
+      forward: async () => ({ resultText: 'small' }),
+      streamingForward: async function* () {},
+    } as unknown as AxProgrammable<any, any>;
+    const runtime = new AxEventRuntime({
+      store,
+      workerConcurrency: 1,
+      routes: [
+        eventRoute({
+          id: 'bounded-verifier-route',
+          match: { types: ['bounded.verifier'] },
+          action: 'wake',
+          target: eventTarget({
+            id: 'bounded-verifier-target',
+            ai: {} as never,
+            program,
+            mapInput: () => ({}),
+            retrySafety: 'idempotent',
+            verifier: {
+              id: 'bounded-verifier',
+              maxRuns: 1,
+              fingerprint: () => huge,
+              verify: (_output, context) => {
+                runIds.set(
+                  context.eventContext.ingress.event.id,
+                  context.run.id
+                );
+                if (context.eventContext.ingress.event.id === 'huge-error') {
+                  throw new Error(huge);
+                }
+                return {
+                  status: 'fail',
+                  failure: { code: huge, evidence: huge },
+                };
+              },
+            },
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    for (const id of ['huge-failure', 'huge-error']) {
+      await runtime.publish({
+        event: {
+          specversion: '1.0',
+          id,
+          source: 'test://sqlite',
+          type: 'bounded.verifier',
+        },
+      });
+    }
+    await runtime.waitForIdle();
+    const [failure, error] = await Promise.all([
+      runtime.getRun(runIds.get('huge-failure')!),
+      runtime.getRun(runIds.get('huge-error')!),
+    ]);
+    expect(failure?.status).toBe('verification_failed');
+    expect(
+      Buffer.byteLength(failure!.verification!.failure!.code)
+    ).toBeLessThanOrEqual(256);
+    expect(
+      Buffer.byteLength(
+        JSON.stringify(failure!.verification!.failure!.evidence)
+      )
+    ).toBeLessThanOrEqual(4_096);
+    expect(error?.status).toBe('verification_failed');
+    expect(Buffer.byteLength(error!.verification!.error!)).toBeLessThanOrEqual(
+      1_024
+    );
+    await runtime.close({ drain: false });
+  });
+
+  it('does not install a verifier child when cancel wins a delayed SQLite transition', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const backing = new AxSQLiteEventStore({
+      filename: join(directory, 'cancel-transition.sqlite'),
+      retention: AX_SQLITE_EVENT_STANDARD_RETENTION,
+    });
+    let releaseTransition!: () => void;
+    const transitionGate = new Promise<void>((resolve) => {
+      releaseTransition = resolve;
+    });
+    let transitionStarted!: () => void;
+    const transitionStart = new Promise<void>((resolve) => {
+      transitionStarted = resolve;
+    });
+    let runId = '';
+    let targetCalls = 0;
+    const store = new Proxy(backing, {
+      get(target, property, receiver) {
+        if (property === 'transitionVerifier') {
+          return async (
+            request: Parameters<typeof target.transitionVerifier>[0],
+            signal?: AbortSignal
+          ) => {
+            transitionStarted();
+            await transitionGate;
+            return target.transitionVerifier(request, signal);
+          };
+        }
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const signature = s('goal:string, feedback?:json -> answer:string');
+    const program = {
+      getId: () => 'cancel-transition-program',
+      getSignature: () => signature,
+      forward: async () => {
+        targetCalls++;
+        return { answer: 'fix the tests' };
+      },
+      streamingForward: async function* () {},
+    } as unknown as AxProgrammable<any, any>;
+    const runtime = new AxEventRuntime({
+      store,
+      workerConcurrency: 1,
+      routes: [
+        eventRoute({
+          id: 'cancel-transition-route',
+          match: { types: ['goal.run'] },
+          action: 'wake',
+          target: eventTarget({
+            id: 'goal',
+            ai: {} as never,
+            program,
+            mapInput: () => ({ goal: 'fix the tests' }),
+            retrySafety: 'idempotent',
+            verifier: {
+              id: 'cancel-transition',
+              verify: (_output, context) => {
+                runId = context.run.id;
+                return {
+                  status: 'fail',
+                  failure: { code: 'retry' },
+                };
+              },
+            },
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    const receipt = await runtime.publish({
+      event: {
+        specversion: '1.0',
+        id: 'cancel-sqlite-transition',
+        source: 'app://tests',
+        type: 'goal.run',
+        data: { goal: 'fix the tests' },
+      },
+      identity: { tenantId: 'tenant-1' },
+      trust: 'authenticated',
+    });
+    await transitionStart;
+    expect(runtime.cancelRun(runId, 'host abort')).toBe(true);
+    releaseTransition();
+    await runtime.waitForIdle();
+    expect((await runtime.getRun(runId))?.status).toBe('cancelled');
+    expect((await backing.getDelivery(receipt.deliveryIds[0]!))?.status).toBe(
+      'cancelled'
+    );
+    expect(targetCalls).toBe(1);
+    await runtime.close({ drain: false });
+  });
+
+  it('journals immutable transitions across repeated commit-ack loss', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ax-event-sqlite-'));
+    directories.push(directory);
+    const retention = {
+      ...AX_SQLITE_EVENT_STANDARD_RETENTION,
+      eventAndResultMs: 1,
+    };
+    const filename = join(directory, 'transition-journal.sqlite');
+    let store = new AxSQLiteEventStore({
+      filename,
+      retention,
+    });
+    const transition = store.transitionVerifier.bind(store);
+    const confirmTransition = store.confirmVerifierTransition.bind(store);
+    vi.spyOn(store, 'confirmVerifierTransition')
+      .mockResolvedValueOnce(undefined)
+      .mockImplementation(confirmTransition);
+    vi.spyOn(store, 'transitionVerifier').mockImplementation(
+      async (request) => {
+        await transition(request);
+        throw new Error('commit acknowledgement lost');
+      }
+    );
+    let attempts = 0;
+    const sensitive = 'sensitive-journal-payload-do-not-retain';
+    const verify = vi.fn(() =>
+      attempts++ === 0
+        ? {
+            status: 'fail' as const,
+            failure: { code: 'retry_once' },
+          }
+        : { status: 'pass' as const }
+    );
+    const signature = s('trigger?:string -> resultText:string');
+    const program = {
+      getId: () => 'journal-verifier-output',
+      getSignature: () => signature,
+      forward: async () => ({ resultText: sensitive }),
+      streamingForward: async function* () {},
+    } as unknown as AxProgrammable<any, any>;
+    const runtime = new AxEventRuntime({
+      store,
+      workerConcurrency: 1,
+      routes: [
+        eventRoute({
+          id: 'journal-verifier-route',
+          match: { types: ['journal.verifier'] },
+          action: 'wake',
+          target: eventTarget({
+            id: 'journal-verifier-target',
+            ai: {} as never,
+            program,
+            mapInput: () => ({}),
+            retrySafety: 'idempotent',
+            verifier: { id: 'journal-verifier', verify },
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    await runtime.publish({
+      event: {
+        specversion: '1.0',
+        id: 'journal-event',
+        source: 'test://sqlite',
+        type: 'journal.verifier',
+        data: { sensitive },
+      },
+    });
+    await runtime.waitForIdle();
+    expect(verify).toHaveBeenCalledTimes(2);
+    expect(store.transitionVerifier).toHaveBeenCalledTimes(2);
+    const request = (store.transitionVerifier as any).mock.calls[0]![0];
+    expect((await confirmTransition(request))?.deliveryIds).toEqual([
+      request.childDeliveryId,
+    ]);
+    await expect(
+      transition({
+        ...request,
+        child: {
+          ...request.child,
+          acceptedAt: request.child.acceptedAt + 1,
+        },
+      })
+    ).rejects.toThrow('already owned');
+    await expect(
+      confirmTransition({
+        ...request,
+        parent: {
+          ...request.parent,
+          expectedFencingToken: request.parent.expectedFencingToken + 1,
+        },
+      })
+    ).rejects.toThrow('already owned');
+    const liveDb = (store as any).db;
+    const compactJournal = liveDb
+      .prepare(
+        `SELECT request_commitment, receipt_json, child_delivery_id,
+                child_commitment
+         FROM event_verifier_transitions WHERE operation_id=?`
+      )
+      .get(request.operationId);
+    expect(JSON.stringify(compactJournal)).not.toContain(sensitive);
+
+    const receipt = await confirmTransition(request);
+    const persistedChild = await store.getDelivery(request.childDeliveryId);
+    liveDb
+      .prepare('UPDATE event_deliveries SET route_id=? WHERE id=?')
+      .run('corrupted-route', request.childDeliveryId);
+    await expect(confirmTransition(request)).rejects.toThrow(
+      'child is corrupt'
+    );
+    liveDb
+      .prepare('UPDATE event_deliveries SET route_id=? WHERE id=?')
+      .run(persistedChild!.routeId, request.childDeliveryId);
+    const legacyRecord = {
+      request,
+      receipt,
+      child: persistedChild,
+    };
+    const mismatchedRequest = {
+      ...request,
+      operationId: `${request.operationId}:mismatched-child`,
+      childDeliveryId: `${request.childDeliveryId}:mismatched-child`,
+    };
+    const mismatchedRecord = {
+      request: mismatchedRequest,
+      receipt: {
+        ...receipt,
+        deliveryIds: [mismatchedRequest.childDeliveryId],
+      },
+      child: {
+        ...persistedChild!,
+        id: mismatchedRequest.childDeliveryId,
+        routeId: 'legacy-mismatched-route',
+      },
+    };
+    liveDb.exec(`
+      DROP TABLE event_verifier_transitions;
+      DROP TABLE event_store_metadata;
+      CREATE TABLE event_verifier_transitions (
+        operation_id TEXT PRIMARY KEY,
+        request_json TEXT NOT NULL,
+        record_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      PRAGMA user_version = 2;
+    `);
+    const insertLegacy = liveDb.prepare(
+      `INSERT INTO event_verifier_transitions
+         (operation_id, request_json, record_json, created_at)
+         VALUES(?,?,?,?)`
+    );
+    insertLegacy.run(
+      request.operationId,
+      axEventCanonicalJson(request),
+      JSON.stringify(legacyRecord),
+      Date.now()
+    );
+    insertLegacy.run(
+      mismatchedRequest.operationId,
+      axEventCanonicalJson(mismatchedRequest),
+      JSON.stringify(mismatchedRecord),
+      Date.now()
+    );
+    await runtime.close({ drain: false });
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    store = new AxSQLiteEventStore({
+      filename: join(directory, 'transition-journal.sqlite'),
+      retention,
+    });
+    expect(
+      (await store.confirmVerifierTransition(request))?.deliveryIds
+    ).toEqual([request.childDeliveryId]);
+    await expect(
+      store.confirmVerifierTransition(mismatchedRequest)
+    ).rejects.toThrow('already owned');
+    const db = (store as any).db;
+    const retained = db
+      .prepare(
+        `SELECT request_commitment, receipt_json, child_delivery_id,
+                child_commitment
+         FROM event_verifier_transitions WHERE operation_id=?`
+      )
+      .get(request.operationId);
+    expect(JSON.stringify(retained)).not.toContain(sensitive);
+    expect(
+      JSON.stringify(
+        db.prepare('SELECT ingress_json FROM event_deliveries').all()
+      )
+    ).not.toContain(sensitive);
+    expect(
+      JSON.stringify(db.prepare('SELECT run_json FROM event_runs').all())
+    ).not.toContain(sensitive);
+
+    db.exec(`
+      CREATE TABLE migration_crash_sentinel(value TEXT NOT NULL);
+      INSERT INTO migration_crash_sentinel(value)
+      VALUES('${sensitive}');
+      DROP TABLE migration_crash_sentinel;
+      INSERT OR REPLACE INTO event_store_metadata(metadata_key, metadata_value)
+      VALUES('verifier-v2-cleanup-pending', '1');
+    `);
+    expect(
+      readFileSync(`${filename}-wal`).includes(Buffer.from(sensitive))
+    ).toBe(true);
+    const cleanupStore = new AxSQLiteEventStore({ filename, retention });
+    expect(
+      (await cleanupStore.confirmVerifierTransition(request))?.deliveryIds
+    ).toEqual([request.childDeliveryId]);
+    await cleanupStore.close();
+    const row = db
+      .prepare(
+        'SELECT receipt_json FROM event_verifier_transitions WHERE operation_id=?'
+      )
+      .get(request.operationId);
+    const corrupted = JSON.parse(row.receipt_json);
+    corrupted.deliveryIds = ['corrupted-child'];
+    db.prepare(
+      'UPDATE event_verifier_transitions SET receipt_json=? WHERE operation_id=?'
+    ).run(JSON.stringify(corrupted), request.operationId);
+    await expect(store.confirmVerifierTransition(request)).rejects.toThrow(
+      'already owned'
+    );
+    await store.close();
+    for (const entry of readdirSync(directory)) {
+      expect(
+        readFileSync(join(directory, entry)).includes(Buffer.from(sensitive))
+      ).toBe(false);
+    }
   });
 
   it('persists output before isolated sink retries', async () => {

@@ -204,11 +204,11 @@ export interface AxEventContext {
   readonly trust: AxEventTrust;
   readonly attempt: number;
   readonly idempotencyKey: string;
-  readonly fencingToken?: number;
+  readonly abortSignal: AbortSignal;
   /** Host-resolved authority for this delivery. Never sourced from event data. */
   readonly authority?: Readonly<AxAuthorityContext>;
-  readonly abortSignal: AbortSignal;
   readonly continuation?: Readonly<AxEventContinuation>;
+  readonly fencingToken?: number;
   registerContinuation(
     registration: Readonly<AxEventContinuationRegistration>
   ): string;
@@ -256,6 +256,79 @@ export interface AxEventProgramStateAdapter<P = AxProgrammable<any, any>> {
 export interface AxEventTargetInputContext {
   eventContext: Readonly<AxEventContext>;
   continuation?: Readonly<AxEventContinuation>;
+}
+
+export interface AxEventVerificationUsage {
+  tokens?: number;
+  costUSD?: number;
+}
+
+export type AxEventVerifierResult =
+  | Readonly<{ status: 'pass' }>
+  | Readonly<{
+      status: 'fail';
+      failure: Readonly<{
+        code: string;
+        evidence?: AxEventValue;
+      }>;
+    }>;
+
+export interface AxEventVerifierContext<OUT = unknown> {
+  readonly run: Readonly<AxEventRun<OUT>>;
+  readonly eventContext: Readonly<AxEventContext>;
+  readonly signal: AbortSignal;
+}
+
+/** Host-owned verifier and deterministic continuation limits for one target. */
+export interface AxEventVerifierPolicy<OUT = unknown> {
+  id: string;
+  verify(
+    output: OUT,
+    context: Readonly<AxEventVerifierContext<OUT>>
+  ): AxEventVerifierResult | Promise<AxEventVerifierResult>;
+  fingerprint?: (
+    output: OUT,
+    context: Readonly<AxEventVerifierContext<OUT>>
+  ) => string | Promise<string>;
+  usage?: (
+    output: OUT,
+    context: Readonly<AxEventVerifierContext<OUT>>
+  ) =>
+    | Readonly<AxEventVerificationUsage>
+    | Promise<Readonly<AxEventVerificationUsage>>;
+  maxRuns?: number;
+  maxTokens?: number;
+  maxWallTimeMs?: number;
+  maxCostUSD?: number;
+  timeoutMs?: number;
+  maxEvidenceBytes?: number;
+  backoffMs?:
+    | number
+    | ((attempt: number, failure: Readonly<{ code: string }>) => number);
+}
+
+export type AxEventVerificationStatus =
+  | 'pass'
+  | 'fail'
+  | 'exhausted'
+  | 'unchanged_state'
+  | 'error'
+  | 'timeout';
+
+export interface AxEventVerificationResult {
+  policyId: string;
+  chainId: string;
+  status: AxEventVerificationStatus;
+  run: number;
+  checkedAt: number;
+  cumulativeUsage: Readonly<Required<AxEventVerificationUsage>>;
+  fingerprint?: string;
+  failure?: Readonly<{
+    code: string;
+    evidence?: AxEventValue;
+  }>;
+  reason?: 'max_runs' | 'max_tokens' | 'max_wall_time' | 'max_cost';
+  error?: string;
 }
 
 export type AxEventPathSegment = string | number;
@@ -337,6 +410,8 @@ export interface AxEventTarget<IN = any, OUT = any> {
   forwardOptions?: Readonly<AxProgramForwardOptions<string>>;
   execution?: 'forward' | 'streaming';
   state?: AxEventProgramStateAdapter<AxProgrammable<IN, OUT>>;
+  /** Host-only gate run after output persistence and before final sinks. */
+  verifier?: Readonly<AxEventVerifierPolicy<OUT>>;
   sinks?: readonly AxEventSink<OUT>[];
   retrySafety?: 'idempotent' | 'unknown';
 }
@@ -400,6 +475,7 @@ export type AxEventDeliveryStatus =
   | 'waiting_event'
   | 'succeeded'
   | 'failed'
+  | 'verification_failed'
   | 'cancelled'
   | 'dead_lettered'
   | 'output_persistence_failed'
@@ -436,6 +512,7 @@ export type AxEventRunStatus =
   | 'waiting_event'
   | 'succeeded'
   | 'failed'
+  | 'verification_failed'
   | 'cancelled'
   | 'output_persistence_failed'
   | 'outcome_unknown';
@@ -459,6 +536,7 @@ export interface AxEventRun<OUT = unknown> {
   finishedAt?: number;
   output?: OUT;
   chunks?: readonly AxGenDeltaOut<OUT>[];
+  verification?: Readonly<AxEventVerificationResult>;
   error?: string;
   continuationIds?: readonly string[];
   sinks?: readonly AxEventSinkAttempt[];
@@ -484,6 +562,7 @@ export interface AxEventStoreCapabilities {
   compareAndSet: boolean;
   outputPersistence: boolean;
   conformance?: Readonly<{ multiWorker?: string; schemaVersion?: number }>;
+  verifierTransitions?: 'axevent-verifier-transition-v2';
 }
 
 export interface AxEventEnqueueRequest {
@@ -503,12 +582,50 @@ export interface AxEventEnqueueRequest {
   publishTimeoutMs: number;
 }
 
+export interface AxEventContinuationEnqueueRequest {
+  continuation: Readonly<AxEventContinuation>;
+  enqueue: Readonly<AxEventEnqueueRequest>;
+}
+
+export interface AxEventVerifierTransitionRequest {
+  operationId: string;
+  childDeliveryId: string;
+  parent: Readonly<{
+    delivery: AxEventDelivery;
+    run: AxEventRun;
+    expectedFencingToken: number;
+  }>;
+  continuation: Readonly<AxEventContinuation>;
+  child: Readonly<AxEventEnqueueRequest>;
+  consumeContinuationId?: string;
+}
+
+export interface AxEventVerifierTransitionRecord {
+  operationId: string;
+  requestCommitment: string;
+  receipt: Readonly<AxEventPublishReceipt>;
+  childDeliveryId: string;
+  childCommitment: string;
+}
+
 export interface AxEventStore {
   readonly capabilities: Readonly<AxEventStoreCapabilities>;
   enqueue(
     request: Readonly<AxEventEnqueueRequest>,
     signal?: AbortSignal
   ): Promise<AxEventPublishReceipt>;
+  /**
+   * V2 fenced parent-to-child handoff. Required only when
+   * capabilities.verifierTransitions advertises the matching marker.
+   */
+  transitionVerifier?(
+    request: Readonly<AxEventVerifierTransitionRequest>,
+    signal?: AbortSignal
+  ): Promise<AxEventPublishReceipt>;
+  /** Confirms an exact, authority-bearing V2 request without exposing journal data. */
+  confirmVerifierTransition?(
+    request: Readonly<AxEventVerifierTransitionRequest>
+  ): Promise<Readonly<AxEventPublishReceipt> | undefined>;
   claim(
     workerId: string,
     now: number,

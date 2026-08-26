@@ -12,6 +12,7 @@ import {
   type AxAIOpenAIResponsesConfig,
   type AxAIOpenAIResponsesRequest,
   type AxAIService,
+  type AxCodeRuntime,
   type AxExecutableSkillArtifact,
   type AxExecutableSkillSelection,
   type AxFunction,
@@ -23,13 +24,16 @@ import {
   type AxMultiMetricFn,
   type AxParetoResult,
   type AxProgrammable,
+  type AxProgramSource,
   ax,
   axExecutableSkillRef,
+  axProgramSourceRuntimeProtocol,
   axSelectExecutableSkills,
   f,
   flow,
   fn,
   optimize,
+  programSource,
   react,
 } from './index.js';
 import type { Equal, Expect, Flatten } from './util/typetest.js';
@@ -652,6 +656,35 @@ const responsesConfigMaxEffort: AxAIOpenAIResponsesConfig<
   string
 >['reasoningEffort'] = 'max';
 void responsesConfigMaxEffort;
+
+// === Experimental program-source factory ===
+const sourceProgram: AxProgramSource<
+  { userQuestion: string; contextItems?: string[] },
+  { finalAnswer: string; confidence: number }
+> = programSource(
+  'userQuestion:string, contextItems?:string[] -> finalAnswer:string, confidence:number'
+);
+sourceProgram.forward(optimizeAI, { userQuestion: 'hello' }).then((output) => {
+  const answer: string = output.finalAnswer;
+  const confidence: number = output.confidence;
+  void answer;
+  void confidence;
+});
+// @ts-expect-error missing required input
+void sourceProgram.forward(optimizeAI, {});
+
+declare const customCodeRuntime: AxCodeRuntime;
+programSource('question:string -> answer:string', {
+  runtime: {
+    runtime: customCodeRuntime,
+    protocol: axProgramSourceRuntimeProtocol,
+  },
+  valueLimits: { maxBytes: 65_536, maxDepth: 12, maxWidth: 256 },
+});
+// @ts-expect-error custom runtimes require an explicit compatibility wrapper
+programSource('question:string -> answer:string', {
+  runtime: customCodeRuntime,
+});
 
 // === Host-owned executable skill selection ===
 const executableSkill: AxExecutableSkillArtifact = {

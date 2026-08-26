@@ -1000,6 +1000,25 @@ import {
 } from './dsp/playbook.js';
 import { AxProgram } from './dsp/program.js';
 import {
+  AxProgramSource,
+  AxProgramSourceBudgetError,
+  type AxProgramSourceCapability,
+  type AxProgramSourceDocument,
+  AxProgramSourceError,
+  type AxProgramSourceExpression,
+  type AxProgramSourceLateBridgeEvent,
+  type AxProgramSourceOptions,
+  type AxProgramSourceRuntime,
+  AxProgramSourceSessionExpiredError,
+  type AxProgramSourceState,
+  type AxProgramSourceStatement,
+  type AxProgramSourceValueLimits,
+  axProgramSourceDefaultNodeResourceLimits,
+  axProgramSourceRuntimeProtocol,
+  axProgramSourceVersion,
+  programSource,
+} from './dsp/programSource.js';
+import {
   type AxFieldTemplateFn,
   AxPromptTemplate,
   type AxPromptTemplateOptions,
@@ -1142,6 +1161,7 @@ import {
   type AxEventCloseOptions,
   type AxEventContext,
   type AxEventContinuation,
+  type AxEventContinuationEnqueueRequest,
   AxEventContinuationNotFoundError,
   type AxEventContinuationPlan,
   type AxEventContinuationRegistration,
@@ -1186,6 +1206,14 @@ import {
   type AxEventTargetInputContext,
   type AxEventTrust,
   type AxEventValue,
+  type AxEventVerificationResult,
+  type AxEventVerificationStatus,
+  type AxEventVerificationUsage,
+  type AxEventVerifierContext,
+  type AxEventVerifierPolicy,
+  type AxEventVerifierResult,
+  type AxEventVerifierTransitionRecord,
+  type AxEventVerifierTransitionRequest,
   AxManualEventClock,
   type AxProgramStateEnvelope,
   type AxProgramStateStore,
@@ -1196,6 +1224,8 @@ import {
   type AxUCPWebhookEventSourceOptions,
 } from './event/ucpSource.js';
 import {
+  axEventCanonicalDigest,
+  axEventCanonicalJson,
   axEventErrorMessage,
   axEventId,
   axEventIdentityScope,
@@ -1654,6 +1684,10 @@ export { AxMultiServiceRouter };
 export { AxOptimizedProgramImpl };
 export { AxPlaybook };
 export { AxProgram };
+export { AxProgramSource };
+export { AxProgramSourceBudgetError };
+export { AxProgramSourceError };
+export { AxProgramSourceSessionExpiredError };
 export { AxPromptTemplate };
 export { AxProviderRouter };
 export { AxPushEventSource };
@@ -1747,6 +1781,8 @@ export { axDefaultOptimizerMetricsConfig };
 export { axDeserializeOptimizedProgram };
 export { axEmitUsageEvent };
 export { axErasePreferenceEvidence };
+export { axEventCanonicalDigest };
+export { axEventCanonicalJson };
 export { axEventErrorMessage };
 export { axEventId };
 export { axEventIdentityScope };
@@ -1819,6 +1855,9 @@ export { axPlaybookFailureSection };
 export { axPreferenceEvidenceLimits };
 export { axPreferenceEvidenceToMemories };
 export { axProcessContentForProvider };
+export { axProgramSourceDefaultNodeResourceLimits };
+export { axProgramSourceRuntimeProtocol };
+export { axProgramSourceVersion };
 export { axReactCanonicalJSON };
 export { axReactSerializeHistory };
 export { axRenewPreferenceEvidence };
@@ -1872,6 +1911,7 @@ export { flow };
 export { fn };
 export { optimize };
 export { playbook };
+export { programSource };
 export { react };
 export { refine };
 export { runAxEventStoreConformance };
@@ -2322,6 +2362,7 @@ export type { AxEventClock };
 export type { AxEventCloseOptions };
 export type { AxEventContext };
 export type { AxEventContinuation };
+export type { AxEventContinuationEnqueueRequest };
 export type { AxEventContinuationPlan };
 export type { AxEventContinuationRegistration };
 export type { AxEventCorrelationKey };
@@ -2367,6 +2408,14 @@ export type { AxEventTarget };
 export type { AxEventTargetInputContext };
 export type { AxEventTrust };
 export type { AxEventValue };
+export type { AxEventVerificationResult };
+export type { AxEventVerificationStatus };
+export type { AxEventVerificationUsage };
+export type { AxEventVerifierContext };
+export type { AxEventVerifierPolicy };
+export type { AxEventVerifierResult };
+export type { AxEventVerifierTransitionRecord };
+export type { AxEventVerifierTransitionRequest };
 export type { AxEvidenceDescriptor };
 export type { AxExample };
 export type { AxExamples };
@@ -2683,6 +2732,15 @@ export type { AxProgramExamples };
 export type { AxProgramForwardOptions };
 export type { AxProgramForwardOptionsWithModels };
 export type { AxProgramOptions };
+export type { AxProgramSourceCapability };
+export type { AxProgramSourceDocument };
+export type { AxProgramSourceExpression };
+export type { AxProgramSourceLateBridgeEvent };
+export type { AxProgramSourceOptions };
+export type { AxProgramSourceRuntime };
+export type { AxProgramSourceState };
+export type { AxProgramSourceStatement };
+export type { AxProgramSourceValueLimits };
 export type { AxProgramStateEnvelope };
 export type { AxProgramStateStore };
 export type { AxProgramStreamingForwardOptions };
