@@ -110,6 +110,13 @@ and the
 
 Optimization output is model-adjacent configuration. Save it, version it, record the examples and metrics used, and apply it through the program or agent API rather than manually patching instructions.
 
+For program-source candidates, the complete JSON source remains an opaque
+`componentMap` string. Host-authored causal evidence may reference that exact
+component and candidate identity without taking ownership of the source:
+serialization/replay preserve both, rollback replaces the rewindable source
+snapshot while retaining verified evidence history, and settlement appends a
+new receipt-backed record without mutating prior evidence.
+
 {{optimizeArtifactExample}}
 
 ## Budget Discipline

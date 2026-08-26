@@ -11,13 +11,8 @@ impl AxAIClient for ScriptedClient {
 
 fn main() -> AxResult<()> {
     let qa = ax("question:string -> answer:string")?;
-    let mut program = flow("example.flow")
-        .execute("qa", qa)
-        .returns(json!({"answer": "answer"}));
-    let output = program.forward(
-        &mut ScriptedClient,
-        json!({"question": "Capital of France?"}),
-    )?;
+    let mut program = flow("example.flow").execute("qa", qa).returns(json!({"answer": "answer"}));
+    let output = program.forward(&mut ScriptedClient, json!({"question": "Capital of France?"}))?;
     assert_eq!(output["answer"], "Paris");
     println!("rust-axflow-ok");
     Ok(())

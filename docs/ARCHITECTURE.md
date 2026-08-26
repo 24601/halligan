@@ -202,7 +202,12 @@ Multiple optimization strategies serve different needs:
 
 GEPA is one shipped optimizer engine. Top-level `optimize(...)` seeds GEPA with
 `AxBootstrapFewShot` demos first, then runs GEPA with internal bootstrap
-disabled and returns an artifact for the caller to apply. GEPA runs through the existing
+disabled and returns an artifact for the caller to apply. Metrics may return a
+number, a named score vector, or an `AxMetricResult` containing an explicit
+scalar score, bounded textual feedback, and named objective scores. The explicit
+score controls scalar acceptance while named scores feed Pareto selection;
+feedback stays aligned with evaluation rows and traces for reflection and is not
+persisted in optimized artifacts. GEPA runs through the existing
 `OptimizerEngine.optimize(request, evaluator)` boundary and owns reflection,
 selection, Pareto acceptance, bootstrapping, selector state, metric budgets, and
 descendant component optimization. The optimizer contract itself remains

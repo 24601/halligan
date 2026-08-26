@@ -6,8 +6,7 @@ fn main() -> AxResult<()> {
         json!({"status": 200, "json": {"audio": "base64-speech"}}),
         json!({"status": 200, "json": {"text": "hello world", "language": "en", "duration": 1.25}}),
     ]);
-    let mut client =
-        ai("openai-responses", json!({"api_key": "test-key"}))?.with_transport(transport);
+    let mut client = ai("openai-responses", json!({"api_key": "test-key"}))?.with_transport(transport);
     let speech = client.speak(json!({"text": "hello", "voice": "alloy", "format": "mp3"}))?;
     let transcript = client.transcribe(json!({
         "audio": "base64-audio",

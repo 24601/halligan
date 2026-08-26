@@ -34,10 +34,10 @@
     "postbuild": "node ../../scripts/postbuild.js"
   },
   "dependencies": {
-    "@ai-sdk/provider": "^4.0.0",
+    "@ai-sdk/provider": "^4.0.7",
     "@ai-sdk/provider-utils": "^5.0.0",
     "@ax-llm/ax": "24.0.8",
-    "ai": "^7.0.2",
+    "ai": "^7.0.77",
     "zod": "^3.25.76"
   },
   "bugs": {
@@ -46,6 +46,6 @@
   "homepage": "https://github.com/ax-llm/ax#readme",
   "author": "Vikram <https://twitter.com/dosco>",
   "devDependencies": {
-    "@types/react": "^19.0.5"
+    "@types/react": "^19.2.18"
   }
 }

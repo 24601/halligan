@@ -82,11 +82,7 @@ impl AxCodeRuntime for QuickJsCodeRuntime {
         "JavaScript QuickJS runtime profile. Use final(...), respond(...), askClarification(...), discover(...), recall(...), used(...), reportSuccess(...), reportFailure(...), and guideAgent(...). Filesystem, network, process, module loading, and native host objects are not exposed by default."
     }
 
-    fn create_session(
-        &mut self,
-        globals: Value,
-        options: Value,
-    ) -> AxResult<Box<dyn AxCodeSession>> {
+    fn create_session(&mut self, globals: Value, options: Value) -> AxResult<Box<dyn AxCodeSession>> {
         Ok(Box::new(QuickJsCodeSession::new(
             globals,
             options,
@@ -95,11 +91,7 @@ impl AxCodeRuntime for QuickJsCodeRuntime {
         )?))
     }
 
-    fn register_host_callable(
-        &mut self,
-        name: &str,
-        callable: crate::AxHostCallable,
-    ) -> AxResult<()> {
+    fn register_host_callable(&mut self, name: &str, callable: crate::AxHostCallable) -> AxResult<()> {
         if is_reserved_name(name) {
             return Err(AxError::runtime(format!(
                 "QuickJS host callable conflicts with reserved runtime name: {name}"
@@ -156,29 +148,23 @@ impl QuickJsCodeSession {
     fn bootstrap(&mut self) -> AxResult<()> {
         let callables = self.host_callables.clone();
         self.context.with(|ctx| -> AxResult<()> {
-            let host_call = Function::new(
-                ctx.clone(),
-                move |name: String, params_json: String| -> String {
-                    let params = serde_json::from_str::<Value>(&params_json).unwrap_or(Value::Null);
-                    let response = match callables.get(&name) {
-                        Some(callable) => match callable(params) {
-                            Ok(result) => json!({"ok": true, "result": result}),
-                            Err(err) => {
-                                json!({"ok": false, "category": err.category, "error": err.message})
-                            }
-                        },
-                        None => json!({
-                            "ok": false,
-                            "category": "runtime",
-                            "error": format!("host callable not registered: {name}")
-                        }),
-                    };
-                    serde_json::to_string(&response).unwrap_or_else(|error| {
-                        json!({"ok": false, "category": "runtime", "error": error.to_string()})
-                            .to_string()
-                    })
-                },
-            )
+            let host_call = Function::new(ctx.clone(), move |name: String, params_json: String| -> String {
+                let params = serde_json::from_str::<Value>(&params_json).unwrap_or(Value::Null);
+                let response = match callables.get(&name) {
+                    Some(callable) => match callable(params) {
+                        Ok(result) => json!({"ok": true, "result": result}),
+                        Err(err) => json!({"ok": false, "category": err.category, "error": err.message}),
+                    },
+                    None => json!({
+                        "ok": false,
+                        "category": "runtime",
+                        "error": format!("host callable not registered: {name}")
+                    }),
+                };
+                serde_json::to_string(&response).unwrap_or_else(|error| {
+                    json!({"ok": false, "category": "runtime", "error": error.to_string()}).to_string()
+                })
+            })
             .map_err(qjs_error)?;
             ctx.globals()
                 .set("__ax_host_call", host_call)
@@ -186,10 +172,7 @@ impl QuickJsCodeSession {
             ctx.eval::<(), _>(QUICKJS_BOOTSTRAP).map_err(qjs_error)?;
             Ok(())
         })?;
-        self.set_global_json(
-            "__ax_session_reserved",
-            &reserved_names_value(&self.reserved),
-        )?;
+        self.set_global_json("__ax_session_reserved", &reserved_names_value(&self.reserved))?;
         Ok(())
     }
 
@@ -220,8 +203,7 @@ impl QuickJsCodeSession {
         let value_json = serde_json::to_string(value)?;
         let value_json_literal = serde_json::to_string(&value_json)?;
         let source = format!("globalThis[{name_json}] = JSON.parse({value_json_literal});");
-        self.context
-            .with(|ctx| ctx.eval::<(), _>(source).map_err(qjs_error))
+        self.context.with(|ctx| ctx.eval::<(), _>(source).map_err(qjs_error))
     }
 
     fn eval_json_string(&mut self, source: String) -> AxResult<String> {
@@ -233,10 +215,7 @@ impl QuickJsCodeSession {
         let text = self.eval_json_string("__ax_snapshot_json()".to_string())?;
         let bindings: Value = serde_json::from_str(&text)?;
         if apply_limit {
-            Ok(limit_snapshot(
-                bindings,
-                int_option(&self.runtime_policy, "maxSnapshotBytes", 262_144),
-            ))
+            Ok(limit_snapshot(bindings, int_option(&self.runtime_policy, "maxSnapshotBytes", 262_144)))
         } else {
             Ok(bindings)
         }
@@ -279,9 +258,7 @@ impl AxCodeSession for QuickJsCodeSession {
         let persist_suffix = self
             .eval_json_string(format!("axPersistSuffix({code_literal})"))
             .unwrap_or_default();
-        let body_literal = serde_json::to_string(&format!(
-            "with (globalThis) {{\n{code}\n{persist_suffix}\n}}"
-        ))?;
+        let body_literal = serde_json::to_string(&format!("with (globalThis) {{\n{code}\n{persist_suffix}\n}}"))?;
         let run_source = format!(
             "globalThis.__ax_completion = undefined; globalThis.__ax_error = undefined; globalThis.__ax_error_category = undefined; __ax_install_host_callables(); (async function(){{}}).constructor({body_literal})().then(function(){{}}, function(e){{ globalThis.__ax_error_category = String((e && (e.error_category || e.category)) || 'runtime'); globalThis.__ax_error = String((e && e.message) ? ((e.name ? e.name + ': ' : '') + e.message + (e.stack ? (' ' + e.stack) : '')) : ((e && e.stack) ? e.stack : e)); }});"
         );
@@ -490,10 +467,7 @@ fn is_host_callable_marker(value: &Value) -> bool {
         .get("__ax_host_callable")
         .and_then(Value::as_bool)
         .unwrap_or(false)
-        || value
-            .get("native")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
+        || value.get("native").and_then(Value::as_bool).unwrap_or(false)
 }
 
 fn is_reserved_name(name: &str) -> bool {

@@ -159,7 +159,7 @@ describe('AxProgramSource', () => {
     });
     (optimizer as any).reflectTargetInstruction = async (...args: any[]) => {
       expect(args[0]).toBe(component.key);
-      expect(args.at(-1)).toMatchObject({
+      expect(args[9]).toMatchObject({
         kind: 'program-source',
         format: axProgramSourceVersion,
       });
