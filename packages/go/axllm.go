@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -80,6 +81,51 @@ func (e AxError) Error() string {
 type SignatureError struct{ AxError }
 type ValidationError struct{ AxError }
 type AIServiceError struct{ AxError }
+
+// Unwrap exposes the embedded envelope so errors.As(err, &AxError{}) reaches
+// Status, Code, and Retryable without the caller having to know which concrete
+// Ax error type carries them. Embedding alone does not satisfy errors.As: the
+// concrete type is SignatureError, not AxError.
+func (e SignatureError) Unwrap() error  { return e.AxError }
+func (e ValidationError) Unwrap() error { return e.AxError }
+func (e AIServiceError) Unwrap() error  { return e.AxError }
+
+// AsAxError returns the structured envelope carried by err, following wrapping.
+// Callers that map Ax failures onto their own error vocabulary should use this
+// rather than matching on Error() text, which renders Message alone and drops
+// the status a provider actually reported.
+func AsAxError(err error) (AxError, bool) {
+	var axErr AxError
+	if errors.As(err, &axErr) {
+		return axErr, true
+	}
+	return AxError{}, false
+}
+
+// IsRetryable reports whether err is a transient failure worth another attempt.
+// Status classification stays Core-owned via is_retryable_status so hosts,
+// balancers, and every generated target agree on the same set.
+func IsRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	var serviceErr AIServiceError
+	if errors.As(err, &serviceErr) {
+		switch serviceErr.Type {
+		case "AxAIServiceAuthenticationError":
+			return false
+		case "AxAIServiceStatusError":
+			return coreTruthy(mustCore(is_retryable_status(serviceErr.Status)))
+		case "AxAIServiceNetworkError", "AxAIServiceResponseError", "AxAIServiceStreamTerminatedError", "AxAIServiceTimeoutError":
+			return true
+		}
+		return serviceErr.Retryable
+	}
+	if axErr, ok := AsAxError(err); ok {
+		return axErr.Category == "network" || axErr.Retryable
+	}
+	return false
+}
 
 // coreFlow carries non-local exits (return/break/continue) out of core.try
 // closures in emitted Core functions, mirroring the Rust runtime's CoreFlow
@@ -17334,7 +17380,9 @@ func _gemini_build_embed_request(args ...Value) (Value, error) {
 	axirCoverageMark("_gemini_build_embed_request")
 	var v_request Value
 	var v_content Value
+	var v_dimensions Value
 	var v_empty_texts Value
+	var v_has_dimensions Value
 	var v_item Value
 	var v_model Value
 	var v_model_name Value
@@ -17347,7 +17395,9 @@ func _gemini_build_embed_request(args ...Value) (Value, error) {
 	if len(args) > 0 { v_request = args[0] }
 	_ = v_request
 	_ = v_content
+	_ = v_dimensions
 	_ = v_empty_texts
+	_ = v_has_dimensions
 	_ = v_item
 	_ = v_model
 	_ = v_model_name
@@ -17373,6 +17423,13 @@ func _gemini_build_embed_request(args ...Value) (Value, error) {
 		v_model_name = _core_string_format("models/{}", v_model)
 		if err := coreSet(v_item, "model", v_model_name); err != nil { return nil, err }
 		if err := coreSet(v_item, "content", v_content); err != nil { return nil, err }
+		v_dimensions = coreGet(v_request, "dimensions", nil)
+		v_has_dimensions = _core_is_not_none(v_dimensions)
+		if coreTruthy(v_has_dimensions) {
+			if err := coreSet(v_item, "outputDimensionality", v_dimensions); err != nil { return nil, err }
+		} else {
+		// empty
+		}
 		v_requests = coreAppend(v_requests, v_item)
 	}
 	if err := coreSet(v_payload, "requests", v_requests); err != nil { return nil, err }
@@ -53241,7 +53298,7 @@ func (c *OpenAICompatibleClient) Embed(ctx context.Context, request map[string]V
 		if err != nil {
 			panic(AxError{Category: "network", Message: err.Error()})
 		}
-		return mustCore(provider_normalize_embed_response(c.Profile, coreGet(raw, "json", raw), c.Name, model))
+		return mustCore(provider_normalize_embed_response(c.Profile, normalizeTransportPayload(raw), c.Name, model))
 	})
 	if err == nil {
 		emitUsageEvent("embed", response, mergedOptions, false)
@@ -53427,7 +53484,7 @@ func (c *OpenAICompatibleClient) Transcribe(ctx context.Context, request map[str
 		if err != nil {
 			panic(AxError{Category: "network", Message: err.Error()})
 		}
-		return mustCore(provider_normalize_transcribe_response(c.Profile, coreGet(raw, "json", raw)))
+		return mustCore(provider_normalize_transcribe_response(c.Profile, normalizeTransportPayload(raw)))
 	})
 }
 func (c *OpenAICompatibleClient) Speak(ctx context.Context, request map[string]Value, options map[string]Value) (Value, error) {
@@ -53437,7 +53494,7 @@ func (c *OpenAICompatibleClient) Speak(ctx context.Context, request map[string]V
 		if err != nil {
 			panic(AxError{Category: "network", Message: err.Error()})
 		}
-		return mustCore(provider_normalize_speak_response(c.Profile, coreGet(raw, "json", raw), request))
+		return mustCore(provider_normalize_speak_response(c.Profile, normalizeTransportPayload(raw), request))
 	})
 }
 func (c *OpenAICompatibleClient) RealtimeAudioSetup(request map[string]Value, options map[string]Value) Value {
@@ -54356,22 +54413,6 @@ func (b *AxBalancer) canRetryService(service AxAIService) bool {
 }
 func (b *AxBalancer) handleFailure(service AxAIService) { b.serviceFailures[service.GetID()]++ }
 func (b *AxBalancer) handleSuccess(service AxAIService) { delete(b.serviceFailures, service.GetID()) }
-func isRetryableAIError(err error) bool {
-	switch e := err.(type) {
-	case AIServiceError:
-		if e.Type == "AxAIServiceAuthenticationError" {
-			return false
-		}
-		if e.Type == "AxAIServiceStatusError" {
-			return e.Status == 408 || e.Status == 429 || e.Status == 500 || e.Status == 502 || e.Status == 503 || e.Status == 504 || e.Status == 529
-		}
-		return e.Type == "AxAIServiceNetworkError" || e.Type == "AxAIServiceResponseError" || e.Type == "AxAIServiceStreamTerminatedError" || e.Type == "AxAIServiceTimeoutError"
-	case AxError:
-		return e.Category == "network" || e.Retryable
-	default:
-		return false
-	}
-}
 func (b *AxBalancer) candidateServices(request map[string]Value) ([]AxAIService, error) {
 	out := []AxAIService{}
 	model := display(coreGet(request, "model", ""))
@@ -54707,7 +54748,7 @@ func (b *AxBalancer) Chat(ctx context.Context, request map[string]Value, options
 			if ctx.Err() != nil {
 				return nil, err
 			}
-			if !isRetryableAIError(err) {
+			if !IsRetryable(err) {
 				return nil, err
 			}
 			last = err
@@ -54755,7 +54796,7 @@ func (b *AxBalancer) Chat(ctx context.Context, request map[string]Value, options
 			b.handleSuccess(current)
 			return response, nil
 		}
-		if !isRetryableAIError(err) {
+		if !IsRetryable(err) {
 			return nil, err
 		}
 		b.handleFailure(current)
@@ -54797,7 +54838,7 @@ func (b *AxBalancer) Stream(ctx context.Context, request map[string]Value, optio
 			if ctx.Err() != nil {
 				return nil, err
 			}
-			if !isRetryableAIError(err) {
+			if !IsRetryable(err) {
 				return nil, err
 			}
 			last = err
@@ -63156,4 +63197,4 @@ func extractQuotedSuffix(s string) (Value, error) {
 
 func _core_type_is_json(value Value) Value { return true }
 
-func Version() string { return "24.0.9" }
+func Version() string { return "24.0.10" }
