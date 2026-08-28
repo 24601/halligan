@@ -1,7 +1,7 @@
 ---
 name: ax-ai
 description: This skill helps an LLM generate correct AI provider setup and configuration code using @ax-llm/ax. Use when the user asks about ai(), providers, models, routing, adaptive balancing, presets, embeddings, batch audio with ai.transcribe() or ai.speak(), extended thinking, context caching, or mentions OpenAI/Anthropic/Google/Azure/DeepSeek/Mistral/Cohere/Reka/Grok with @ax-llm/ax.
-version: "24.0.8"
+version: "24.0.12"
 ---
 
 # AI Provider Codegen Rules (@ax-llm/ax)
@@ -136,6 +136,29 @@ Filter with `{ type: 'all' | 'text' | 'embeddings' | 'code' | 'audio' }` or an a
 
 Dynamic providers such as Azure OpenAI deployments are marked with `isDynamic: true` and may have an empty or static-limited model list.
 
+## Gemini Inference Service Tiers
+
+Gemini GenerateContent accepts `standard`, `flex`, and `priority` tiers. The
+applied tier is normalized into `response.modelUsage.tokens.serviceTier`.
+
+```typescript
+import { ai, AxAIGoogleGeminiModel } from '@ax-llm/ax';
+
+const gemini = ai({
+  name: 'google-gemini',
+  apiKey: process.env.GOOGLE_APIKEY!,
+  config: {
+    model: AxAIGoogleGeminiModel.Gemini35Flash,
+    serviceTier: 'flex',
+  },
+});
+```
+
+Service tiers apply only to the Gemini GenerateContent API. Ax rejects them for
+Vertex AI and Gemini Live before opening a provider connection. Generated
+packages expose the same option using their native provider-options shape and
+normalize an `unspecified` provider response to `standard`.
+
 ## Routing And Balancing
 
 Choose the primitive by responsibility:
@@ -202,6 +225,87 @@ const res = await llm.chat({
 console.log(res.results[0]?.content);
 ```
 
+## Host-Driven Visual Sampling
+
+`AxFrameSampler` is an optional, provider-neutral metadata policy for deciding
+which host-captured still images to forward. It is not a capture API or a video
+transport. The host remains responsible for capture, frame payload retention,
+clock values, consent and authority decisions, token estimates, and any later
+model call.
+
+```typescript
+import { axFrameSampler, type AxVisualObservation } from '@ax-llm/ax';
+
+const sampler = axFrameSampler({
+  minIntervalMs: 200,
+  maxIntervalMs: 2_000,
+  changeThreshold: 0.125,
+  sceneCutThreshold: 0.5,
+  maxObservationAgeMs: 1_000,
+  maxFutureSkewMs: 50,
+  maxObservationBytes: 10_000_000,
+  budget: {
+    windowMs: 1_000,
+    maxFrames: 2,
+    maxBytes: 2_000_000,
+    maxTokens: 4_000,
+  },
+});
+
+// captureFrame is host code. Ax does not provide or invoke it.
+const observation: AxVisualObservation = await captureFrame();
+const decision = sampler.observe(observation, hostClockMs());
+if (decision.action !== 'suppress') {
+  await forwardHostOwnedFrame(observation.frameId);
+}
+```
+
+Create one sampler per source stream. Every observation carries source, stream,
+frame, monotonic revision, capture/observation/expiry times, dimensions, image
+media type, byte and token estimates, and opaque host authority/consent
+references with a monotonic authority revision. A revocation latches closed;
+only a newer non-revoked authority revision can resume sampling. Well-formed
+authority updates are applied independently before frame payload rejection.
+Duplicate or out-of-order frame revisions, clock rollback, and older authority
+revisions are refused. Dropped revision numbers are valid. A budget-rejected
+frame revision may be retried after the rolling window clears. A rejected clock
+rollback starts a fresh rolling-time budget epoch because timestamps from the
+two clock epochs cannot share a meaningful window.
+
+Supply either a `dhash-64` digest or a host-normalized 9 × 8 `Uint8Array`
+luminance grid. `axVisualPerceptualDigest(...)` computes the 64-bit difference
+hash synchronously with browser-safe typed-array operations. It does not decode
+images. SharedArrayBuffer-backed grids are refused as `shared_memory` because an
+unsynchronized writer could change the bytes during snapshotting; the host must
+provide an ordinary, stable `ArrayBuffer`-backed grid. Scene cuts can bypass
+`minIntervalMs`; all accepted samples still obey
+the rolling frame, byte, and token budgets. `maxIntervalMs` is a heartbeat, not
+a guarantee: freshness, authority, validation, and budgets still fail closed.
+
+The defaults shown above are exact. Tune them with representative host data.
+Difference hashes are cheap change heuristics, not semantic understanding:
+collisions exist, meaningful changes can preserve local luminance ordering, and
+lighting/crop changes can trigger samples. The policy is useful when adjacent
+frames are often redundant and host estimates are reliable. It is not useful
+when every frame is independently important, revisions/clocks are unreliable,
+or digest false suppression is unacceptable. It provides no camera capture,
+storage, OCR, identity, surveillance, rendering, codec, legal-consent,
+application-materiality, model-quality, privacy, or security guarantee.
+
+Run the deterministic synthetic mechanism evaluation with:
+
+```bash
+npm run eval:frame-sampler
+```
+
+It makes zero provider calls and reports adaptive, fixed-rate, and every-frame
+change recall/precision, scene-cut recall, stale acceptance, frames/bytes/tokens
+avoided, false suppression, no-benefit control, and environment-specific policy
+latency. Because the naive baseline forwards even invalid observations, savings
+are split between validity/authority refusal and redundancy/budget suppression.
+The fixtures and labels are synthetic; results are mechanism evidence, not
+evidence of model quality, true video understanding, privacy, or security.
+
 ## Batch Audio
 
 Use `ai.transcribe(...)` for batch speech-to-text and `ai.speak(...)` for batch text-to-speech. These are separate from conversational `.chat()` audio config.
@@ -240,9 +344,11 @@ Use `axGlobals` when the app wants one live default for AI requests, generator r
 
 ```typescript
 import { ai, axGlobals, axCreateDefaultColorLogger } from '@ax-llm/ax';
-import { trace } from '@opentelemetry/api';
+import { metrics, trace } from '@opentelemetry/api';
 
+axGlobals.rateLimiter = async (next, info) => next();
 axGlobals.tracer = trace.getTracer('my-app');
+axGlobals.meter = metrics.getMeter('my-app');
 axGlobals.debug = true;
 axGlobals.logger = axCreateDefaultColorLogger();
 axGlobals.customLabels = { service: 'api' };
@@ -253,12 +359,24 @@ const llm = ai({ name: 'openai', apiKey: process.env.OPENAI_APIKEY! });
 
 Rules:
 
-- `axGlobals.tracer`, `meter`, `logger`, `debug`, `abortSignal`, and `customLabels` are live runtime defaults; future calls read the current value even if the AI instance already exists.
+- `axGlobals.rateLimiter`, `tracer`, `meter`, `logger`, `debug`, `abortSignal`, and `customLabels` are live runtime defaults; each operation snapshots them at its start, even if the AI instance already exists.
 - Precedence is: per-call options, then explicit AI/service options, then current `axGlobals`, then built-in defaults.
+- The limiter receives `next` plus operation, provider, model, streaming state, and previous service usage. It wraps chat and embedding provider execution, including streaming and retries; its errors propagate. It may delay, reject, skip, or invoke `next` multiple times.
+- Tracer, meter, and usage-observer failures are fail-open. Limiter failures are fail-closed.
+- Runtime-hook telemetry contains metadata and usage only, never prompts, outputs, tool arguments, or tool results.
+- External meter instruments are independent of balancer-local `getMetrics()` snapshots. Adapt `AxMeter` to OpenTelemetry at the application boundary; generated packages do not require an OpenTelemetry dependency.
 - `customLabels` merge from globals to service to call options; later sources override earlier keys.
 - `abortSignal` values are merged, so either a global shutdown signal or a local request signal can cancel the request.
 - `axGlobals.onUsage` receives one immutable normalized event for each completed chat or embedding call that reports token usage. A fully consumed stream emits once.
 - Usage observers are best-effort and fail-open. Ax does not await them; synchronously enqueue events and persist or aggregate them out of band.
+
+Clear process-wide hooks during shutdown or test teardown:
+
+```typescript
+axGlobals.rateLimiter = undefined;
+axGlobals.tracer = undefined;
+axGlobals.meter = undefined;
+```
 
 Use `usageContext` for multi-tenant and request attribution:
 
@@ -305,9 +423,9 @@ profile rules are applied only to model IDs verified for the selected deployment
 DeepSeek V4 supports thinking mode. When `thinkingTokenBudget` is omitted, Ax
 selects its logical `max` level and sends `thinking: { type: "enabled" }` with
 `reasoning_effort: "max"`. Set `thinkingTokenBudget: "none"` explicitly to
-disable it. DeepSeek's API exposes `low`, `high`, and `max`:
-Ax maps `minimal` and `low` to `low`, `medium` and `high` to `high`, and
-`highest` to `max`. DeepSeek has no distinct `medium` effort rung. DeepSeek V4
+disable it. DeepSeek's API exposes `low`, `medium`, `high`, and `max`:
+Ax maps `minimal` and `low` to `low`, preserves `medium`, maps `high` to `high`,
+and maps `highest` to `max`. DeepSeek V4
 thinking models support tools, but reject the `tool_choice` request parameter,
 so Ax omits auto and Ax-generated `__axOutput` tool choices for `deepseek-v4-pro`,
 `deepseek-v4-flash`, and `deepseek-reasoner` while still sending tool

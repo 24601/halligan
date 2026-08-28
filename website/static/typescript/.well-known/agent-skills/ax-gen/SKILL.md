@@ -1,7 +1,7 @@
 ---
 name: ax-gen
 description: This skill helps an LLM generate correct AxGen code using @ax-llm/ax. Use when the user asks about ax(), AxGen, generators, forward(), streamingForward(), validation, assertions, streaming assertions, field processors, step hooks, self-tuning, or structured outputs. For MCP clients, transports, prompts, resources, tasks, subscriptions, or authentication use ax-mcp alongside this skill.
-version: "24.0.8"
+version: "24.0.12"
 ---
 
 # AxGen Codegen Rules (@ax-llm/ax)
@@ -14,6 +14,9 @@ prompts, resources, tools, tasks, subscriptions, authentication, or events.
 ## Use These Defaults
 
 - Use `ax(...)` factory, not `new AxGen(...)`.
+- Use `react(...)` when a small typed program specifically needs an explicit
+  native-or-prompt tool loop and terminal structured output. Keep `AxAgent` or
+  RLM for discovery, delegation, durable sessions, and long-horizon work.
 - Always pass an AI instance from `ai(...)` as the first argument to `forward()`.
 - Streaming uses `streamingForward()`, not `forward()` with a stream option.
 - Use schema validation for field shape and constraints.
@@ -52,6 +55,68 @@ const gen3 = ax('input -> output', {
 const result = await gen.forward(llm, { input: 'Hello world' });
 console.log(result.output);
 ```
+
+## Structured ReAct
+
+`react(...)` derives a reserved typed `submit` tool from the signature outputs.
+It uses provider-native function calls when the selected model advertises them
+and a strict JSON prompt protocol otherwise.
+
+```typescript
+import { f, fn, react } from '@ax-llm/ax';
+
+const lookup = fn('lookup')
+  .description('Look up a value')
+  .arg('key', f.string())
+  .returns(f.string())
+  .handler(async ({ key }) => readValue(key))
+  .build();
+
+const program = react('question:string -> answer:string', {
+  functions: [lookup],
+  maxIterations: 6,
+  maxParallelTools: 4,
+});
+
+const result = await program.forward(llm, { question: '...' });
+if (result.success) console.log(result.output.answer);
+else console.error(result.terminationReason, result.error, result.output);
+```
+
+Rules:
+
+- `functionCallMode: 'auto'` selects native calls by provider/model capability;
+  use `'native'` to require them or `'prompt'` to force the JSON fallback.
+- Async tools and attached MCP/UCP bindings are awaited. Calls in one turn run
+  concurrently up to `maxParallelTools`, with results committed in call order.
+- `submit` must be the only call in its turn. At iteration exhaustion Ax makes
+  exactly one submit-only attempt.
+- Success returns `{ success: true, output, terminationReason, history }`.
+  Runtime failure returns the same declared output keys set to `null`, plus
+  `terminationReason`, canonical complete `history`, and `error`.
+- Resume with `{ history: previous.history }`. Ax IDs remain collision-safe
+  across runs; unique native provider IDs are retained separately for replay.
+  Compaction retains only complete assistant/tool groups. Resume is bound to
+  the executable catalog, replay provider/model/config protocol, and a host
+  authority digest. Set a stable non-secret `historyAuthority` to recreate the
+  module across processes, and set `replayProfile` for durable native resume
+  across provider objects. The profile is the complete provider/protocol
+  identity (provider names are not also hashed), so aliases may deliberately
+  share it; rotate it for provider defaults, adapter/API, endpoint/deployment,
+  routing, or native-ID changes. Without it, native resume is fail-closed to the
+  current provider object. Native request model/config values must be a bounded
+  plain JSON tree; the digest also binds forwarded `thinkingTokenBudget` and
+  `showThoughts` values and never uses mutable provider-global `getLastUsed*`
+  state. Prompt resume remains provider-neutral. Both values support per-run
+  overrides.
+- `abortSignal` cancels one run; `program.stop()` cancels all its active runs.
+- Canonical JSON stabilizes prompt-cache input, tool arguments/results, and
+  persisted history. Structural validation does not authenticate semantic
+  history edits; callers must verify storage integrity and treat resumed
+  content as untrusted input.
+
+See `docs/REACT.md` for protocol, compaction, security, provider limitations,
+and the bounded `npm run eval:react` comparison.
 
 ### Signatures from zod / valibot / arktype
 
@@ -130,6 +195,7 @@ import { trace } from '@opentelemetry/api';
 
 const responseCache = new Map<string, any>();
 
+axGlobals.rateLimiter = async (next, info) => next();
 axGlobals.tracer = trace.getTracer('my-app');
 axGlobals.debug = true;
 axGlobals.cachingFunction = async (key, value?) => {
@@ -143,7 +209,9 @@ axGlobals.cachingFunction = async (key, value?) => {
 
 Rules:
 
-- Tracing/logging precedence is: forward options, then generator options, then AI service options, then current `axGlobals`, then built-in defaults.
+- Runtime-hook precedence is: forward options, then generator options, then AI service options, then the globals snapshotted at run start.
+- A forward-scoped `rateLimiter`, `tracer`, or `meter` is carried to every retry and provider call without being serialized or mutating the generator. Concurrent forwards remain isolated.
+- Limiter failures propagate. Tracer and meter failures are ignored, and telemetry contains metadata rather than prompts, outputs, or tool payloads.
 - `abortSignal` from `axGlobals` is merged with local forward signals.
 - `customLabels` merge from globals to AI service to forward options.
 - `cachingFunction` and `functionResultFormatter` also fall back to current `axGlobals` when local options do not provide them.

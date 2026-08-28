@@ -197,6 +197,7 @@ import {
   axExecutableSkillRef,
   axSelectExecutableSkills,
 } from './agent/executableSkills.js';
+import type { AxAgentMetricsInstruments } from './agent/metrics.js';
 import type {
   AxAgentPlaybookConfig,
   AxAgentPlaybookLearnOptions,
@@ -715,6 +716,8 @@ import type {
   AxModelUsage,
   AxProviderMetadata,
   AxRateLimiterFunction,
+  AxRateLimitInfo,
+  AxRuntimeHooks,
   AxStructuredOutputMode,
   AxStructuredOutputRung,
   AxThoughtBlockItem,
@@ -1347,6 +1350,7 @@ import {
   type AxFlowMermaidNodeBinding,
   type AxFlowMermaidRenderOptions,
 } from './flow/mermaid.js';
+import type { AxFlowMetricsInstruments } from './flow/metrics.js';
 import type {
   AxFlowable,
   AxFlowDynamicContext,
@@ -1655,6 +1659,15 @@ import {
   AxRateLimiterTokenUsage,
   type AxRateLimiterTokenUsageOptions,
 } from './util/rate-limit.js';
+import {
+  type AxRuntimeHookFrame,
+  type AxRuntimeHookFramedOptions,
+  axFailOpenSpan,
+  axGetRuntimeHookFrame,
+  axRuntimeHookFrame,
+  axStartActiveSpanFailOpen,
+  axStartSpanFailOpen,
+} from './util/telemetry.js';
 
 // Value exports
 export { AxACE };
@@ -1899,6 +1912,7 @@ export { axEventScopedDedupeKey };
 export { axEventSizeBytes };
 export { axExecutableSkillRef };
 export { axExtendAxIRRuntimeCapabilities };
+export { axFailOpenSpan };
 export { axFetchJsonSpeech };
 export { axFetchMultipartTranscription };
 export { axFingerprintCausalEvidence };
@@ -1910,6 +1924,7 @@ export { axGetFormatCompatibility };
 export { axGetMetricsConfig };
 export { axGetOptimizerMetricsConfig };
 export { axGetProvidersWithMediaSupport };
+export { axGetRuntimeHookFrame };
 export { axGetSupportedAIModels };
 export { axGlobals };
 export { axGoogleGeminiLiveAudioDefaults };
@@ -1982,6 +1997,7 @@ export { axRetractPreferenceEvidence };
 export { axRuntimeCapabilitiesToAxIR };
 export { axRuntimeCapabilitiesVersion };
 export { axRuntimeCapabilityRequirementsVersion };
+export { axRuntimeHookFrame };
 export { axRuntimePrimitives };
 export { axRuntimeProtocolFromToken };
 export { axScoreProvidersForRequest };
@@ -1997,6 +2013,8 @@ export { axSignUCPRequest };
 export { axSnapshotAuthority };
 export { axSpanAttributes };
 export { axSpanEvents };
+export { axStartActiveSpanFailOpen };
+export { axStartSpanFailOpen };
 export { axUpdateBalancerRouteStats };
 export { axUpdateMetricsConfig };
 export { axUpdateOptimizerMetricsConfig };
@@ -2302,6 +2320,7 @@ export type { AxAgentJudgeOutput };
 export type { AxAgentMemoriesSearchFn };
 export type { AxAgentMemoryEntry };
 export type { AxAgentMemoryResult };
+export type { AxAgentMetricsInstruments };
 export type { AxAgentOnContextEvent };
 export type { AxAgentOnFunctionCall };
 export type { AxAgentOptimizationTargetDescriptor };
@@ -2605,6 +2624,7 @@ export type { AxFlowLoggerFunction };
 export type { AxFlowMermaidBindings };
 export type { AxFlowMermaidNodeBinding };
 export type { AxFlowMermaidRenderOptions };
+export type { AxFlowMetricsInstruments };
 export type { AxFlowOptions };
 export type { AxFlowParallelGroupCompleteData };
 export type { AxFlowParallelGroupStartData };
@@ -2921,6 +2941,7 @@ export type { AxRankableDocument };
 export type { AxRankableField };
 export type { AxRankedDocument };
 export type { AxRankedModule };
+export type { AxRateLimitInfo };
 export type { AxRateLimiterFunction };
 export type { AxRateLimiterTokenUsageOptions };
 export type { AxReactAssistantEvent };
@@ -2964,6 +2985,9 @@ export type { AxRuntimeCapabilityContradictionReport };
 export type { AxRuntimeCapabilityExtensions };
 export type { AxRuntimeCapabilityObservations };
 export type { AxRuntimeCapabilityRequirements };
+export type { AxRuntimeHookFrame };
+export type { AxRuntimeHookFramedOptions };
+export type { AxRuntimeHooks };
 export type { AxRuntimeLanguageInfo };
 export type { AxRuntimePlatform };
 export type { AxRuntimePlatformAuthority };

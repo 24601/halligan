@@ -1,7 +1,7 @@
 ---
 name: ax-agent-memory-skills
 description: This skill helps an LLM generate correct AxAgent memory retrieval, context-map, and dynamic skill-loading code using @ax-llm/ax. Use when the user asks about contextMap, AxAgentContextMap, onMemoriesSearch, memoriesCatalog, recall(...), inputs.memories, onLoadedMemories, onUsedMemories, onSkillsSearch, skillsCatalog, AxAgentCatalogSkill, discover({ skills }), onLoadedSkills, onUsedSkills, preloaded skills, preloading memories at forward time, relevanceRanking hints, loaded memory/skill IDs, or carrying memories across forward() calls.
-version: "24.0.8"
+version: "24.0.12"
 ---
 
 # AxAgent Memory And Skills Rules (@ax-llm/ax)
@@ -198,6 +198,198 @@ const myAgent = agent('task:string -> answer:string', {
 });
 ```
 
+## Host-owned preference evidence
+
+Use `axSelectPreferenceEvidence(...)` when a host already has a bounded,
+principal-scoped preference ledger and needs to decide which evidence may enter
+Ax's existing memory input. This is an optional selection contract, not a user
+profile, identity system, consent system, database, or autonomous learner.
+
+The contract deliberately separates:
+
+- `observation`: a sourced event, never applied as a preference;
+- `inference`: an uncertain interpretation, returned under `informational` and
+  never applied;
+- `confirmed-preference`: eligible for `applied` only when the host admits its
+  exact source, authority, and consent receipts.
+
+The context `principalId` and stream checkpoint are host-owned. Ax does not
+authenticate either. Receipt references are opaque lookup keys, not bearer
+authority: the host callbacks must compare the detached, frozen request against
+durable state and verify the complete principal, record, stream/version, epoch,
+revision, event, operation, purpose, and event payload binding. A principal ID,
+consent statement, or receipt reference copied from model output cannot certify
+identity, provenance, authority, or consent. Never derive callback approval
+from the same model text being evaluated.
+
+```typescript
+import {
+  axPreferenceEvidenceToMemories,
+  axSelectPreferenceEvidence,
+} from '@ax-llm/ax';
+import type { AxPreferenceEvidenceRecord } from '@ax-llm/ax';
+
+const evidence: AxPreferenceEvidenceRecord[] = [
+  {
+    id: 'response-style',
+    principalId: trustedSession.principalId,
+    streamId: 'preference-stream-42',
+    streamVersion: 1,
+    epoch: 1,
+    revisions: [
+      {
+        operation: 'assert',
+        revision: 1,
+        epoch: 1,
+        eventId: 'preference-event-1',
+        kind: 'confirmed-preference',
+        value: 'Use concise bullet points for status updates.',
+        sourceReceiptRef: 'source-receipt-1',
+        confidence: 1,
+        scope: 'response-style',
+        applicability: { allOf: { channel: 'work' } },
+        recordedAt: '2026-08-20T12:00:00.000Z',
+        expiresAt: '2027-08-20T12:00:00.000Z',
+        authorityReceiptRef: 'authority-receipt-1',
+        consentReceiptRef: 'consent-receipt-1',
+      },
+    ],
+  },
+];
+
+const selection = axSelectPreferenceEvidence(evidence, {
+  principalId: trustedSession.principalId,
+  query: 'Draft a concise project status update',
+  scope: 'response-style',
+  attributes: { channel: 'work' },
+  now: new Date().toISOString(),
+  verifyStreamState: (request) =>
+    preferenceLedger.matchesCurrentSnapshot(request),
+  verifyReceipt: (request) => preferenceLedger.verifyReceipt(request),
+  verifyDestructiveLifecycleReceipt: (request) =>
+    privacyControls.verifyDestructiveReceipt(request),
+  allowApplication: (revision) => safetyPolicy.allows(revision),
+});
+
+await myAgent.forward(ai, {
+  task: 'Draft the update',
+  memories: axPreferenceEvidenceToMemories(selection),
+});
+```
+
+Selection validates strictly increasing timestamps and versions, principal
+scope, exact host stream state, receipt bindings, scope/applicability, expiry,
+terminal lifecycle state, contradiction, supersession, confidence, and host
+policy before using Ax's existing deterministic lexical ranker. Equal-time or
+older supersession and unresolved contradictions fail closed. Within a single
+stream's current epoch, a uniquely stronger claim resolves a self-contradiction
+by authority kind (`confirmed-preference` over `observation` over `inference`),
+then confidence; an equal-strength or otherwise unresolved conflict still fails
+closed. This prevents a weak later inference from silently displacing a
+stronger confirmed preference.
+Stream-state verification binds the selected claim to the current durable
+snapshot and its current `streamVersion`. Receipt verification instead binds
+each event to the immutable `streamVersion` that emitted it (equal to that
+event's `revision`), so later revisions cannot rewrite historical source,
+authority, or consent receipts.
+Only `applied` confirmed preferences convert to memory; observations and
+inferences remain available for host inspection under `informational`.
+Convert the returned selection directly; the memory adapter rejects copied or
+deserialized selection objects. Callback inputs and returned selections are
+detached and deeply frozen. Persist records and host checkpoints, not the
+transient selection.
+
+Use `axRetractPreferenceEvidence(...)` to append a reversible retraction while
+retaining revision history. Use `axErasePreferenceEvidence(...)` to advance the
+same stream monotonically and replace prior revisions with a content-free
+tombstone; revision numbers do not reset. Retraction and erasure are terminal
+within an epoch, and replayed older snapshots fail when
+`verifyStreamState(...)` checks the host's current checkpoint. The only reopen
+path is `axRenewPreferenceEvidence(...)`, which advances to a new epoch and
+requires a separately verified epoch-authority receipt plus fresh consent.
+Persist the new stream checkpoint before making it selectable. Erasure uses a
+separate `verifyDestructiveLifecycleReceipt(...)`; ordinary application
+authority cannot authorize deletion. The host remains responsible for
+replacing/deleting durable copies, indexes, backups, caches, and derived data.
+
+Selection has fixed fail-closed limits: 256 records, 64 revisions per record,
+262,144 total bytes, 16,384 bytes per record, 4,000 value characters, 2,000
+query characters, 256 scope/ID characters, 512 receipt-reference characters,
+32 context attributes, 16 applicability entries, 32 relation references,
+object depth 8, object/array width 64, and `topK` 20. Corpus and structural
+limits are checked before host callbacks or ranking. The values are exported as
+`axPreferenceEvidenceLimits`. Count, query, and total-byte overflow reject the
+batch. Structural and per-record byte violations exclude only the malformed
+record and do not consume the valid corpus's total-byte budget.
+
+All verification and policy callbacks are synchronous and invoked inline.
+Selector limits bound Ax-owned validation and ranking work, but do not bound
+trusted-host callback latency. Hosts must keep callbacks bounded and
+non-blocking, avoid reentrancy and lock cycles, and prefetch/cache authority
+state or complete asynchronous verification before selection when external I/O
+is required.
+
+This mechanism is useful for small, auditable preference catalogs where the
+host already owns identity, authority, privacy, retention, and safety policy.
+Do not use it as a universal memory store, an authorization decision, or a
+basis for medical, psychological, protected-trait, or other sensitive
+inference. It does not verify that a reference is authentic, discover consent,
+resolve semantic contradictions, sanitize preference text, or prove that
+personalization helps model output. Callback correctness, atomic checkpoint
+updates, receipt storage, privacy enforcement, identity binding, and input
+contamination controls remain host responsibilities. `allowApplication` must
+enforce product and safety rules independently of expected output text; user
+preference never overrides truthfulness or safety.
+
+### Deterministic mechanism evaluation
+
+Run:
+
+```bash
+npm run evaluate:preference-evidence
+```
+
+The final corpus, expected outcomes, and event-bound host policy live in the
+separately authored post-baseline artifact
+`scripts/fixtures/preference-evidence-later-v1.json`. The artifact was committed
+at `0f70af1aa9723c7059c0850b034918ba733ee958` after mechanism baseline
+`8e1152f8974231ea7e81d8078acbd7e84386c438`; its frozen SHA-256 is
+`756d76538ab5733c86894b8aecb62af7218563f301a80c599970c1d5922daa9f`.
+The evaluator checks that digest before parsing and records the provenance in
+its output. Artifact-owned expectations include exact exclusions and callback
+counts/purposes for successful and rejected cases, so a callback regression or
+an empty applied set rejected for the wrong reason fails.
+Cases cover stable benefit, contradiction, expiry, cross-principal leakage,
+forged consent/provenance and destructive authority, retraction, erasure and
+stale replay, explicit epoch renewal, uncertain inference, unseen
+harmful/sycophantic paraphrases, equal-time ambiguity, no-benefit, and noisy
+small-data. Separate stress probes exercise count, query, total-byte, and
+single and repeated cyclic-shape isolation before callbacks.
+
+On the 17-case artifact, static/no personalization scores 14/17 exact with
+three missed-personalization cases; naive latest-value scores 16/17 with two
+correct applications, zero false-personalization cases, and one missed case.
+Evidence-aware selection scores 17/17 with three correct applications, zero
+false-personalization cases, and zero missed cases. All 17 exact applied-ID,
+exclusion-reason, and callback checks pass, including unresolved observation
+contradiction, an explicitly configured `minConfidence: 0.5` uncertain
+inference rejection, equal-time observation supersession, and preservation of
+a stronger confirmed preference over a weak later inference. Retention/expiry,
+retraction/erasure, stale replay, renewal, authority, and stress checks also
+pass. The artifact is 28,572 UTF-8 bytes. The evaluator reports measured
+latency and every exclusion/callback check, exits nonzero on any failure, and
+does not suppress or golden known failures.
+
+The default bound is 17 cases × 1,000 iterations = 17,000 local selections,
+five one-shot stress probes, zero provider calls/tokens, and $0 provider cost.
+Latency is descriptive and machine-dependent. This is deterministic
+adversarial mechanism regression coverage, not independent held-out
+personalization accuracy. It makes no model-quality, security-proof,
+semantic-retrieval, authority-authenticity, privacy-system, or
+production-latency claim. The small synthetic set is useful for regression
+detection, not statistical generalization; contamination control and genuine
+independent evaluation remain host responsibilities.
+
 ## Skills Search
 
 Use `onSkillsSearch` when the agent needs to load skill guides such as usage instructions, operational guides, or domain conventions into the executor's system prompt on demand. The actor decides which skills to fetch and when, so you do not pre-render every skill into every prompt.
@@ -338,6 +530,194 @@ await releaseAgent.forward(
 ```
 
 You can use `skills` without setting `onSkillsSearch` at all. That is useful for static guides where the actor never needs to fetch more.
+
+## Host-Owned Executable Skill Artifacts
+
+`skills`, `skillsCatalog`, and `onSkillsSearch` load opaque Markdown guidance;
+they are not executable-skill registries. When a host has already built an
+`AxAgentFunction` and needs a compatibility/retirement gate before registering
+it, wrap it in `AxExecutableSkillArtifact` and call
+`axSelectExecutableSkills(...)`:
+
+```typescript
+import {
+  agent,
+  axExecutableSkillRef,
+  axSelectExecutableSkills,
+  type AxExecutableSkillArtifact,
+} from '@ax-llm/ax';
+
+const artifacts: AxExecutableSkillArtifact[] = [
+  {
+    id: 'browser-checkout',
+    version: '2',
+    name: 'Browser checkout',
+    description: 'Complete checkout in the current web store',
+    functionRef: 'functions/browser-checkout/2',
+    requirements: {
+      preconditions: ['authenticated'],
+      tools: ['browser.navigate@2'],
+      environments: ['web-store@2026-08'],
+      protocols: ['commerce@1'],
+      capabilities: ['browser'],
+      authorities: [
+        {
+          issuer: 'auth.example',
+          audience: 'agent:checkout',
+          principal: 'user:123',
+          tenant: 'shop:7',
+          resource: 'order:456',
+          action: 'purchase',
+          delegationRef: 'delegation:9',
+        },
+      ],
+    },
+    verification: {
+      mode: 'required',
+      evaluation: 'checkout-compatibility-v2',
+      receiptRefs: ['receipt:checkout:2'],
+      issuers: ['eval.example'],
+    },
+    provenance: { source: 'host-registry' },
+    knownFailureModes: ['Does not handle split shipment'],
+  },
+];
+
+const trustedFunctionRegistry = new Map([
+  ['functions/browser-checkout/2', checkoutFunction],
+]);
+const verificationNow = new Date();
+const receiptExpiresAt = new Date(
+  verificationNow.getTime() + 30 * 24 * 60 * 60 * 1000
+);
+
+const selection = axSelectExecutableSkills(
+  artifacts,
+  {
+    // Admission and accepted receipts are host-owned facts. Artifact metadata
+    // cannot add itself to either list.
+    admittedArtifacts: artifacts.map(axExecutableSkillRef),
+    principal: 'user:123',
+    audience: 'agent:checkout',
+    preconditions: ['authenticated'],
+    tools: ['browser.navigate@2'],
+    environment: 'web-store@2026-08',
+    protocols: ['commerce@1'],
+    capabilities: ['browser'],
+    grantedAuthorities: [
+      {
+        issuer: 'auth.example',
+        audience: 'agent:checkout',
+        principal: 'user:123',
+        tenant: 'shop:7',
+        resource: 'order:456',
+        action: 'purchase',
+        delegationRef: 'delegation:9',
+      },
+    ],
+    verifiedReceipts: [
+      {
+        ref: 'receipt:checkout:2',
+        artifact: { id: 'browser-checkout', version: '2' },
+        principal: 'user:123',
+        issuer: 'eval.example',
+        audience: 'agent:checkout',
+        evaluation: 'checkout-compatibility-v2',
+        verifiedAt: verificationNow.toISOString(),
+        expiresAt: receiptExpiresAt.toISOString(),
+      },
+    ],
+    now: verificationNow.toISOString(),
+    resolveFunction: (functionRef) => trustedFunctionRegistry.get(functionRef),
+  },
+  { query: 'complete checkout', topK: 1 }
+);
+
+const assistant = agent('task:string -> answer:string', {
+  contextFields: [],
+  functions: selection.artifacts.map((artifact) => artifact.function),
+});
+
+// Inactive/incompatible/malformed entries never enter `artifacts`; inspect
+// their exact exclusion reasons without exposing their functions to the agent.
+console.log(selection.inspection);
+```
+
+Requirements use exact host-canonicalized IDs. Include versions in tool,
+environment, and protocol IDs when compatibility depends on a version; Ax does
+not guess semver compatibility. Artifact admission and supersession use
+structured `{ id, version }` references, so delimiters inside either field cannot
+alias another revision. Every requirement is all-of except `environments`, where
+any listed environment may match. Authorities are exact structured grants bound
+to issuer, audience, principal, tenant, resource, action, and optional delegation.
+`expiresAt`,
+`deprecatedAt`, `lifecycle`, and `supersededBy` exclude revisions by default.
+Malformed chronology, self-supersession, duplicate references, invalid clocks,
+oversized inputs, and invalid `topK` fail closed but remain inspectable.
+Limits are 1,000 catalog entries, 128 entries per list, 256 UTF-16 code units
+per identifier, 2,048 per description or failure-mode string, 4,096 per query,
+and integer `topK` from 0 through 100. Unknown record fields are rejected rather
+than retained as unbounded extension metadata.
+
+`verification` is mandatory and explicit. Use `{ mode: 'receiptless' }` only
+when host policy permits an admitted artifact without evaluation evidence. In
+`required` mode, at least one host-supplied receipt must match an allowed receipt
+reference and issuer and be bound to the artifact revision, principal, audience,
+evaluation, verification time, and unexpired lifetime.
+
+This is only a selection and audit boundary. It does not load files, install
+packages, execute artifact code during selection, sandbox functions, authenticate
+receipt contents, or provide security isolation. The host must validate artifact
+and receipt sources, admit structured revisions, supply current principal,
+authority, capability, and receipt facts, and retain evaluation records outside
+Ax. `resolveFunction` is the trusted registry boundary; selected metadata and
+function schemas are copied and frozen, and the selected handler is bound to the
+resolved handler value so later registry-object mutation cannot swap it.
+Catalog, artifact, context, and option facts are detached and frozen before
+validation in one shared ingress session and then never reread from caller
+objects. Ingress and registry metadata must use own data properties; accessors
+are rejected without invocation, so one context, option, catalog, or registry
+getter cannot rewrite a fact that has not yet been detached. Supported metadata
+is limited to finite JSON-like primitives, dense arrays, and plain or
+null-prototype records. Arrays reject accessors, sparse entries, and keys outside
+their declared length; snapshots and selector result arrays define own entries
+without inherited assignment. Detached records and selected functions are
+normalized to a null prototype so inherited or later-added `Object.prototype`
+values cannot establish authority or alter function metadata. Callables, symbols,
+bigints, custom-prototype objects such as `Date`, and cyclic values fail closed.
+The trusted context resolver is the ingress exception. A selected function must
+be a plain or null-prototype record with an own data-property `func` whose value
+is callable and an own valid `name`. Its metadata is copied from own data
+properties without executing accessors or rereading `func`; the whole selected
+batch returns no artifacts if any selected root fails snapshot.
+Inherited handlers, class instances, callable aliases, missing function names,
+and accessor handlers or metadata fail closed; descriptions remain optional.
+JavaScript proxies cannot be identified portably in the same realm and are
+outside this boundary; hosts must not pass proxy-backed ingress or registry
+records.
+Select immediately before registration/invocation and select again whenever host
+principal, authority, capability, receipt, or compatibility facts change.
+`provenance` is informational and must never be populated from model output as
+proof of trust. Legacy prompt skills are unchanged; rollback is removing the
+selector and passing ordinary functions directly.
+
+The deterministic zero-cost evaluation is:
+
+```bash
+node --import=tsx src/examples/executable-skill-compatibility-eval.ts
+```
+
+It compares naive lexical retrieval with compatibility-aware retrieval over a
+controlled mechanism fixture containing task/tool/environment/protocol changes,
+missing capability/authority,
+unaccepted and forged receipt metadata, malformed legacy input, expiry,
+deprecation, supersession, and a no-benefit control. It reports exact retrieval,
+false application, serialized artifact/context bytes, prompt bytes (zero), and
+wall-clock selector latency. The task variants are deterministic test cases, not
+a statistically independent benchmark split. This fixture measures selector
+mechanics only,
+not model answer quality, function safety, verifier correctness, or real-world
+latency.
 
 ## Advisory Relevance Hints (`relevanceRanking`)
 
