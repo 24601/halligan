@@ -1,20 +1,20 @@
 ---
 name: ax-llm
 description: This skill helps with using the @ax-llm/ax TypeScript library for building LLM applications. Use when the user asks about ax(), ai(), f(), s(), agent(), flow(), AxGen, AxAgent, AxFlow, signatures, streaming, or mentions @ax-llm/ax.
-version: "24.0.8"
+version: "24.0.12"
 ---
 
 # Ax Library (@ax-llm/ax) Quick Reference
 
 Ax is a TypeScript library for building LLM-powered applications with type-safe signatures, streaming support, and multi-provider compatibility.
 
-> **Detailed skills available:** ax-ai (providers, routing, adaptive balancing), ax-signature (signatures/types), ax-gen (generators), ax-agent (core agents/tools), ax-agent-rlm (agent runtime/RLM/delegation), ax-agent-observability (callbacks/logs/usage), ax-agent-memory-skills (recall and dynamic skill loading), ax-agent-optimize (agent tuning/eval), ax-flow (workflows), ax-gepa (top-level `optimize(...)`, BootstrapFewShot -> GEPA, Pareto optimization).
+> **Detailed skills available:** ax-ai (providers, routing, adaptive balancing), ax-signature (signatures/types), ax-gen (generators), ax-agent (core agents/tools), ax-agent-rlm (agent runtime/RLM/delegation), ax-agent-observability (callbacks/logs/usage), ax-agent-memory-skills (recall and dynamic skill loading), ax-agent-optimize (agent tuning/eval), ax-flow (workflows), ax-gepa (top-level `optimize(...)`, BootstrapFewShot -> GEPA, Pareto optimization, experimental `programSource(...)`).
 
 ## Imports & Factories
 
 ```typescript
-// Prefer factory functions: ax(), ai(), agent(), flow(); avoid class constructors.
-import { ax, ai, f, s, fn, agent, flow, AxMemory, AxMCPClient } from '@ax-llm/ax';
+// Prefer factory functions; avoid class constructors.
+import { ax, ai, f, s, fn, agent, flow, programSource, AxMemory, AxMCPClient } from '@ax-llm/ax';
 import { z } from 'zod'; // optional — any Standard Schema v1 library works
 
 // AI provider
@@ -22,6 +22,10 @@ const llm = ai({ name: 'openai', apiKey: process.env.OPENAI_APIKEY });
 
 // Generator (from string signature)
 const gen = ax('question:string -> answer:string');
+
+// Experimental whole-implementation optimization. Source is a validated JSON
+// control-flow AST, never host-executable JavaScript.
+const sourceProgram = programSource('question:string -> answer:string');
 
 // Generator (from fluent signature)
 const gen = ax(
@@ -110,14 +114,16 @@ Global runtime defaults can be set with `axGlobals` and are read live by future 
 
 ```typescript
 import { axGlobals, axCreateDefaultColorLogger } from '@ax-llm/ax';
-import { trace } from '@opentelemetry/api';
+import { metrics, trace } from '@opentelemetry/api';
 
+axGlobals.rateLimiter = async (next, info) => next();
 axGlobals.tracer = trace.getTracer('my-app');
+axGlobals.meter = metrics.getMeter('my-app');
 axGlobals.debug = true;
 axGlobals.logger = axCreateDefaultColorLogger();
 ```
 
-Precedence is: per-call options, then explicit instance/program options, then current `axGlobals`, then built-in defaults. `customLabels` merge in that order, and `abortSignal` values are combined so either global or local cancellation works.
+Runtime hooks resolve as: forward/direct-call hooks, enclosing program defaults, child-program defaults, AI-service hooks, then globals snapshotted at operation start. They are native run-scoped values and never enter AxIR JSON state, cache keys, exported state, traces, or optimizer artifacts. Agent and flow forwards carry them through every internal generator and model call without mutating children or leaking across concurrent runs. Limiter failures propagate; tracer, meter, and usage-observer failures are fail-open. `customLabels` merge by precedence, and `abortSignal` values are combined so either global or local cancellation works.
 
 ## Memory and Context
 
