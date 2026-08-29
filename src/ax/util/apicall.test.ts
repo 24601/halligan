@@ -555,26 +555,48 @@ describe('apiCall', () => {
     });
   });
 
-  describe('browser SSE streaming', () => {
-    // apicall.ts switches to its browser-optimized SSE reader when both
-    // `window` and `EventSource` are defined. Vitest runs in a node
-    // environment, so stub them to reach that branch.
-    const stubBrowserGlobals = () => {
-      vi.stubGlobal('window', {});
-      vi.stubGlobal('EventSource', vi.fn());
+  describe.each([
+    ['Node', false],
+    ['browser', true],
+  ] as const)('%s SSE streaming', (_runtime, browser) => {
+    const configureRuntime = () => {
+      if (browser) {
+        vi.stubGlobal('window', {});
+        vi.stubGlobal('EventSource', vi.fn());
+      }
     };
 
     afterEach(() => {
       vi.unstubAllGlobals();
     });
 
-    const sseResponse = (events: string): Response =>
-      new Response(events, {
+    const sseResponse = (
+      events: string | Array<string | Uint8Array>
+    ): Response => {
+      const body = Array.isArray(events)
+        ? new ReadableStream<Uint8Array>({
+            start(controller) {
+              const encoder = new TextEncoder();
+              for (const event of events) {
+                controller.enqueue(
+                  typeof event === 'string' ? encoder.encode(event) : event
+                );
+              }
+              controller.close();
+            },
+          })
+        : events;
+
+      return new Response(body, {
         status: 200,
         headers: { 'content-type': 'text/event-stream' },
       });
+    };
 
-    const collectStream = async (events: string) => {
+    const collectStream = async (
+      events: string | Array<string | Uint8Array>
+    ) => {
+      configureRuntime();
       const mockFetch = vi.fn().mockResolvedValue(sseResponse(events));
 
       const stream = (await apiCall<{ test: string }, { index: number }>(
@@ -599,16 +621,12 @@ describe('apiCall', () => {
     };
 
     it('ends the stream when the provider sends no [DONE] sentinel', async () => {
-      stubBrowserGlobals();
-
       await expect(
         collectStream('data: {"index":0}\n\ndata: {"index":1}\n\n')
       ).resolves.toEqual([{ index: 0 }, { index: 1 }]);
     });
 
     it('ends the stream when the last event has no trailing blank line', async () => {
-      stubBrowserGlobals();
-
       await expect(
         collectStream('data: {"index":0}\n\ndata: {"index":1}')
       ).resolves.toEqual([{ index: 0 }, { index: 1 }]);
@@ -618,11 +636,67 @@ describe('apiCall', () => {
       ['terminated by a blank line', 'data: [DONE]\n\n'],
       ['sent as a trailing event', 'data: [DONE]'],
     ])('stops at the [DONE] sentinel %s', async (_label, sentinel) => {
-      stubBrowserGlobals();
-
       await expect(
         collectStream(`data: {"index":0}\n\ndata: {"index":1}\n\n${sentinel}`)
       ).resolves.toEqual([{ index: 0 }, { index: 1 }]);
+    });
+
+    // The SSE spec allows \r\n line endings. Without normalization the event
+    // boundary is never found and the buffer grows for the whole response.
+    it('splits events on \\r\\n\\r\\n boundaries', async () => {
+      await expect(
+        collectStream('data: {"index":0}\r\n\r\ndata: {"index":1}\r\n\r\n')
+      ).resolves.toEqual([{ index: 0 }, { index: 1 }]);
+    });
+
+    it('keeps CRLF boundaries whole when split across chunks', async () => {
+      await expect(
+        collectStream([
+          'data: {"index":0}\r',
+          '\n\r',
+          '\ndata: {"index":1}\r',
+          '\n\r',
+          '\n',
+        ])
+      ).resolves.toEqual([{ index: 0 }, { index: 1 }]);
+    });
+
+    it('splits events on bare \\r boundaries', async () => {
+      await expect(
+        collectStream('data: {"index":0}\r\rdata: {"index":1}\r')
+      ).resolves.toEqual([{ index: 0 }, { index: 1 }]);
+    });
+
+    // The spec concatenates repeated data: fields with \n.
+    it('concatenates multi-line data fields', async () => {
+      await expect(
+        collectStream('data: {"index":\ndata: 0}\n\n')
+      ).resolves.toEqual([{ index: 0 }]);
+    });
+
+    // The space after the colon is optional in the SSE spec.
+    it('accepts data fields with no space after the colon', async () => {
+      await expect(
+        collectStream('data:{"index":0}\n\ndata:{"index":1}\n\n')
+      ).resolves.toEqual([{ index: 0 }, { index: 1 }]);
+    });
+
+    it('stops at a [DONE] sentinel sent with \\r\\n line endings', async () => {
+      await expect(
+        collectStream('data: {"index":0}\r\n\r\ndata: [DONE]\r\n\r\n')
+      ).resolves.toEqual([{ index: 0 }]);
+    });
+
+    it('decodes every UTF-8 byte boundary through the shared parser', async () => {
+      const body =
+        '\uFEFFdata: {"label":"snowman ☃",\r\ndata: "index":0}\r\n\r\ndata: [DONE]\r\n\r\n';
+      const chunks = Array.from(new TextEncoder().encode(body), (byte) =>
+        Uint8Array.of(byte)
+      );
+
+      await expect(collectStream(chunks)).resolves.toEqual([
+        { label: 'snowman ☃', index: 0 },
+      ]);
     });
   });
 });

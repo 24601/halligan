@@ -94,6 +94,20 @@ breakpoints. Give AxGen a stable `promptCacheKey` plus `contextCache`; those
 forward options reach the provider in every language. Cache reads and writes
 are normalized separately for usage and catalog-backed cost estimates.
 
+### Gemini thinking levels
+
+Ax resolves the effective Gemini model before translating a logical thinking
+level. Gemini 3 requests send `thinkingLevel`, clamped to the levels supported
+by the selected model family; Gemini 2.5 and older requests send a numeric
+`thinkingBudget`. Numeric budgets fail locally for Gemini 3, and logical `none`
+always hides returned thoughts even when the model must retain its minimum
+thinking level.
+
+The native `google-gemini`, `gemini`, and `google_gemini` deployment profile
+names share this behavior, including native Gemini configured for Vertex with a
+project and region. The separate OpenAI-compatible `vertex-ai` profile remains
+profile-owned and does not gain native Gemini request fields from its model ID.
+
 ### Gemini inference service tiers
 
 Gemini GenerateContent supports `standard`, `flex`, and `priority` service
@@ -115,6 +129,12 @@ language-native setup and response syntax.
 Use the native stats-store option for authoritative decision state. The built-in in-memory store can be shared by balancers in one process; multi-process applications can implement `AxBalancerStatsStore` with an atomic Redis or database update. The routing-event hook is best-effort telemetry, not routing state. Stable route keys are required with a shared store, and `namespace` plus `slice` keep unrelated traffic from learning from each other.
 
 Adaptive balancing does not inspect prompt meaning or decide which model is best for a task. The application defines acceptable substitutes through shared logical aliases.
+
+### Incremental provider streaming
+
+Generated Python, Java, Go, Rust, and C++ provider clients expose each SSE event as soon as it arrives. Their closeable streaming APIs propagate through provider routers, multi-service routers, and balancers. Retry or failover is allowed only before the first content event; after delivery begins, an upstream failure is surfaced without replaying content or switching providers. Usage and completion telemetry finalize after full consumption, while cancellation closes the HTTP response immediately.
+
+{{aiProviderStreamExample}}
 
 ### Provider clients
 

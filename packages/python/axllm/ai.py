@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 import base64
+import codecs
 import copy
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -357,6 +358,9 @@ def _usage_observed_stream(
     finally:
         if completed and last_usage_response is not None:
             _emit_usage_event("chat", last_usage_response, options, True)
+        close = getattr(values, "close", None)
+        if callable(close):
+            close()
 
 
 def _invoke_rate_limiter(limiter: AxRateLimiter | None, next_request: Callable[[], Any], info: AxRateLimitInfo) -> Any:
@@ -1138,22 +1142,40 @@ class ProviderOperationClient(AxBaseAI):
             # normalize runs (so peeking has no side effects). If the provider classifies it as
             # a retryable transient status (e.g. Anthropic's HTTP-200 overloaded_error event),
             # re-issue with the same exponential backoff apiCall uses for a 529 before surfacing.
-            raw = self._request_json(endpoint, payload, stream=True, method=self._operation_method("stream_chat"), operation="stream_chat")
-            events = _iter_sse_json(raw)
-            first = next(events, sentinel)
+            events = None
+            try:
+                raw = self._request_json(endpoint, payload, stream=True, method=self._operation_method("stream_chat"), operation="stream_chat")
+                events = _iter_sse_json(raw)
+                first = next(events, sentinel)
+            except AxAIServiceError as error:
+                if _is_retryable_ai_error(error) and attempt < max_retries:
+                    attempt += 1
+                    delay = min(initial_delay * (backoff ** (attempt - 1)), max_delay)
+                    if delay > 0:
+                        time.sleep(delay / 1000.0)
+                    continue
+                raise
             if first is not sentinel:
                 status = provider_classify_stream_error_status(self.profile, first)
                 if status is not None and is_retryable_status(status) and attempt < max_retries:
+                    close = getattr(events, "close", None)
+                    if callable(close):
+                        close()
                     attempt += 1
                     delay = min(initial_delay * (backoff ** (attempt - 1)), max_delay)
                     if delay > 0:
                         time.sleep(delay / 1000.0)
                     continue
             state: dict[str, Any] = {}
-            if first is not sentinel:
-                yield provider_normalize_stream_delta(self.profile, first, state, self.name, model)
-                for event in events:
-                    yield provider_normalize_stream_delta(self.profile, event, state, self.name, model)
+            try:
+                if first is not sentinel:
+                    yield provider_normalize_stream_delta(self.profile, first, state, self.name, model)
+                    for event in events:
+                        yield provider_normalize_stream_delta(self.profile, event, state, self.name, model)
+            finally:
+                close = getattr(events, "close", None)
+                if callable(close):
+                    close()
             return
 
     def transcribe(self, request: dict[str, Any], options: dict[str, Any] | None = None):
@@ -1333,13 +1355,29 @@ class ProviderOperationClient(AxBaseAI):
             method=method,
         )
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as res:
+            res = urllib.request.urlopen(req, timeout=self.timeout)
+            if stream:
+                def body_chunks():
+                    try:
+                        read = getattr(res, "read1", res.read)
+                        while True:
+                            chunk = read(8192)
+                            if not chunk:
+                                return
+                            yield chunk
+                    except TimeoutError as exc:
+                        raise AxAIServiceTimeoutError("OpenAI-compatible request timed out", request=call, retryable=True) from exc
+                    except OSError as exc:
+                        raise AxAIServiceNetworkError(str(exc), request=call, retryable=True) from exc
+                    finally:
+                        res.close()
+                return body_chunks()
+            with res:
                 if binary_response:
                     # Binary operations (e.g. OpenAI /audio/speech returns raw mp3)
                     # must not be UTF-8 decoded; return the bytes as base64.
                     return base64.b64encode(res.read()).decode()
-                body = res.read().decode()
-                return body if stream else json.loads(body)
+                return json.loads(res.read().decode())
         except TimeoutError as exc:
             raise AxAIServiceTimeoutError("OpenAI-compatible request timed out", request=call, retryable=True) from exc
         except urllib.error.HTTPError as exc:
@@ -1545,6 +1583,21 @@ class MultiServiceRouter(AxAIService):
             req.pop("model", None)
             return entry["service"].chat(req, options)
         return entry["service"].chat(req, options)
+
+    def stream(self, request: dict[str, Any], options: dict[str, Any] | None = None):
+        model_key = request.get("model")
+        if not model_key:
+            raise ValueError("Model key must be specified for multi-service")
+        entry = self.services.get(model_key)
+        if entry is None:
+            raise ValueError(f"No service found for model key: {model_key}")
+        self.last_used_service = entry["service"]
+        req = copy.deepcopy(request)
+        if "modelConfig" in req and "model_config" not in req:
+            req["model_config"] = copy.deepcopy(req["modelConfig"])
+        if "model" not in entry:
+            req.pop("model", None)
+        return entry["service"].stream(req, options)
 
     def embed(self, request: dict[str, Any], options: dict[str, Any] | None = None):
         embed_key = request.get("embedModel", request.get("embed_model"))
@@ -2157,9 +2210,81 @@ class AxBalancer(AxAIService):
                 raise
 
     def stream(self, request: dict[str, Any], options: dict[str, Any] | None = None):
-        if self.adaptive is not None:
-            return self._adaptive_invoke("stream", request, options)
-        return super().stream(request, options)
+        def iterate():
+            if self.adaptive is not None:
+                ranked = self._rank_adaptive(request, options)
+                last_error = None
+                for attempt, candidate in enumerate(ranked, 1):
+                    service = candidate["service"]
+                    self.current_service = service
+                    key = candidate["stats_key"]
+                    base = {name: key[name] for name in ("namespace", "slice", "logicalModel")}
+                    self._emit_routing_event({"type": "selected", **base, "routeKey": candidate["route_key"], "serviceName": service.get_name(), "attempt": attempt})
+                    started = time.monotonic()
+                    source = None
+                    try:
+                        source = iter(service.stream(request, options))
+                        first = next(source)
+                    except StopIteration:
+                        self._adaptive_observe(candidate, {"outcome": "success", "latencyMs": max(1.0, (time.monotonic() - started) * 1000)}, streaming=True)
+                        return
+                    except AxAIServiceError as error:
+                        close = getattr(source, "close", None)
+                        if callable(close): close()
+                        if not _is_retryable_ai_error(error): raise
+                        last_error = error
+                        reason = self._failure_reason(error)
+                        status = getattr(error, "status", None)
+                        self._adaptive_observe(candidate, {"outcome": "failure"}, streaming=True, reason=reason, status=status)
+                        next_route = ranked[attempt]["route_key"] if attempt < len(ranked) else None
+                        self._emit_routing_event({"type": "fallback", **base, "fromRouteKey": candidate["route_key"], "toRouteKey": next_route, "reason": reason, "status": status})
+                        continue
+                    self._adaptive_observe(candidate, {"outcome": "success", "latencyMs": max(1.0, (time.monotonic() - started) * 1000)}, streaming=True)
+                    try:
+                        yield first
+                        yield from source
+                    except AxAIServiceError as error:
+                        self._adaptive_observe(candidate, {"outcome": "failure"}, streaming=True, reason=self._failure_reason(error), status=getattr(error, "status", None))
+                        raise
+                    finally:
+                        close = getattr(source, "close", None)
+                        if callable(close): close()
+                    return
+                if last_error is not None: raise last_error
+                raise ValueError(f"All candidate services exhausted (tried {len(ranked)} service(s))")
+
+            candidates = self._candidate_services(request)
+            last_error = None
+            for service in candidates:
+                self.current_service = service
+                while self._can_retry_service(service):
+                    source = None
+                    try:
+                        source = iter(service.stream(request, options))
+                        first = next(source)
+                    except StopIteration:
+                        self._handle_success(service)
+                        return
+                    except AxAIServiceError as error:
+                        close = getattr(source, "close", None)
+                        if callable(close): close()
+                        if not _is_retryable_ai_error(error): raise
+                        last_error = error
+                        self._handle_failure(service, error)
+                        failure = self.service_failures.get(service.get_id(), {})
+                        if int(failure.get("retries", 0)) >= self.max_retries: break
+                        continue
+                    self._handle_success(service)
+                    try:
+                        yield first
+                        yield from source
+                    finally:
+                        close = getattr(source, "close", None)
+                        if callable(close): close()
+                    return
+            if last_error is not None: raise last_error
+            raise ValueError(f"All candidate services exhausted (tried {len(candidates)} service(s))")
+        return iterate()
 
     def embed(self, request: dict[str, Any], options: dict[str, Any] | None = None):
         self._reset()
@@ -5714,6 +5839,9 @@ def _gemini_live_bidi_build_setup(descriptor: Any, request: Any) -> Any:
     voice_config["prebuiltVoiceConfig"] = prebuilt_voice
     speech_config["voiceConfig"] = voice_config
     generation_config["speechConfig"] = speech_config
+    empty_model_config = {}
+    model_config = _core_get(request, "model_config", empty_model_config)
+    _gemini_apply_thinking_config_impl(generation_config, request_model, model_config)
     setup["generationConfig"] = generation_config
     include_transcript = _core_get(request_output_audio, "transcript", True)
     if include_transcript:
@@ -6900,8 +7028,13 @@ def openai_responses_build_chat_request(request: AxChatRequest) -> Any:
             tool = _openai_responses_tool_spec_impl(fn)
             tools.append(tool)
         payload["tools"] = tools
-        tool_choice = _core_get(request, "function_call", "auto")
-        payload["tool_choice"] = tool_choice
+        function_call = _core_get(request, "function_call", "auto")
+        tool_choice = _openai_responses_tool_choice_impl(function_call)
+        has_tool_choice = _core_is_not_none(tool_choice)
+        if has_tool_choice:
+            payload["tool_choice"] = tool_choice
+        else:
+            pass
     else:
         pass
     response_format = _core_get(request, "response_format", None)
@@ -6994,6 +7127,50 @@ def _openai_responses_tool_spec_impl(fn: Any) -> Any:
     tool["description"] = description
     tool["parameters"] = parameters
     return tool
+
+
+def _openai_responses_tool_choice_impl(function_call: Any) -> Any:
+    _core_coverage_mark("_openai_responses_tool_choice_impl")
+    is_none = _core_eq(function_call, "none")
+    if is_none:
+        return function_call
+    else:
+        pass
+    is_auto = _core_eq(function_call, "auto")
+    if is_auto:
+        return function_call
+    else:
+        pass
+    is_required = _core_eq(function_call, "required")
+    if is_required:
+        return function_call
+    else:
+        pass
+    is_object = _core_type_is(function_call, "object")
+    if is_object:
+        type = _core_get(function_call, "type", "")
+        is_function_choice = _core_eq(type, "function")
+        if is_function_choice:
+            function = _core_get(function_call, "function", None)
+            function_is_object = _core_type_is(function, "object")
+            if function_is_object:
+                name = _core_get(function, "name", None)
+                has_name = _core_truthy(name)
+                if has_name:
+                    choice = {}
+                    choice["type"] = "function"
+                    choice["name"] = name
+                    return choice
+                else:
+                    pass
+            else:
+                pass
+        else:
+            pass
+    else:
+        pass
+    none = _core_none()
+    return none
 
 
 def _openai_responses_input_item_impl(message: Any) -> Any:
@@ -7848,7 +8025,7 @@ def _gemini_build_chat_request(request: AxChatRequest, options: Any, is_vertex: 
     generation_config["responseMimeType"] = "text/plain"
     empty_model_config = {}
     model_config = _core_get(request, "model_config", empty_model_config)
-    _gemini_apply_model_config_impl(generation_config, model_config, server_managed_sampling)
+    _gemini_apply_model_config_impl(generation_config, model, model_config, server_managed_sampling)
     response_format = _core_get(request, "response_format", None)
     has_response_format = _core_truthy(response_format)
     if has_response_format:
@@ -7900,7 +8077,238 @@ def _gemini_build_chat_request(request: AxChatRequest, options: Any, is_vertex: 
     return payload
 
 
-def _gemini_apply_model_config_impl(payload: Any, model_config: Any, server_managed_sampling: bool) -> None:
+def _gemini_clamp_thinking_level_impl(model: str, level: str) -> str:
+    _core_coverage_mark("_gemini_clamp_thinking_level_impl")
+    is_minimal = _core_eq(level, "minimal")
+    is_low = _core_eq(level, "low")
+    is_medium = _core_eq(level, "medium")
+    is_high = _core_eq(level, "high")
+    is_minimal_or_low = _core_or(is_minimal, is_low)
+    is_medium_or_high = _core_or(is_medium, is_high)
+    is_supported_level = _core_or(is_minimal_or_low, is_medium_or_high)
+    if is_supported_level:
+        pass
+    else:
+        message = _core_string_format("unsupported Gemini thinking level: {}", level)
+        error = _core_ai_error_unsupported(message)
+        raise error
+    is_gemini3 = _core_contains(model, "gemini-3")
+    is_image_name = _core_contains(model, "-image")
+    is_image = _core_and(is_gemini3, is_image_name)
+    if is_image:
+        if is_minimal_or_low:
+            return "minimal"
+        else:
+            pass
+        return "high"
+    else:
+        pass
+    is_legacy_pro_name = _core_contains(model, "gemini-3-pro")
+    is_legacy_pro = _core_and(is_gemini3, is_legacy_pro_name)
+    if is_legacy_pro:
+        if is_minimal_or_low:
+            return "low"
+        else:
+            pass
+        return "high"
+    else:
+        pass
+    is_37_flash = _core_contains(model, "gemini-3.7-flash")
+    is_31_pro = _core_contains(model, "gemini-3.1-pro")
+    no_minimal_name = _core_or(is_37_flash, is_31_pro)
+    no_minimal = _core_and(is_gemini3, no_minimal_name)
+    clamp_minimal = _core_and(no_minimal, is_minimal)
+    if clamp_minimal:
+        return "low"
+    else:
+        pass
+    return level
+
+
+def _gemini_apply_thinking_config_impl(payload: Any, model: str, model_config: Any) -> None:
+    _core_coverage_mark("_gemini_apply_thinking_config_impl")
+    thinking_config = {}
+    has_thinking = False
+    budget_is_none = False
+    is_gemini3 = _core_contains(model, "gemini-3")
+    is_25_pro = _core_contains(model, "gemini-2.5-pro")
+    empty_level_mapping = {}
+    level_mapping_snake = _core_get(model_config, "thinking_level_mapping", empty_level_mapping)
+    level_mapping = _core_get(model_config, "thinkingLevelMapping", level_mapping_snake)
+    empty_budget_levels = {}
+    budget_levels_snake = _core_get(model_config, "thinking_token_budget_levels", empty_budget_levels)
+    budget_levels = _core_get(model_config, "thinkingTokenBudgetLevels", budget_levels_snake)
+    minimum_budget = _core_get(budget_levels, "minimal", 200)
+    low_budget = _core_get(budget_levels, "low", 800)
+    medium_budget = _core_get(budget_levels, "medium", 5000)
+    high_budget = _core_get(budget_levels, "high", 10000)
+    highest_budget = _core_get(budget_levels, "highest", 24500)
+    budget_snake = _core_get(model_config, "thinking_token_budget", None)
+    budget = _core_get(model_config, "thinkingTokenBudget", budget_snake)
+    has_budget = _core_is_not_none(budget)
+    if has_budget:
+        budget_is_number = _core_type_is(budget, "number")
+        budget_is_string = _core_type_is(budget, "string")
+        if is_gemini3:
+            if budget_is_number:
+                message = _core_string_format("Gemini 3 model {} does not support numeric thinkingTokenBudget", model)
+                error = _core_ai_error_unsupported(message)
+                raise error
+            else:
+                pass
+            if budget_is_string:
+                pass
+            else:
+                error = _core_ai_error_unsupported("Gemini thinkingTokenBudget must be a number or logical level")
+                raise error
+            level = ""
+            is_none = _core_eq(budget, "none")
+            if is_none:
+                level = "minimal"
+                budget_is_none = True
+            else:
+                pass
+            is_minimal = _core_eq(budget, "minimal")
+            if is_minimal:
+                level = "minimal"
+            else:
+                pass
+            is_low = _core_eq(budget, "low")
+            if is_low:
+                level = "low"
+            else:
+                pass
+            is_medium = _core_eq(budget, "medium")
+            if is_medium:
+                level = "medium"
+            else:
+                pass
+            is_high = _core_eq(budget, "high")
+            if is_high:
+                level = "high"
+            else:
+                pass
+            is_highest = _core_eq(budget, "highest")
+            if is_highest:
+                level = "high"
+            else:
+                pass
+            unknown_level = _core_eq(level, "")
+            if unknown_level:
+                message = _core_string_format("unsupported Gemini thinkingTokenBudget level: {}", budget)
+                error = _core_ai_error_unsupported(message)
+                raise error
+            else:
+                pass
+            mapping_key = budget
+            if is_none:
+                mapping_key = "minimal"
+            else:
+                pass
+            mapped_level = _core_get(level_mapping, mapping_key, level)
+            clamped_level = _gemini_clamp_thinking_level_impl(model, mapped_level)
+            thinking_config["thinkingLevel"] = clamped_level
+        else:
+            if budget_is_number:
+                numeric_budget = budget
+                is_zero = _core_eq(budget, 0)
+                clamp_pro_zero = _core_and(is_25_pro, is_zero)
+                if clamp_pro_zero:
+                    numeric_budget = minimum_budget
+                else:
+                    pass
+                thinking_config["thinkingBudget"] = numeric_budget
+            else:
+                if budget_is_string:
+                    pass
+                else:
+                    error = _core_ai_error_unsupported("Gemini thinkingTokenBudget must be a number or logical level")
+                    raise error
+                numeric_budget = -1
+                is_none = _core_eq(budget, "none")
+                if is_none:
+                    numeric_budget = 0
+                    if is_25_pro:
+                        numeric_budget = minimum_budget
+                    else:
+                        pass
+                    budget_is_none = True
+                else:
+                    pass
+                is_minimal = _core_eq(budget, "minimal")
+                if is_minimal:
+                    numeric_budget = minimum_budget
+                else:
+                    pass
+                is_low = _core_eq(budget, "low")
+                if is_low:
+                    numeric_budget = low_budget
+                else:
+                    pass
+                is_medium = _core_eq(budget, "medium")
+                if is_medium:
+                    numeric_budget = medium_budget
+                else:
+                    pass
+                is_high = _core_eq(budget, "high")
+                if is_high:
+                    numeric_budget = high_budget
+                else:
+                    pass
+                is_highest = _core_eq(budget, "highest")
+                if is_highest:
+                    numeric_budget = highest_budget
+                else:
+                    pass
+                unknown_level = _core_eq(numeric_budget, -1)
+                if unknown_level:
+                    message = _core_string_format("unsupported Gemini thinkingTokenBudget level: {}", budget)
+                    error = _core_ai_error_unsupported(message)
+                    raise error
+                else:
+                    pass
+                thinking_config["thinkingBudget"] = numeric_budget
+        has_thinking = True
+    else:
+        pass
+    level_snake = _core_get(model_config, "thinking_level", None)
+    explicit_level = _core_get(model_config, "thinkingLevel", level_snake)
+    has_explicit_level = _core_is_not_none(explicit_level)
+    use_explicit_level = _core_and(is_gemini3, has_explicit_level)
+    if use_explicit_level:
+        level_is_string = _core_type_is(explicit_level, "string")
+        if level_is_string:
+            pass
+        else:
+            error = _core_ai_error_unsupported("Gemini thinkingLevel must be a logical level")
+            raise error
+        clamped_level = _gemini_clamp_thinking_level_impl(model, explicit_level)
+        _core_map_delete(thinking_config, "thinkingBudget")
+        thinking_config["thinkingLevel"] = clamped_level
+        has_thinking = True
+    else:
+        pass
+    show_snake = _core_get(model_config, "show_thoughts", None)
+    show_thoughts = _core_get(model_config, "showThoughts", show_snake)
+    has_show = _core_is_not_none(show_thoughts)
+    if has_show:
+        thinking_config["includeThoughts"] = show_thoughts
+        has_thinking = True
+    else:
+        pass
+    if budget_is_none:
+        thinking_config["includeThoughts"] = False
+        has_thinking = True
+    else:
+        pass
+    if has_thinking:
+        payload["thinkingConfig"] = thinking_config
+    else:
+        pass
+    return None
+
+
+def _gemini_apply_model_config_impl(payload: Any, model: str, model_config: Any, server_managed_sampling: bool) -> None:
     _core_coverage_mark("_gemini_apply_model_config_impl")
     _openai_copy_config_key_impl(payload, model_config, "maxTokens", "maxOutputTokens")
     _openai_copy_config_key_impl(payload, model_config, "max_tokens", "maxOutputTokens")
@@ -7918,28 +8326,7 @@ def _gemini_apply_model_config_impl(payload: Any, model_config: Any, server_mana
     _openai_copy_config_key_impl(payload, model_config, "n", "candidateCount")
     _openai_copy_config_key_impl(payload, model_config, "stopSequences", "stopSequences")
     _openai_copy_config_key_impl(payload, model_config, "stop_sequences", "stopSequences")
-    thinking_config = {}
-    has_thinking = False
-    budget_snake = _core_get(model_config, "thinking_token_budget", None)
-    budget = _core_get(model_config, "thinkingTokenBudget", budget_snake)
-    has_budget = _core_is_not_none(budget)
-    if has_budget:
-        thinking_config["thinkingBudget"] = budget
-        has_thinking = True
-    else:
-        pass
-    show_snake = _core_get(model_config, "show_thoughts", None)
-    show_thoughts = _core_get(model_config, "showThoughts", show_snake)
-    has_show = _core_is_not_none(show_thoughts)
-    if has_show:
-        thinking_config["includeThoughts"] = show_thoughts
-        has_thinking = True
-    else:
-        pass
-    if has_thinking:
-        payload["thinkingConfig"] = thinking_config
-    else:
-        pass
+    _gemini_apply_thinking_config_impl(payload, model, model_config)
     return None
 
 
@@ -9590,43 +9977,98 @@ def _transport_result(result: Any, request: dict[str, Any]):
 
 
 def _iter_sse_json(raw: Any):
-    if isinstance(raw, list):
+    if isinstance(raw, list) and all(isinstance(item, dict) or item == "[DONE]" for item in raw):
         for item in raw:
             if item != "[DONE]":
                 yield item
         return
-    text = raw.decode() if isinstance(raw, bytes) else str(raw)
-    # Mirror src/ax/util/sse.ts: normalize CRLF/CR, then fold the data: lines of
-    # each event (events are blank-line separated) into a single payload before
-    # parsing. A spec-legal SSE event may split one JSON value across several
-    # data: lines, joined with "\n"; parsing each line on its own would choke.
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-    buffer = ""
 
-    def flush(payload: str):
-        payload = payload.strip()
-        if not payload or payload == "[DONE]":
+    chunks = [raw] if isinstance(raw, (str, bytes, bytearray)) else raw
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    line = ""
+    data_lines: list[str] = []
+    pending_cr = False
+    at_start = True
+    terminated = False
+
+    def flush_event():
+        nonlocal data_lines, terminated
+        if not data_lines:
+            return None
+        payload = "\n".join(data_lines)
+        data_lines = []
+        if payload.strip() == "[DONE]":
+            terminated = True
             return None
         return json.loads(payload)
 
-    for line in text.split("\n"):
-        if line == "":
-            event = flush(buffer)
-            buffer = ""
+    def process_line(value: str):
+        if value == "":
+            return flush_event()
+        if value.startswith(":"):
+            return None
+        colon = value.find(":")
+        field = value if colon < 0 else value[:colon]
+        field_value = "" if colon < 0 else value[colon + 1:]
+        if field_value.startswith(" "):
+            field_value = field_value[1:]
+        if field == "data":
+            data_lines.append(field_value)
+        return None
+
+    def process_text(text: str):
+        nonlocal line, pending_cr, at_start
+        if at_start and text:
+            at_start = False
+            if text.startswith("\ufeff"):
+                text = text[1:]
+        for char in text:
+            if pending_cr:
+                pending_cr = False
+                event = process_line(line)
+                line = ""
+                if event is not None:
+                    yield event
+                if terminated:
+                    return
+                if char == "\n":
+                    continue
+            if char == "\r":
+                pending_cr = True
+            elif char == "\n":
+                event = process_line(line)
+                line = ""
+                if event is not None:
+                    yield event
+                if terminated:
+                    return
+            else:
+                line += char
+
+    try:
+        for chunk in chunks:
+            if isinstance(chunk, dict):
+                yield chunk
+                continue
+            text = chunk if isinstance(chunk, str) else decoder.decode(bytes(chunk), final=False)
+            yield from process_text(text)
+            if terminated:
+                return
+        yield from process_text(decoder.decode(b"", final=True))
+        if terminated:
+            return
+        if pending_cr:
+            event = process_line(line)
+            line = ""
             if event is not None:
                 yield event
-            continue
-        if line.startswith(":"):
-            continue  # comment line
-        field, sep, value = line.partition(":")
-        if sep:
-            field = field.strip()
-            value = value.strip()
-            if field != "data":
-                continue  # event:/id:/retry: do not contribute to the payload
-        else:
-            value = line.strip()
-        buffer += ("\n" if buffer and not buffer.endswith("\n") else "") + value
-    event = flush(buffer)
-    if event is not None:
-        yield event
+        elif line:
+            # Provider-compatible EOF: accept a final event without a blank line.
+            process_line(line)
+        event = flush_event()
+        if event is not None:
+            yield event
+    finally:
+        close = getattr(raw, "close", None)
+        if callable(close):
+            close()

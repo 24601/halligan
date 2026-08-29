@@ -79,6 +79,8 @@ struct Value {
 using AxUsageContext = Value;
 using AxUsageEvent = Value;
 using AxUsageObserver = std::function<void(AxUsageEvent)>;
+using AxStreamHandler = std::function<bool(const Value&)>;
+using AxTransportStreamHandler = std::function<bool(Value)>;
 
 struct AxRateLimitInfo {
   std::string operation;
@@ -489,6 +491,7 @@ struct Core {
   static Value openai_responses_build_chat_request(Value request);
   static Value _openai_responses_apply_model_config_impl(Value payload, Value model_config);
   static Value _openai_responses_tool_spec_impl(Value fn);
+  static Value _openai_responses_tool_choice_impl(Value function_call);
   static Value _openai_responses_input_item_impl(Value message);
   static Value _openai_responses_content_parts_impl(Value content, Value role);
   static Value _openai_responses_content_part_impl(Value part, Value role);
@@ -511,7 +514,9 @@ struct Core {
   static Value _gemini_live_bidi_normalize_realtime_event(Value event, Value state, Value ai_name, Value model);
   static Value _gemini_service_tier_impl(Value request, Value options, Value vertex, Value live);
   static Value _gemini_build_chat_request(Value request, Value options, Value is_vertex);
-  static Value _gemini_apply_model_config_impl(Value payload, Value model_config, Value server_managed_sampling);
+  static Value _gemini_clamp_thinking_level_impl(Value model, Value level);
+  static Value _gemini_apply_thinking_config_impl(Value payload, Value model, Value model_config);
+  static Value _gemini_apply_model_config_impl(Value payload, Value model, Value model_config, Value server_managed_sampling);
   static Value _gemini_message_impl(Value message);
   static Value _gemini_content_parts_impl(Value content);
   static Value _gemini_content_part_impl(Value part);
@@ -947,6 +952,7 @@ class AxAIService : public AIClient {
   Value chat(Value request, Value options) override;
   virtual Value chat(Value request, Value options, const AxRuntimeHooks& hooks);
   virtual std::vector<Value> stream(Value request);
+  virtual void stream_each(Value request, AxStreamHandler handler);
   virtual Value embed(Value request, Value options);
   virtual Value embed(Value request, Value options, const AxRuntimeHooks& hooks);
   virtual Value embed(Value request) = 0;
@@ -1072,6 +1078,7 @@ class AxBalancer : public AxAIService {
   Value chat(Value request) override;
   Value chat(Value request, Value options) override;
   std::vector<Value> stream(Value request) override;
+  void stream_each(Value request, AxStreamHandler handler) override;
   Value embed(Value request) override;
   Value embed(Value request, Value options) override;
   Value transcribe(Value request) override;
@@ -1134,6 +1141,8 @@ class MultiServiceRouter : public AxAIService {
   Value get_features(Value model = Value()) override;
   Value chat(Value request) override;
   Value chat(Value request, Value options) override;
+  std::vector<Value> stream(Value request) override;
+  void stream_each(Value request, AxStreamHandler handler) override;
   Value embed(Value request) override;
   Value embed(Value request, Value options) override;
   Value transcribe(Value request) override;
@@ -1175,6 +1184,7 @@ class ProviderRouter {
   Value get_routing_stats();
   Value chat(Value request, Value options = Value::object());
   std::vector<Value> stream(Value request);
+  void stream_each(Value request, AxStreamHandler handler);
   Value embed(Value request, Value options = Value::object());
   Value transcribe(Value request, Value options = Value::object());
   Value speak(Value request, Value options = Value::object());
@@ -1191,11 +1201,13 @@ class Transport {
  public:
   virtual ~Transport() = default;
   virtual Value call(Value request) = 0;
+  virtual void stream(Value request, AxTransportStreamHandler handler);
 };
 
 class HttpTransport : public Transport {
  public:
   Value call(Value request) override;
+  void stream(Value request, AxTransportStreamHandler handler) override;
 };
 
 class AxContextCacheRegistry {
@@ -1233,6 +1245,7 @@ class OpenAICompatibleClient : public AxBaseAI {
   explicit OpenAICompatibleClient(Value options = Value::object(), Transport* transport = nullptr, AxCredentialProvider credential_provider = {});
   OpenAICompatibleClient(std::string profile, std::string name, Value options, Transport* transport, std::string default_model, std::string default_embed_model, AxCredentialProvider credential_provider = {});
   std::vector<Value> stream(Value request) override;
+  void stream_each(Value request, AxStreamHandler handler) override;
   Value transcribe(Value request) override;
   Value speak(Value request) override;
   std::vector<Value> realtime(Value events);
@@ -1265,6 +1278,7 @@ class OpenAICompatibleClient : public AxBaseAI {
   Value request_json(const std::string& endpoint, Value payload, bool stream, const std::string& body_key);
   Value request_json(const std::string& endpoint, Value payload, bool stream, const std::string& body_key, bool binary_response);
   Value request_json(const std::string& endpoint, Value payload, bool stream, const std::string& body_key, bool binary_response, const std::string& method);
+  Value build_request(const std::string& endpoint, Value payload, bool stream, const std::string& body_key, bool binary_response, const std::string& method);
   std::string operation_method(const std::string& operation) const;
   std::string operation_path(const std::string& operation) const;
   std::string operation_path(const std::string& operation, Value model) const;
