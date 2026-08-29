@@ -929,179 +929,38 @@ export const apiCall = async <TRequest = unknown, TResponse = unknown>(
       let lastChunk: TResponse | undefined;
       let chunkCount = 0;
 
-      // Detect if we're in a browser environment with EventSource support
-      const isBrowser =
-        typeof window !== 'undefined' && typeof EventSource !== 'undefined';
-
-      if (isBrowser) {
-        // Use browser-optimized SSE parsing that mimics EventSource behavior
-        // We can't use EventSource directly because:
-        // 1. It only supports GET requests (we need POST for LLM APIs)
-        // 2. It doesn't support custom headers (needed for auth)
-        // 3. It doesn't support request bodies (needed for prompts/config)
-        return new ReadableStream<TResponse>({
-          start(controller) {
-            const reader = res.body!.getReader();
-            const decoder = new TextDecoder();
-            let buffer = '';
-
-            // Returns true if the caller should stop reading (e.g. saw [DONE]).
-            const processEvent = (event: string): boolean => {
-              if (!event.trim()) return false;
-
-              const lines = event.split('\n');
-              let data = '';
-              let eventType = 'message';
-
-              for (const line of lines) {
-                if (line.startsWith('data: ')) {
-                  data = line.slice(6);
-                } else if (line.startsWith('event: ')) {
-                  eventType = line.slice(7);
-                }
-              }
-
-              if (!data) return false;
-
-              if (data === '[DONE]') {
-                controller.close();
-                return true;
-              }
-
-              try {
-                const parsed = JSON.parse(data) as TResponse;
-                lastChunk = parsed;
-                chunkCount++;
-                metrics.streamChunks = chunkCount;
-                metrics.lastChunkTime = Date.now();
-
-                controller.enqueue(parsed);
-
-                api.span?.addEvent('stream.chunk', {
-                  'stream.chunks': chunkCount,
-                  'stream.duration': Date.now() - metrics.startTime,
-                  'response.retries': metrics.retryCount,
-                  'sse.event.type': eventType,
-                });
-              } catch (parseError) {
-                if (verbose) {
-                  console.warn('Skipping non-JSON SSE data:', data, parseError);
-                }
-              }
-              return false;
-            };
-
-            async function read() {
-              try {
-                while (true) {
-                  const { done, value } = await reader.read();
-                  if (done) {
-                    // Flush any trailing event that wasn't terminated by \n\n.
-                    // Providers are allowed to end the stream without a final
-                    // blank line; the Node SSEParser path handles this via
-                    // handleFlush, so match that behavior here.
-                    let sawDone = false;
-                    if (buffer.length > 0) {
-                      sawDone = processEvent(buffer);
-                      buffer = '';
-                    }
-                    // processEvent already closed the controller if it saw
-                    // the [DONE] sentinel, so only close it here if it did not.
-                    if (!sawDone) {
-                      controller.close();
-                    }
-                    break;
-                  }
-
-                  buffer += decoder.decode(value, { stream: true });
-
-                  const events = buffer.split('\n\n');
-                  buffer = events.pop() || '';
-
-                  for (const event of events) {
-                    if (processEvent(event)) return;
-                  }
-                }
-              } catch (e) {
-                const error = e as Error;
-                const streamMetrics = {
-                  ...metrics,
-                  streamDuration: Date.now() - metrics.startTime,
-                };
-
-                if (
-                  error.name === 'AbortError' ||
-                  error.message?.includes('aborted')
-                ) {
-                  controller.error(
-                    api.abortSignal?.aborted
-                      ? new AxAIServiceAbortedError(
-                          apiUrl.href,
-                          api.abortSignal.reason,
-                          json,
-                          { streamMetrics },
-                          includeBodyInErrors
-                        )
-                      : new AxAIServiceStreamTerminatedError(
-                          apiUrl.href,
-                          json,
-                          lastChunk,
-                          { streamMetrics },
-                          includeBodyInErrors
-                        )
-                  );
-                } else {
-                  controller.error(
-                    new AxAIServiceNetworkError(
-                      error,
-                      apiUrl.href,
-                      json,
-                      '[ReadableStream - consumed during streaming]',
-                      {
-                        streamMetrics,
-                      },
-                      includeBodyInErrors
-                    )
-                  );
-                }
-              } finally {
-                reader.releaseLock();
-              }
-            }
-
-            read();
-          },
-        });
-      }
-      // Use the existing Node.js SSEParser for server-side environments
-      const trackingStream = new TransformStream<TResponse, TResponse>({
-        transform(chunk, controller) {
-          lastChunk = chunk;
-          chunkCount++;
-          metrics.streamChunks = chunkCount;
-          metrics.lastChunkTime = Date.now();
-
-          controller.enqueue(chunk);
-
-          api.span?.addEvent('stream.chunk', {
-            'stream.chunks': chunkCount,
-            'stream.duration': Date.now() - metrics.startTime,
-            'response.retries': metrics.retryCount,
-          });
-        },
-      });
-
       // Flag to track if the controller is closed.
       let closed = false;
+      let streamReader: ReadableStreamDefaultReader<TResponse> | undefined;
 
       // Enhanced wrapped stream
       return new ReadableStream<TResponse>({
         start(controller) {
           const reader = res
             .body!.pipeThrough(new textDecoderStream())
-            .pipeThrough(new SSEParser<TResponse>())
-            .pipeThrough(trackingStream)
+            .pipeThrough(
+              new SSEParser<TResponse>({
+                // Ax accepts a final provider event without the SSE blank-line
+                // terminator. Keep that compatibility behavior identical in
+                // browsers and server runtimes.
+                emitIncompleteEventOnEof: true,
+                onEvent(chunk, event) {
+                  lastChunk = chunk;
+                  chunkCount++;
+                  metrics.streamChunks = chunkCount;
+                  metrics.lastChunkTime = Date.now();
+
+                  api.span?.addEvent('stream.chunk', {
+                    'stream.chunks': chunkCount,
+                    'stream.duration': Date.now() - metrics.startTime,
+                    'response.retries': metrics.retryCount,
+                    'sse.event.type': event.event,
+                  });
+                },
+              })
+            )
             .getReader();
+          streamReader = reader;
 
           async function read() {
             try {
@@ -1120,6 +979,8 @@ export const apiCall = async <TRequest = unknown, TResponse = unknown>(
                 controller.enqueue(value);
               }
             } catch (e) {
+              if (closed) return;
+
               const error = e as Error;
               const streamMetrics = {
                 ...metrics,
@@ -1182,14 +1043,16 @@ export const apiCall = async <TRequest = unknown, TResponse = unknown>(
                 clearTimeout(timeoutId);
               }
               reader.releaseLock();
+              if (streamReader === reader) streamReader = undefined;
             }
           }
 
           read();
         },
         // When the consumer cancels the stream, set our flag to stop processing further.
-        cancel() {
+        cancel(reason) {
           closed = true;
+          return streamReader?.cancel(reason);
         },
       });
     } catch (error) {
