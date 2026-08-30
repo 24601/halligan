@@ -942,19 +942,25 @@ export class AxInMemoryEventStore implements AxEventStore, AxEventEffectStore {
       return;
     }
     let waiter: Waiter | undefined;
-    const abort = () => {
-      if (waiter) this.workWaiters.delete(waiter);
-      waiter?.reject(signal?.reason);
-    };
+    let onAbort: (() => void) | undefined;
     try {
       await new Promise<void>((resolve, reject) => {
         waiter = { resolve, reject };
         this.workWaiters.add(waiter);
-        signal?.addEventListener('abort', abort, { once: true });
+        if (signal) {
+          onAbort = () => {
+            if (waiter) this.workWaiters.delete(waiter);
+            reject(signal.reason);
+          };
+          signal.addEventListener('abort', onAbort, { once: true });
+        }
       });
     } finally {
+      // Resolving the waiter via notify() never fires the abort listener, so
+      // remove it here to avoid leaking a listener on a long-lived signal that
+      // a worker loop reuses across many waitForWork() calls.
       if (waiter) this.workWaiters.delete(waiter);
-      signal?.removeEventListener('abort', abort);
+      if (signal && onAbort) signal.removeEventListener('abort', onAbort);
     }
   }
 
