@@ -100,22 +100,6 @@ languages:
           name: "openai",
           config: { baseURL: "http://localhost:11434/v1" },
         });
-    graphjin:
-      filename: ax-agent.ts
-      code: |
-        import { AxMCPClient, AxMCPHTTPSSETransport, agent } from "@ax-llm/ax";
-
-        const transport = new AxMCPHTTPSSETransport(
-          "http://localhost:8080/api/v1/mcp"
-        );
-        const mcp = new AxMCPClient(transport);
-        await mcp.init();
-
-        const dataAnalyst = agent({
-          name: "data-analyst",
-          signature: "question:string -> answer:string",
-          functions: mcp.toFunction(),
-        });
     patterns:
       classification: ax("text:string -> category:class \"spam, ham, promo\"")
       extraction: ax("document:string -> names:string[], dates:date[]")
@@ -222,22 +206,6 @@ languages:
         local = ai("openai", {
             "baseURL": "http://localhost:11434/v1"
         })
-    graphjin:
-      filename: ax_agent.py
-      code: |
-        from axllm import agent
-        from axllm.mcp import MCPClient, HTTPSSETransport
-
-        transport = HTTPSSETransport(
-            "http://localhost:8080/api/v1/mcp"
-        )
-        mcp = MCPClient(transport)
-        mcp.init()
-
-        data_analyst = agent(
-            "question:string -> answer:string",
-            {"functions": mcp.to_functions()},
-        )
     patterns:
       classification: ax('text:string -> category:class "spam, ham, promo"')
       extraction: ax("document:string -> names:string[], dates:date[]")
@@ -349,19 +317,6 @@ languages:
         var local = Ax.ai("openai", Map.of(
           "baseURL", "http://localhost:11434/v1"
         ));
-    graphjin:
-      filename: AxAgent.java
-      code: |
-        var transport = new AxMCPHTTPSSETransport(
-          "http://localhost:8080/api/v1/mcp"
-        );
-        var mcp = new AxMCPClient(transport);
-        mcp.init();
-
-        var dataAnalyst = Ax.agent(
-          "question:string -> answer:string",
-          Map.of("functions", mcp.toFunctions())
-        );
     patterns:
       classification: Ax.ax("text:string -> category:class \"spam, ham, promo\"")
       extraction: Ax.ax("document:string -> names:string[], dates:date[]")
@@ -468,19 +423,6 @@ languages:
         auto local = axllm::ai("openai", axllm::object({
           {"baseURL", "http://localhost:11434/v1"}
         }));
-    graphjin:
-      filename: ax_agent.cpp
-      code: |
-        auto transport = axllm::MCPHTTPSSETransport(
-          "http://localhost:8080/api/v1/mcp"
-        );
-        auto mcp = axllm::MCPClient(transport);
-        mcp.init();
-
-        auto data_analyst = axllm::agent(
-          "question:string -> answer:string",
-          axllm::object({{"functions", mcp.to_functions()}})
-        );
     patterns:
       classification: axllm::ax("text:string -> category:class \"spam, ham, promo\"")
       extraction: axllm::ax("document:string -> names:string[], dates:date[]")
@@ -593,21 +535,6 @@ languages:
         local := ax.NewAI("openai", map[string]ax.Value{
           "baseURL": "http://localhost:11434/v1",
         })
-    graphjin:
-      filename: ax_agent.go
-      code: |
-        transport := ax.NewMCPHTTPSSETransport(
-          "http://localhost:8080/api/v1/mcp",
-        )
-        mcp := ax.NewMCPClient(transport)
-        err := mcp.Init(ctx)
-
-        dataAnalyst := ax.NewAgent(
-          "question:string -> answer:string",
-          map[string]ax.Value{
-            "functions": mcp.ToFunctions(),
-          },
-        )
     patterns:
       classification: ax.NewAx("text:string -> category:class \"spam, ham, promo\"", nil)
       extraction: ax.NewAx("document:string -> names:string[], dates:date[]", nil)
@@ -716,18 +643,6 @@ languages:
         let local = ai("openai", json!({
           "baseURL": "http://localhost:11434/v1"
         }))?;
-    graphjin:
-      filename: ax_agent.rs
-      code: |
-        let transport = MCPHTTPSSETransport::new(
-          "http://localhost:8080/api/v1/mcp"
-        );
-        let mut mcp = MCPClient::new(transport);
-        mcp.init().await?;
-
-        let mut data_analyst = agent(
-          "question:string -> answer:string"
-        )?.with_functions(mcp.to_functions());
     patterns:
       classification: ax("text:string -> category:class \"spam, ham, promo\"")?
       extraction: ax("document:string -> names:string[], dates:date[]")?

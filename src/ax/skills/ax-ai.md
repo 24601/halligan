@@ -125,16 +125,33 @@ import { axGetSupportedAIModels } from '@ax-llm/ax';
 const providers = axGetSupportedAIModels();
 const openai = providers.find((provider) => provider.name === 'openai');
 console.log(openai?.models[0]?.promptTokenCostPer1M);
+console.log(openai?.capabilities.serviceTiers);
+
+const reasoningModel = openai?.models.find(
+  (model) => model.capabilities.thinkingLevels.includes('high')
+);
+console.log(reasoningModel?.capabilities.thinkingLevels);
 
 const textProviders = axGetSupportedAIModels({ type: 'text' });
 const embeddingProviders = axGetSupportedAIModels({ type: 'embeddings' });
 ```
 
-Use `axGetSupportedAIModels()` to build provider/model selectors before creating an `ai(...)` instance. It returns bundled static metadata: provider names, display names, default models, raw `AxModelInfo` pricing/details, model type (`'text'`, `'embeddings'`, `'code'`, or `'audio'`), and normalized capability flags for thinking, thoughts, structured outputs, audio, temperature, and top-p support. Provider groups and models are sorted cheapest to most expensive based on bundled input + output token pricing; unpriced models sort last.
+Use `axGetSupportedAIModels()` to build provider/model selectors before creating an `ai(...)` instance. It returns bundled static metadata: provider names, display names, default models, raw `AxModelInfo` pricing/details, model type (`'text'`, `'embeddings'`, `'code'`, or `'audio'`), and normalized capabilities for thinking, thoughts, structured outputs, audio, temperature, top-p, portable thinking levels, and verified service tiers. Provider capabilities describe the default deployment profile; each static model also carries its resolved `capabilities.thinkingLevels` and `capabilities.serviceTiers`. Portable thinking levels can collapse onto the same provider-native value. `serviceTiers` lists verified explicit tiers; `serviceTier: 'auto'` remains available as the provider-delegated policy.
+
+Provider groups and models are sorted cheapest to most expensive based on bundled input + output token pricing; unpriced models sort last. Dynamic profiles remain useful even when `models` is empty because their provider-level capability metadata is still returned.
 
 Filter with `{ type: 'all' | 'text' | 'embeddings' | 'code' | 'audio' }` or an array of those values. The `'text'` filter includes code-capable models; use `'code'` to show only code-first models.
 
 Dynamic providers such as Azure OpenAI deployments are marked with `isDynamic: true` and may have an empty or static-limited model list.
+
+The same AxIR-backed catalog is public in every generated package: Python
+`get_supported_ai_models()`, Java `Ax.getSupportedAIModels()`, C++
+`get_supported_ai_models()`, Go `GetSupportedAIModels(...)`, and Rust
+`get_supported_ai_models()` (with `get_supported_ai_models_with_options(...)`
+for filters). It includes the named OpenAI-compatible profiles accepted by
+`ai(...)`, including `azure-openai`, `openrouter`, `together`, `fireworks`, and
+the explicit `openai-compatible` fallback. These entries are usually dynamic,
+so inspect provider-level `capabilities` even when `models` is empty.
 
 ## Portable Inference Service Tiers
 
@@ -705,9 +722,40 @@ import { AxAIBedrock, AxAIBedrockModel } from '@ax-llm/ax-ai-aws-bedrock';
 const bedrock = new AxAIBedrock({
   region: 'us-east-2',
   fallbackRegions: ['us-west-2'],
-  config: { model: AxAIBedrockModel.ClaudeOpus45 },
+  config: { model: AxAIBedrockModel.ClaudeSonnet5 },
 });
 ```
+
+The native client uses Bedrock `Converse` and `ConverseStream`. Claude models
+advertise native functions, streaming, image/document input, prompt-cache
+breakpoints, and their verified thinking modes. Structured-output and service-
+tier support remain model-specific; query `bedrock.getFeatures(model)` instead
+of assuming every Bedrock model has the same capabilities. The AWS SDK remains
+a dependency of `@ax-llm/ax-ai-aws-bedrock` only and is not pulled into
+`@ax-llm/ax`.
+
+Use `contextCache.ttlSeconds` for a 5-minute or supported 1-hour cache point,
+and `thinkingTokenBudget` for legacy budget thinking or the corresponding
+adaptive-thinking effort on current Claude models:
+
+```typescript
+const response = await bedrock.chat(
+  {
+    chatPrompt: [
+      { role: 'system', content: 'Use the supplied policy.', cache: true },
+      { role: 'user', content: 'Summarize the policy.' },
+    ],
+  },
+  {
+    stream: true,
+    contextCache: { ttlSeconds: 3600 },
+    thinkingTokenBudget: 'medium',
+  }
+);
+```
+
+Claude Sonnet 5 always uses adaptive thinking and rejects
+`thinkingTokenBudget: 'none'`; Claude Opus 5 permits disabling it.
 
 ## Vercel AI SDK Integration
 
@@ -758,7 +806,7 @@ the event runtime sees the request.
 - Thinking constraints on Anthropic: every adaptive-thinking model omits
   `temperature`, `topP`, and `topK`; older thinking models ignore `temperature` and `topK`, with
   `topP` only sent if >= 0.95.
-- `ai({ name: 'amazon-bedrock', apiURL: ... })` targets Bedrock's OpenAI-compatible endpoint. `new AxAIBedrock()` remains the separate AWS-native runtime client.
+- `ai({ name: 'amazon-bedrock', apiURL: ... })` targets Bedrock's OpenAI-compatible endpoint. `new AxAIBedrock()` remains the separate AWS-native runtime client and keeps the AWS SDK out of core.
 - Vercel AI SDK uses `AxAIProvider` wrapper.
 
 ## Examples

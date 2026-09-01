@@ -20,14 +20,14 @@ description: "Stop prompting. Start programming. Typed signatures become reliabl
     <span><i class="home-proof-dot proof-green" aria-hidden="true"></i>Native in your language — six supported</span>
   </div>
   <div class="home-actions">
-    <a href="/typescript/quick-start/" data-home-lang-href="quick-start/">Get started</a>
+    <a href="/typescript/quick-start/" data-home-lang-href="quick-start/">Get started — 5 min</a>
     <a class="home-button-secondary" href="https://github.com/ax-llm/ax">GitHub</a>
     <div class="home-hero-stats" data-home-stats data-repo="ax-llm/ax" data-npm-package="@ax-llm/ax" aria-label="Project stats">
       <a href="https://github.com/ax-llm/ax" hidden><strong data-stat="stars"></strong><span>GitHub stars</span></a>
       <a href="https://www.npmjs.com/package/@ax-llm/ax" hidden><strong data-stat="downloads"></strong><span>npm downloads/week</span></a>
     </div>
   </div>
-  <p class="home-skills-note">Building with Claude Code or Cursor? <a href="/typescript/skills/" data-home-lang-href="skills/">Install the Ax skills</a> — your coding agent writes correct Ax in all six languages.</p>
+  <p class="home-skills-note">Coding with AI? <a href="/typescript/skills/" data-home-lang-href="skills/">Install the Ax skills</a> — Claude Code, Cursor, and other agents write correct Ax in all six languages.</p>
 </div>
 <div class="home-hero-panel" aria-label="Ax signature runtime preview">
   <div class="home-example-tabs" role="tablist" aria-label="Hero example">
@@ -49,14 +49,14 @@ description: "Stop prompting. Start programming. Typed signatures become reliabl
 </div>
 
 <section class="home-section home-academy-cta" aria-labelledby="home-academy-title">
-<article class="home-marketing-card">
+<article class="home-editorial-callout">
 {{< home-icon "list-checks" "icon-violet" >}}
-  <div>
+  <div class="home-editorial-callout-copy">
     <p class="home-section-label">Ax Academy</p>
     <h2 id="home-academy-title">Learn Ax through an adaptive knowledge path.</h2>
-    <p>Start with a diagnostic, build mastery through short scaffolded lessons, and strengthen due concepts with interleaved spaced review. Progress stays in your browser.</p>
-    <div class="home-actions home-section-actions"><a href="/typescript/academy/" data-home-lang-href="academy/">Start Ax Academy</a></div>
+    <p>A free course — about six hours end to end, entirely in your browser. Start with a diagnostic, build mastery through short scaffolded lessons, and strengthen due concepts with interleaved spaced review.</p>
   </div>
+  <div class="home-actions home-editorial-callout-actions"><a href="/typescript/academy/" data-home-lang-href="academy/">Start Ax Academy</a></div>
 </article>
 </section>
 
@@ -64,7 +64,7 @@ description: "Stop prompting. Start programming. Typed signatures become reliabl
 <div class="home-section-heading">
   <p class="home-section-label">Get started</p>
   <h2 id="quick-install">Quick install</h2>
-  <p>One Ax programming model, six languages — pick yours and drop the package in.</p>
+  <p>Just want the package? One Ax programming model, six languages — pick yours and drop it in.</p>
 </div>
 <div class="home-quick-install-bar">
 {{< home-language-controls >}}
@@ -78,7 +78,7 @@ description: "Stop prompting. Start programming. Typed signatures become reliabl
 </div>
 </section>
 
-<section class="home-section home-code-story" aria-labelledby="why-signatures">
+<section class="home-section home-code-story home-chapter-start" aria-labelledby="why-signatures">
 <div class="home-section-heading">
   <p class="home-section-label">Why signatures?</p>
   <h2 id="why-signatures">Describe the input and output. Ax handles the model call.</h2>
@@ -239,17 +239,17 @@ description: "Stop prompting. Start programming. Typed signatures become reliabl
 </div>
 </section>
 
-<section class="home-section home-agent-section" aria-labelledby="agents-that-work">
+<section class="home-section home-agent-section home-chapter-start" aria-labelledby="agents-that-work">
 <div class="home-section-heading home-agent-heading">
   <p class="home-section-label">Agents</p>
   <h2 id="agents-that-work">One agent harness, every size of job.</h2>
   <p>The design bet: <strong>the model computes on your data instead of reading it.</strong> Bulky inputs live in a runtime session; the agent writes small code steps against them; only compact evidence enters the prompt — so prompts stay bounded at any data size and small, cheap models stay exact. Typed signatures define the job, discovery loads only the schemas the next action needs, and built-in memory, skills, child agents, telemetry, and <code>agent.optimize(...)</code> make it practical to operate.</p>
   <p>Proof you can run: in the <a href="https://github.com/ax-llm/ax/blob/main/src/examples/agent-grounded-audit.ts">grounded-audit example</a>, a small Flash model audits a 250-row ledger it never sees in its prompt and reproduces the exact answer — total to the cent, count, and the full flagged-transaction list — verified against ground truth computed in plain code. <a href="/typescript/agents/performance/">See the measurements</a>.</p>
 </div>
-<div class="home-card-grid three-up">
-  <article class="home-marketing-card">{{< home-icon "zap" "icon-blue" >}}<h3>Micro</h3><p>One signature, a few tools, a typed reply. Zero config still runs the full harness — runtime session included.</p><p><a href="/typescript/agents/micro/">Micro agents</a></p></article>
-  <article class="home-marketing-card">{{< home-icon "bot" "icon-teal" >}}<h3>Standard</h3><p>Namespaced tool catalogs, specialist child agents, structured outputs, and clarification instead of guessing.</p><p><a href="/typescript/agents/standard/">Standard agents</a></p></article>
-  <article class="home-marketing-card">{{< home-icon "brain" "icon-green" >}}<h3>Long-horizon</h3><p>Large context by reference, context policies, memory, skills, and offline optimization for runs that keep going.</p><p><a href="/typescript/agents/long-horizon/">Long-horizon agents</a></p></article>
+<div class="home-card-grid three-up home-agent-tier-grid">
+  <article class="home-marketing-card home-agent-tier-card">{{< home-icon "zap" "icon-blue" >}}<h3>Micro</h3><p>One signature, a few tools, a typed reply. Zero config still runs the full harness — runtime session included.</p><p><a href="/typescript/agents/micro/">Micro agents</a></p></article>
+  <article class="home-marketing-card home-agent-tier-card">{{< home-icon "bot" "icon-teal" >}}<h3>Standard</h3><p>Namespaced tool catalogs, specialist child agents, structured outputs, and clarification instead of guessing.</p><p><a href="/typescript/agents/standard/">Standard agents</a></p></article>
+  <article class="home-marketing-card home-agent-tier-card">{{< home-icon "brain" "icon-green" >}}<h3>Long-horizon</h3><p>Large context by reference, context policies, memory, skills, and offline optimization for runs that keep going.</p><p><a href="/typescript/agents/long-horizon/">Long-horizon agents</a></p></article>
 </div>
 <div class="home-agent-code">
 {{< home-code topic="agent" group="agent" >}}
@@ -289,6 +289,52 @@ description: "Stop prompting. Start programming. Typed signatures become reliabl
   <a href="/typescript/agents/">Explore the Agents section</a>
   <a class="home-button-secondary" href="/typescript/agents/performance/">Performance &amp; measurements</a>
   <a class="home-button-secondary" href="/typescript/concepts/optimization/">Optimization guide</a>
+</div>
+</section>
+
+<section id="graphjin" class="home-section home-graphjin" aria-labelledby="graphjin-title">
+<div class="home-graphjin-header">
+  <div class="home-graphjin-heading">
+    <p class="home-section-label">Case study</p>
+    <h2 id="graphjin-title">GraphJin runs on Ax.</h2>
+    <p>An agent built with Ax effortlessly connects all your databases to AI</p>
+  </div>
+  <div class="home-actions home-graphjin-actions">
+    <a href="https://graphjin.com">Explore GraphJin</a>
+    <a class="home-button-secondary" href="https://github.com/dosco/graphjin">GraphJin on GitHub</a>
+  </div>
+</div>
+<div class="home-graphjin-demo">
+  <div class="home-graphjin-command-row" aria-label="GraphJin setup commands">
+    <div class="home-graphjin-command" aria-label="Install GraphJin"><span>$</span><code><span class="home-install-command">npm install -g graphjin</span></code></div>
+    <div class="home-graphjin-command" aria-label="Add GraphJin as an MCP server"><span>$</span><code><span class="home-install-command">claude mcp add graphjin -- graphjin mcp --demo</span></code></div>
+  </div>
+  <div class="home-graphjin-terminal" aria-label="GraphJin demo conversation">
+    <div class="home-panel-title">Then just ask</div>
+<pre><code>Q: which customers churned last month,
+   and what did they have in common?&#10;
+A: 9 of 12 churned accounts were on the Starter plan.
+   7 opened a support ticket in their final 30 days.
+   Median tenure: 4 months.</code></pre>
+  </div>
+</div>
+<div class="home-graphjin-status">
+  <span aria-hidden="true"></span>
+  <p>Schema-validated · role-checked · audited · 12+ database engines</p>
+  <a href="https://graphjin.com/agentic/server-agent/">Read how the Ax agent is built</a>
+</div>
+<div class="home-graphjin-proof">
+  <div class="home-graphjin-proof-heading">
+    <p class="home-section-label">Proof, in public</p>
+    <h3>DeepORG benchmark</h3>
+    <a href="https://graphjin.com/benchmark/">See the leaderboard</a>
+  </div>
+  <div class="home-stats" aria-label="DeepORG current board result">
+    <div><strong>100/113</strong><span>tasks passed in full</span></div>
+    <div><strong>0</strong><span>unsafe effects</span></div>
+    <div><strong>~4¢</strong><span>per task</span></div>
+    <div><strong>339</strong><span>graded attempts</span></div>
+  </div>
 </div>
 </section>
 
@@ -339,11 +385,11 @@ description: "Stop prompting. Start programming. Typed signatures become reliabl
 </div>
 </section>
 
-<section class="home-section" aria-labelledby="included">
+<section class="home-section home-chapter-start" aria-labelledby="included">
 <div class="home-section-heading home-section-heading-wide">
   <p class="home-section-label">The full surface</p>
   <h2 id="included">Everything you need to build useful LLM systems.</h2>
-  <p>Every capability above hangs off the same signature contract. Start with a single typed generation call, then grow into tools, agents, voice, workflows, telemetry, optimization, and native packages without switching mental models.</p>
+  <p>Every capability above hangs off the same signature contract. Start with a single typed generation call, then grow into tools, agents, voice, workflows, telemetry, optimization, and native packages without switching mental models. New to Ax? <a href="/typescript/how-ax-fits-together/" data-home-lang-href="how-ax-fits-together/">See how the pieces fit together</a>.</p>
 </div>
 <div class="home-capability-grid">
   <article class="home-marketing-card">{{< home-icon "zap" "icon-blue" >}}<h3>Structured generation <span>ax()</span></h3><p>Declare typed inputs and outputs, then get parsed host values with streaming, validation, retries, and traces.</p></article>
@@ -445,30 +491,6 @@ description: "Stop prompting. Start programming. Typed signatures become reliabl
 </div>
 </section>
 
-<section class="home-section home-graphjin" aria-labelledby="graphjin">
-<div class="home-section-heading">
-  <p class="home-section-label">Also checkout</p>
-  <h2 id="graphjin">Connect AI agents to your database.</h2>
-  <p><a href="https://graphjin.com">GraphJin</a> compiles GraphQL to efficient SQL and doubles as an MCP server, giving Ax agents direct, governed access to application data.</p>
-</div>
-<div class="home-graphjin-layout">
-  <div class="home-graphjin-code">
-{{< home-code topic="graphjin" group="graphjin" compact="true" label="GraphJin MCP" >}}
-  </div>
-  <div class="home-graphjin-copy">
-    <h3>Use GraphJin as an MCP tool inside Ax agents.</h3>
-    <p>PostgreSQL, MySQL, SQLite, MongoDB, Oracle, MSSQL, and Snowflake can sit behind one data access layer for AI workflows.</p>
-    <div class="home-badge-row">
-      <span>PostgreSQL</span><span>MySQL</span><span>SQLite</span><span>MongoDB</span><span>Snowflake</span>
-    </div>
-    <div class="home-actions home-section-actions">
-      <a href="https://graphjin.com">Explore GraphJin</a>
-      <a class="home-button-secondary" href="https://github.com/dosco/graphjin">GitHub</a>
-    </div>
-  </div>
-</div>
-</section>
-
 <section class="home-section home-final-cta" aria-labelledby="get-started">
 <div class="home-section-heading">
   <p class="home-section-label">Start now</p>
@@ -477,6 +499,7 @@ description: "Stop prompting. Start programming. Typed signatures become reliabl
 </div>
 <div class="home-actions">
   <a href="/typescript/quick-start/">Get started</a>
+  <a class="home-button-secondary" href="/typescript/how-ax-fits-together/">How Ax fits together</a>
   <a class="home-button-secondary" href="/typescript/examples/">Examples</a>
   <a class="home-button-secondary" href="https://github.com/ax-llm/ax">GitHub</a>
   <a class="home-button-secondary" href="https://x.com/intent/follow?screen_name=dosco">Follow @dosco on X</a>
