@@ -5,6 +5,12 @@
   "fence": "typescript",
   "packageName": "@ax-llm/ax",
   "install": ["npm install @ax-llm/ax"],
+  "quickStartRun": {
+    "file": "classify.ts",
+    "setup": ["export OPENAI_APIKEY=\"sk-...\""],
+    "run": ["npx tsx classify.ts"],
+    "output": ["sentiment: positive"]
+  },
   "exampleRoot": "src/examples",
   "academy": {
     "unitExamples": {
@@ -104,7 +110,9 @@
       "",
       "const result = await classify.forward(llm, {",
       "  review: 'Useful and boring in the best way.',",
-      "});"
+      "});",
+      "",
+      "console.log('sentiment:', result.sentiment);"
     ],
     "dspy": [
       "import { ai, ax } from '@ax-llm/ax';",
@@ -162,6 +170,11 @@
       "import { AxAIOpenAIModel, ai, axGetSupportedAIModels } from '@ax-llm/ax';",
       "",
       "const catalog = axGetSupportedAIModels({ type: 'text' });",
+      "const openai = catalog.find((provider) => provider.name === 'openai');",
+      "const reasoningModels = openai?.models.filter((model) =>",
+      "  model.capabilities.thinkingLevels.includes('high') &&",
+      "  model.capabilities.serviceTiers.includes('priority')",
+      ");",
       "const llm = ai({",
       "  name: 'openai',",
       "  apiKey: process.env.OPENAI_APIKEY!,",

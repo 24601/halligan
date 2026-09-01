@@ -443,8 +443,23 @@ function runHomeLanguageViewTransition(update) {
     return Promise.resolve();
   }
 
-  const transition = document.startViewTransition(update);
-  return (transition.updateCallbackDone || transition.ready).catch(() => {});
+  try {
+    const transition = document.startViewTransition(update);
+    // A view transition may be aborted by navigation, theme changes, or the
+    // browser starting another transition. Consume every lifecycle rejection
+    // so an expected abort does not surface as an unhandled console error.
+    for (const promise of [
+      transition.updateCallbackDone,
+      transition.ready,
+      transition.finished,
+    ]) {
+      promise?.catch(() => {});
+    }
+    return (transition.updateCallbackDone || transition.ready).catch(() => {});
+  } catch {
+    update();
+    return Promise.resolve();
+  }
 }
 
 function finishHomeLanguageTransition(targets) {
@@ -598,19 +613,6 @@ if (homeLanguageRoot) {
     // Web fonts change code metrics — re-measure once they are in.
     document.fonts?.ready?.then(() => reserveHomeHeroPanelHeight());
   }
-}
-
-const homeLanguageBar = document.querySelector('[data-home-language-bar]');
-if (homeLanguageBar && 'IntersectionObserver' in window) {
-  const sentinel = document.createElement('div');
-  sentinel.setAttribute('aria-hidden', 'true');
-  homeLanguageBar.before(sentinel);
-  new IntersectionObserver(
-    ([entry]) => {
-      homeLanguageBar.classList.toggle('is-stuck', !entry.isIntersecting);
-    },
-    { rootMargin: '-68px 0px 0px 0px' }
-  ).observe(sentinel);
 }
 
 const searchRoot = document.querySelector('[data-site-search]');

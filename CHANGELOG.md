@@ -1,5 +1,18 @@
 # Changelog
 
+## [24.0.17](https://github.com/ax-llm/ax/compare/24.0.16...24.0.17) (2026-09-01)
+
+### Features
+
+* **bedrock:** add native Converse capabilities ([#642](https://github.com/ax-llm/ax/issues/642)) ([d480062](https://github.com/ax-llm/ax/commit/d480062291e677056615b2938f36bd20f9557784))
+* **axir:** expose the model catalog across backend languages ([#643](https://github.com/ax-llm/ax/issues/643)) ([1c9877b](https://github.com/ax-llm/ax/commit/1c9877be0124e57f290be62a646a2a9eb80ea37c))
+
+## [24.0.16](https://github.com/ax-llm/ax/compare/24.0.15...24.0.16) (2026-08-31)
+
+### Features
+
+* **ai:** expose catalog thinking and service tiers ([#639](https://github.com/ax-llm/ax/issues/639)) ([dec4f9e](https://github.com/ax-llm/ax/commit/dec4f9e8b1a81df0b7c1c69c313f0b03ad35b9fc))
+
 ## [24.0.15](https://github.com/ax-llm/ax/compare/24.0.13...24.0.14) (2026-08-30)
 
 ### Features

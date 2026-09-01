@@ -10,14 +10,14 @@ Add the dependency from Maven Central:
 <dependency>
   <groupId>dev.axllm</groupId>
   <artifactId>ax</artifactId>
-  <version>24.0.15</version>
+  <version>24.0.17</version>
 </dependency>
 ```
 
 Or with Gradle:
 
 ```groovy
-implementation 'dev.axllm:ax:24.0.15'
+implementation 'dev.axllm:ax:24.0.17'
 ```
 
 Realtime audio over WebSocket uses the JDK's built-in `java.net.http` WebSocket — no extra dependency.
@@ -56,6 +56,7 @@ Shared Ax behavior is Core-owned. The generated target code stays focused on idi
 `no-key` examples are deterministic local smokes. They are the fastest way to see the package work without any provider account:
 
 - `examples/SignatureSchemaExample.java`: signature parsing and JSON schema generation
+- `examples/ModelCatalogExample.java`: model catalog, named profiles, thinking levels, and service tiers
 - `examples/AxGenScriptedClientToolExample.java`: AxGen with a scripted client and tool
 - `examples/ProviderMappingNoKeyExample.java`: provider mapping through a scripted transport
 - `examples/RuntimeHooksNoKeyExample.java`: runtime-hook globals and typed program surfaces through a scripted transport

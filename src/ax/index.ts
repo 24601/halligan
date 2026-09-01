@@ -435,7 +435,9 @@ import {
   type AxAIModelCatalogModelType,
   type AxAIModelCatalogOptions,
   type AxAIModelCatalogProvider,
+  type AxAIModelCatalogProviderCapabilities,
   type AxAIModelCatalogProviderName,
+  type AxAIModelCatalogThinkingLevel,
   axGetSupportedAIModels,
 } from './ai/catalog.js';
 import { axModelInfoCohere } from './ai/cohere/info.js';
@@ -2146,7 +2148,9 @@ export type { AxAIModelCatalogModelCapabilities };
 export type { AxAIModelCatalogModelType };
 export type { AxAIModelCatalogOptions };
 export type { AxAIModelCatalogProvider };
+export type { AxAIModelCatalogProviderCapabilities };
 export type { AxAIModelCatalogProviderName };
+export type { AxAIModelCatalogThinkingLevel };
 export type { AxAIModelList };
 export type { AxAIModelListBase };
 export type { AxAIModels };
