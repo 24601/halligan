@@ -363,6 +363,21 @@ describe('Ax evidence guards at the authorization boundary', () => {
     ).toBe('guard_predicate_failed');
   });
 
+  it('rejects a non-finite authorization clock instead of evaluating under it', async () => {
+    // Belt and braces for the evaluator's own NaN handling: a broken host
+    // clock would otherwise decide both grant expiry and evidence freshness.
+    const { authority, audits, requests } = harness({
+      grants: [grant({ requirements: [requirement({ maxAgeMs: 1_000 })] })],
+      evidence: [observation()],
+      now: () => Number.NaN,
+    });
+    await expect(
+      axAuthorize(authority, 'document.read', resource)
+    ).rejects.toThrow(/authorization now must be a finite number/);
+    expect(audits).toHaveLength(0);
+    expect(requests).toHaveLength(0);
+  });
+
   it('an already-aborted signal still reports cancelled, not guard_predicate_failed', async () => {
     // Cancellation precedence is unchanged by the guard block.
     const controller = new AbortController();

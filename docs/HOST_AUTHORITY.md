@@ -152,8 +152,13 @@ candidate set names the failure:
 | none of them from an exact member of `trustedSources` | `untrusted_source` |
 | none of those taken under the current lease epoch | `lease_epoch_mismatch` |
 | more than one survives | `ambiguous_observation` |
-| the survivor is older than `maxAgeMs` | `stale` |
+| the survivor is older than `maxAgeMs`, or the clock is not finite | `stale` |
 | the operator predicate rejects it | `predicate_failed` |
+
+`maxAgeMs` is evaluated as a passing condition, not a negated failing one, so a
+missing, `NaN`, or infinite clock denies every requirement that reads it rather
+than silently disabling freshness. `axAuthorize` additionally rejects a
+non-finite `now()` outright, since the same clock decides grant expiry.
 
 Lease-epoch binding is unconditional and is not an operator: an observation
 taken under a prior epoch never satisfies any requirement. Ambiguity is a deny —

@@ -202,9 +202,14 @@ function evaluateRequirement(
   // Ax never picks the freshest, the first, or the "best" (F3).
   if (bound.length > 1) return failure(kind, op, 'ambiguous_observation');
   const observation = bound[0] as Readonly<AxEvidenceObservation>;
+  // Stated as the passing condition rather than its negation on purpose: a
+  // non-finite `now` makes the comparison false and denies, where the negated
+  // form (`now - observedAt > maxAgeMs`) is false for NaN and would silently
+  // disable the only time-bounded operator. `axEvaluateGuards` already maps
+  // every non-finite clock to NaN so `-Infinity` cannot pass either.
   if (
     requirement.maxAgeMs !== undefined &&
-    now - observation.observedAt > requirement.maxAgeMs
+    !(now - observation.observedAt <= requirement.maxAgeMs)
   ) {
     return failure(kind, op, 'stale');
   }
@@ -266,7 +271,13 @@ export function axEvaluateGuards(
   const requirements = context?.requirements ?? [];
   const evidence = context?.evidence ?? [];
   const leaseEpoch = context?.leaseEpoch as number;
-  const now = context?.now as number;
+  // The one host-supplied number this evaluator reads without a capture step.
+  // A missing, NaN, or infinite clock cannot be used to decide freshness, so it
+  // collapses to NaN and every `maxAgeMs` requirement fails closed with
+  // `stale`. Requirements that do not read the clock are unaffected.
+  const now = Number.isFinite(context?.now)
+    ? (context.now as number)
+    : Number.NaN;
   const failures: Readonly<AxGuardFailure>[] = [];
   for (const requirement of requirements) {
     const result = evaluateRequirement(requirement, evidence, leaseEpoch, now);

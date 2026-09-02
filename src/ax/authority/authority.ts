@@ -721,6 +721,10 @@ export async function axAuthorize(
   nonEmpty(operation, 'authorization operation');
   const scopedResource = captureResource(resource, 'authorization resource');
   const now = snapshot.now?.() ?? Date.now();
+  // Every other host-supplied number on this path is validated; the clock is
+  // load-bearing for grant expiry and for evidence freshness, so a non-finite
+  // one is a host misconfiguration and must not reach either check.
+  finite(now, 'authorization now');
   if (cancelled(signal)) {
     await audit(
       snapshot,

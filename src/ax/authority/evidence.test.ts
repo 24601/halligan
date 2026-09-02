@@ -154,6 +154,41 @@ describe('Ax evidence guard evaluation', () => {
     });
   });
 
+  it('denies every maxAgeMs requirement when the injected clock is not finite', () => {
+    // `NaN > n` is false, so a negated staleness test would let a broken clock
+    // disable the only time-bounded operator. Every non-finite clock — and an
+    // absent one, since axEvaluateGuards is public API — must deny instead.
+    const fresh = requirement({
+      kind: 'session.mfa',
+      maxAgeMs: 1,
+      match: { op: 'fresh' },
+    });
+    const aged = requirement({ maxAgeMs: 1 });
+    const clockless = requirement({ kind: 'device.posture' });
+    const evidence = [
+      observation(),
+      observation({ kind: 'device.posture', value: 'strong' }),
+    ];
+    for (const now of [
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      Number.NEGATIVE_INFINITY,
+      undefined as unknown as number,
+      '10000' as unknown as number,
+    ]) {
+      const result = evaluate([fresh, aged, clockless], evidence, { now });
+      expect(result.allow).toBe(false);
+      expect(result.failures.map((entry) => entry.code)).toEqual([
+        'stale',
+        'stale',
+      ]);
+    }
+    // The same inputs on a finite clock allow, so the denial is the clock's.
+    expect(
+      evaluate([fresh, aged, clockless], evidence, { now: NOW - 1_000 }).allow
+    ).toBe(true);
+  });
+
   it('evaluates eq/ne/in/notIn/contains/fresh positively and negatively', () => {
     const cases: readonly {
       match: Readonly<AxEvidenceMatch>;
