@@ -1240,6 +1240,9 @@ import type {
   AxGEPACandidateLineageOptions,
   AxGEPACandidateLineageRecord,
   AxGEPACandidateStrategy,
+  AxGEPADeployableBestChain,
+  AxGEPAReflectionCategory,
+  AxGEPAReflectionOutcome,
   AxGEPAResolvedLineageOptions,
 } from './dsp/optimizers/gepaLineage.js';
 import type {
@@ -3784,6 +3787,7 @@ export type { AxGEPACandidateLineageRecord };
 export type { AxGEPACandidateStrategy };
 export type { AxGEPAComponentBanditState };
 export type { AxGEPAComponentTarget };
+export type { AxGEPADeployableBestChain };
 export type { AxGEPAEvaluationBatch };
 export type { AxGEPAEvaluationState };
 export type { AxGEPAOptimizationReference };
@@ -3791,6 +3795,8 @@ export type { AxGEPAOptimizationReport };
 export type { AxGEPAProposalOptions };
 export type { AxGEPAProposalPolicy };
 export type { AxGEPAProposalPolicyArgs };
+export type { AxGEPAReflectionCategory };
+export type { AxGEPAReflectionOutcome };
 export type { AxGEPAReflectiveTuple };
 export type { AxGEPARejectedPriorBlock };
 export type { AxGEPAResolvedLineageOptions };

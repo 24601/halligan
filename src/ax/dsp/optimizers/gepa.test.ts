@@ -6,6 +6,7 @@ import {
 } from '../optimizer.js';
 import { ax } from '../template.js';
 import { AxGEPA } from './gepa.js';
+import { axHarnessRecipe } from './harnessRecipe.js';
 import type { AxTrajectoryTerminationClassifier } from './trajectoryTermination.js';
 
 const createSingleRootProgram = (
@@ -661,7 +662,7 @@ describe('AxGEPA Optimizer', () => {
       });
     });
 
-    it('does not read candidate-lineage, abort, trajectory-termination or sampler accessors at the opt-in boundary', async () => {
+    it('does not read candidate-lineage, abort, trajectory-termination, sampler, harness or mutation accessors at the opt-in boundary', async () => {
       let reads = 0;
       const inheritedOptions = Object.create({
         get candidateLineage() {
@@ -683,6 +684,14 @@ describe('AxGEPA Optimizer', () => {
         get taskDiscrimination() {
           reads += 1;
           throw new Error('inherited taskDiscrimination was read');
+        },
+        get harnessRecipe() {
+          reads += 1;
+          throw new Error('inherited harnessRecipe was read');
+        },
+        get mutationAnnotation() {
+          reads += 1;
+          throw new Error('inherited mutationAnnotation was read');
         },
       });
       Object.defineProperty(inheritedOptions, 'maxMetricCalls', {
@@ -724,6 +733,20 @@ describe('AxGEPA Optimizer', () => {
           get() {
             reads += 1;
             throw new Error('taskDiscrimination accessor was read');
+          },
+        },
+        harnessRecipe: {
+          enumerable: true,
+          get() {
+            reads += 1;
+            throw new Error('harnessRecipe accessor was read');
+          },
+        },
+        mutationAnnotation: {
+          enumerable: true,
+          get() {
+            reads += 1;
+            throw new Error('mutationAnnotation accessor was read');
           },
         },
         maxMetricCalls: { enumerable: true, value: 2 },
@@ -803,14 +826,14 @@ describe('AxGEPA Optimizer', () => {
       );
 
       // One own-descriptor read per opt-in option reached on the default path:
-      // candidateLineage, abortSignal, trajectoryTermination,
-      // minibatchStrategy and taskDiscrimination. The last is read even on the
-      // uniform path so that supplying it without the strategy that consumes it
-      // can be REPORTED rather than silently ignored; reading an own data
-      // property is not observable in any artifact, event or draw sequence.
-      // This count is the tripwire that a new option was added without being
-      // routed through `ownDataOption`.
-      expect(descriptorCalls).toBe(5);
+      // candidateLineage, abortSignal, trajectoryTermination, harnessRecipe,
+      // mutationAnnotation, minibatchStrategy and taskDiscrimination. The last
+      // is read even on the uniform path so that supplying it without the
+      // strategy that consumes it can be REPORTED rather than silently
+      // ignored; reading an own data property is not observable in any
+      // artifact, event or draw sequence. This count is the tripwire that a
+      // new option was added without being routed through `ownDataOption`.
+      expect(descriptorCalls).toBe(7);
       expect(result.optimizedProgram?.candidateLineage).toBeUndefined();
     });
 
@@ -2609,5 +2632,335 @@ describe('AxGEPA RNG stream discipline (INV-L5)', () => {
     });
     expect(discriminative).toBeLessThan(59);
     expect(discriminative).toBeGreaterThan(0);
+  });
+});
+
+describe('lineage version 2 annotations', () => {
+  const buildRecipe = async (boundModelId: string) =>
+    await axHarnessRecipe({
+      bindings: [
+        { port: 'model.primary', atomId: 'atom-a', version: '1' },
+        { port: 'retriever.default', atomId: 'atom-b', version: '2' },
+      ],
+      boundModelId,
+    });
+
+  /**
+   * One accepted mutation over a two-example set. `better` scores 1 on the
+   * first example and 0 on the second, `base` the reverse — so the paired
+   * reflection classes are one `fixed` and one `regressed`, which is the
+   * only shape that distinguishes a real classifier from one that returns a
+   * constant.
+   */
+  const runSplitFixture = async (
+    compileOptions: Record<string, unknown>,
+    optimizerOverrides: Record<string, unknown> = {}
+  ) => {
+    const optimizer = new AxGEPA({
+      studentAI: {} as AxAIService,
+      teacherAI: {} as AxAIService,
+      numTrials: 1,
+      minibatch: false,
+      mergeMax: 0,
+      minImprovementThreshold: -1,
+      ...optimizerOverrides,
+    });
+    const program = createSingleRootProgram(
+      'task',
+      async (instruction, example) => ({
+        score:
+          instruction === 'better'
+            ? example.question === 'q1'
+              ? 1
+              : 0
+            : example.question === 'q1'
+              ? 0
+              : 1,
+      })
+    );
+    (optimizer as any).reflectTargetInstruction = async () => 'better';
+    const result = await optimizer.compile(
+      program as any,
+      [{ question: 'q1' }, { question: 'q2' }],
+      async ({ prediction }) => prediction.score,
+      { maxMetricCalls: 40, skipPerfectScore: false, ...compileOptions }
+    );
+    return result;
+  };
+
+  it('emits lineage version 1 with no version-2 field when the new options are omitted', async () => {
+    const result = await runSplitFixture({ candidateLineage: true });
+    const manifest = result.optimizedProgram?.candidateLineage;
+    expect(manifest?.version).toBe(1);
+    // Every version-2 manifest field is ABSENT, not undefined: `undefined`
+    // would still change the serialized bytes if the key were present.
+    for (const key of [
+      'mutationDepthHistogram',
+      'discrimination',
+      'harness',
+      'bestChain',
+      'admission',
+    ]) {
+      expect(Object.hasOwn(manifest as object, key)).toBe(false);
+    }
+    for (const record of manifest?.records ?? []) {
+      for (const key of [
+        'mutation',
+        'reflection',
+        'causalEvidenceRecordId',
+        'harness',
+        'admission',
+      ]) {
+        expect(Object.hasOwn(record as object, key)).toBe(false);
+      }
+    }
+  });
+
+  it('stamps the harness digest and bound model id on every lineage record', async () => {
+    const recipe = await buildRecipe('model-a');
+    const result = await runSplitFixture({
+      candidateLineage: true,
+      harnessRecipe: { recipe },
+    });
+    const manifest = result.optimizedProgram?.candidateLineage;
+    expect(manifest?.version).toBe(2);
+    expect(manifest?.harness).toEqual({
+      recipeDigest: recipe.digest,
+      boundModelId: 'model-a',
+    });
+    const records = manifest?.records ?? [];
+    expect(records.length).toBeGreaterThan(1);
+    // EVERY record, not just the accepted one: a stamp that only some
+    // record sites carry is worse than none, because a reader cannot tell
+    // an unstamped record from a record produced under another harness.
+    for (const record of records) {
+      expect(record.harness).toEqual({
+        recipeDigest: recipe.digest,
+        boundModelId: 'model-a',
+      });
+      expect(record.harness?.stale).toBeUndefined();
+    }
+  });
+
+  it('marks a stamp stale only when currentModelId was supplied and differs', async () => {
+    const recipe = await buildRecipe('model-a');
+    const stampsFor = async (currentModelId?: string) => {
+      const result = await runSplitFixture({
+        candidateLineage: true,
+        harnessRecipe: {
+          recipe,
+          ...(currentModelId ? { currentModelId } : {}),
+        },
+      });
+      return (result.optimizedProgram?.candidateLineage?.records ?? []).map(
+        (record) => record.harness?.stale
+      );
+    };
+    // Absent means NOT EVALUATED, never "fresh".
+    expect(await stampsFor(undefined)).toEqual([undefined, undefined]);
+    expect(await stampsFor('model-a')).toEqual([undefined, undefined]);
+    expect(await stampsFor('model-b')).toEqual([true, true]);
+  });
+
+  it('classifies paired rows into the four reflection categories', async () => {
+    const result = await runSplitFixture({
+      candidateLineage: {
+        includeReflectionOutcomes: true,
+        includeReflectionIndices: true,
+      },
+    });
+    const records = result.optimizedProgram?.candidateLineage?.records ?? [];
+    const mutation = records.find(
+      (record) => record.strategy === 'reflective_mutation'
+    );
+    // Fixed emission order with zero-count entries retained.
+    expect(mutation?.reflection?.map((outcome) => outcome.category)).toEqual([
+      'fixed',
+      'regressed',
+      'still_failing',
+      'still_passing',
+    ]);
+    expect(
+      mutation?.reflection?.map((outcome) => [outcome.category, outcome.count])
+    ).toEqual([
+      ['fixed', 1],
+      ['regressed', 1],
+      ['still_failing', 0],
+      ['still_passing', 0],
+    ]);
+    // Indices identify WHICH example moved, not just how many.
+    expect(
+      mutation?.reflection?.find((outcome) => outcome.category === 'fixed')
+        ?.exampleIndices
+    ).toEqual([0]);
+    expect(
+      mutation?.reflection?.find((outcome) => outcome.category === 'regressed')
+        ?.exampleIndices
+    ).toEqual([1]);
+    // The seed is not a paired comparison, so it carries no reflection.
+    expect(
+      records.find((record) => record.strategy === 'seed')?.reflection
+    ).toBeUndefined();
+  });
+
+  it('omits reflection indices unless they were opted into', async () => {
+    const result = await runSplitFixture({
+      candidateLineage: { includeReflectionOutcomes: true },
+    });
+    const mutation = (
+      result.optimizedProgram?.candidateLineage?.records ?? []
+    ).find((record) => record.strategy === 'reflective_mutation');
+    expect(mutation?.reflection).toHaveLength(4);
+    for (const outcome of mutation?.reflection ?? []) {
+      expect(Object.hasOwn(outcome as object, 'exampleIndices')).toBe(false);
+    }
+  });
+
+  it('emits a mutation depth histogram summing to the proposed candidate count', async () => {
+    const result = await runSplitFixture({
+      candidateLineage: true,
+      mutationAnnotation: {},
+    });
+    const manifest = result.optimizedProgram?.candidateLineage;
+    const histogram = manifest?.mutationDepthHistogram;
+    expect(histogram).toBeDefined();
+    const total = Object.values(histogram ?? {}).reduce(
+      (sum, count) => sum + count,
+      0
+    );
+    const proposed = (manifest?.records ?? []).filter(
+      (record) => record.strategy !== 'seed'
+    ).length;
+    // The SEED is deliberately not annotated — it is not a patch — so the
+    // histogram counts proposed candidates only.
+    expect(proposed).toBeGreaterThan(0);
+    expect(total).toBe(proposed);
+    expect(histogram?.supervision).toBe(proposed);
+    expect(histogram?.unannotated).toBe(0);
+    const mutation = (manifest?.records ?? []).find(
+      (record) => record.strategy === 'reflective_mutation'
+    );
+    expect(mutation?.mutation).toEqual({
+      depth: 'supervision',
+      patch: { class: 'steering', type: 'prompt.rule_modify' },
+      componentClasses: ['context'],
+    });
+  });
+
+  it('emits a running mutation depth histogram on every round, not only at completion', async () => {
+    const events: any[] = [];
+    // The optimizer-level logger, not the compile-option one: GEPA
+    // deliberately does not forward `options` into
+    // `updateOptimizationProgress`, so a compile-option logger never sees
+    // RoundProgress.
+    await runSplitFixture(
+      { candidateLineage: true, mutationAnnotation: {} },
+      {
+        debugOptimizer: true,
+        optimizerLogger: (data: any) => events.push(data),
+      }
+    );
+    const rounds = events.filter((event) => event.name === 'RoundProgress');
+    expect(rounds.length).toBeGreaterThan(0);
+    for (const round of rounds) {
+      expect(round.value.mutationDepthHistogram).toBeDefined();
+    }
+    const complete = events.find(
+      (event) => event.name === 'OptimizationComplete'
+    );
+    expect(complete?.value.mutationDepthHistogram).toBeDefined();
+  });
+
+  it('aborts a candidate before evaluation when a required annotation is missing', async () => {
+    const calls: string[] = [];
+    const result = await runSplitFixture({
+      candidateLineage: true,
+      mutationAnnotation: {
+        policy: 'required',
+        annotator: (args: any) => {
+          calls.push(args.strategy);
+          return undefined;
+        },
+      },
+    });
+    const records = result.optimizedProgram?.candidateLineage?.records ?? [];
+    const aborted = records.find(
+      (record) => record.reason === 'mutation_annotation_required'
+    );
+    expect(aborted).toMatchObject({
+      decision: 'aborted',
+      disposition: 'aborted',
+    });
+    expect(aborted?.failures?.[0]?.kind).toBe('validator');
+    // The annotator ran for the proposed candidate and never for the seed.
+    expect(calls).toEqual(['reflective_mutation']);
+    // Refused BEFORE the child minibatch, so it never reached the gate: the
+    // candidate has no child_minibatch evaluation recorded.
+    expect(aborted?.evaluations).toEqual([]);
+    // ...and the aborted candidate is not the deployed one.
+    expect(result.optimizedProgram?.componentMap).toEqual({
+      'root::instruction': 'task',
+    });
+  });
+
+  it('records a validator failure but promotes anyway when the policy is off', async () => {
+    const result = await runSplitFixture({
+      candidateLineage: true,
+      mutationAnnotation: {
+        annotator: () =>
+          ({
+            depth: 'not-a-depth',
+            patch: { class: 'steering', type: 'prompt.rule_modify' },
+            componentClasses: ['context'],
+          }) as any,
+      },
+    });
+    const records = result.optimizedProgram?.candidateLineage?.records ?? [];
+    const mutation = records.find(
+      (record) => record.strategy === 'reflective_mutation'
+    );
+    expect(mutation?.decision).toBe('accepted');
+    expect(mutation?.mutation).toBeUndefined();
+    // Silence would make the option look like it validated something.
+    expect(
+      mutation?.failures?.some((failure) => failure.kind === 'validator')
+    ).toBe(true);
+    expect(
+      result.optimizedProgram?.candidateLineage?.mutationDepthHistogram
+        ?.unannotated
+    ).toBe(1);
+  });
+
+  it('reports a deployable best chain whose ancestry ends at the selected candidate', async () => {
+    const result = await runSplitFixture(
+      { candidateLineage: true, mutationAnnotation: {} },
+      { numTrials: 3 }
+    );
+    const manifest = result.optimizedProgram?.candidateLineage;
+    const chain = manifest?.bestChain;
+    expect(chain).toBeDefined();
+    expect(chain?.candidateId).toBe(manifest?.selectedCandidateId);
+    // Root-first, ending at the deployed candidate.
+    expect(chain?.ancestry.at(-1)).toBe(chain?.candidateId);
+    expect(chain?.ancestry[0]).toBe('c0');
+    expect(new Set(chain?.ancestry).size).toBe(chain?.ancestry.length);
+    // No archive-best / oracle composite is produced anywhere.
+    expect(Object.hasOwn(manifest as object, 'archiveBest')).toBe(false);
+  });
+
+  it('publishes a causal-evidence cross-link id on every version-2 record', async () => {
+    const result = await runSplitFixture({
+      candidateLineage: true,
+      mutationAnnotation: {},
+    });
+    const records = result.optimizedProgram?.candidateLineage?.records ?? [];
+    expect(records.length).toBeGreaterThan(1);
+    for (const record of records) {
+      expect(record.causalEvidenceRecordId).toBe(`gepa-candidate-${record.id}`);
+    }
+    // Unique per candidate, so it can be a manifest record id.
+    expect(
+      new Set(records.map((record) => record.causalEvidenceRecordId)).size
+    ).toBe(records.length);
   });
 });

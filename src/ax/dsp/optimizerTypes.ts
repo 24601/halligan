@@ -1,4 +1,6 @@
 import type { AxOptimizationStats } from './common_types.js';
+import type { AxGEPADeployableBestChain } from './optimizers/gepaLineage.js';
+import type { AxMutationDepthHistogram } from './optimizers/mutationTaxonomy.js';
 import type {
   AxTaskDiscriminationSummary,
   AxTaskInclusionSnapshot,
@@ -51,6 +53,13 @@ export type AxOptimizerLoggerData =
          * The inclusion probabilities this round's minibatch was drawn from.
          */
         inclusionSnapshot?: AxTaskInclusionSnapshot;
+        /**
+         * GEPA only, and only under `AxCompileOptions.mutationAnnotation`.
+         * RUNNING histogram over the candidates proposed so far — emitted every
+         * round rather than only at completion, so a run that aborts still
+         * leaves one behind.
+         */
+        mutationDepthHistogram?: AxMutationDepthHistogram;
       };
     }
   | {
@@ -83,6 +92,16 @@ export type AxOptimizerLoggerData =
          * Bounded run-level sampler report.
          */
         discrimination?: AxTaskDiscriminationSummary;
+        /**
+         * GEPA only, and only under `AxCompileOptions.mutationAnnotation`.
+         * Final depth histogram over every proposed candidate.
+         */
+        mutationDepthHistogram?: AxMutationDepthHistogram;
+        /**
+         * GEPA only. The deployable candidate and its ancestry. Emitted only
+         * with lineage version 2; there is no archive-best counterpart.
+         */
+        bestChain?: AxGEPADeployableBestChain;
       };
     }
   | {
