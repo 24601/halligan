@@ -418,7 +418,14 @@ export type AxAgentPlaybookEvolveResult<OUT extends AxGenOut = AxGenOut> = {
   varianceBand?: AxAgentPlaybookVarianceBandReport;
   transfer?: AxAgentPlaybookTransferReport;
   redundancy?: AxAgentPlaybookRedundancyReport;
-  /** Anchor-vs-candidate turn / call / token cost of the final artifact. */
+  /**
+   * Anchor-vs-candidate turn / call / token cost of the final artifact: the
+   * LAST ACCEPTED candidate, against the anchor it was actually compared with
+   * (which is the previously accepted state, not the original baseline — the
+   * same re-anchoring the scalar scores do). Absent when nothing was accepted
+   * or when no evidence machinery ran. Reported beside the gain, never gated
+   * on.
+   */
   overhead?: AxAgentPlaybookOverheadReport;
   /** Evaluated once at the end; forbidden from influencing any gate. */
   sealedTest?: AxAgentPlaybookSealedTestReport;

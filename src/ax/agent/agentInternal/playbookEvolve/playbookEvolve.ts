@@ -54,6 +54,7 @@ import type {
   AxAgentPlaybookGateReport,
   AxAgentPlaybookInterval,
   AxAgentPlaybookNomination,
+  AxAgentPlaybookOverheadReport,
   AxAgentPlaybookOverheadSplit,
   AxAgentPlaybookSplitName,
   AxAgentPlaybookVarianceBand,
@@ -856,6 +857,13 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
   let heldOutSelectionComparisons = 0;
   const runWarnings: AxAgentPlaybookEvidenceWarning[] = [];
   const seenRunWarnings = new Set<string>();
+  /**
+   * The overhead of the LAST ACCEPTED candidate — the one that produced the
+   * final artifact — against the anchor it was actually compared with. Surfaced
+   * on the result so a reader who sees `overhead_exceeds_gain` in `warnings`
+   * finds the number the warning quotes instead of `undefined`.
+   */
+  let finalOverhead: AxAgentPlaybookOverheadReport | undefined;
   const registered = registeredFunctionNames(s);
   const nowIso = () => new Date(nowFn()).toISOString();
   const currentSeed = () =>
@@ -1417,6 +1425,7 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
         })();
 
         const chainAccepts = gateChainAccepts(gateReport);
+        if (legacyAccept && chainAccepts && overhead) finalOverhead = overhead;
         evidence = buildEvidenceReceipt({
           kind: 'curate',
           nomination,
@@ -1693,6 +1702,7 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
     accounting,
     applied: options?.apply === false ? 'dry_run' : 'live',
     ...(varianceBand ? { varianceBand } : {}),
+    ...(finalOverhead ? { overhead: finalOverhead } : {}),
     ...(runWarnings.length > 0 ? { warnings: runWarnings } : {}),
   };
 }

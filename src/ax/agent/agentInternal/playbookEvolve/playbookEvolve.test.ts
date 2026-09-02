@@ -1800,6 +1800,24 @@ describe('agent.playbook().evolve() legacy identity', () => {
       ],
     });
 
+    // The deep-equal above compares `records[i].prediction` and the proposal
+    // against themselves, so those parts of the identity claim cannot fail on
+    // their own. Pin the prediction's shape explicitly.
+    for (const record of result.records) {
+      expect(record.prediction?.completionType).toBe('final');
+      expect(record.prediction?.turnCount).toBeGreaterThan(0);
+      expect(record.prediction?.functionCalls).toEqual([]);
+      expect(record.prediction?.output).toEqual({ answer: 'gave-up' });
+    }
+    expect(Object.keys(result.outcomes[0]!.proposal).sort()).toEqual([
+      'clusterSignature',
+      'feedback',
+      'weaknessId',
+    ]);
+    expect(result.outcomes[0]!.proposal.weaknessId).toBe(
+      result.weaknesses[0]!.id
+    );
+
     // The new fields take exactly the documented no-option values.
     expect(result.control).toEqual({
       status: 'not_run',
@@ -2170,6 +2188,35 @@ describe('agent.playbook().evolve() compute accounting', () => {
       )
     ).rejects.toThrow(/at least one training task/);
     expect(unsubscribe).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports the accepted artifact overhead on the result, not only on the receipt', async () => {
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(TASKS, {
+      metric: scoreByAnswer,
+      maxProposals: 1,
+      gates: { validity: 'warn' },
+    });
+    const accepted = result.outcomes.find((outcome: any) => outcome.accepted);
+    expect(accepted).toBeDefined();
+    // The `overhead_exceeds_gain` warning quotes worstRelativeDelta, so a
+    // reader must be able to find the block it quotes on the result.
+    expect(result.overhead).toBeDefined();
+    expect(result.overhead).toEqual(accepted!.evidence!.overhead);
+    expect(result.overhead!.splits.length).toBeGreaterThan(0);
+  });
+
+  it('omits the result overhead when nothing was accepted', async () => {
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(TASKS, {
+      metric: async () => 0.2,
+      maxProposals: 1,
+      gates: { validity: 'warn' },
+    });
+    expect(result.outcomes.every((outcome: any) => !outcome.accepted)).toBe(
+      true
+    );
+    expect(result.overhead).toBeUndefined();
   });
 
   it('reports cost as unknown without costFor and caller_supplied with it', async () => {
