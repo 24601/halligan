@@ -1606,6 +1606,94 @@ import type {
   AxMemoryMessageValue,
 } from './mem/types.js';
 import { axSpanAttributes, axSpanEvents } from './trace/trace.js';
+import {
+  type AxTrajectoryStoreConformanceFactory,
+  type AxTrajectoryStoreConformanceFactoryOptions,
+  type AxTrajectoryStoreConformanceInstance,
+  type AxTrajectoryStoreConformanceReport,
+  runAxTrajectoryStoreConformance,
+} from './trajectory/conformance.js';
+import {
+  AxTrajectoryLog,
+  type AxTrajectoryLogEntry,
+  type AxTrajectoryLogOptions,
+  type AxTrajectoryPreparedStep,
+  type AxTrajectorySpilledStep,
+  type AxTrajectorySpillStepOptions,
+  axFreezeTrajectoryStep,
+  axPrepareTrajectoryStep,
+  axSpillTrajectoryStep,
+} from './trajectory/log.js';
+import {
+  AxInMemoryTrajectoryBlobStore,
+  AxInMemoryTrajectoryStore,
+  type AxInMemoryTrajectoryStoreOptions,
+} from './trajectory/memoryStore.js';
+import {
+  type AxTrajectoryTypeRegistryOptions,
+  axDefaultTrajectoryTypes,
+  axTrajectoryTypeRegistry,
+  axTrajectoryUnknownDescriptor,
+} from './trajectory/registry.js';
+import {
+  type AxTrajectoryResolveOptions,
+  type AxTrajectorySpillPolicy,
+  type AxTrajectorySpillRequest,
+  type AxTrajectorySpillResult,
+  axDefaultTrajectorySpillPolicy,
+  axResolveTrajectoryStep,
+  axResolveTrajectorySteps,
+  axSpillTrajectoryFields,
+  axTrajectoryInlineBytes,
+} from './trajectory/spill.js';
+import {
+  AxTrajectoryAppendError,
+  type AxTrajectoryAppendReceipt,
+  type AxTrajectoryAppendRequest,
+  AxTrajectoryBlobError,
+  type AxTrajectoryBlobPutRequest,
+  type AxTrajectoryBlobRef,
+  type AxTrajectoryBlobStore,
+  type AxTrajectoryCreateRequest,
+  type AxTrajectoryCursor,
+  AxTrajectoryCursorError,
+  type AxTrajectoryDrainBudget,
+  type AxTrajectoryDrainResult,
+  type AxTrajectoryFieldValue,
+  AxTrajectoryForkError,
+  type AxTrajectoryForkRequest,
+  type AxTrajectoryForkResult,
+  type AxTrajectoryHeader,
+  type AxTrajectoryMergeRequest,
+  AxTrajectoryQueryError,
+  type AxTrajectoryReadQuery,
+  AxTrajectoryRegistryError,
+  AxTrajectoryRollupError,
+  type AxTrajectoryStats,
+  type AxTrajectoryStep,
+  type AxTrajectoryStepClass,
+  type AxTrajectoryStore,
+  type AxTrajectoryStoreCapabilities,
+  type AxTrajectoryTailQuery,
+  type AxTrajectoryTailResult,
+  type AxTrajectoryTypeDescriptor,
+  type AxTrajectoryTypeRegistry,
+  axIsTrajectoryAppendError,
+  axIsTrajectoryBlobError,
+  axIsTrajectoryCursorError,
+  axIsTrajectoryQueryError,
+  axTrajectoryMaxStepIds,
+} from './trajectory/types.js';
+import {
+  axNormalizeTrajectoryTimestamp,
+  axTrajectoryCompactData,
+  axTrajectoryId,
+  axTrajectoryInvalidFieldPath,
+  axTrajectoryStepBytes,
+  axTrajectoryStepFingerprint,
+  axTrajectoryTruncateUtf8,
+  axTrajectoryUtf8ByteLength,
+} from './trajectory/util.js';
 import { AxUCPClient } from './ucp/client.js';
 import {
   AxUCPSchemaValidationError,
@@ -1777,6 +1865,8 @@ export { AxInMemoryBalancerStatsStore };
 export { AxInMemoryDemandStore };
 export { AxInMemoryEventStore };
 export { AxInMemoryProgramStateStore };
+export { AxInMemoryTrajectoryBlobStore };
+export { AxInMemoryTrajectoryStore };
 export { AxInteractionTimeline };
 export { AxInteractionTimelineDefaults };
 export { AxInteractionTimelineSchema };
@@ -1829,6 +1919,14 @@ export { AxTemporalValidationError };
 export { AxTestPrompt };
 export { AxTimerEventSource };
 export { AxTokenLimitError };
+export { AxTrajectoryAppendError };
+export { AxTrajectoryBlobError };
+export { AxTrajectoryCursorError };
+export { AxTrajectoryForkError };
+export { AxTrajectoryLog };
+export { AxTrajectoryQueryError };
+export { AxTrajectoryRegistryError };
+export { AxTrajectoryRollupError };
 export { AxUCPClient };
 export { AxUCPHTTPMessageSignatureError };
 export { AxUCPHTTPMessageVerifier };
@@ -1903,6 +2001,8 @@ export { axDefaultFlowLogger };
 export { axDefaultMetricsConfig };
 export { axDefaultOptimizerLogger };
 export { axDefaultOptimizerMetricsConfig };
+export { axDefaultTrajectorySpillPolicy };
+export { axDefaultTrajectoryTypes };
 export { axDemandEventObserver };
 export { axDeserializeOptimizedProgram };
 export { axEmitUsageEvent };
@@ -1928,6 +2028,7 @@ export { axFetchJsonSpeech };
 export { axFetchMultipartTranscription };
 export { axFingerprintCausalEvidence };
 export { axFrameSampler };
+export { axFreezeTrajectoryStep };
 export { axFunctionAuthorityTarget };
 export { axGetAIProfile };
 export { axGetCompatibilityReport };
@@ -1946,6 +2047,10 @@ export { axIsGrokVoiceModel };
 export { axIsOpenAIChatAudioModel };
 export { axIsOpenAIRealtimeModel };
 export { axIsOpenAIRealtimeTranscriptionModel };
+export { axIsTrajectoryAppendError };
+export { axIsTrajectoryBlobError };
+export { axIsTrajectoryCursorError };
+export { axIsTrajectoryQueryError };
 export { axMCPAPIKeyAuthentication };
 export { axMCPAppToolMeta };
 export { axMCPBasicAuthentication };
@@ -1984,12 +2089,14 @@ export { axNormalizeAppliedServiceTier };
 export { axNormalizeAxIRRuntimeCapabilities };
 export { axNormalizeOpenAIUsage };
 export { axNormalizeRequestedServiceTier };
+export { axNormalizeTrajectoryTimestamp };
 export { axNormalizeTranscriptionResponse };
 export { axOpenAIChatAudioDefaults };
 export { axOptimizableValidators };
 export { axPlaybookFailureSection };
 export { axPreferenceEvidenceLimits };
 export { axPreferenceEvidenceToMemories };
+export { axPrepareTrajectoryStep };
 export { axProcessContentForProvider };
 export { axProgramSourceDefaultNodeResourceLimits };
 export { axProgramSourceRuntimeProtocol };
@@ -2007,6 +2114,8 @@ export { axResolveMCPExecutionContext };
 export { axResolveOpenAIChatAudioConfig };
 export { axResolveOpenAIRealtimeAudioConfig };
 export { axResolveServiceTier };
+export { axResolveTrajectoryStep };
+export { axResolveTrajectorySteps };
 export { axRetractPreferenceEvidence };
 export { axRuntimeCapabilitiesToAxIR };
 export { axRuntimeCapabilitiesVersion };
@@ -2027,8 +2136,21 @@ export { axSignUCPRequest };
 export { axSnapshotAuthority };
 export { axSpanAttributes };
 export { axSpanEvents };
+export { axSpillTrajectoryFields };
+export { axSpillTrajectoryStep };
 export { axStartActiveSpanFailOpen };
 export { axStartSpanFailOpen };
+export { axTrajectoryCompactData };
+export { axTrajectoryId };
+export { axTrajectoryInlineBytes };
+export { axTrajectoryInvalidFieldPath };
+export { axTrajectoryMaxStepIds };
+export { axTrajectoryStepBytes };
+export { axTrajectoryStepFingerprint };
+export { axTrajectoryTruncateUtf8 };
+export { axTrajectoryTypeRegistry };
+export { axTrajectoryUnknownDescriptor };
+export { axTrajectoryUtf8ByteLength };
 export { axUpdateBalancerRouteStats };
 export { axUpdateMetricsConfig };
 export { axUpdateOptimizerMetricsConfig };
@@ -2056,6 +2178,7 @@ export { programSource };
 export { react };
 export { refine };
 export { runAxEventStoreConformance };
+export { runAxTrajectoryStoreConformance };
 export { s };
 
 // Type exports
@@ -2709,6 +2832,7 @@ export type { AxIRRuntimeCapabilities };
 export type { AxIRRuntimeCapabilitiesInput };
 export type { AxInMemoryDemandStoreOptions };
 export type { AxInMemoryEventStoreOptions };
+export type { AxInMemoryTrajectoryStoreOptions };
 export type { AxInputFunctionType };
 export type { AxInteractionEvent };
 export type { AxInteractionTimelineAppendResult };
@@ -3056,6 +3180,44 @@ export type { AxThoughtBlockItem };
 export type { AxTimerEventSourceOptions };
 export type { AxTokenUsage };
 export type { AxToolActivityInteractionEvent };
+export type { AxTrajectoryAppendReceipt };
+export type { AxTrajectoryAppendRequest };
+export type { AxTrajectoryBlobPutRequest };
+export type { AxTrajectoryBlobRef };
+export type { AxTrajectoryBlobStore };
+export type { AxTrajectoryCreateRequest };
+export type { AxTrajectoryCursor };
+export type { AxTrajectoryDrainBudget };
+export type { AxTrajectoryDrainResult };
+export type { AxTrajectoryFieldValue };
+export type { AxTrajectoryForkRequest };
+export type { AxTrajectoryForkResult };
+export type { AxTrajectoryHeader };
+export type { AxTrajectoryLogEntry };
+export type { AxTrajectoryLogOptions };
+export type { AxTrajectoryMergeRequest };
+export type { AxTrajectoryPreparedStep };
+export type { AxTrajectoryReadQuery };
+export type { AxTrajectoryResolveOptions };
+export type { AxTrajectorySpillPolicy };
+export type { AxTrajectorySpillRequest };
+export type { AxTrajectorySpillResult };
+export type { AxTrajectorySpillStepOptions };
+export type { AxTrajectorySpilledStep };
+export type { AxTrajectoryStats };
+export type { AxTrajectoryStep };
+export type { AxTrajectoryStepClass };
+export type { AxTrajectoryStore };
+export type { AxTrajectoryStoreCapabilities };
+export type { AxTrajectoryStoreConformanceFactory };
+export type { AxTrajectoryStoreConformanceFactoryOptions };
+export type { AxTrajectoryStoreConformanceInstance };
+export type { AxTrajectoryStoreConformanceReport };
+export type { AxTrajectoryTailQuery };
+export type { AxTrajectoryTailResult };
+export type { AxTrajectoryTypeDescriptor };
+export type { AxTrajectoryTypeRegistry };
+export type { AxTrajectoryTypeRegistryOptions };
 export type { AxTranscriptInteractionEvent };
 export type { AxTranscriptionRequest };
 export type { AxTranscriptionResponse };

@@ -1,0 +1,36 @@
+{
+  "name": "the filtered backward tail reports scanned beside exhausted",
+  "kind": "trajectory",
+  "operation": "tail_budget",
+  "note": "TypeScript-consumed in v1: conformanceSuitePaths in tools/axir/internal/axir/verify.go is a hardcoded directory list and does not include axmind, so the five generated targets do not read this file. Registering the suite is filed in the AxIR backlog.",
+  "log": {
+    "description": "One 'trajectory' header step, then 60 steps where every tenth is a 'message' and the rest are 'run'.",
+    "headerType": "trajectory",
+    "machineryType": "run",
+    "narrativeType": "message",
+    "narrativeEvery": 10,
+    "steps": 60
+  },
+  "cases": [
+    {
+      "name": "budget spent before the head is reached",
+      "query": { "limit": 5, "types": ["message"], "maxScan": 8 },
+      "expected": { "matched": 0, "scanned": 8, "exhausted": false }
+    },
+    {
+      "name": "enough matches found without reaching the head",
+      "query": { "limit": 2, "types": ["message"], "maxScan": 1000 },
+      "expected": { "matched": 2, "exhausted": false }
+    },
+    {
+      "name": "head reached with fewer matches than the limit",
+      "query": { "limit": 50, "types": ["message"], "maxScan": 1000 },
+      "expected": { "matched": 6, "exhausted": true }
+    },
+    {
+      "name": "an unregistered type matches nothing and still exhausts",
+      "query": { "limit": 3, "types": ["host.unregistered"], "maxScan": 1000 },
+      "expected": { "matched": 0, "exhausted": true }
+    }
+  ]
+}

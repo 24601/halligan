@@ -776,3 +776,39 @@ void selectedExecutableFunction;
 
 // @ts-expect-error trusted principal, clock, admission, and resolver are mandatory
 axSelectExecutableSkills([executableSkill], { capabilities: ['report.read'] });
+
+// === Trajectory surface (src/ax/trajectory) ===
+// Proves the generated barrel really exports the append-only step log, its
+// store port, the reference implementation and the normative conformance kit.
+import {
+  AxInMemoryTrajectoryStore,
+  AxTrajectoryAppendError,
+  type AxTrajectoryAppendReceipt,
+  type AxTrajectoryStep,
+  type AxTrajectoryStore,
+  type AxTrajectoryStoreConformanceReport,
+  type AxTrajectoryTailResult,
+  axResolveTrajectoryStep,
+  axTrajectoryTypeRegistry,
+  runAxTrajectoryStoreConformance,
+} from './index.js';
+
+const trajectoryStore: AxTrajectoryStore = new AxInMemoryTrajectoryStore();
+void trajectoryStore;
+void axTrajectoryTypeRegistry();
+void runAxTrajectoryStoreConformance;
+void axResolveTrajectoryStep;
+void AxTrajectoryAppendError;
+
+declare const trajectoryReceipt: AxTrajectoryAppendReceipt;
+declare const trajectoryStep: AxTrajectoryStep;
+declare const trajectoryTail: AxTrajectoryTailResult;
+declare const trajectoryConformance: AxTrajectoryStoreConformanceReport;
+const trajectorySeq: number = trajectoryReceipt.seq;
+const trajectoryType: string = trajectoryStep.type;
+const trajectoryExhausted: boolean = trajectoryTail.exhausted;
+const trajectoryAssertions: number = trajectoryConformance.assertions;
+void trajectorySeq;
+void trajectoryType;
+void trajectoryExhausted;
+void trajectoryAssertions;

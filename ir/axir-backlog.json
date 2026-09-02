@@ -1164,6 +1164,25 @@
       "verification": "TS-derived native-image routing fixture; five-language AxIR dev verifier; npm run axir:check-packages; go test ./internal/axir; focused TypeScript router tests"
     },
     {
+      "id": "axir-2026-08-25-port-advisory-demand-evidence-and-disposition-proposals",
+      "status": "open",
+      "title": "Port advisory demand evidence and disposition proposals",
+      "createdAt": "2026-08-25",
+      "sourcePR": null,
+      "sourceCommit": "ca760294f5ea4f207052c39c2218e1195103bc2a",
+      "tsPaths": ["src/ax/event/demand.ts"],
+      "portableSurface": "runtime",
+      "impact": "TypeScript exposes a provider-neutral advisory demand boundary with retained observations, calibration/provenance, explicit no-demand and uncertainty, cursor/dedupe, grant references, and observe-route integration; generated packages do not yet expose this policy/store surface.",
+      "suggestedAxirWork": [
+        "Add or update the TS-derived conformance fixture.",
+        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
+        "Run npm run axir:conformance:check and npm run test:axir."
+      ],
+      "completedAt": null,
+      "completedByCommit": null,
+      "verification": null
+    },
+    {
       "id": "axir-2026-08-25-port-axeventruntime-effect-aware-resumability",
       "status": "open",
       "title": "Port AxEventRuntime effect-aware resumability",
@@ -1180,44 +1199,6 @@
       ],
       "portableSurface": "axprogram",
       "impact": "Add the effect intent/dispatched/settled/parked state machine, resolver outcomes, effect-level replay safety, fencing, exclusive continuation admission/redrive binding, shutdown revocation, and host APIs to AxIR plus all generated language runtimes and conformance fixtures without claiming exactly-once effects.",
-      "suggestedAxirWork": [
-        "Add or update the TS-derived conformance fixture.",
-        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
-        "Run npm run axir:conformance:check and npm run test:axir."
-      ],
-      "completedAt": null,
-      "completedByCommit": null,
-      "verification": null
-    },
-    {
-      "id": "axir-2026-08-25-port-provider-neutral-temporal-interaction-timeline",
-      "status": "open",
-      "title": "Port provider-neutral temporal interaction timeline",
-      "createdAt": "2026-08-25",
-      "sourcePR": null,
-      "sourceCommit": "ca760294f5ea4f207052c39c2218e1195103bc2a",
-      "tsPaths": ["src/ax/event/timeline.ts"],
-      "portableSurface": "axprogram",
-      "impact": "Generated Python, Java, C++, Go, and Rust packages do not yet expose the bounded temporal envelope, classification, projection, and serialization semantics added to TypeScript.",
-      "suggestedAxirWork": [
-        "Add or update the TS-derived conformance fixture.",
-        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
-        "Run npm run axir:conformance:check and npm run test:axir."
-      ],
-      "completedAt": null,
-      "completedByCommit": null,
-      "verification": null
-    },
-    {
-      "id": "axir-2026-08-25-port-advisory-demand-evidence-and-disposition-proposals",
-      "status": "open",
-      "title": "Port advisory demand evidence and disposition proposals",
-      "createdAt": "2026-08-25",
-      "sourcePR": null,
-      "sourceCommit": "ca760294f5ea4f207052c39c2218e1195103bc2a",
-      "tsPaths": ["src/ax/event/demand.ts"],
-      "portableSurface": "runtime",
-      "impact": "TypeScript exposes a provider-neutral advisory demand boundary with retained observations, calibration/provenance, explicit no-demand and uncertainty, cursor/dedupe, grant references, and observe-route integration; generated packages do not yet expose this policy/store surface.",
       "suggestedAxirWork": [
         "Add or update the TS-derived conformance fixture.",
         "Update AxIR/Core or descriptor data to match the portable TS behavior.",
@@ -1467,6 +1448,25 @@
       ],
       "portableSurface": "axagent",
       "impact": "Generated runtimes do not yet expose the optional principal-scoped preference evidence contract, nested and per-record-byte malformed isolation without consuming the valid corpus budget, current-stream versus immutable historical receipt binding, strong-claim self-contradiction resolution, content-free erase tombstones, allowlisted retraction invariants, monotonic stream/epoch lifecycle helpers, frozen publications, or memory adapter.",
+      "suggestedAxirWork": [
+        "Add or update the TS-derived conformance fixture.",
+        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
+        "Run npm run axir:conformance:check and npm run test:axir."
+      ],
+      "completedAt": null,
+      "completedByCommit": null,
+      "verification": null
+    },
+    {
+      "id": "axir-2026-08-25-port-provider-neutral-temporal-interaction-timeline",
+      "status": "open",
+      "title": "Port provider-neutral temporal interaction timeline",
+      "createdAt": "2026-08-25",
+      "sourcePR": null,
+      "sourceCommit": "ca760294f5ea4f207052c39c2218e1195103bc2a",
+      "tsPaths": ["src/ax/event/timeline.ts"],
+      "portableSurface": "axprogram",
+      "impact": "Generated Python, Java, C++, Go, and Rust packages do not yet expose the bounded temporal envelope, classification, projection, and serialization semantics added to TypeScript.",
       "suggestedAxirWork": [
         "Add or update the TS-derived conformance fixture.",
         "Update AxIR/Core or descriptor data to match the portable TS behavior.",
@@ -1813,6 +1813,51 @@
       "completedAt": null,
       "completedByCommit": null,
       "verification": null
+    },
+    {
+      "id": "axir-2026-09-02-axtrajectory-append-only-step-log-blob-spill-filtered-backward-t",
+      "status": "open",
+      "title": "AxTrajectory append-only step log, blob spill, filtered backward tail, and durable per-consumer cursors",
+      "createdAt": "2026-09-02",
+      "sourcePR": 87,
+      "sourceCommit": "c2f8a0c42c4ad93d05c0abacb9a5b549ca431101",
+      "tsPaths": [
+        "src/ax/trajectory/types.ts",
+        "src/ax/trajectory/registry.ts",
+        "src/ax/trajectory/spill.ts",
+        "src/ax/trajectory/log.ts",
+        "src/ax/trajectory/memoryStore.ts",
+        "src/ax/trajectory/conformance.ts"
+      ],
+      "portableSurface": "runtime",
+      "impact": "New portable TS behaviour: append-only step model with dense gap-free per-trajectory seq, registry-declared narrative/machinery/structural classification with an open-world unknown descriptor, generic size-based blob spill with a digest-verified read-side resolver and a single-fetch batch pre-pass, bounded reads throughout (no unbounded read, maxScan-bounded filtered backward tail reporting scanned beside exhausted, step and byte drain budgets, a 256-id fetch cap), durable per-consumer cursors, and a fork/merge DAG with bidirectional references. Steps are deep-frozen once indexed, so append-only immutability is a runtime property rather than a type-level one, and a durable cursor resolves its frame location against the index so a tolerant parse that drops an interior frame fails closed instead of silently renumbering every later step. Pinned by the executable runAxTrajectoryStoreConformance contract. Not yet expressed in AxIR.",
+      "suggestedAxirWork": [
+        "Add or update the TS-derived conformance fixture.",
+        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
+        "Run npm run axir:conformance:check and npm run test:axir."
+      ],
+      "completedAt": null,
+      "completedByCommit": null,
+      "verification": null
+    },
+    {
+      "id": "axir-2026-09-02-register-the-axmind-conformance-suite-with-the-axir-verifier-and",
+      "status": "open",
+      "title": "Register the axmind conformance suite with the AxIR verifier and the five target runners",
+      "createdAt": "2026-09-02",
+      "sourcePR": 87,
+      "sourceCommit": "c2f8a0c42c4ad93d05c0abacb9a5b549ca431101",
+      "tsPaths": ["ir/conformance/axmind"],
+      "portableSurface": "runtime",
+      "impact": "ir/conformance/axmind/*.json are consumed only by TypeScript today (src/ax/trajectory/fixtures.test.ts). conformanceSuitePaths in tools/axir/internal/axir/verify.go is a hardcoded directory list and the coverage manifest in tools/axir/internal/axir/codegen.go is a hardcoded suite table, so adding the suite requires a Go change plus a runner in each of python/java/cpp/go/rust.",
+      "suggestedAxirWork": [
+        "Add or update the TS-derived conformance fixture.",
+        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
+        "Run npm run axir:conformance:check and npm run test:axir."
+      ],
+      "completedAt": null,
+      "completedByCommit": null,
+      "verification": null
     }
   ],
   "nonPortableExemptions": [
@@ -1828,6 +1873,15 @@
       "tags": ["claim-complete", "target-native", "public-inventory"],
       "reason": "The claim-complete AxAgent gate inventories the entire inherited TypeScript surface. Members outside the enrolled skills, memories, ranker, observer, prompt, forward, and state lifecycle contract retain target-native generated APIs or TypeScript coordinator/DSP semantics and are explicitly not claimed byte-for-byte portable by this enrollment.",
       "createdAt": "2026-07-22"
+    },
+    {
+      "id": "axtrajectory-jsonl-store-node-only",
+      "surface": "runtime",
+      "paths": ["src/tools/trajectory/jsonl.ts"],
+      "scopedFiles": [],
+      "tags": ["node-only"],
+      "reason": "Node-only file-backed trajectory store; requires node:fs and cannot run in the browser-compatible src/ax tree. The portable contract it implements is AxTrajectoryStore, which is tracked separately.",
+      "createdAt": "2026-09-02"
     },
     {
       "id": "webllm-browser-only",
