@@ -67,6 +67,7 @@ import {
   MAX_FEEDBACK_SIGNALS,
   mergeFailureSignals,
 } from './failureReport.js';
+import { rebuildSkillsSearch } from './initialization.js';
 import {
   createAgentOptimizeMetric,
   createOptimizationProgram,
@@ -78,6 +79,7 @@ import {
   streamingForwardPipeline,
 } from './pipelineForward.js';
 import { forwardPipelineForEvaluation } from './pipelineForwardForEvaluation.js';
+import type { AxAgentCatalogSkill } from './skillsTypes.js';
 import {
   appendCitationsOutputField,
   buildFinalResponderSignature,
@@ -994,6 +996,105 @@ export class AxAgent<IN extends AxGenIn, OUT extends AxGenOut>
       ...((stage.instructionAddenda as string[] | undefined) ?? []),
       trimmed,
     ];
+    stage._buildSplitPrograms?.();
+  }
+
+  /**
+   * Set (or, with no `text`, clear) a NAMED standing instruction slot on the
+   * executor actor's prompt.
+   *
+   * `addActorInstruction` appends and can never be un-applied, so it cannot
+   * back an installable artifact: installing the same tree twice would stack
+   * the same paragraph twice and uninstalling it would be impossible. A slot
+   * replaces or clears by name, which makes an install idempotent and exactly
+   * reversible. Slots render after the anonymous addenda, in slot-name order.
+   *
+   * Writes the EXECUTOR stage only — the same channel `addActorInstruction`
+   * writes. There is no responder instruction channel.
+   */
+  public setActorInstructionSlot(slot: string, text?: string): void {
+    const name = slot.trim();
+    if (!name) {
+      throw new Error(
+        'AxAgent.setActorInstructionSlot(): slot must be a non-empty string.'
+      );
+    }
+    const stage: any = this.executor;
+    const slots: Map<string, string> =
+      (stage.instructionSlots as Map<string, string> | undefined) ?? new Map();
+    const trimmed = text?.trim();
+    const had = slots.has(name);
+    if (trimmed) {
+      if (slots.get(name) === trimmed) {
+        return;
+      }
+      slots.set(name, trimmed);
+    } else {
+      if (!had) {
+        return;
+      }
+      slots.delete(name);
+    }
+    stage.instructionSlots = slots;
+    stage._buildSplitPrograms?.();
+  }
+
+  /**
+   * Set (or, with no `skills`, clear) a NAMED skills-catalog slot, merged
+   * after the construction-time catalog in slot-name order.
+   *
+   * Fails closed in two directions, because the skills surface is decided at
+   * construction and a slot must never silently change what the host chose:
+   *
+   * 1. an agent constructed with a host `onSkillsSearch` is refused — the host
+   *    callback always wins over the catalog, and replacing it with catalog
+   *    search would invert that precedence;
+   * 2. an agent constructed without a skills catalog is refused — the Available
+   *    Skills prompt section and the `discover({ skills })` primitive are not
+   *    declared for it and cannot be enabled after the fact.
+   *
+   * On success the merged catalog, the search callback, and BOTH advisory hint
+   * flags are recomputed; otherwise injected skills would never be hinted.
+   */
+  public setSkillsCatalogSlot(
+    slot: string,
+    skills?: readonly AxAgentCatalogSkill[]
+  ): void {
+    const name = slot.trim();
+    if (!name) {
+      throw new Error(
+        'AxAgent.setSkillsCatalogSlot(): slot must be a non-empty string.'
+      );
+    }
+    const stage: any = this.executor;
+    if (stage.hostSkillsSearch !== undefined) {
+      throw new Error(
+        'AxAgent.setSkillsCatalogSlot(): this agent was constructed with a host onSkillsSearch, which always wins over the catalog. Refusing to replace it with catalog search.'
+      );
+    }
+    const base = stage.skillsCatalogBase as readonly unknown[] | undefined;
+    if (!Array.isArray(base) || base.length === 0) {
+      throw new Error(
+        'AxAgent.setSkillsCatalogSlot(): this agent was constructed without a skills catalog, so the skills prompt section and discover({ skills }) are not declared and cannot be enabled later.'
+      );
+    }
+    const slots: Map<string, readonly AxAgentCatalogSkill[]> =
+      (stage.skillsCatalogSlots as
+        | Map<string, readonly AxAgentCatalogSkill[]>
+        | undefined) ?? new Map();
+    if (skills === undefined || skills.length === 0) {
+      if (!slots.has(name)) {
+        return;
+      }
+      slots.delete(name);
+    } else {
+      slots.set(name, [...skills]);
+    }
+    stage.skillsCatalogSlots = slots;
+    rebuildSkillsSearch(stage);
+    // The Available Skills prompt section is rendered into the cached stage
+    // definition, so the catalog change is invisible until the split programs
+    // are rebuilt.
     stage._buildSplitPrograms?.();
   }
 

@@ -181,6 +181,42 @@ export class ActorAgentRLM<
    * clobber each other. Process-local: not serialized into `AxAgentState`.
    */
   private instructionAddenda?: string[];
+  /**
+   * Managed, named instruction slots (set via
+   * `agent.setActorInstructionSlot(...)`). Unlike `instructionAddenda`, a slot
+   * is replaceable and clearable, which is what makes installing a harness
+   * tree idempotent and exactly reversible. Process-local, like the addenda.
+   */
+  private instructionSlots?: Map<string, string>;
+  /**
+   * Managed, named skills-catalog slots (set via
+   * `agent.setSkillsCatalogSlot(...)`), merged after `skillsCatalogBase` in
+   * slot-name order. Process-local.
+   */
+  private skillsCatalogSlots?: Map<
+    string,
+    readonly import('./agentInternal/skillsTypes.js').AxAgentCatalogSkill[]
+  >;
+  /**
+   * The catalog the agent was CONSTRUCTED with, kept apart from the effective
+   * `skillsCatalog` so slot installs and removals never lose it.
+   */
+  private skillsCatalogBase?: readonly import('./agentInternal/skillsTypes.js').AxAgentCatalogSkill[];
+  /**
+   * The host's own `onSkillsSearch`, when one was supplied. Its presence is
+   * what makes `setSkillsCatalogSlot` refuse: the host callback always wins
+   * over the catalog, so silently replacing it would invert that precedence.
+   */
+  private hostSkillsSearch?: import('./agentInternal/skillsTypes.js').AxAgentSkillsSearchFn;
+  /**
+   * The skill environment resolved ONCE at construction. Catalog eligibility
+   * is a function of it, and the Available Skills index is built at
+   * signature-build time, so recomputing it per run would churn the prompt
+   * cache. Held so a slot rebuild filters by the same environment.
+   */
+  private skillEnvironment?: Readonly<
+    import('./skillCatalog.js').AxAgentSkillEnvironment
+  >;
   private executorModelPolicy?: AxResolvedExecutorModelPolicy;
   private judgeOptions?: AxAgentJudgeOptions;
   private recursionForwardOptions?: AxAgentRecursionOptions;
