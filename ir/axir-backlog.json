@@ -8,7 +8,9 @@
       "createdAt": "2026-06-07",
       "sourcePR": null,
       "sourceCommit": "4e8da4ba",
-      "tsPaths": ["src/ax/mcp"],
+      "tsPaths": [
+        "src/ax/mcp"
+      ],
       "portableSurface": "axmcp",
       "impact": "Generated Python, Java, C++, Go, and Rust packages do not yet expose the modern MCP client, transports, OAuth discovery, or SSRF guard behavior.",
       "suggestedAxirWork": [
@@ -49,7 +51,9 @@
       "createdAt": "2026-06-24",
       "sourcePR": 556,
       "sourceCommit": "2d1a5f96f033640bf4e892e866fde99bc92e8268",
-      "tsPaths": ["src/ax/ai"],
+      "tsPaths": [
+        "src/ax/ai"
+      ],
       "portableSurface": "axai",
       "impact": "Generated Python/Java/C++/Go/Rust packages still map Anthropic streaming error events (overloaded_error/api_error/rate_limit_error) to refusals instead of retryable status errors, and lack the balancer's 529 retryability, pre-content streaming-overload retry-with-backoff, and mid-stream failure recording — so transient Anthropic errors hard-fail there with no retry or failover.",
       "suggestedAxirWork": [
@@ -117,7 +121,9 @@
       "createdAt": "2026-07-01",
       "sourcePR": null,
       "sourceCommit": "6d7286ce",
-      "tsPaths": ["src/ax/agent/agentInternal/coordinator.ts"],
+      "tsPaths": [
+        "src/ax/agent/agentInternal/coordinator.ts"
+      ],
       "portableSurface": "axagent",
       "impact": "In TS the memories block keeps its prompt-cache breakpoint after the agent rebuilds its signature via setSignature(); a narrow coordinator fix restored this. Generated Python/Java/C++/Go/Rust ports may drop the memories cache breakpoint when the signature is rebuilt mid-run, losing prompt-cache reuse for the memories section and paying full tokens for it every turn.",
       "suggestedAxirWork": [
@@ -290,7 +296,9 @@
       "createdAt": "2026-07-12",
       "sourcePR": null,
       "sourceCommit": "9c0520371669a553eed605351fdd5417a734da1f",
-      "tsPaths": ["src/ax/event"],
+      "tsPaths": [
+        "src/ax/event"
+      ],
       "portableSurface": "axprogram",
       "impact": "Generated Python, Java, C++, Go, and Rust now enforce strict same-instance retry ordering and normalize callback/default event input through the destination signature, including cloning accepted values, stripping undeclared fields, and rejecting invalid values before invocation.",
       "suggestedAxirWork": [
@@ -309,7 +317,9 @@
       "createdAt": "2026-07-12",
       "sourcePR": null,
       "sourceCommit": "47856347b35aed15f2ec0f7884c235f0868c3f88",
-      "tsPaths": ["src/ax/mcp/client.ts"],
+      "tsPaths": [
+        "src/ax/mcp/client.ts"
+      ],
       "portableSurface": "axmcp",
       "impact": "Generated Python, Java, C++, Go, and Rust now expose catalog snapshots, explicit/all/selector subscription policies, logical ownership, dynamic catalog reconciliation, reconnect restoration, and real Streamable HTTP/SSE wake/resume behavior.",
       "suggestedAxirWork": [
@@ -430,7 +440,10 @@
       "createdAt": "2026-07-14",
       "sourcePR": 561,
       "sourceCommit": "5dfd044af5b6ac2c1839a40262286fec7c55e2ec",
-      "tsPaths": ["src/ax/ai/anthropic/types.ts", "src/ax/ai/anthropic/api.ts"],
+      "tsPaths": [
+        "src/ax/ai/anthropic/types.ts",
+        "src/ax/ai/anthropic/api.ts"
+      ],
       "portableSurface": "axai",
       "impact": "TS now sets thinking.display on the adaptive request: display='summarized' by default (gated on showThoughts) so the human-readable reasoning summary is returned, or 'omitted' when showThoughts===false. The Anthropic IR's adaptive branch (provider.axir, is_adaptive) builds thinking={type:'adaptive'} with no display field, so generated Python/Java/C++/Go/Rust targets inherit Anthropic's server default of display='omitted' on Sonnet 5 / Opus 4.7+ — the model still thinks and bills, but streams empty thinking text, and there is no way to request the summary. Fix: mirror the TS derivation by setting thinking['display'] in the is_adaptive block from the showThoughts option (summarized unless showThoughts is false).",
       "suggestedAxirWork": [
@@ -504,7 +517,10 @@
       "createdAt": "2026-07-21",
       "sourcePR": null,
       "sourceCommit": "f1d93bbcc79a4223e21c4197cf875a23e889c37f",
-      "tsPaths": ["src/ax/ai/balance.ts", "src/ax/ai/balance_adaptive.ts"],
+      "tsPaths": [
+        "src/ax/ai/balance.ts",
+        "src/ax/ai/balance_adaptive.ts"
+      ],
       "portableSurface": "axai",
       "impact": "Adds opt-in chat routing based on shared failure EWMA, log-latency Thompson sampling, deadline risk, and estimated provider cost.",
       "suggestedAxirWork": [
@@ -523,7 +539,9 @@
       "createdAt": "2026-07-21",
       "sourcePR": null,
       "sourceCommit": "1acfd7dede33f7de6c9e2c56a6457bfcec9c95a0",
-      "tsPaths": ["src/ax/ai/google-gemini"],
+      "tsPaths": [
+        "src/ax/ai/google-gemini"
+      ],
       "portableSurface": "axai",
       "impact": "TypeScript exposes the new Gemini 3.6 Flash and 3.5 Flash-Lite model IDs, catalog pricing and limits, explicit context caching, and server-managed sampling behavior. Generated Python, Java, C++, Go, and Rust providers do not yet expose equivalent model metadata or omit temperature, top_p, and top_k for these models.",
       "suggestedAxirWork": [
@@ -609,7 +627,9 @@
       "createdAt": "2026-07-29",
       "sourcePR": null,
       "sourceCommit": "8b69691ef0fb0d957428f198de38354b46b26069",
-      "tsPaths": ["src/ax/mcp"],
+      "tsPaths": [
+        "src/ax/mcp"
+      ],
       "portableSurface": "axmcp",
       "impact": "TypeScript gains a dual-era MCP client for the stateless 2026-07-28 protocol while generated Python, Java, C++, Go, and Rust clients remain on the 2025-11-25 lifecycle.",
       "suggestedAxirWork": [
@@ -628,7 +648,9 @@
       "createdAt": "2026-07-29",
       "sourcePR": null,
       "sourceCommit": "4d479b97f933b977c6c79d98fe2fc4b984fb7b96",
-      "tsPaths": ["src/ax/mcp/client.ts"],
+      "tsPaths": [
+        "src/ax/mcp/client.ts"
+      ],
       "portableSurface": "axmcp",
       "impact": "Generated Python, Java, C++, Go, and Rust clients still initialize only the 2025-11-25 stateful lifecycle and do not probe server/discover, classify and cache an endpoint era, retry -32022 with a mutual version, or expose discover and getEra.",
       "suggestedAxirWork": [
@@ -647,7 +669,9 @@
       "createdAt": "2026-07-29",
       "sourcePR": null,
       "sourceCommit": "4d479b97f933b977c6c79d98fe2fc4b984fb7b96",
-      "tsPaths": ["src/ax/mcp/transports/httpStreamTransport.ts"],
+      "tsPaths": [
+        "src/ax/mcp/transports/httpStreamTransport.ts"
+      ],
       "portableSurface": "axmcp",
       "impact": "Generated Python, Java, C++, Go, and Rust Streamable HTTP transports still build legacy session headers and do not derive Mcp-Method or Mcp-Name, validate RFC 9110 header values, or omit Mcp-Session-Id for modern requests.",
       "suggestedAxirWork": [
@@ -666,7 +690,9 @@
       "createdAt": "2026-07-29",
       "sourcePR": null,
       "sourceCommit": "4d479b97f933b977c6c79d98fe2fc4b984fb7b96",
-      "tsPaths": ["src/ax/mcp/cache.ts"],
+      "tsPaths": [
+        "src/ax/mcp/cache.ts"
+      ],
       "portableSurface": "axmcp",
       "impact": "Generated Python, Java, C++, Go, and Rust catalog and resource readers ignore 2026-07-28 ttlMs and cacheScope metadata and lack the CacheableResult refresh and cache-expiry contract.",
       "suggestedAxirWork": [
@@ -685,7 +711,9 @@
       "createdAt": "2026-07-29",
       "sourcePR": null,
       "sourceCommit": "4d479b97f933b977c6c79d98fe2fc4b984fb7b96",
-      "tsPaths": ["src/ax/mcp/oauth/oauthHelper.ts"],
+      "tsPaths": [
+        "src/ax/mcp/oauth/oauthHelper.ts"
+      ],
       "portableSurface": "axmcp",
       "impact": "Generated Python, Java, C++, Go, and Rust OAuth surfaces are currently stubs, so the RFC 9207 authorization-response iss check is a near-noop until their OAuth authorization-code flows become functional.",
       "suggestedAxirWork": [
@@ -704,7 +732,9 @@
       "createdAt": "2026-07-29",
       "sourcePR": null,
       "sourceCommit": "4d479b97f933b977c6c79d98fe2fc4b984fb7b96",
-      "tsPaths": ["src/ax/mcp/tasksV2.ts"],
+      "tsPaths": [
+        "src/ax/mcp/tasksV2.ts"
+      ],
       "portableSurface": "axmcp",
       "impact": "Generated Python, Java, C++, Go, and Rust clients implement the legacy task draft only and do not negotiate io.modelcontextprotocol/tasks, expose task outcomes and tasks/update input, or consume embedded terminal results and errors.",
       "suggestedAxirWork": [
@@ -723,7 +753,9 @@
       "createdAt": "2026-07-29",
       "sourcePR": null,
       "sourceCommit": "4d479b97f933b977c6c79d98fe2fc4b984fb7b96",
-      "tsPaths": ["src/ax/mcp/meta.ts"],
+      "tsPaths": [
+        "src/ax/mcp/meta.ts"
+      ],
       "portableSurface": "axmcp",
       "impact": "Generated Python, Java, C++, Go, and Rust clients do not attach 2026-07-28 protocolVersion and clientCapabilities metadata to every request, leaving a zero-footprint modern metadata boundary in the generated ports.",
       "suggestedAxirWork": [
@@ -742,7 +774,9 @@
       "createdAt": "2026-07-29",
       "sourcePR": null,
       "sourceCommit": "4d479b97f933b977c6c79d98fe2fc4b984fb7b96",
-      "tsPaths": ["src/ax/mcp/client.ts"],
+      "tsPaths": [
+        "src/ax/mcp/client.ts"
+      ],
       "portableSurface": "axmcp",
       "impact": "Generated Python, Java, C++, Go, and Rust event adapters still use legacy resources/subscribe plus GET/SSE and Last-Event-ID; they do not issue or restart subscriptions/listen POST streams with modern interests.",
       "suggestedAxirWork": [
@@ -761,7 +795,9 @@
       "createdAt": "2026-07-29",
       "sourcePR": null,
       "sourceCommit": "4d479b97f933b977c6c79d98fe2fc4b984fb7b96",
-      "tsPaths": ["src/ax/mcp/mrtr.ts"],
+      "tsPaths": [
+        "src/ax/mcp/mrtr.ts"
+      ],
       "portableSurface": "axmcp",
       "impact": "Generated Python, Java, C++, Go, and Rust clients initially could not fulfill modern input_required rounds. This completed first tranche deliberately covered roots only and is superseded by the MRTR elicitation host-callback tranche; sampling remains outside the generated-port scope.",
       "suggestedAxirWork": [
@@ -780,7 +816,9 @@
       "createdAt": "2026-07-30",
       "sourcePR": null,
       "sourceCommit": "4f0d018f",
-      "tsPaths": ["src/ax/mcp/client.ts"],
+      "tsPaths": [
+        "src/ax/mcp/client.ts"
+      ],
       "portableSurface": "axmcp",
       "impact": "TypeScript can dispatch a legacy server-initiated elicitation/create request through the host handler, while generated clients currently expose elicitation only inside modern MRTR input rounds; Rust and C++ also lack general inbound server-request plumbing.",
       "suggestedAxirWork": [
@@ -799,7 +837,10 @@
       "createdAt": "2026-07-30",
       "sourcePR": null,
       "sourceCommit": "4f0d018f",
-      "tsPaths": ["src/ax/mcp/mrtr.ts", "src/ax/mcp/client.ts"],
+      "tsPaths": [
+        "src/ax/mcp/mrtr.ts",
+        "src/ax/mcp/client.ts"
+      ],
       "portableSurface": "axmcp",
       "impact": "The generated Python, Java, C++, Go, and Rust clients can fulfill roots-only modern MRTR rounds but lack host elicitation callbacks and can advertise sampling or elicitation option keys they cannot execute.",
       "suggestedAxirWork": [
@@ -818,7 +859,9 @@
       "createdAt": "2026-07-30",
       "sourcePR": null,
       "sourceCommit": "4f0d018f",
-      "tsPaths": ["src/ax/mcp/client.ts"],
+      "tsPaths": [
+        "src/ax/mcp/client.ts"
+      ],
       "portableSurface": "axmcp",
       "impact": "TypeScript can fulfill input_required task status through tasks/update and continue polling, while generated clients currently auto-await only working and terminal task states and do not run the input-request fulfillment loop.",
       "suggestedAxirWork": [
@@ -864,7 +907,9 @@
       "createdAt": "2026-07-31",
       "sourcePR": null,
       "sourceCommit": "9e4f3ed15f28dcc891556cc611ed7da997bb9aac",
-      "tsPaths": ["src/ax/mcp/oauth/oauthHelper.ts"],
+      "tsPaths": [
+        "src/ax/mcp/oauth/oauthHelper.ts"
+      ],
       "portableSurface": "axmcp",
       "impact": "Generated Python, Java, C++, Go, and Rust OAuth transports fabricate bearer tokens instead of performing RFC 9728 discovery, PKCE authorization-code or client-credentials exchange, 60-second-skew refresh, RFC 8707 resource binding, and RFC 9207 issuer validation against the discovered authorization server.",
       "suggestedAxirWork": [
@@ -1020,7 +1065,10 @@
       "createdAt": "2026-08-12",
       "sourcePR": 576,
       "sourceCommit": "2215088b466141dc82c31b8db9206c64295ada6a",
-      "tsPaths": ["src/ax/ai/anthropic/info.ts", "src/ax/ai/catalog.test.ts"],
+      "tsPaths": [
+        "src/ax/ai/anthropic/info.ts",
+        "src/ax/ai/catalog.test.ts"
+      ],
       "portableSurface": "axai",
       "impact": "Generated Python, Java, C++, Go, and Rust catalogs still embed the pre-correction Claude Sonnet 5 rates ($3/$15 per 1M, $0.30 cache read, $3.75 cache write), so cost estimates on those targets are ~50% high and cheapest-first model ordering ranks Sonnet 5 above its true cost.",
       "suggestedAxirWork": [
@@ -1039,7 +1087,9 @@
       "createdAt": "2026-08-13",
       "sourcePR": null,
       "sourceCommit": "83468e8c20e760ece48dc921c67c2bc874860f3f",
-      "tsPaths": ["src/ax/ai/google-gemini"],
+      "tsPaths": [
+        "src/ax/ai/google-gemini"
+      ],
       "portableSurface": "axai",
       "impact": "TypeScript should expose the Gemini 3.7 Flash model ID, catalog metadata, explicit context caching, and server-managed sampling behavior; generated language providers remain unchanged.",
       "suggestedAxirWork": [
@@ -1104,7 +1154,10 @@
       "createdAt": "2026-08-15",
       "sourcePR": null,
       "sourceCommit": "30ae9feee1833307577cc43408d9c0256f8693d7",
-      "tsPaths": ["src/ax/dsp/prompt.ts", "src/ax/agent/templates/dsp/dspy.md"],
+      "tsPaths": [
+        "src/ax/dsp/prompt.ts",
+        "src/ax/agent/templates/dsp/dspy.md"
+      ],
       "portableSurface": "axgen",
       "impact": "Custom AxGen instructions must compose with identity, tools, exact output wire keys, nested shapes, examples, and formatting rules in TypeScript and every AxIR-generated package instead of replacing the structured prompt.",
       "suggestedAxirWork": [
@@ -1170,7 +1223,9 @@
       "createdAt": "2026-08-25",
       "sourcePR": null,
       "sourceCommit": "ca760294f5ea4f207052c39c2218e1195103bc2a",
-      "tsPaths": ["src/ax/event/demand.ts"],
+      "tsPaths": [
+        "src/ax/event/demand.ts"
+      ],
       "portableSurface": "runtime",
       "impact": "TypeScript exposes a provider-neutral advisory demand boundary with retained observations, calibration/provenance, explicit no-demand and uncertainty, cursor/dedupe, grant references, and observe-route integration; generated packages do not yet expose this policy/store surface.",
       "suggestedAxirWork": [
@@ -1464,7 +1519,9 @@
       "createdAt": "2026-08-25",
       "sourcePR": null,
       "sourceCommit": "ca760294f5ea4f207052c39c2218e1195103bc2a",
-      "tsPaths": ["src/ax/event/timeline.ts"],
+      "tsPaths": [
+        "src/ax/event/timeline.ts"
+      ],
       "portableSurface": "axprogram",
       "impact": "Generated Python, Java, C++, Go, and Rust packages do not yet expose the bounded temporal envelope, classification, projection, and serialization semantics added to TypeScript.",
       "suggestedAxirWork": [
@@ -1483,7 +1540,10 @@
       "createdAt": "2026-08-25",
       "sourcePR": 18,
       "sourceCommit": "ca760294f5ea4f207052c39c2218e1195103bc2a",
-      "tsPaths": ["src/ax/ai/index.ts", "src/ax/ai/visual"],
+      "tsPaths": [
+        "src/ax/ai/index.ts",
+        "src/ax/ai/visual"
+      ],
       "portableSurface": "axai",
       "impact": "TypeScript hosts can apply revision-, freshness-, authority-, change-, and rolling-budget-aware selection to host-captured visual observations; generated language packages do not yet expose the AxVisualObservation or AxFrameSampler policy.",
       "suggestedAxirWork": [
@@ -1624,7 +1684,9 @@
       "createdAt": "2026-08-25",
       "sourcePR": 9,
       "sourceCommit": "ef6087a382f2275cfc9dd7e5f90ea4acadabc1c6",
-      "tsPaths": ["src/ax/event/components.ts"],
+      "tsPaths": [
+        "src/ax/event/components.ts"
+      ],
       "portableSurface": "axprogram",
       "impact": "TypeScript exposes a trusted process-local event integration manager with stable component IDs and versions, dependency ordering, scoped reverse disposers, transactional activation rollback, serialized transitions, cooperative abort, inspectable diagnostics, and manager-visible hot replacement. Generated Python, Java, C++, Go, and Rust event runtimes retain their existing source lifecycle but do not expose this generic host component API.",
       "suggestedAxirWork": [
@@ -1693,7 +1755,10 @@
       "createdAt": "2026-08-26",
       "sourcePR": null,
       "sourceCommit": "ea3c3402eba063239e48fa132e0472dc3f908c96",
-      "tsPaths": ["src/ax/event/runtime.ts", "src/ax/event/types.ts"],
+      "tsPaths": [
+        "src/ax/event/runtime.ts",
+        "src/ax/event/types.ts"
+      ],
       "portableSurface": "axprogram",
       "impact": "TypeScript event targets can defer retained-session scheduler dispatch until staged continuations are durably registered, preventing inline terminal events from racing continuation ownership. Generated runtimes persist continuations only after invocation and do not expose or execute this post-registration callback boundary.",
       "suggestedAxirWork": [
@@ -1712,7 +1777,9 @@
       "createdAt": "2026-08-26",
       "sourcePR": 4,
       "sourceCommit": "3d515e18fb8ae707eec068749c60355f546a7aee",
-      "tsPaths": ["src/ax/agent"],
+      "tsPaths": [
+        "src/ax/agent"
+      ],
       "portableSurface": "axagent",
       "impact": "TypeScript agent.playbook().evolve() can require semantic train/validation disjointness and complete held-out evidence, fail closed on insufficient budget or evaluator errors, and prevent verify:false bypass; generated language runtimes retain only the permissive verify gate.",
       "suggestedAxirWork": [
@@ -1778,7 +1845,9 @@
       "createdAt": "2026-08-28",
       "sourcePR": null,
       "sourceCommit": "2eb335322230bc3a33ccca9744d55719063c29df",
-      "tsPaths": ["ir/axcore/ai.axir"],
+      "tsPaths": [
+        "ir/axcore/ai.axir"
+      ],
       "portableSurface": "axai",
       "impact": "Generated Python, Java, C++, Go, and Rust provider streams currently buffer complete HTTP response bodies before exposing normalized deltas, preventing time-to-first-token parity, prompt cancellation, and TypeScript-equivalent pre-content versus mid-stream failure behavior.",
       "suggestedAxirWork": [
@@ -1821,7 +1890,9 @@
       "createdAt": "2026-09-02",
       "sourcePR": 98,
       "sourceCommit": "b3c28f0339fdafaa0069a24b6261f72f9ded4a7e",
-      "tsPaths": ["src/ax/agent/callTimeSkills.ts"],
+      "tsPaths": [
+        "src/ax/agent/callTimeSkills.ts"
+      ],
       "portableSurface": "axagent",
       "impact": "Review-driven refinement of the call-time skill injection entry for PR #98. New portable rule: a callTimeSkills binding that names a skillsCatalog ID is re-resolved at RUN START through the same two catalog gates every other retrieval path uses - requires-eligibility against the run's declared skill environment, and the retrieval-time authority re-check that produces the denied set - and the run is REFUSED with a distinct ineligible_bound_skill / denied_bound_skill detail when either gate hid the skill. This is fail-closed by design: silently dropping the skill while still intercepting would leave the actor blocked on a call it may not make with no procedure to read, and silently executing would make both gates advisory. The ordering is part of the rule: the binding table must be opened AFTER the retrieval gate is computed, because the gate is time- and authority-varying (an expired grant or revoked trajectory parks a skill mid-lifecycle) while a binding is static host configuration. An INLINE skill is not gated - host-supplied literal text has nothing to be eligible for and no provenance to re-check, the same posture as preset skills. Two further portable rules land with it: a host 'when' predicate (or the committed-state read behind it) that THROWS falls through to the normal call path rather than propagating, because the interception runs synchronously inside the actor's await and a propagated throw would become an error turn AND would never charge the injection budget, leaving the re-draft loop unbounded; and a predicate result that is not exactly true does not intercept. maxInjections is bounded above at 100.",
       "suggestedAxirWork": [
@@ -1864,7 +1935,9 @@
       "createdAt": "2026-09-02",
       "sourcePR": 96,
       "sourceCommit": "67a519be8ae67845f1c8358e60684a1d0cc1ce1d",
-      "tsPaths": ["src/ax/agent/agentInternal/agentLearning.ts"],
+      "tsPaths": [
+        "src/ax/agent/agentInternal/agentLearning.ts"
+      ],
       "portableSurface": "axagent",
       "impact": "AxAgentOptions gains an optional learning config; the coordinator gains learn(), getLearn(), setActorInstructionSlot(), getActorInstructionSlot(), setSkillsCatalogSlot(), getSkillsCatalogSlot() and hasContinuousPlaybookLearning(). Named instruction slots replace or clear by name and render after the anonymous addenda in slot-name order; named skills-catalog slots merge after the construction-time catalog and recompute the merged catalog, the search callback and both advisory hint flags, refusing an agent constructed with a host onSkillsSearch or without a catalog. Recording lives in AxAgentLearning.run(), outside the agent runtime scope; forward() and streamingForward() are unchanged and record nothing. A record's artifactRef is read from the live harness installation, never from the store head. Default-off: with no learning config, behaviour and cost are unchanged.",
       "suggestedAxirWork": [
@@ -1940,7 +2013,9 @@
       "createdAt": "2026-09-02",
       "sourcePR": 86,
       "sourceCommit": "774efdb70f373efb343c3a76523bbe490d954f11",
-      "tsPaths": ["src/ax/agent/agentInternal/playbookEvolve/gate.ts"],
+      "tsPaths": [
+        "src/ax/agent/agentInternal/playbookEvolve/gate.ts"
+      ],
       "portableSurface": "axagent",
       "impact": "Behaviour-preserving refactor: the evolve() acceptance decision (revalComplete/gainOk/heldOutOk/accept) and its human-readable reason move to the pure evaluateAgentPromotionGate; the retention computation, sequence counter, anchors and receipt assembly stay in playbookEvolve.ts. playbookEvolve.test.ts and playbookEvolveUnits.test.ts pass unmodified. The gate is internal (internalExportNames) and reached through evolve() and the coming axHarnessEvolve, so any AxIR migration of axagent promotion semantics now has one function to port instead of an inline expression.",
       "suggestedAxirWork": [
@@ -2035,7 +2110,9 @@
       "createdAt": "2026-09-02",
       "sourcePR": 98,
       "sourceCommit": "e0167695dc78690204b890be0c192f4c38842208",
-      "tsPaths": ["src/ax/agent/callTimeSkills.ts"],
+      "tsPaths": [
+        "src/ax/agent/callTimeSkills.ts"
+      ],
       "portableSurface": "axagent",
       "impact": "Adds an opt-in per-callable binding to the actor loop: when the actor drafts a call to a bound qualified callable the harness returns a frozen not-executed marker BEFORE the authority boundary instead of dispatching, so the call requests no authorization, fires no onFunctionCall, produces no function-call record and mints no working-state tool receipt; the bound skill is then ingested through the existing loaded-skills channel and harness-authored guidance is appended to the trusted guidance log so the model re-drafts on the next turn. A bound callable is additionally excluded from the JS-runtime speculation adapter, so the speculation path cannot execute, authorize or mint behind the interception. Injections are budgeted per callable (default 1), an optional predicate over the committed working state gates them, and the trace records the intercepted turn as not executed. Default behaviour is unchanged when callTimeSkills is unset.",
       "suggestedAxirWork": [
@@ -2054,7 +2131,9 @@
       "createdAt": "2026-09-02",
       "sourcePR": 100,
       "sourceCommit": "382c3542be9ae312e69f9e5876ece7d1f5f5f5d6",
-      "tsPaths": ["src/ax/dsp/programSource.ts"],
+      "tsPaths": [
+        "src/ax/dsp/programSource.ts"
+      ],
       "portableSurface": "axprogram",
       "impact": "AxMutationAnnotator is invoked once per GEPA candidate, not once per program-source AST edit. programSource.ts has no annotation hook, so a candidate that rewrites an evolved AST is classified as a single program.source_replace patch regardless of how many distinct edits it made. Recorded so the gap is visible rather than implied by the taxonomy's presence.",
       "suggestedAxirWork": [
@@ -2101,7 +2180,9 @@
       "createdAt": "2026-09-02",
       "sourcePR": 100,
       "sourceCommit": "382c3542be9ae312e69f9e5876ece7d1f5f5f5d6",
-      "tsPaths": ["src/ax/dsp/optimizers/gepaLineage.ts"],
+      "tsPaths": [
+        "src/ax/dsp/optimizers/gepaLineage.ts"
+      ],
       "portableSurface": "axoptimize",
       "impact": "AxGEPACandidateLineageManifest becomes version 1 | 2. Version 2 adds five optional record fields (mutation annotation, paired reflection outcomes, causal-evidence cross-link id, harness stamp, per-batch admission) and five optional manifest fields (mutation depth histogram, discrimination summary, harness stamp, deployable best chain, run-level admission). Two new compile options, harnessRecipe and mutationAnnotation, are read through the Proxy-safe own-data reader; a required annotation aborts a candidate before either promotion gate evaluates it. The manifest version is derived from content, so a record carrying a version-2 field can never ship inside a version-1 manifest. With every opt-in option absent the manifest stays version 1 and byte-identical, including the rand() draw sequence. The lineage objectives key order moves from localeCompare to code-unit order, so it no longer depends on the host locale.",
       "suggestedAxirWork": [
@@ -2120,7 +2201,9 @@
       "createdAt": "2026-09-02",
       "sourcePR": 100,
       "sourceCommit": "382c3542be9ae312e69f9e5876ece7d1f5f5f5d6",
-      "tsPaths": ["src/ax/dsp/optimizers/gepa.ts"],
+      "tsPaths": [
+        "src/ax/dsp/optimizers/gepa.ts"
+      ],
       "portableSurface": "axoptimize",
       "impact": "Rejected candidates are recorded into a host-owned store at five sites (both merge aborts, the merge reject, the mutation abort and the mutation reject) with the gate reading, the estimator the gate actually used, the mutation annotation, the harness stamp and a bounded untrusted diagnosis. Each round reads the prior for the components it is about to propose, with expiry evaluated at query time against the caller's context and an injected clock; an expiresWhen with no after_ms clause is refused before the first metric call. AxGEPAProposalPolicyArgs gains rejectedPrior, rendered into its own delimited untrusted prompt field and never into the trusted optimization-reference channel; GEPA_PROPOSAL_CONTRACT gains two sentences only when a non-empty prior is present and is byte-identical otherwise. AxGEPAOptimizationReference gains an optional channel discriminant that makes the untrusted block structurally unassignable to it. AxOptimizedProgram gains rejectedCandidateLedgerRef, a pointer set the artifact cannot rewrite. A store that throws degrades to a lineage runtime failure and never aborts the run; a failed read degrades the same way, and an abort is reported as an abort rather than as a store fault. A gate reading carries parentScore and childScore together or not at all: an abort for insufficient_admitted_rows records neither and no observed delta, and an ipw_hajek reading carries a differenceEstimate instead of a score pair. The artifact's pointer set is bounded to 256 digests OLDEST-FIRST at every path that builds or unions one, and a deserialized ref is normalized through the same validator as a written one.",
       "suggestedAxirWork": [
@@ -2139,7 +2222,9 @@
       "createdAt": "2026-09-02",
       "sourcePR": 92,
       "sourceCommit": "02685baabdd047c06f918a0f45cd5eed47bda0f7",
-      "tsPaths": ["src/ax/dsp/optimizers/gepa.ts"],
+      "tsPaths": [
+        "src/ax/dsp/optimizers/gepa.ts"
+      ],
       "portableSurface": "axoptimize",
       "impact": "Wires host-owned trajectory termination classification into evaluateGEPABatch so environment-failed rows leave the promotion denominator with the discard rate reported, intersects the admitted index sets at BOTH of GEPA's promotion gates (reflective mutation and the default-on system merge, via a new perInstanceAdmitted mask), and adds an opt-in discriminative minibatch strategy with Beta(1,1)-smoothed water-filled inclusion probabilities, Madow systematic pips sampling and a Hajek/IPW paired-difference accept branch. A port must reproduce: the all-rows meaning of avg/scalars/sum under admission; the non-reclassifiable override for config-error rows and for any row of a program-source candidate; the inconclusive-batch abort and the run-level discard ceiling that publishes no best score; the intersected denominator at both gates; and the fact that with every option omitted the artifact, events, checkpoints, selection and rand() draw sequence are unchanged.",
       "suggestedAxirWork": [
@@ -2190,7 +2275,9 @@
       "createdAt": "2026-09-02",
       "sourcePR": 86,
       "sourceCommit": "774efdb70f373efb343c3a76523bbe490d954f11",
-      "tsPaths": ["src/ax/learn/types.ts"],
+      "tsPaths": [
+        "src/ax/learn/types.ts"
+      ],
       "portableSurface": "axoptimize",
       "impact": "New portable TS behaviour under a new src/ax/learn/ root: record and report schemas with fail-closed JSON-persistability validation, the train/wait/never eligibility reducer with named counted reasons and a stable-until-acknowledged batch, floor-not-ceiling report-schema validation, and a store port whose release chain moves by separate append-CAS and promote-CAS. Not yet expressible in AxIR; generated packages are unaffected until migrated. Harness tree, installer, release surface and axHarnessEvolve land in the follow-up PR.",
       "suggestedAxirWork": [
@@ -2209,7 +2296,9 @@
       "createdAt": "2026-09-02",
       "sourcePR": 96,
       "sourceCommit": "67a519be8ae67845f1c8358e60684a1d0cc1ce1d",
-      "tsPaths": ["src/ax/learn/types.ts"],
+      "tsPaths": [
+        "src/ax/learn/types.ts"
+      ],
       "portableSurface": "axoptimize",
       "impact": "New portable TS behaviour: a flat harness-tree entry list over instruction/playbookBullet/skill with sha256 content identity over the admitted entry list in tree order; a fail-closed admission gate (closed config allow-list per kind, a closed proposer-authored bullet field set, a two-rule credential tripwire over every field of every kind, path-only denial reporting); pure rendering as a function of (tree, now); three atomic mutation ops that re-admit their result; a content-addressed release chain with SEPARATE append-CAS and promote-CAS, rollback-as-new-release and monotonic step; normalized-cause failure fingerprints with new/persisting/fixed classification; and a verified evolution step that reuses the existing promotion gate, freezes split digests before proposing, interleaves paired episodes, ranks a crashed episode below every real score, and NOMINATES rather than promoting. Not yet expressible in AxIR; generated packages are unaffected until migrated.",
       "suggestedAxirWork": [
@@ -2228,7 +2317,9 @@
       "createdAt": "2026-09-02",
       "sourcePR": 96,
       "sourceCommit": "38d5a2350e5a1dce12b126b32ba25068d903888d",
-      "tsPaths": ["src/ax/learn/types.ts"],
+      "tsPaths": [
+        "src/ax/learn/types.ts"
+      ],
       "portableSurface": "axoptimize",
       "impact": "Corrects portable TS semantics shipped by the learning surface. (1) The failure manifest is advanced from the CANDIDATE side's observations only; observations carry the side they were seen on and the current side travels on the evaluation instead, so a nominated candidate never ships a durable claim that it failed the baseline's tasks. (2) Installing a tree is a function of the TARGET: whenever the target has a playbook handle the install replaces the playbook and the continuous-learning reset guard fires, including for a tree carrying no bullets; the skills slot is replaced whenever the tree fills it or the slot already holds something. (3) The built-in judge resolves judgeAI then the target's own getJudgeAI(), and refuses a teacherAI with neither, so proposer and evaluator are never correlated by default. (4) A tree that cannot be canonicalized is denied 'non-json-config' rather than raising RangeError, on every entry point. (5) The evolve step number is derived from the chain tail, matching publish. (6) publish holds the gate decision to the same persistability floor as a record payload. (7) A non-restorable rollback target raises the typed AxLearningRollbackRefusedError with a structural guard.",
       "suggestedAxirWork": [
@@ -2273,7 +2364,9 @@
       "createdAt": "2026-09-02",
       "sourcePR": 87,
       "sourceCommit": "c2f8a0c42c4ad93d05c0abacb9a5b549ca431101",
-      "tsPaths": ["ir/conformance/axmind"],
+      "tsPaths": [
+        "ir/conformance/axmind"
+      ],
       "portableSurface": "runtime",
       "impact": "ir/conformance/axmind/*.json are consumed only by TypeScript today (src/ax/trajectory/fixtures.test.ts). conformanceSuitePaths in tools/axir/internal/axir/verify.go is a hardcoded directory list and the coverage manifest in tools/axir/internal/axir/codegen.go is a hardcoded suite table, so adding the suite requires a Go change plus a runner in each of python/java/cpp/go/rust.",
       "suggestedAxirWork": [
@@ -2316,7 +2409,9 @@
       "createdAt": "2026-09-02",
       "sourcePR": 94,
       "sourceCommit": "5e087d2298084e8d4028a571728f3ad6c060cd3d",
-      "tsPaths": ["src/ax/agent/skillState.ts"],
+      "tsPaths": [
+        "src/ax/agent/skillState.ts"
+      ],
       "portableSurface": "axagent",
       "impact": "Adds an opt-in second prompt substrate to the actor loop. Under actorMemoryMode 'skillState' the prompt is a frozen skill spec, the declared state contract, the typed working-state document, the read-only receipt roster and the latest observation; the action log is neither replayed nor rendered nor checkpoint-summarized. The actor emits an optional typed RFC-6902 statePatch and a rationale that is digested and discarded; AxSkillStateRuntime validates the patch through the working-state kernel and host checker and commits it through AxProgramStateStore.compareAndSet under the configured fence, recording one transition per ACCEPTED transition with a non-optional committedRevision and a schema/authority/fence/invariant rejection vocabulary. The actor prompt measurement now reads the same value record the turn sends. Default behaviour is unchanged when actorMemoryMode is unset. Review-driven refinements ports must match: rationaleDigest is ABSENT when the actor emitted no rationale at all (an empty rationale still digests), so declining to explain is distinguishable from explaining with nothing; the rejection is decided by the working-state error CODE rather than by constructor identity; the kernel advances its stored envelope on the bounded rebase, so the envelope revision a host reads always equals the kernel current revision; and a code-policy-refused turn is recorded as the latest observation, which in this mode is the only history the actor sees.",
       "suggestedAxirWork": [
@@ -2359,7 +2454,10 @@
       "createdAt": "2026-09-02",
       "sourcePR": 90,
       "sourceCommit": "a69ec8ebcade22fc2a48a75d4f7f745b5e2b2350",
-      "tsPaths": ["src/ax/agent/statePatch.ts", "src/ax/agent/workingState.ts"],
+      "tsPaths": [
+        "src/ax/agent/statePatch.ts",
+        "src/ax/agent/workingState.ts"
+      ],
       "portableSurface": "axagent",
       "impact": "Adds an opt-in typed working state to the actor loop: an id-keyed goal ledger whose transitions commit only on host-checker support and harness-minted tool receipts cited by a model-visible ref, an RFC-6902-subset state patch applied all-or-nothing with test-as-guard, a closed delta classification table, a bounded park ledger, a per-turn structured trace, executor-only stage scoping with a per-forward run id, and an optional bounded completion interlock. Default behaviour is unchanged when the option is unset.",
       "suggestedAxirWork": [
@@ -2378,9 +2476,74 @@
       "createdAt": "2026-09-02",
       "sourcePR": 100,
       "sourceCommit": "382c3542be9ae312e69f9e5876ece7d1f5f5f5d6",
-      "tsPaths": ["src/ax/dsp/optimizers/causalCandidateEvidence.ts"],
+      "tsPaths": [
+        "src/ax/dsp/optimizers/causalCandidateEvidence.ts"
+      ],
       "portableSurface": "axoptimize",
       "impact": "AxCausalCandidateEvidenceManifest becomes version 3 | 4, bumped by ANY version-4 feature rather than by a declared policy alone, so a version-3 manifest keeps identifying the exact legacy record schema. Records gain attribution, mutation, cost, harness, discrimination (with an estimator and gate discriminant), admission, effects and runtimeRequirements; ablation gains a leave-one-out matrix held to the same link invariants as the single ablation it generalizes. validateManifestRecords takes an explicit policy; canonicalizeReceipt appends a version-guarded policy key so the manifest-level gate is covered by the authority receipt; axCloneCausalCandidateEvidenceManifest accepts requirePolicyAtLeast and re-validates under the strictest of the artifact's policy and the caller's. Every version-4 effect gate keys on the record's own affectedComponents (componentKind plus declared tool:* capabilities), never on the optional host-authored mutation annotation: a promoted record touching a component that declares a tool capability is refused without an effect declaration, a promoted record touching a program-source component is refused without runtime capability requirements, and an effect declaration on a steering patch or on a record naming no program-source surface is refused. Keying any of them on the annotation made both the gate and a reader's requirePolicyAtLeast floor defeatable by omitting one optional field. axReplaceOptimizedProgramSnapshot unions only the rejected-candidate ledger ref and leaves the divergent-causal-history refusal untouched. No version-4 manifest is readable by an older build.",
+      "suggestedAxirWork": [
+        "Add or update the TS-derived conformance fixture.",
+        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
+        "Run npm run axir:conformance:check and npm run test:axir."
+      ],
+      "completedAt": null,
+      "completedByCommit": null,
+      "verification": null
+    },
+    {
+      "id": "axir-2026-09-02-axmind-monolith-and-responder-thinkers-the-model-free-determinis",
+      "status": "open",
+      "title": "AxMind monolith and responder thinkers, the model-free deterministic program, and the host-mediated function menu",
+      "createdAt": "2026-09-02",
+      "sourcePR": 101,
+      "sourceCommit": "48c4e8446f9bb6810e007fbd208b396d1566d6bc",
+      "tsPaths": [
+        "src/ax/mind/thinkers.ts"
+      ],
+      "portableSurface": "runtime",
+      "impact": "New portable TS behaviour: a thinker rendered as an event target (ai plus exactly one of program/createProgram plus a context assembler in mapInput position, so a broken projection dead-letters before any model call); the monolith's function menu (act/think/share/learn/goals/idle) with every handler routed through one boundary the runtime decides close_from_inside on, and a goal change recorded as a proposal because an artifact write needs an out-of-band host receipt; the responder as a single generation with a chat-shaped context and an inner-life block whose reply and whose decline both go through the ledgered chat path; goal rendering with AxACEBulletLifecycle vocabulary (status, expiresAt, supersededBy, reason) and priority ordering; and a deterministic program that satisfies the whole programmable surface over one run so a model-free thinker still composes. Not yet expressed in AxIR.",
+      "suggestedAxirWork": [
+        "Add or update the TS-derived conformance fixture.",
+        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
+        "Run npm run axir:conformance:check and npm run test:axir."
+      ],
+      "completedAt": null,
+      "completedByCommit": null,
+      "verification": null
+    },
+    {
+      "id": "axir-2026-09-02-axmind-step-orchestration-wake-classification-work-probe-bracket",
+      "status": "open",
+      "title": "AxMind step orchestration: wake classification, work-probe-bracketed runs, budget dimensions, and fork/run/merge sub-runs",
+      "createdAt": "2026-09-02",
+      "sourcePR": 101,
+      "sourceCommit": "48c4e8446f9bb6810e007fbd208b396d1566d6bc",
+      "tsPaths": [
+        "src/ax/mind/mind.ts"
+      ],
+      "portableSurface": "runtime",
+      "impact": "New portable TS behaviour a non-TypeScript target would need to reproduce: wake classification from the published envelope (reactive / spontaneous / watchdog / bootstrap / manual) with a synthesized trigger for the wakes that have no step behind them; one thinker step bracketed by two bounded filtered work probes so the outcome is a log fact rather than a parse of model output; the arming finally that arms the next spontaneous wake on every exit path including a throw inside the orchestration itself; the four budget dimensions (wall clock, tokens, sub-runs, depth) with the typed AxMindBudgetExceededError; the deterministic routing-signal table computed only from the bounded projection the model is about to read; and fork -> run -> merge sub-runs that always merge something back, success, failure or cancellation. Not yet expressed in AxIR.",
+      "suggestedAxirWork": [
+        "Add or update the TS-derived conformance fixture.",
+        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
+        "Run npm run axir:conformance:check and npm run test:axir."
+      ],
+      "completedAt": null,
+      "completedByCommit": null,
+      "verification": null
+    },
+    {
+      "id": "axir-2026-09-02-core-ir-event-route-matching-covers-types-and-sources-only-no-su",
+      "status": "open",
+      "title": "Core IR event route matching covers types and sources only: no subject matching, no extension matching, no authorize predicate",
+      "createdAt": "2026-09-02",
+      "sourcePR": 101,
+      "sourceCommit": "48c4e8446f9bb6810e007fbd208b396d1566d6bc",
+      "tsPaths": [
+        "ir/axcore/event.axir"
+      ],
+      "portableSurface": "runtime",
+      "impact": "event_route_commands in ir/axcore/event.axir matches a route on match.sources and match.types alone. The TypeScript matcher axEventMatches (src/ax/event/util.ts) additionally supports match.subjects and exact-equality match.extensions, and AxEventRoute.authorize is a predicate function with no portable expression at all. AxMind rides all three: its wake routes select by subject, its self-suppression is an authorize predicate over the step's writer identity, and the published envelope carries that identity as an extension. ir/conformance/axevent/mind-wake-source-routing.json therefore pins only the portable half; a fixture using subjects or extensions would fail every generated target today. Closing this needs the matcher widened in Core IR and re-emitted to python/java/cpp/go/rust.",
       "suggestedAxirWork": [
         "Add or update the TS-derived conformance fixture.",
         "Update AxIR/Core or descriptor data to match the portable TS behavior.",
@@ -2401,23 +2564,34 @@
         "src/ax/agent/agentInternal/agentStateTypes.ts"
       ],
       "scopedFiles": [],
-      "tags": ["claim-complete", "target-native", "public-inventory"],
+      "tags": [
+        "claim-complete",
+        "target-native",
+        "public-inventory"
+      ],
       "reason": "The claim-complete AxAgent gate inventories the entire inherited TypeScript surface. Members outside the enrolled skills, memories, ranker, observer, prompt, forward, and state lifecycle contract retain target-native generated APIs or TypeScript coordinator/DSP semantics and are explicitly not claimed byte-for-byte portable by this enrollment.",
       "createdAt": "2026-07-22"
     },
     {
       "id": "axtrajectory-jsonl-store-node-only",
       "surface": "runtime",
-      "paths": ["src/tools/trajectory/jsonl.ts"],
+      "paths": [
+        "src/tools/trajectory/jsonl.ts"
+      ],
       "scopedFiles": [],
-      "tags": ["node-only"],
+      "tags": [
+        "node-only"
+      ],
       "reason": "Node-only file-backed trajectory store; requires node:fs and cannot run in the browser-compatible src/ax tree. The portable contract it implements is AxTrajectoryStore, which is tracked separately.",
       "createdAt": "2026-09-02"
     },
     {
       "id": "webllm-browser-only",
       "surface": "axai",
-      "paths": ["src/ax/ai/webllm", "src/examples/webllm-chat.html"],
+      "paths": [
+        "src/ax/ai/webllm",
+        "src/examples/webllm-chat.html"
+      ],
       "scopedFiles": [
         "src/ax/ai/wrap.ts",
         "src/ax/ai/catalog.ts",
@@ -2425,7 +2599,12 @@
         "src/ax/ai/wrap.test.ts",
         "src/ax/skills/ax-ai.md"
       ],
-      "tags": ["webllm", "browser-only", "webgpu", "host-engine"],
+      "tags": [
+        "webllm",
+        "browser-only",
+        "webgpu",
+        "host-engine"
+      ],
       "reason": "WebLLM is browser-specific integration code around a caller-supplied MLCEngine/WebGPU runtime. It is not a portable Ax semantic and should not create Python/Java/C++/Go/Rust AxIR backlog work.",
       "createdAt": "2026-06-26"
     }
