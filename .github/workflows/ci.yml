@@ -148,7 +148,7 @@ jobs:
           python-version: '3.x'
       - name: Setup Java
         if: matrix.target == 'java'
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '17'
@@ -284,7 +284,7 @@ jobs:
           python-version: '3.x'
       - name: Setup Java
         if: matrix.target == 'java'
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '17'
@@ -392,7 +392,7 @@ jobs:
         run: cargo run --offline --manifest-path packages/rust/Cargo.toml --features runtime-quickjs --bin axllm-conformance -- ir/conformance/axagent-real
       - name: Setup Java
         if: contains(fromJSON(needs.changes.outputs.axir_targets), 'java')
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '17'
