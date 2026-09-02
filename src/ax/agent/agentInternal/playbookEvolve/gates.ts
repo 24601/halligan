@@ -1,10 +1,15 @@
 /**
  * The per-candidate gate chain for `agent.playbook().evolve()`.
  *
- * Evaluated in a fixed order, cheapest first, so an expensive host call is
- * never spent on a candidate that cannot land. Every gate is reported —
- * including the ones that were skipped — because the in-round reading of a
- * REJECTED candidate is the auditability precondition.
+ * Gates 1-7 are free, and every one of them is reported — including the ones
+ * that were skipped — because the in-round reading of a REJECTED candidate is
+ * the auditability precondition.
+ *
+ * Gates 8 and 9 are the only ones that cost anything: each is one host call.
+ * They are therefore passed in as THUNKS and invoked inside the ordered loop,
+ * after every free gate has been decided, so an expensive host call is never
+ * spent on a candidate that cannot land. A candidate rejected by gate 1 leaves
+ * both thunks uninvoked and both gates reported `skipped` with the reason.
  *
  * Gates 1 and 2 have two variants, selected by the candidate's `kind`. A
  * removal cannot raise the current-task mean by `minCurrentGain` (default
@@ -75,8 +80,23 @@ export type AxGateChainInput = Readonly<{
     tokensAfter: number;
     minTokenReduction: number;
   }>;
-  veto?: Readonly<{ vetoed: boolean; detail: string }>;
-  authority?: Readonly<{ allowed: boolean; detail: string }>;
+  /**
+   * One host call. A THUNK, not a value: it is invoked only when every free
+   * gate before it passed.
+   */
+  veto?: () => AxGateVetoOutcome | Promise<AxGateVetoOutcome>;
+  /** One `axAuthorize` call. A thunk, for the same reason as `veto`. */
+  authority?: () => AxGateAuthorityOutcome | Promise<AxGateAuthorityOutcome>;
+}>;
+
+export type AxGateVetoOutcome = Readonly<{
+  vetoed: boolean;
+  detail: string;
+}>;
+
+export type AxGateAuthorityOutcome = Readonly<{
+  allowed: boolean;
+  detail: string;
 }>;
 
 type GateOutcome = Readonly<{
@@ -292,9 +312,15 @@ function pruneSizeGate(input: AxGateChainInput): GateOutcome {
   );
 }
 
-export function evaluateGateChain(
+/** Gates 8 and 9 cost a host call; every earlier gate is free. */
+const HOST_CALL_GATES: ReadonlySet<AxAgentPlaybookGateId> =
+  new Set<AxAgentPlaybookGateId>(['veto', 'authority']);
+
+export async function evaluateGateChain(
   input: AxGateChainInput
-): AxAgentPlaybookGateReport {
+): Promise<AxAgentPlaybookGateReport> {
+  // The free gates. Computing all of them costs nothing and their readings are
+  // the audit trail for a rejected candidate, so none of them is elided.
   const outcomes = new Map<AxAgentPlaybookGateId, GateOutcome>();
   outcomes.set('gain', gainGate(input));
   outcomes.set('held_out', heldOutGate(input));
@@ -308,36 +334,37 @@ export function evaluateGateChain(
   outcomes.set('interval', intervalGate(input));
   outcomes.set('reach', reachGate(input));
   outcomes.set('prune_size', pruneSizeGate(input));
-  outcomes.set(
-    'veto',
-    input.veto
-      ? requiredOutcome(!input.veto.vetoed, input.veto.detail)
-      : skipped('no promotion veto configured')
-  );
-  outcomes.set(
-    'authority',
-    input.authority
-      ? requiredOutcome(input.authority.allowed, input.authority.detail)
-      : skipped('no promotion authority configured')
-  );
 
   const entries: AxAgentPlaybookGateEntry[] = [];
   let failedGate: AxAgentPlaybookGateId | undefined;
   let failedPredicate: string | undefined;
   for (const id of GATE_ORDER) {
-    const outcome = outcomes.get(id)!;
+    let outcome = outcomes.get(id);
+    if (!outcome && HOST_CALL_GATES.has(id)) {
+      // THE short-circuit: a candidate that has already lost never pays for a
+      // host call.
+      outcome =
+        failedGate !== undefined
+          ? skipped(
+              `not evaluated: the ${failedGate} gate already rejected this candidate`
+            )
+          : id === 'veto'
+            ? await vetoGate(input)
+            : await authorityGate(input);
+    }
+    const resolved = outcome!;
     entries.push({
       id,
-      mode: outcome.mode,
-      status: outcome.status,
-      detail: outcome.detail,
+      mode: resolved.mode,
+      status: resolved.status,
+      detail: resolved.detail,
     });
     const decided =
-      outcome.mode === 'require' &&
-      (outcome.status === 'fail' || outcome.status === 'unmeasured');
+      resolved.mode === 'require' &&
+      (resolved.status === 'fail' || resolved.status === 'unmeasured');
     if (decided && failedGate === undefined) {
       failedGate = id;
-      failedPredicate = outcome.predicate ?? outcome.detail;
+      failedPredicate = resolved.predicate ?? resolved.detail;
     }
   }
   return {
@@ -345,6 +372,18 @@ export function evaluateGateChain(
     ...(failedGate ? { failedGate } : {}),
     ...(failedPredicate ? { failedPredicate } : {}),
   };
+}
+
+async function vetoGate(input: AxGateChainInput): Promise<GateOutcome> {
+  if (!input.veto) return skipped('no promotion veto configured');
+  const result = await input.veto();
+  return requiredOutcome(!result.vetoed, result.detail);
+}
+
+async function authorityGate(input: AxGateChainInput): Promise<GateOutcome> {
+  if (!input.authority) return skipped('no promotion authority configured');
+  const result = await input.authority();
+  return requiredOutcome(result.allowed, result.detail);
 }
 
 /** True when no required gate failed. */

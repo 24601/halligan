@@ -67,11 +67,35 @@ const discardClassifier = (
       : undefined;
 };
 
-/** Expand a fixture gate-chain case into the real chain input. */
-function chainInputOf(spec: any) {
+/**
+ * Expand a fixture gate-chain case into the real chain input. The two
+ * host-call gates are THUNKS in the real input; the fixture declares their
+ * result and the counter records whether the chain actually invoked them, so a
+ * case can assert that a rejected candidate never paid for one.
+ */
+function chainInputOf(spec: any, invoked?: string[]) {
   return {
     kind: spec.kind,
     gain: spec.gain,
+    ...(spec.veto
+      ? {
+          veto: async () => {
+            invoked?.push('veto');
+            return { vetoed: spec.veto.vetoed, detail: spec.veto.detail };
+          },
+        }
+      : {}),
+    ...(spec.authority
+      ? {
+          authority: async () => {
+            invoked?.push('authority');
+            return {
+              allowed: spec.authority.allowed,
+              detail: spec.authority.detail,
+            };
+          },
+        }
+      : {}),
     ...(spec.heldOut ? { heldOut: spec.heldOut } : {}),
     ...(spec.pruneSize ? { pruneSize: spec.pruneSize } : {}),
     ...(spec.reach
@@ -106,9 +130,15 @@ describe('ir/conformance/axagent/playbook-evidence-gate', () => {
 
   it.each(fixture.cases.map((entry: any) => [entry.name, entry]))(
     'gate chain contract: %s',
-    (_name: string, entry: any) => {
-      const report = evaluateGateChain(chainInputOf(entry.gate_chain));
+    async (_name: string, entry: any) => {
+      const hostGatesInvoked: string[] = [];
+      const report = await evaluateGateChain(
+        chainInputOf(entry.gate_chain, hostGatesInvoked)
+      );
       const expected = entry.expected;
+      if (expected.hostGatesInvoked !== undefined) {
+        expect(hostGatesInvoked).toEqual(expected.hostGatesInvoked);
+      }
       if (expected.entries !== undefined) {
         expect(report.entries).toHaveLength(expected.entries);
       }
@@ -191,8 +221,8 @@ describe('ir/conformance/axagent/playbook-evidence-gate', () => {
     }
   );
 
-  it('names an environment-incomplete evaluation distinctly from a budget one', () => {
-    const report = evaluateGateChain({
+  it('names an environment-incomplete evaluation distinctly from a budget one', async () => {
+    const report = await evaluateGateChain({
       kind: 'curate',
       gain: {
         revalComplete: false,

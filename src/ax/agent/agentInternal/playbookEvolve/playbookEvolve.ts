@@ -1262,7 +1262,7 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
         }
         const overhead = overheadReportFrom(overheadSplits);
 
-        gateReport = evaluateGateChain({
+        gateReport = await evaluateGateChain({
           kind: 'curate',
           gain: {
             revalComplete,

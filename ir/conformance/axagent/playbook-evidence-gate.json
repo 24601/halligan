@@ -1,7 +1,7 @@
 {
   "kind": "program_contract",
   "name": "playbook-evidence-gate",
-  "notes": "TS-derived contract for the playbook evidence gate chain and for batch completeness under environment-failure discards. The generated targets do not yet implement this behavior, so they run the fixture through the program_contract shape and assert nothing about it; the executable assertions live in the consumer named below and are recorded as an open AxIR backlog entry. The three contracts are chosen so that a stub cannot satisfy them: a curate-threshold implementation rejects the zero-gain prune, a break-based batch loop produces a shorter record list, and a budget-shaped rejection string fails the environment-incomplete case.",
+  "notes": "TS-derived contract for the playbook evidence gate chain and for batch completeness under environment-failure discards. The generated targets do not yet implement this behavior, so they run the fixture through the program_contract shape and assert nothing about it; the executable assertions live in the consumer named below and are recorded as an open AxIR backlog entry. The contracts are chosen so that a stub cannot satisfy them: a curate-threshold implementation rejects the zero-gain prune, an eagerly-evaluated chain invokes a host-call gate on a candidate gate 1 already rejected, a break-based batch loop produces a shorter record list, and a budget-shaped rejection string fails the environment-incomplete case.",
   "source": {
     "tsDerived": true,
     "consumer": "scripts/playbook-evidence-conformance.test.ts",
@@ -29,7 +29,7 @@
   ],
   "cases": [
     {
-      "name": "gate-order-short-circuits-on-the-first-required-failure",
+      "name": "gate-order-names-the-first-required-failure",
       "gate_chain": {
         "kind": "curate",
         "gain": {
@@ -43,6 +43,62 @@
         "entries": 9,
         "failedGate": "gain",
         "accepts": false
+      }
+    },
+    {
+      "name": "gate-order-short-circuits-before-any-host-call-gate",
+      "gate_chain": {
+        "kind": "curate",
+        "gain": {
+          "revalComplete": true,
+          "currentGain": 0.0,
+          "threshold": 0.05
+        },
+        "veto": { "vetoed": false, "detail": "no veto" },
+        "authority": { "allowed": true, "detail": "allowed" }
+      },
+      "expected": {
+        "entries": 9,
+        "failedGate": "gain",
+        "accepts": false,
+        "hostGatesInvoked": []
+      }
+    },
+    {
+      "name": "gate-order-runs-the-host-call-gates-when-every-free-gate-passes",
+      "gate_chain": {
+        "kind": "curate",
+        "gain": {
+          "revalComplete": true,
+          "currentGain": 0.2,
+          "threshold": 0.05
+        },
+        "veto": { "vetoed": false, "detail": "no veto" },
+        "authority": { "allowed": true, "detail": "allowed" }
+      },
+      "expected": {
+        "entries": 9,
+        "accepts": true,
+        "hostGatesInvoked": ["veto", "authority"]
+      }
+    },
+    {
+      "name": "gate-order-stops-before-authority-once-the-veto-rejects",
+      "gate_chain": {
+        "kind": "curate",
+        "gain": {
+          "revalComplete": true,
+          "currentGain": 0.2,
+          "threshold": 0.05
+        },
+        "veto": { "vetoed": true, "detail": "host vetoed" },
+        "authority": { "allowed": true, "detail": "allowed" }
+      },
+      "expected": {
+        "entries": 9,
+        "failedGate": "veto",
+        "accepts": false,
+        "hostGatesInvoked": ["veto"]
       }
     },
     {

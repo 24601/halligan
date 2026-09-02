@@ -1734,8 +1734,8 @@ describe('gate chain', () => {
     ...over,
   });
 
-  it('reports every gate including the skipped ones, in decision order', () => {
-    const report = evaluateGateChain(baseInput());
+  it('reports every gate including the skipped ones, in decision order', async () => {
+    const report = await evaluateGateChain(baseInput());
     expect(report.entries.map((entry) => entry.id)).toEqual(GATE_ORDER);
     expect(gateChainAccepts(report)).toBe(true);
     const skipped = report.entries.filter(
@@ -1745,8 +1745,8 @@ describe('gate chain', () => {
     for (const entry of skipped) expect(entry.detail).toBeTruthy();
   });
 
-  it('short-circuits on the first required failure in order', () => {
-    const report = evaluateGateChain(
+  it('names the first required failure in decision order', async () => {
+    const report = await evaluateGateChain(
       baseInput({
         gain: { revalComplete: true, currentGain: 0, threshold: 0.05 },
         heldOut: { delta: -1, tolerance: 0.01 },
@@ -1757,11 +1757,54 @@ describe('gate chain', () => {
     expect(gateChainAccepts(report)).toBe(false);
   });
 
-  it('passes a zero-gain prune under the loss-tolerance variant', () => {
+  it('never spends a host call on a candidate an earlier gate already rejected', async () => {
+    const veto = vi.fn(async () => ({ vetoed: false, detail: 'no veto' }));
+    const authority = vi.fn(async () => ({ allowed: true, detail: 'allowed' }));
+    const report = await evaluateGateChain(
+      baseInput({
+        gain: { revalComplete: true, currentGain: 0, threshold: 0.05 },
+        veto,
+        authority,
+      })
+    );
+    expect(report.failedGate).toBe('gain');
+    // THE property: the two host-call gates are thunks and neither ran.
+    expect(veto).not.toHaveBeenCalled();
+    expect(authority).not.toHaveBeenCalled();
+    // They are still reported, with the reason they were not evaluated.
+    const byId = new Map(report.entries.map((entry) => [entry.id, entry]));
+    expect(byId.get('veto')?.status).toBe('skipped');
+    expect(byId.get('veto')?.detail).toContain(
+      'the gain gate already rejected'
+    );
+    expect(byId.get('authority')?.status).toBe('skipped');
+  });
+
+  it('invokes both host-call thunks exactly once when every free gate passes', async () => {
+    const veto = vi.fn(async () => ({ vetoed: false, detail: 'no veto' }));
+    const authority = vi.fn(async () => ({ allowed: true, detail: 'allowed' }));
+    const report = await evaluateGateChain(baseInput({ veto, authority }));
+    expect(veto).toHaveBeenCalledTimes(1);
+    expect(authority).toHaveBeenCalledTimes(1);
+    expect(gateChainAccepts(report)).toBe(true);
+  });
+
+  it('stops before the authority call when the veto gate rejects', async () => {
+    const veto = vi.fn(async () => ({ vetoed: true, detail: 'host vetoed' }));
+    const authority = vi.fn(async () => ({ allowed: true, detail: 'allowed' }));
+    const report = await evaluateGateChain(baseInput({ veto, authority }));
+    expect(veto).toHaveBeenCalledTimes(1);
+    expect(authority).not.toHaveBeenCalled();
+    expect(report.failedGate).toBe('veto');
+    expect(report.failedPredicate).toBe('host vetoed');
+    expect(gateChainAccepts(report)).toBe(false);
+  });
+
+  it('passes a zero-gain prune under the loss-tolerance variant', async () => {
     // The decisive prune test: a removal with currentGain 0 and maxCurrentLoss
     // 0 must reach the later gates, not be short-circuited by the curate
     // threshold of 0.05. A curate-variant implementation fails here.
-    const report = evaluateGateChain({
+    const report = await evaluateGateChain({
       kind: 'prune',
       gain: { revalComplete: true, currentGain: 0, threshold: 0 },
       heldOut: { delta: 0, tolerance: 0.01 },
@@ -1780,8 +1823,8 @@ describe('gate chain', () => {
     expect(gateChainAccepts(report)).toBe(true);
   });
 
-  it('rejects a prune that loses more than the tolerance', () => {
-    const report = evaluateGateChain({
+  it('rejects a prune that loses more than the tolerance', async () => {
+    const report = await evaluateGateChain({
       kind: 'prune',
       gain: { revalComplete: true, currentGain: -0.2, threshold: 0 },
       pruneSize: {
@@ -1796,8 +1839,8 @@ describe('gate chain', () => {
     ).toContain('prune current-task loss');
   });
 
-  it('rejects a prune that does not shrink the rendered playbook enough', () => {
-    const report = evaluateGateChain({
+  it('rejects a prune that does not shrink the rendered playbook enough', async () => {
+    const report = await evaluateGateChain({
       kind: 'prune',
       gain: { revalComplete: true, currentGain: 0, threshold: 0 },
       pruneSize: {
@@ -1809,8 +1852,8 @@ describe('gate chain', () => {
     expect(report.failedGate).toBe('prune_size');
   });
 
-  it('skips the reach gate for a prune because a removed bullet has no reach', () => {
-    const report = evaluateGateChain({
+  it('skips the reach gate for a prune because a removed bullet has no reach', async () => {
+    const report = await evaluateGateChain({
       kind: 'prune',
       gain: { revalComplete: true, currentGain: 0, threshold: 0 },
       pruneSize: { tokensBefore: 10, tokensAfter: 1, minTokenReduction: 1 },
@@ -1829,8 +1872,8 @@ describe('gate chain', () => {
     );
   });
 
-  it('names the environment-failure reason distinctly from the budget one', () => {
-    const report = evaluateGateChain(
+  it('names the environment-failure reason distinctly from the budget one', async () => {
+    const report = await evaluateGateChain(
       baseInput({
         gain: {
           revalComplete: false,
@@ -1847,12 +1890,12 @@ describe('gate chain', () => {
     expect(report.failedPredicate).not.toContain('metric_budget');
   });
 
-  it('fails a required reach gate on any counterfactual basis', () => {
+  it('fails a required reach gate on any counterfactual basis', async () => {
     for (const basis of [
       'applicability_counterfactual',
       'rendered_only',
     ] as const) {
-      const report = evaluateGateChain(
+      const report = await evaluateGateChain(
         baseInput({
           reach: {
             mode: 'require',
@@ -1883,8 +1926,8 @@ describe('gate chain', () => {
     }
   });
 
-  it('carries the failing validity predicate verbatim into the report', () => {
-    const report = evaluateGateChain(
+  it('carries the failing validity predicate verbatim into the report', async () => {
+    const report = await evaluateGateChain(
       baseInput({
         validity: {
           mode: 'require',
@@ -1909,12 +1952,14 @@ describe('gate chain', () => {
     expect(report.failedPredicate).toBe('validity:tool_error_rate@heldOut');
   });
 
-  it('treats an unmeasured interval as a failure under require and a warning under warn', () => {
-    const required = evaluateGateChain(
+  it('treats an unmeasured interval as a failure under require and a warning under warn', async () => {
+    const required = await evaluateGateChain(
       baseInput({ interval: { mode: 'require' } })
     );
     expect(required.failedGate).toBe('interval');
-    const warned = evaluateGateChain(baseInput({ interval: { mode: 'warn' } }));
+    const warned = await evaluateGateChain(
+      baseInput({ interval: { mode: 'warn' } })
+    );
     // 'warn' surfaces the unmeasured reading without rejecting the candidate.
     expect(warned.failedGate).toBeUndefined();
     expect(
@@ -1922,7 +1967,7 @@ describe('gate chain', () => {
     ).toBe('unmeasured');
   });
 
-  it('requires the point delta to beat the variance band when one is configured', () => {
+  it('requires the point delta to beat the variance band when one is configured', async () => {
     const interval = {
       point: 0.02,
       lower: 0.01,
@@ -1934,20 +1979,20 @@ describe('gate chain', () => {
       seed: 1,
       direction: 'positive' as const,
     };
-    const withinBand = evaluateGateChain(
+    const withinBand = await evaluateGateChain(
       baseInput({
         interval: { mode: 'require', current: interval, bandSpread: 0.05 },
       })
     );
     expect(withinBand.failedGate).toBe('interval');
-    const beatsBand = evaluateGateChain(
+    const beatsBand = await evaluateGateChain(
       baseInput({
         interval: { mode: 'require', current: interval, bandSpread: 0.005 },
       })
     );
     expect(beatsBand.failedGate).toBeUndefined();
     // Without a band the detail says so, so the weaker reading is visible.
-    const noBand = evaluateGateChain(
+    const noBand = await evaluateGateChain(
       baseInput({ interval: { mode: 'warn', current: interval } })
     );
     expect(
