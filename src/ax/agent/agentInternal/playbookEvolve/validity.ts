@@ -8,6 +8,11 @@
  * independently, on both splits, and ANDed into the gate.
  *
  * Two rules the implementation must keep:
+ *  - `tool_error_rate` is a RATE. `prediction.toolErrors` is derived from
+ *    `prediction.functionCalls` by the eval pipeline, so summing both counts
+ *    every failing call twice and produces values above 1.0. Each failing call
+ *    is counted once; a prediction-level entry with no matching call is counted
+ *    once and widens the denominator too.
  *  - `unknown_function_call_rate` and `tool_error_rate` are computed IN AX.
  *    `classifyFunctionCall` is an override, not the source: a host classifier
  *    that returns 'ok' for everything would otherwise be a laundering surface.
@@ -90,6 +95,8 @@ type Counters = {
   calls: number;
   unknownCalls: number;
   toolErrors: number;
+  /** Prediction-level tool errors with no matching function call. */
+  unmatchedToolErrors: number;
   overriddenUnknown: boolean;
   overriddenToolError: boolean;
   tokenAttempts: number;
@@ -112,6 +119,7 @@ function countSplit(
     calls: 0,
     unknownCalls: 0,
     toolErrors: 0,
+    unmatchedToolErrors: 0,
     overriddenUnknown: false,
     overriddenToolError: false,
     tokenAttempts: 0,
@@ -120,6 +128,18 @@ function countSplit(
     latencyTotal: 0,
   };
   for (const record of input.records) {
+    // `pipelineForwardForEvaluation` derives `prediction.toolErrors` from this
+    // record's own function calls as `${qualifiedName}: ${error}`. Seeding the
+    // set from EVERY errored call (not only the ones the verdict counted) keeps
+    // a host classifier's `'ok'` override authoritative instead of letting the
+    // derived string reinstate the failure it suppressed.
+    const derivedToolErrors = new Set<string>();
+    for (const call of record.prediction?.functionCalls ?? []) {
+      if (!call?.error) continue;
+      derivedToolErrors.add(
+        `${call.qualifiedName}: ${call.error ?? 'unknown error'}`
+      );
+    }
     counters.predictions++;
     if (record.prediction?.completionType === 'final') {
       counters.finalPredictions++;
@@ -155,7 +175,19 @@ function countSplit(
       if (verdict === 'unknown_function') counters.unknownCalls++;
       if (verdict === 'tool_error') counters.toolErrors++;
     }
-    counters.toolErrors += record.prediction?.toolErrors?.length ?? 0;
+    // A prediction-level tool error with no corresponding function call cannot
+    // arise from the ax pipeline today, but a host-built prediction may carry
+    // one. Counted once, structurally de-duplicated against the calls above,
+    // and it widens the denominator so the result stays a rate.
+    const countedToolErrors = new Set<string>();
+    for (const entry of record.prediction?.toolErrors ?? []) {
+      if (typeof entry !== 'string') continue;
+      if (derivedToolErrors.has(entry)) continue;
+      if (countedToolErrors.has(entry)) continue;
+      countedToolErrors.add(entry);
+      counters.toolErrors++;
+      counters.unmatchedToolErrors++;
+    }
   }
   return counters;
 }
@@ -281,8 +313,16 @@ export function evaluateValidity(args: {
         predicate({
           ...scope,
           id: 'tool_error_rate',
-          ...(counters.calls > 0
-            ? { observed: counters.toolErrors / counters.calls }
+          // Denominator: every observed call plus every prediction-level tool
+          // error that had no call of its own. Each failing call is in the
+          // numerator exactly once, so the value is a rate in [0, 1] rather
+          // than the unbounded double count a naive sum produces.
+          ...(counters.calls + counters.unmatchedToolErrors > 0
+            ? {
+                observed:
+                  counters.toolErrors /
+                  (counters.calls + counters.unmatchedToolErrors),
+              }
             : { observed: 0 }),
           threshold: options!.maxToolErrorRate!,
           direction: 'max',

@@ -1256,7 +1256,7 @@ describe('validity conjuncts', () => {
     expect(predicate.overriddenByHost).toBe(true);
   });
 
-  it('computes tool_error_rate from call errors and prediction toolErrors', () => {
+  it('counts a failing call once even though the pipeline also derives prediction.toolErrors from it', () => {
     const report = evaluateValidity({
       inputs: [
         {
@@ -1273,7 +1273,75 @@ describe('validity conjuncts', () => {
                   },
                   { qualifiedName: 'db.search', name: 'search', arguments: {} },
                 ],
-                toolErrors: ['sandbox unavailable'],
+                // Exactly what pipelineForwardForEvaluation derives from the
+                // call above. Summing both sources would report 1.0.
+                toolErrors: ['db.search: timeout'],
+              },
+            }),
+          ],
+        },
+      ],
+      registered: new Set(['db.search']),
+      options: { maxToolErrorRate: 0.6 },
+    });
+    const predicate = find(report, 'tool_error_rate');
+    expect(predicate.observed).toBeCloseTo(0.5, 12);
+    expect(predicate.status).toBe('pass');
+  });
+
+  it('counts a prediction-level tool error with no matching call exactly once', () => {
+    const report = evaluateValidity({
+      inputs: [
+        {
+          split: 'current',
+          records: [
+            recordOf({
+              prediction: {
+                functionCalls: [
+                  { qualifiedName: 'db.search', name: 'search', arguments: {} },
+                ],
+                toolErrors: ['sandbox unavailable', 'sandbox unavailable'],
+              },
+            }),
+          ],
+        },
+      ],
+      registered: new Set(['db.search']),
+      options: { maxToolErrorRate: 0.9 },
+    });
+    const predicate = find(report, 'tool_error_rate');
+    // 1 unmatched error over (1 call + 1 unmatched error).
+    expect(predicate.observed).toBeCloseTo(0.5, 12);
+    expect(predicate.status).toBe('pass');
+  });
+
+  it('never reports a tool_error_rate above 1', () => {
+    const report = evaluateValidity({
+      inputs: [
+        {
+          split: 'current',
+          records: [
+            recordOf({
+              prediction: {
+                functionCalls: [
+                  {
+                    qualifiedName: 'db.search',
+                    name: 'search',
+                    arguments: {},
+                    error: 'timeout',
+                  },
+                  {
+                    qualifiedName: 'db.search',
+                    name: 'search',
+                    arguments: {},
+                    error: 'timeout',
+                  },
+                ],
+                toolErrors: [
+                  'db.search: timeout',
+                  'db.search: timeout',
+                  'sandbox unavailable',
+                ],
               },
             }),
           ],
@@ -1283,8 +1351,41 @@ describe('validity conjuncts', () => {
       options: { maxToolErrorRate: 0.1 },
     });
     const predicate = find(report, 'tool_error_rate');
+    expect(predicate.observed).toBeLessThanOrEqual(1);
+    // 2 errored calls + 1 unmatched entry over 2 calls + 1 unmatched entry.
     expect(predicate.observed).toBeCloseTo(1, 12);
     expect(predicate.status).toBe('fail');
+  });
+
+  it('keeps a host "ok" override authoritative over the derived toolErrors string', () => {
+    const report = evaluateValidity({
+      inputs: [
+        {
+          split: 'current',
+          records: [
+            recordOf({
+              prediction: {
+                functionCalls: [
+                  {
+                    qualifiedName: 'db.search',
+                    name: 'search',
+                    arguments: {},
+                    error: 'timeout',
+                  },
+                ],
+                toolErrors: ['db.search: timeout'],
+              },
+            }),
+          ],
+        },
+      ],
+      registered: new Set(['db.search']),
+      options: { maxToolErrorRate: 0, classifyFunctionCall: () => 'ok' },
+    });
+    const predicate = find(report, 'tool_error_rate');
+    expect(predicate.observed).toBe(0);
+    expect(predicate.status).toBe('pass');
+    expect(predicate.overriddenByHost).toBe(true);
   });
 
   it('names the failing predicate with its split and runs on both splits', () => {
