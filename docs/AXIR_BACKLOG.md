@@ -382,6 +382,13 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
   - TS paths: `ir/axcore/event.axir`
   - Impact: event_route_commands in ir/axcore/event.axir matches a route on match.sources and match.types alone. The TypeScript matcher axEventMatches (src/ax/event/util.ts) additionally supports match.subjects and exact-equality match.extensions, and AxEventRoute.authorize is a predicate function with no portable expression at all. AxMind rides all three: its wake routes select by subject, its self-suppression is an authorize predicate over the step's writer identity, and the published envelope carries that identity as an extension. ir/conformance/axevent/mind-wake-source-routing.json therefore pins only the portable half; a fixture using subjects or extensions would fail every generated target today. Closing this needs the matcher widened in Core IR and re-emitted to python/java/cpp/go/rust.
   - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+- `axir-2026-09-02-axmind-review-fixes-per-step-token-delta-settle-after-sinks-and-` [runtime] AxMind review fixes: per-step token delta, settle-after-sinks, and the liveness-fallback arm
+  - Status: open
+  - Source PR: #101
+  - Source commit: `ef343c379826ddfc37da758cf30dad9ba238a339`
+  - TS paths: `src/ax/mind/mind.ts`
+  - Impact: Corrects three portable AxMind runtime semantics the first cut shipped wrong. (1) The per-step token ceiling is the DELTA one step spends, not the accumulated program total: a port that compares getUsage() to maxTokens turns the per-step cap into a lifetime one and bricks the thinker. (2) The step settle -- work probe after, outcome step, pace decision -- must bracket the thinker's SINKS as well as its forward, because a thinker whose effect is a sink (the shipped responder replies from one) is otherwise recorded idle/empty on the wake that did the work. The settle is idempotent and delivery-keyed, reachable from the run, from a trailing settle sink, and from the tick's reaper. (3) Every delivery that terminalises without a pace decision re-arms exactly one wake at the thinker's capMs (RFC M7 layer (b)), and the rate fuse's un-park must clear the dispatched stamp or the armed re-evaluation is never due. Also: self-addressed inbound is refused with the chat error, in both directions, and a sub-run charges the thinker it names.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 
 ## Done
 
