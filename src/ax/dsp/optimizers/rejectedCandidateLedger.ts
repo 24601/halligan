@@ -920,9 +920,26 @@ export async function axRunRejectedCandidateLedgerConformance(
     );
   }
 
+  // `close()` must be idempotent AND must leave the store usable enough to
+  // answer a query rather than throwing at a shutdown race. `check(true, ...)`
+  // would count an assertion without asserting anything.
   await store.close?.();
   await store.close?.();
-  check(true, 'close must be idempotent');
+  let closeError: unknown;
+  let afterClose: readonly AxRejectedCandidateLedgerEntry[] = [];
+  try {
+    afterClose = await store.list({ now: clock.now(), context: {} });
+  } catch (error) {
+    closeError = error;
+  }
+  check(
+    closeError === undefined,
+    `a second close() must not make the store throw: ${String(closeError)}`
+  );
+  check(
+    Array.isArray(afterClose),
+    'list() after close() must still answer with a list'
+  );
 
   return Object.freeze({
     assertions,
