@@ -45,6 +45,7 @@ const typeScriptSkillNames = [
   'ax-event-runtime',
   'ax-trajectory',
   'ax-gepa',
+  'ax-learn',
   'ax-playbook',
   'ax-refine',
 ].sort();

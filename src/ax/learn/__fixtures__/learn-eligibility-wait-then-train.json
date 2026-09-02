@@ -1,0 +1,54 @@
+{
+  "name": "learn-eligibility-wait-then-train",
+  "behaviour": "eligibility",
+  "description": "A report arrives before the interaction it grades. It parks with its missing id and trains the moment the reference lands — late and out-of-order feedback is a legal ordering, not an error.",
+  "scenario": "support",
+  "processor": { "batchSize": 1, "minScore": 0, "maxScore": 1 },
+  "sampleFields": ["input", "output"],
+  "records": [
+    {
+      "kind": "report",
+      "id": "r1",
+      "scenario": "support",
+      "createdAt": 1000,
+      "references": ["i1"],
+      "payload": { "score": 0.25, "feedback": "too long" }
+    },
+    {
+      "kind": "interaction",
+      "id": "i1",
+      "scenario": "support",
+      "createdAt": 1001,
+      "payload": {
+        "signature": "query:string -> answer:string",
+        "programId": "root",
+        "input": { "query": "refund policy?" },
+        "output": { "answer": "thirty days" },
+        "model": "mock-model",
+        "usage": { "totalTokens": 7 },
+        "tags": { "tenant": "acme" }
+      }
+    }
+  ],
+  "expected": {
+    "decisions": [
+      { "reportId": "r1", "outcome": "wait", "missing": ["i1"] },
+      { "reportId": "r1", "outcome": "train" }
+    ],
+    "unit": {
+      "reportId": "r1",
+      "samples": [
+        {
+          "sourceRecordId": "i1",
+          "score": 0.25,
+          "feedback": "too long",
+          "payload": {
+            "input": { "query": "refund policy?" },
+            "output": { "answer": "thirty days" }
+          }
+        }
+      ]
+    },
+    "readyCount": 1
+  }
+}

@@ -121,6 +121,13 @@
       "digest": "sha256:2364038dbe0e1cb5acc986b08e4f081c41957de1ed986dd7cf4398e69636bf90"
     },
     {
+      "name": "ax-learn",
+      "type": "skill-md",
+      "description": "This skill helps an LLM generate correct learning-surface code using @ax-llm/ax. Use when the user asks about interaction receipts, agent.learn(), report(), AxLearningStore, harness trees, axHarnessEvolve, release chains, or self-improving agent patterns.",
+      "url": "ax-learn/SKILL.md",
+      "digest": "sha256:72d6d1a90cffb277cea8901eae2ffb9898e52b7c37bb73f1c76d14796406e625"
+    },
+    {
       "name": "ax-playbook",
       "type": "skill-md",
       "description": "This skill helps an LLM generate correct playbook code using @ax-llm/ax. Use when the user asks about playbook(), AxPlaybook, context playbooks, evolving context, ACE / Agentic Context Engineering, agent.playbook(), or growing/applying task knowledge offline and online with evolve() and update().",

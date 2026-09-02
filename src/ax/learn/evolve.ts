@@ -1,0 +1,1034 @@
+/**
+ * `axHarnessEvolve` — one verified evolution step over a harness tree.
+ *
+ * The step NOMINATES. It appends a release with `current: false` and returns
+ * `status: 'nominated'`; it never moves the head, and nothing here calls
+ * `surface.promote(...)`. A gate that deployed its own winner would be an
+ * automatic, unconditional rollout wearing a gate's clothes.
+ *
+ * Three orderings are load-bearing and are asserted in the tests:
+ *
+ * 1. The split and its digests are frozen BEFORE `propose` is called, so the
+ *    Goodhart claim ("the task set the candidate was written against is the
+ *    one it was judged on") is true of the step order and not only of the
+ *    prose.
+ * 2. Both sides are trial-installed once before any episode runs, so an
+ *    un-installable tree can never reach the chain.
+ * 3. Episodes are interleaved and alternate first position, so provider drift
+ *    hits both sides equally instead of penalising whichever ran last.
+ *
+ * The acceptance rule itself is not reimplemented here: `selection:
+ * 'axPlaybookGate'` calls the same `evaluateAgentPromotionGate` that
+ * `agent.playbook().evolve()` calls.
+ */
+
+import type {
+  AxAgentEvalDataset,
+  AxAgentEvalPrediction,
+  AxAgentEvalTask,
+  AxAgentJudgeOptions,
+} from '../agent/agentInternal/agentOptimizeTypes.js';
+import { createAgentOptimizeMetric } from '../agent/agentInternal/optimizer.js';
+import {
+  type AxAgentEvalBudget,
+  runAgentEvalBatch,
+} from '../agent/agentInternal/playbookEvolve/evalHarness.js';
+import { evaluateAgentPromotionGate } from '../agent/agentInternal/playbookEvolve/gate.js';
+import type { AxAgentPlaybookEvolveRunRecord } from '../agent/agentInternal/playbookEvolve/playbookEvolveTypes.js';
+import type { AxAIService } from '../ai/types.js';
+import type { AxMetricFn } from '../dsp/common_types.js';
+import type { AxGenIn, AxGenOut } from '../dsp/types.js';
+import { type AxEventClock, AxSystemEventClock } from '../event/types.js';
+import { axEventCanonicalDigest } from '../event/util.js';
+
+import { axApplyHarnessTree, axCurrentHarnessInstallation } from './apply.js';
+import { axAdvanceHarnessFailureManifest } from './manifest.js';
+import type { AxLearningBatch } from './processor.js';
+import type { AxLearningSurface } from './releases.js';
+import {
+  axAdmitHarnessTree,
+  axApplyHarnessMutations,
+  axHarnessContentId,
+  axRenderHarnessTree,
+} from './tree.js';
+import {
+  type AxHarnessEntryKind,
+  AxHarnessEvolveConfigError,
+  type AxHarnessFailureManifest,
+  type AxHarnessFailureObservation,
+  type AxHarnessGateDecision,
+  type AxHarnessGateMetrics,
+  type AxHarnessInstallTarget,
+  type AxHarnessMutation,
+  type AxHarnessTree,
+  type AxLearningRelease,
+  type AxLearningValue,
+  axIsHarnessAdmissionError,
+} from './types.js';
+
+const DEFAULT_EPSILON = 0.01;
+const DEFAULT_MIN_HELD_IN_GAIN = 0.05;
+const DEFAULT_SCORE_THRESHOLD = 0.7;
+const DEFAULT_PROPOSE_TIMEOUT_MS = 60_000;
+const DEFAULT_MAX_PROPOSER_CALLS = 1;
+const TRIAL_SLOT = 'learn';
+
+// ---------------------------------------------------------------------------
+// Public surface
+// ---------------------------------------------------------------------------
+
+/**
+ * The proposer's ONLY path to a model.
+ *
+ * The SERVED provider is deliberately absent: handing a caller callback the
+ * production service is escalation, not containment. A proposer gets a teacher
+ * and whatever the host names, under an explicit call budget.
+ */
+export interface AxHarnessModelBindings {
+  readonly teacher?: Readonly<AxAIService>;
+  readonly named: Readonly<Record<string, Readonly<AxAIService>>>;
+}
+
+export interface AxHarnessProposeArgs {
+  /** The enabled composition in tree order. Disabled entries are excluded. */
+  readonly nodes: readonly Readonly<{
+    id: string;
+    kind: AxHarnessEntryKind;
+    config: AxLearningValue;
+  }>[];
+  /** Projected and byte-capped by the engine before it ever reaches here. */
+  readonly samples: readonly Readonly<Record<string, unknown>>[];
+  /** How many samples the byte cap withheld. Observable, never silent. */
+  readonly droppedSamples: number;
+  readonly models: Readonly<AxHarnessModelBindings>;
+  readonly manifest?: Readonly<AxHarnessFailureManifest>;
+  readonly step: number;
+  readonly signal?: AbortSignal;
+}
+
+export type AxHarnessProposer = (
+  args: Readonly<AxHarnessProposeArgs>
+) =>
+  | AxHarnessMutation
+  | readonly AxHarnessMutation[]
+  | null
+  | Promise<AxHarnessMutation | readonly AxHarnessMutation[] | null>;
+
+export interface AxHarnessCandidate {
+  readonly candidateId: string;
+  readonly currentEntries: AxHarnessTree;
+  readonly candidateEntries: AxHarnessTree;
+  readonly currentContentId: string;
+  readonly candidateContentId: string;
+  readonly mutations: readonly AxHarnessMutation[];
+}
+
+export interface AxHarnessEvaluation {
+  readonly evaluator: string;
+  readonly evaluatorVersion: string;
+  readonly metrics: Readonly<AxHarnessGateMetrics>;
+  readonly observations: readonly Readonly<AxHarnessFailureObservation>[];
+}
+
+export type AxHarnessSelector = (
+  candidate: Readonly<AxHarnessCandidate>,
+  evaluation: Readonly<AxHarnessEvaluation>
+) => Readonly<AxHarnessGateDecision>;
+
+export interface AxHarnessEvolveGateOptions<IN extends AxGenIn = AxGenIn> {
+  /** Tolerated held-out drop. Default 0.01 — identical to evolve(). */
+  readonly epsilon?: number;
+  /** Required held-in improvement. Default 0.05 — identical to evolve(). */
+  readonly minHeldInGain?: number;
+  /**
+   * Default TRUE — a deliberate divergence from `evolve()`, which defaults
+   * false. With no `validation` split the step throws before any model call.
+   * Setting it false opts into the held-in-only regime, which is the same
+   * permissive regime this repo measures at a 66.7% false-promotion rate.
+   */
+  readonly requireHeldOut?: boolean;
+  readonly taskId?: (task: Readonly<AxAgentEvalTask<IN>>) => string | undefined;
+  readonly runsPerTask?: number;
+  readonly maxMetricCalls?: number;
+  readonly scoreThreshold?: number;
+}
+
+export interface AxHarnessEvolveProgressEvent {
+  readonly phase:
+    | 'seed'
+    | 'propose'
+    | 'evaluate'
+    | 'decide'
+    | 'nominate'
+    | 'done';
+  readonly message: string;
+  readonly metricCallsUsed: number;
+}
+
+export interface AxHarnessEvolveOptions<
+  IN extends AxGenIn = AxGenIn,
+  OUT extends AxGenOut = AxGenOut,
+> {
+  readonly agent: AxHarnessEvolveAgent<IN, OUT>;
+  readonly ai: Readonly<AxAIService>;
+  readonly surface: AxLearningSurface;
+  readonly tasks: Readonly<AxAgentEvalDataset<IN>>;
+  readonly propose: AxHarnessProposer;
+  /** Hard cap on proposer invocations for this step. Default 1. */
+  readonly maxProposerCalls?: number;
+  /** Per-proposer-call deadline, composed with `abortSignal`. Default 60_000. */
+  readonly proposeTimeoutMs?: number;
+  readonly batch?: Readonly<AxLearningBatch>;
+  readonly manifest?: Readonly<AxHarnessFailureManifest>;
+  readonly metric?: AxMetricFn;
+  readonly teacherAI?: Readonly<AxAIService>;
+  readonly judgeAI?: Readonly<AxAIService>;
+  readonly judgeOptions?: AxAgentJudgeOptions;
+  readonly namedModels?: Readonly<Record<string, Readonly<AxAIService>>>;
+  /**
+   * Default `axPlaybookGate` — held-in gain plus held-out epsilon.
+   * `scoreComparison` (wins > losses) exists ONLY for reef parity and is
+   * structurally weaker. There is no `always`.
+   */
+  readonly selection?: 'axPlaybookGate' | 'scoreComparison' | AxHarnessSelector;
+  readonly gate?: Readonly<AxHarnessEvolveGateOptions<IN>>;
+  readonly clock?: AxEventClock;
+  /**
+   * Required when the agent learns into its playbook after every run. Every
+   * install this step makes — including restoring the pre-step tree —
+   * replaces the playbook, so the acknowledgement is carried through.
+   */
+  readonly acknowledgeContinuousPlaybookReset?: boolean;
+  readonly onProgress?: (event: Readonly<AxHarnessEvolveProgressEvent>) => void;
+  readonly abortSignal?: AbortSignal;
+}
+
+/**
+ * The subset of the agent an evolve step drives, declared structurally so this
+ * module does not depend on the agent class.
+ *
+ * `_forwardForEvaluation` is required and typed rather than left as `unknown`:
+ * it is the separate evaluation walk that never enters `forwardPipeline`, and
+ * that separation is the structural half of why a verification step creates no
+ * interaction records. A port that did not require it would let a caller pass
+ * an object that compiles and then fails at the first episode.
+ */
+export interface AxHarnessEvolveAgent<
+  IN extends AxGenIn = AxGenIn,
+  OUT extends AxGenOut = AxGenOut,
+> extends AxHarnessInstallTarget {
+  _forwardForEvaluation(
+    ai: Readonly<AxAIService>,
+    task: Readonly<AxAgentEvalTask<IN>>,
+    options?: Readonly<{ abortSignal?: AbortSignal }>
+  ): Promise<AxAgentEvalPrediction<OUT>>;
+  getLearn?():
+    | { suspendRecording(): () => void; suppressedRecords: number }
+    | undefined;
+  /**
+   * The agent's own construction-time judge, if it has one.
+   *
+   * `agent.playbook().evolve()` consults it before falling back
+   * (`playbookEvolve.ts:409-412`); a structural target that can answer gets
+   * the same precedence here. A target that cannot answer must name
+   * `judgeAI` explicitly whenever it also names `teacherAI` — see the
+   * refusal in `axHarnessEvolve`.
+   */
+  getJudgeAI?(): Readonly<AxAIService> | undefined;
+}
+
+export interface AxHarnessEvolveResult<OUT extends AxGenOut = AxGenOut> {
+  /** `nominated` replaces `published`: ax never moves the head. */
+  readonly status: 'nominated' | 'rejected' | 'skipped';
+  readonly reason?: string;
+  readonly candidate?: Readonly<AxHarnessCandidate>;
+  readonly decision?: Readonly<AxHarnessGateDecision>;
+  /** The appended, NON-current release. Promote it with `surface.promote(...)`. */
+  readonly release?: Readonly<AxLearningRelease>;
+  readonly manifest: Readonly<AxHarnessFailureManifest>;
+  readonly metricCallsUsed: number;
+  readonly proposerCallsUsed: number;
+  /** Recorded runs suppressed while the step ran. Observable, never silent. */
+  readonly suppressedRecords: number;
+  readonly records: readonly AxAgentPlaybookEvolveRunRecord<any, OUT>[];
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+type Side = 'current' | 'candidate';
+
+function normalizeTasks<IN extends AxGenIn>(
+  dataset: Readonly<AxAgentEvalDataset<IN>>
+): Readonly<{
+  train: readonly AxAgentEvalTask<IN>[];
+  validation?: readonly AxAgentEvalTask<IN>[];
+}> {
+  if (Array.isArray(dataset)) {
+    return { train: dataset as readonly AxAgentEvalTask<IN>[] };
+  }
+  const shaped = dataset as {
+    train: readonly AxAgentEvalTask<IN>[];
+    validation?: readonly AxAgentEvalTask<IN>[];
+  };
+  return shaped.validation === undefined
+    ? { train: shaped.train }
+    : { train: shaped.train, validation: shaped.validation };
+}
+
+function taskIds<IN extends AxGenIn>(
+  tasks: readonly AxAgentEvalTask<IN>[],
+  resolve?: (task: Readonly<AxAgentEvalTask<IN>>) => string | undefined
+): readonly string[] {
+  return tasks.map(
+    (task, index) => resolve?.(task) ?? task.id ?? `task-${index}`
+  );
+}
+
+/** Mean of the finite scores, or `null` when nothing scored. */
+function meanOf(scores: readonly (number | null)[]): number | null {
+  const finite = scores.filter((score): score is number => score !== null);
+  if (finite.length === 0) return null;
+  return finite.reduce((sum, score) => sum + score, 0) / finite.length;
+}
+
+/** `null` ranks below every real score; a crash can never win. */
+function rank(score: number | null): number {
+  return score === null ? Number.NEGATIVE_INFINITY : score;
+}
+
+function toNodes(tree: AxHarnessTree) {
+  return tree
+    .filter((entry) => entry.disabled !== true)
+    .map((entry) =>
+      Object.freeze({
+        id: entry.id,
+        kind: entry.kind,
+        config: entry.config as unknown as AxLearningValue,
+      })
+    );
+}
+
+/**
+ * Run the proposer under a deadline composed with the caller's signal, and
+ * leave NO listener behind on that signal.
+ *
+ * The composition is explicit rather than `mergeAbortSignals(...)` because
+ * that helper has no disposer: on the manual-merge fallback (a runtime with no
+ * `AbortSignal.any`) its listeners come off only if the signal actually
+ * aborts, so every settled proposer call would leak one listener onto a signal
+ * a worker loop reuses for its whole lifetime. `ax-conventions §8` requires a
+ * long-lived wait to prove it does not; this is the shape
+ * `runtimeExecutionLlmQuery.ts:221-228` already uses.
+ */
+async function withTimeout<T>(
+  run: (signal: AbortSignal | undefined) => Promise<T>,
+  timeoutMs: number,
+  outer?: AbortSignal
+): Promise<T> {
+  const controller = new AbortController();
+  if (outer?.aborted) controller.abort(outer.reason);
+  const onOuterAbort = (): void => {
+    controller.abort(outer?.reason);
+  };
+  outer?.addEventListener('abort', onOuterAbort, { once: true });
+  const timer = setTimeout(() => {
+    controller.abort(new Error('axHarnessEvolve: propose timed out'));
+  }, timeoutMs);
+  try {
+    return await run(controller.signal);
+  } finally {
+    clearTimeout(timer);
+    outer?.removeEventListener('abort', onOuterAbort);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Selectors
+// ---------------------------------------------------------------------------
+
+/** `wins > losses`. reef parity only, and structurally weaker. */
+const scoreComparisonSelector: AxHarnessSelector = (_candidate, evaluation) => {
+  const { metrics } = evaluation;
+  const accept = metrics.wins > metrics.losses;
+  return Object.freeze({
+    outcome: accept ? ('select' as const) : ('reject' as const),
+    evaluator: evaluation.evaluator,
+    evaluatorVersion: evaluation.evaluatorVersion,
+    policy: 'scoreComparison' as const,
+    policyVersion: '1',
+    reason: accept
+      ? `wins ${metrics.wins} > losses ${metrics.losses}`
+      : `wins ${metrics.wins} did not exceed losses ${metrics.losses}`,
+    metrics,
+  });
+};
+
+function playbookGateSelector(
+  options: Readonly<{
+    epsilon: number;
+    minHeldInGain: number;
+    requireHeldOut: boolean;
+    heldInComplete: boolean;
+    heldInExhausted: boolean;
+    heldOutComplete: boolean;
+    heldOutExhausted: boolean;
+    hasHeldOut: boolean;
+  }>
+): AxHarnessSelector {
+  return (_candidate, evaluation) => {
+    const { metrics } = evaluation;
+    const verdict = evaluateAgentPromotionGate({
+      heldIn: metrics.heldIn.before,
+      revalTrain: {
+        complete: options.heldInComplete,
+        exhausted: options.heldInExhausted,
+        mean: metrics.heldIn.after,
+      },
+      ...(options.hasHeldOut && metrics.heldOut
+        ? {
+            heldOut: metrics.heldOut.before,
+            revalHeldOut: metrics.heldOut.after,
+            revalHeldOutBatch: {
+              complete: options.heldOutComplete,
+              exhausted: options.heldOutExhausted,
+              mean: metrics.heldOut.after,
+            },
+          }
+        : {}),
+      epsilon: options.epsilon,
+      currentGainThreshold: options.minHeldInGain,
+      requireHeldOut: options.requireHeldOut,
+      hasRetentionPolicy: false,
+      retentionOk: true,
+      retentionBatchesComplete: true,
+    });
+    return Object.freeze({
+      outcome: verdict.accept ? ('select' as const) : ('reject' as const),
+      evaluator: evaluation.evaluator,
+      evaluatorVersion: evaluation.evaluatorVersion,
+      policy: 'axPlaybookGate' as const,
+      policyVersion: '1',
+      reason: verdict.reason,
+      metrics,
+    });
+  };
+}
+
+// ---------------------------------------------------------------------------
+// axHarnessEvolve
+// ---------------------------------------------------------------------------
+
+export const axHarnessEvolve = async <
+  IN extends AxGenIn = AxGenIn,
+  OUT extends AxGenOut = AxGenOut,
+>(
+  options: Readonly<AxHarnessEvolveOptions<IN, OUT>>
+): Promise<Readonly<AxHarnessEvolveResult<OUT>>> => {
+  const {
+    agent,
+    ai,
+    surface,
+    propose,
+    abortSignal,
+    onProgress,
+    acknowledgeContinuousPlaybookReset,
+  } = options;
+  const clock = options.clock ?? new AxSystemEventClock();
+  const gateOptions = options.gate ?? {};
+  const epsilon = gateOptions.epsilon ?? DEFAULT_EPSILON;
+  const minHeldInGain = gateOptions.minHeldInGain ?? DEFAULT_MIN_HELD_IN_GAIN;
+  const requireHeldOut = gateOptions.requireHeldOut ?? true;
+  const runsPerTask = gateOptions.runsPerTask ?? 1;
+  const scoreThreshold = gateOptions.scoreThreshold ?? DEFAULT_SCORE_THRESHOLD;
+  const target = agent as AxHarnessInstallTarget;
+
+  // ---- Step 1: normalize the dataset and fail closed on the split ---------
+  const split = normalizeTasks(options.tasks);
+  if (split.train.length === 0) {
+    throw new AxHarnessEvolveConfigError(
+      'tasks',
+      'axHarnessEvolve: the training split is empty; there is nothing to improve against.'
+    );
+  }
+  if (requireHeldOut && (split.validation?.length ?? 0) === 0) {
+    throw new AxHarnessEvolveConfigError(
+      'gate.requireHeldOut',
+      'axHarnessEvolve: requireHeldOut defaults to true and needs a { train, validation } dataset. Pass a validation split, or set gate.requireHeldOut: false to opt into the held-in-only regime — the same permissive regime measured at a 66.7% false-promotion rate.'
+    );
+  }
+
+  // The built-in judge is resolved here, before any model call, and a
+  // correlated proposer/judge pair is never arrived at by default.
+  //
+  // `agent.playbook().evolve()` resolves judgeAI ?? agentJudgeAI ?? teacherAI
+  // ?? studentAI. Silently inheriting that last-but-one step would hand the
+  // judge the SAME service the proposer writes with (`models.teacher`), which
+  // is R2's correlated-error risk arrived at by accident rather than by
+  // choice. So: an explicit `judgeAI` is honoured (it may legitimately be the
+  // teacher — that is an informed decision), the agent's own judge is honoured
+  // next, and a bare `teacherAI` with no judge and no metric is refused.
+  const agentJudgeAI = agent.getJudgeAI?.();
+  const resolvedJudgeAI = options.judgeAI ?? agentJudgeAI;
+  if (
+    options.metric === undefined &&
+    resolvedJudgeAI === undefined &&
+    options.teacherAI !== undefined
+  ) {
+    throw new AxHarnessEvolveConfigError(
+      'judgeAI',
+      "axHarnessEvolve: teacherAI is set but no judge is. The built-in judge would silently reuse the proposer's own teacher, correlating the author of a candidate with its evaluator. Pass judgeAI explicitly (it may be the same service if you accept that correlation), or supply your own metric."
+    );
+  }
+
+  const datasetSize =
+    (split.train.length + (split.validation?.length ?? 0)) * runsPerTask * 2;
+  const maxMetricCalls =
+    gateOptions.maxMetricCalls ?? Math.max(100, datasetSize);
+  if (!Number.isSafeInteger(maxMetricCalls) || maxMetricCalls <= 0) {
+    throw new AxHarnessEvolveConfigError(
+      'gate.maxMetricCalls',
+      'axHarnessEvolve: maxMetricCalls must be a positive safe integer.'
+    );
+  }
+
+  // ---- Step 2: freeze the split digests BEFORE any proposal --------------
+  const trainIds = taskIds(split.train, gateOptions.taskId);
+  const taskSetDigest = await axEventCanonicalDigest([...trainIds].sort());
+  const heldOutIds = split.validation
+    ? taskIds(split.validation, gateOptions.taskId)
+    : undefined;
+  const heldOutTaskSetDigest = heldOutIds
+    ? await axEventCanonicalDigest([...heldOutIds].sort())
+    : undefined;
+
+  // ---- Step 3: read and re-admit the current tree -------------------------
+  const current = await surface.currentTree(abortSignal);
+  if (current === undefined) {
+    throw new AxHarnessEvolveConfigError(
+      'surface',
+      'axHarnessEvolve: the scenario has no promoted head; seed the surface before evolving.'
+    );
+  }
+  const currentEntries = axAdmitHarnessTree(current.entries);
+  // The step number is derived from the chain TAIL, not from the promoted
+  // head, because that is what `AxLearningSurface.publish` does
+  // (`releases.ts:160`). Deriving it from the head made the manifest and the
+  // gate metrics disagree with the release they travel on the moment an
+  // un-promoted nomination sat on the chain, and let two consecutive evolve
+  // steps both report `step: 2`.
+  const chain = await surface.releases(abortSignal);
+  const step = (chain.at(-1)?.step ?? 0) + 1;
+
+  const budget: AxAgentEvalBudget = { remaining: maxMetricCalls };
+  const learn = agent.getLearn?.();
+  const suppressedBefore = learn?.suppressedRecords ?? 0;
+  const records: AxAgentPlaybookEvolveRunRecord<any, OUT>[] = [];
+  const observations: AxHarnessFailureObservation[] = [];
+  let proposerCallsUsed = 0;
+
+  const emit = (
+    phase: AxHarnessEvolveProgressEvent['phase'],
+    message: string
+  ): void => {
+    onProgress?.({
+      phase,
+      message,
+      metricCallsUsed: maxMetricCalls - budget.remaining,
+    });
+  };
+
+  const skipped = (
+    reason: string,
+    manifest: Readonly<AxHarnessFailureManifest>
+  ): Readonly<AxHarnessEvolveResult<OUT>> =>
+    Object.freeze({
+      status: 'skipped' as const,
+      reason,
+      manifest,
+      metricCallsUsed: maxMetricCalls - budget.remaining,
+      proposerCallsUsed,
+      suppressedRecords: (learn?.suppressedRecords ?? 0) - suppressedBefore,
+      records: Object.freeze(records),
+    });
+
+  const inputManifest: Readonly<AxHarnessFailureManifest> =
+    options.manifest ?? Object.freeze({ step: step - 1, entries: [] });
+
+  // ---- Step 4: hold recording suspension for the whole step ---------------
+  const releaseSuppression = learn?.suspendRecording();
+
+  // The agent may already be serving a tree. Only one installation is allowed
+  // at a time, so it is taken off for the duration and put back at the end;
+  // the entries come from the chain, which is why a pre-step installation that
+  // is not on this chain is refused rather than silently lost.
+  const preInstallation = axCurrentHarnessInstallation(target);
+  let preEntries: AxHarnessTree | undefined;
+  let preReleaseId: string | undefined;
+  let preParentReleaseId: string | undefined;
+  if (preInstallation) {
+    const preRelease = chain.find(
+      (release) => release.releaseId === preInstallation.releaseId
+    );
+    if (preRelease === undefined) {
+      releaseSuppression?.();
+      throw new AxHarnessEvolveConfigError(
+        'agent',
+        `axHarnessEvolve: the agent is serving release ${preInstallation.releaseId}, which is not on this scenario's chain, so the step could not put it back. Dispose the installation first.`
+      );
+    }
+    preEntries = preRelease.entries;
+    preReleaseId = preRelease.releaseId;
+    preParentReleaseId = preRelease.parentReleaseId;
+    preInstallation.dispose();
+  }
+
+  const nowIso = (): string => new Date(clock.now()).toISOString();
+
+  const installSide = async (
+    entries: AxHarnessTree,
+    releaseId: string,
+    parentReleaseId?: string
+  ) =>
+    axApplyHarnessTree(entries, target, {
+      releaseId,
+      ...(parentReleaseId === undefined ? {} : { parentReleaseId }),
+      now: nowIso(),
+      slot: TRIAL_SLOT,
+      ...(acknowledgeContinuousPlaybookReset === undefined
+        ? {}
+        : { acknowledgeContinuousPlaybookReset }),
+    });
+
+  const runStep = async (): Promise<Readonly<AxHarnessEvolveResult<OUT>>> => {
+    // ---- Step 5: propose, bounded ----------------------------------------
+    emit('propose', 'requesting a proposal');
+    const maxProposerCalls =
+      options.maxProposerCalls ?? DEFAULT_MAX_PROPOSER_CALLS;
+    if (!Number.isSafeInteger(maxProposerCalls) || maxProposerCalls <= 0) {
+      throw new AxHarnessEvolveConfigError(
+        'maxProposerCalls',
+        'axHarnessEvolve: maxProposerCalls must be a positive safe integer.'
+      );
+    }
+    const proposeTimeoutMs =
+      options.proposeTimeoutMs ?? DEFAULT_PROPOSE_TIMEOUT_MS;
+
+    let proposed: AxHarnessMutation | readonly AxHarnessMutation[] | null =
+      null;
+    for (let call = 0; call < maxProposerCalls; call += 1) {
+      proposerCallsUsed += 1;
+      proposed = await withTimeout(
+        (signal) =>
+          Promise.resolve(
+            propose({
+              nodes: toNodes(currentEntries),
+              samples: options.batch?.samples ?? [],
+              droppedSamples: options.batch?.droppedSamples ?? 0,
+              models: Object.freeze({
+                // The SERVED provider is deliberately not here.
+                ...(options.teacherAI === undefined
+                  ? {}
+                  : { teacher: options.teacherAI }),
+                named: Object.freeze({ ...(options.namedModels ?? {}) }),
+              }),
+              ...(options.manifest === undefined
+                ? {}
+                : { manifest: options.manifest }),
+              step,
+              ...(signal === undefined ? {} : { signal }),
+            })
+          ),
+        proposeTimeoutMs,
+        abortSignal
+      );
+      if (proposed !== null) break;
+    }
+
+    // ---- Step 6: nothing proposed ----------------------------------------
+    const mutations =
+      proposed === null
+        ? []
+        : ([] as AxHarnessMutation[]).concat(proposed as AxHarnessMutation[]);
+    if (mutations.length === 0) {
+      return skipped('no proposal', inputManifest);
+    }
+
+    // ---- Step 7: apply the mutations purely, and re-admit -----------------
+    let candidateEntries: AxHarnessTree;
+    try {
+      candidateEntries = axApplyHarnessMutations(currentEntries, mutations);
+    } catch (error) {
+      const reason = axIsHarnessAdmissionError(error)
+        ? `candidate denied admission: ${error.reason} at ${error.path} on entry ${error.entryId}`
+        : `candidate mutation rejected: ${
+            error instanceof Error ? error.message : String(error)
+          }`;
+      return skipped(reason, inputManifest);
+    }
+
+    // ---- Step 8: render both sides and compare content identity -----------
+    const now = nowIso();
+    axRenderHarnessTree(currentEntries, { now });
+    axRenderHarnessTree(candidateEntries, { now });
+    const currentContentId = await axHarnessContentId(currentEntries);
+    const candidateContentId = await axHarnessContentId(candidateEntries);
+    if (currentContentId === candidateContentId) {
+      return skipped('no-op mutation', inputManifest);
+    }
+
+    const candidate: Readonly<AxHarnessCandidate> = Object.freeze({
+      candidateId: candidateContentId,
+      currentEntries,
+      candidateEntries,
+      currentContentId,
+      candidateContentId,
+      mutations: Object.freeze([...mutations]),
+    });
+
+    // ---- Step 9: trial-install BOTH sides before any episode --------------
+    try {
+      for (const [entries, releaseId] of [
+        [currentEntries, current.releaseId],
+        [candidateEntries, `${current.releaseId}-candidate`],
+      ] as const) {
+        const trial = await installSide(entries, releaseId);
+        trial.dispose();
+      }
+    } catch (error) {
+      // Nothing has been appended, so an un-installable tree cannot reach the
+      // chain even in principle.
+      return skipped(
+        `trial install failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        inputManifest
+      );
+    }
+
+    // ---- Step 10: interleaved paired evaluation ---------------------------
+    const metric =
+      options.metric ??
+      createAgentOptimizeMetric(
+        agent,
+        resolvedJudgeAI ?? ai,
+        options.judgeOptions ?? {}
+      );
+    if (
+      options.metric === undefined &&
+      options.teacherAI !== undefined &&
+      resolvedJudgeAI === options.teacherAI
+    ) {
+      // Allowed, because it was asked for — but never silent. R2 is a real
+      // residual risk and the reader of a progress log deserves to see it.
+      emit(
+        'evaluate',
+        'correlated regime: the judge and the proposer share one AxAIService'
+      );
+    }
+
+    const scoreOne = async (
+      side: Side,
+      task: Readonly<AxAgentEvalTask<IN>>,
+      taskId: string,
+      splitName: 'train' | 'validation'
+    ): Promise<{
+      score: number | null;
+      complete: boolean;
+      exhausted: boolean;
+    }> => {
+      emit('evaluate', `${splitName}:${taskId}:${side}`);
+      const entries = side === 'candidate' ? candidateEntries : currentEntries;
+      const releaseId =
+        side === 'candidate'
+          ? `${current.releaseId}-candidate`
+          : current.releaseId;
+      let installation: Awaited<ReturnType<typeof installSide>> | undefined;
+      try {
+        installation = await installSide(entries, releaseId);
+        const batch = await runAgentEvalBatch<IN, OUT>({
+          agent,
+          ai,
+          tasks: [task],
+          metric,
+          scoreThreshold,
+          budget,
+          runsPerTask,
+          ...(abortSignal === undefined ? {} : { abortSignal }),
+          now: () => clock.now(),
+        });
+        records.push(...batch.records);
+        if (!batch.complete || !batch.validEvidence) {
+          observations.push({
+            taskId,
+            side,
+            stage: batch.validEvidence ? 'metric' : 'run',
+            cause:
+              batch.records.find((record) => record.error)?.error ??
+              (batch.exhausted
+                ? 'metric budget exhausted'
+                : 'incomplete evidence'),
+          });
+          return {
+            score: null,
+            complete: false,
+            exhausted: batch.exhausted,
+          };
+        }
+        return { score: batch.mean, complete: true, exhausted: false };
+      } catch (error) {
+        // A caller that aborted wants the STEP to stop, not to receive a
+        // verdict computed from half-run episodes. The restore in the outer
+        // finally still runs, so the agent is left as it was found.
+        if (abortSignal?.aborted) throw error;
+        observations.push({
+          taskId,
+          side,
+          stage: 'apply',
+          cause: error instanceof Error ? error.message : String(error),
+        });
+        return { score: null, complete: false, exhausted: false };
+      } finally {
+        installation?.dispose();
+      }
+    };
+
+    const runSplit = async (
+      tasks: readonly AxAgentEvalTask<IN>[],
+      ids: readonly string[],
+      splitName: 'train' | 'validation'
+    ) => {
+      const candidateScores: (number | null)[] = [];
+      const currentScores: (number | null)[] = [];
+      let candidateComplete = true;
+      let currentComplete = true;
+      let exhausted = false;
+      for (let index = 0; index < tasks.length; index += 1) {
+        const task = tasks[index] as Readonly<AxAgentEvalTask<IN>>;
+        const id = ids[index] as string;
+        // Alternate first position so provider drift hits both sides equally.
+        const order: readonly Side[] =
+          index % 2 === 0
+            ? (['current', 'candidate'] as const)
+            : (['candidate', 'current'] as const);
+        for (const side of order) {
+          const outcome = await scoreOne(side, task, id, splitName);
+          if (side === 'candidate') {
+            candidateScores[index] = outcome.score;
+            candidateComplete &&= outcome.complete;
+          } else {
+            currentScores[index] = outcome.score;
+            currentComplete &&= outcome.complete;
+          }
+          exhausted ||= outcome.exhausted;
+        }
+      }
+      return {
+        candidateScores,
+        currentScores,
+        candidateComplete,
+        currentComplete,
+        exhausted,
+      };
+    };
+
+    const heldInRun = await runSplit(split.train, trainIds, 'train');
+    const heldOutRun =
+      split.validation && heldOutIds
+        ? await runSplit(split.validation, heldOutIds, 'validation')
+        : undefined;
+
+    let wins = 0;
+    let losses = 0;
+    let ties = 0;
+    for (let index = 0; index < heldInRun.candidateScores.length; index += 1) {
+      const c = rank(heldInRun.candidateScores[index] ?? null);
+      const u = rank(heldInRun.currentScores[index] ?? null);
+      if (c > u) wins += 1;
+      else if (c < u) losses += 1;
+      else ties += 1;
+    }
+
+    const heldInBefore = meanOf(heldInRun.currentScores) ?? 0;
+    const heldInAfter = meanOf(heldInRun.candidateScores) ?? 0;
+    const episodeFailures = [
+      ...heldInRun.candidateScores,
+      ...heldInRun.currentScores,
+      ...(heldOutRun?.candidateScores ?? []),
+      ...(heldOutRun?.currentScores ?? []),
+    ].filter((score) => score === null).length;
+
+    // The manifest describes the CANDIDATE, and only the candidate.
+    //
+    // Both sides are swept, and a current-side crash is real evidence — it is
+    // reported on `evaluation.observations`, tagged with its side. But it must
+    // never reach the manifest: the manifest is the one thing a proposer is
+    // told about its own previous attempts, and it travels inside the gate
+    // decision onto the release chain. Folding the baseline's failures in
+    // would make a nominated candidate ship a durable claim that it fails
+    // tasks it never failed, and would fire `fixed` spuriously the moment the
+    // two sides' crash sets differ — which is the normal case.
+    //
+    // Advancing before the selector runs is deliberate (the gate metrics carry
+    // the classification, so the decision cannot reference a manifest computed
+    // after it); RFC §7.2 step 15's "evaluated side" therefore resolves to the
+    // candidate here, and the current side travels on the evaluation instead.
+    const candidateObservations = observations.filter(
+      (observation) => observation.side === 'candidate'
+    );
+    const advanced = await axAdvanceHarnessFailureManifest(
+      inputManifest,
+      candidateObservations,
+      step
+    );
+
+    const metrics: Readonly<AxHarnessGateMetrics> = Object.freeze({
+      candidateScores: Object.freeze([...heldInRun.candidateScores]),
+      currentScores: Object.freeze([...heldInRun.currentScores]),
+      candidateScore: meanOf(heldInRun.candidateScores),
+      currentScore: meanOf(heldInRun.currentScores),
+      wins,
+      losses,
+      ties,
+      heldIn: Object.freeze({ before: heldInBefore, after: heldInAfter }),
+      ...(heldOutRun === undefined
+        ? {}
+        : {
+            heldOut: Object.freeze({
+              before: meanOf(heldOutRun.currentScores) ?? 0,
+              after: meanOf(heldOutRun.candidateScores) ?? 0,
+            }),
+          }),
+      taskSetDigest,
+      ...(heldOutTaskSetDigest === undefined ? {} : { heldOutTaskSetDigest }),
+      failures: Object.freeze({
+        new: advanced.new,
+        persisting: advanced.persisting,
+        fixed: advanced.fixed,
+      }),
+      episodeFailures,
+      ...(options.batch === undefined
+        ? {}
+        : {
+            batchId: options.batch.batchId,
+            processorId: options.batch.processorId,
+          }),
+    });
+
+    const evaluation: Readonly<AxHarnessEvaluation> = Object.freeze({
+      evaluator: 'harness_task_pairs',
+      evaluatorVersion: '1',
+      metrics,
+      observations: Object.freeze([...observations]),
+    });
+
+    // ---- Step 12: decide ---------------------------------------------------
+    emit('decide', 'applying the selection policy');
+    const selector: AxHarnessSelector =
+      typeof options.selection === 'function'
+        ? options.selection
+        : options.selection === 'scoreComparison'
+          ? scoreComparisonSelector
+          : playbookGateSelector({
+              epsilon,
+              minHeldInGain,
+              requireHeldOut,
+              heldInComplete: heldInRun.candidateComplete,
+              heldInExhausted: heldInRun.exhausted,
+              heldOutComplete: heldOutRun?.candidateComplete ?? false,
+              heldOutExhausted: heldOutRun?.exhausted ?? false,
+              hasHeldOut: heldOutRun !== undefined,
+            });
+
+    const decision = selector(candidate, evaluation);
+    if (decision.metrics !== evaluation.metrics) {
+      // A policy may not fabricate its own measurements.
+      throw new Error(
+        'axHarnessEvolve: the selector returned metrics it did not receive; a policy may not fabricate its own measurements.'
+      );
+    }
+    // Both identity pairs are checked, not just the policy: `evaluator` and
+    // `evaluatorVersion` are persisted on the chain beside `policy`, and a
+    // decision log whose evaluator is `''` is not a decision log.
+    for (const [field, value] of [
+      ['policy', decision.policy],
+      ['policyVersion', decision.policyVersion],
+      ['evaluator', decision.evaluator],
+      ['evaluatorVersion', decision.evaluatorVersion],
+    ] as const) {
+      if (typeof value !== 'string' || value.trim().length === 0) {
+        throw new Error(
+          `axHarnessEvolve: the selector must name a non-empty ${field}; every one of them is persisted on the release chain.`
+        );
+      }
+    }
+
+    // ---- Steps 13-14: nominate, or reject ---------------------------------
+    if (decision.outcome !== 'select') {
+      emit('done', `rejected: ${decision.reason}`);
+      return Object.freeze({
+        status: 'rejected' as const,
+        reason: decision.reason,
+        candidate,
+        decision,
+        manifest: advanced.manifest,
+        metricCallsUsed: maxMetricCalls - budget.remaining,
+        proposerCallsUsed,
+        suppressedRecords: (learn?.suppressedRecords ?? 0) - suppressedBefore,
+        records: Object.freeze(records),
+      });
+    }
+
+    emit('nominate', 'appending the nomination');
+    const release = await surface.publish(
+      { entries: candidateEntries, gate: decision, operation: 'evolve' },
+      abortSignal
+    );
+    emit('done', `nominated ${release.releaseId}`);
+    return Object.freeze({
+      status: 'nominated' as const,
+      reason: decision.reason,
+      candidate,
+      decision,
+      release,
+      manifest: advanced.manifest,
+      metricCallsUsed: maxMetricCalls - budget.remaining,
+      proposerCallsUsed,
+      suppressedRecords: (learn?.suppressedRecords ?? 0) - suppressedBefore,
+      records: Object.freeze(records),
+    });
+  };
+
+  // ---- Step 16: leave the agent exactly as it was found -------------------
+  //
+  // Restoration runs on both the success and the failure path, and a failure
+  // to restore is never downgraded to a plain rejection: an agent left serving
+  // a trial tree is worse news than whatever the step was already reporting.
+  let result: Readonly<AxHarnessEvolveResult<OUT>> | undefined;
+  let thrown: unknown;
+  let restoreFailure: unknown;
+  try {
+    result = await runStep();
+  } catch (error) {
+    thrown = error;
+  }
+  axCurrentHarnessInstallation(target)?.dispose();
+  if (preEntries && preReleaseId) {
+    try {
+      await installSide(preEntries, preReleaseId, preParentReleaseId);
+    } catch (error) {
+      restoreFailure = error;
+    }
+  }
+  releaseSuppression?.();
+
+  if (restoreFailure !== undefined) {
+    throw new AggregateError(
+      thrown === undefined ? [restoreFailure] : [thrown, restoreFailure],
+      'axHarnessEvolve: the pre-step installation could not be restored'
+    );
+  }
+  if (thrown !== undefined) throw thrown;
+  return result as Readonly<AxHarnessEvolveResult<OUT>>;
+};

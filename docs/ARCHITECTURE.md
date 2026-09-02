@@ -36,7 +36,11 @@ Ax has eight main runtime surfaces:
    classification, digest-verified blob spill, bounded filtered reads, durable
    per-consumer cursors, a fork/merge DAG, and a tiered-rollup context
    projection with drill-down.
-8. **AxIR generated libraries**: Python, Java, C++, Go, and Rust packages emitted from
+8. **AxLearn**: an opt-in learning surface — addressable interaction records and
+   receipts, late out-of-order feedback with a pure eligibility reducer, a
+   diffable harness tree with a fail-closed admission gate, and a
+   content-addressed release chain whose head only a human moves.
+9. **AxIR generated libraries**: Python, Java, C++, Go, and Rust packages emitted from
    the shared portable semantics.
 
 These surfaces are connected by the shared Ax program contract: `forward`,
@@ -62,6 +66,9 @@ The core TypeScript modules are:
 - `src/ax/flow/`: AxFlow graph API, step model, executor, and planner
 - `src/ax/event/`: event envelopes, stores, sources, routes, continuations,
   targets, sink delivery, and protocol adapters
+- `src/ax/learn/`: learning records, the store port, the report schema and
+  eligibility reducer, harness trees with their admission gate and installer,
+  the release chain, and `axHarnessEvolve`
 - `src/ax/funcs/`: JavaScript runtime, security policy helpers, sessions, and
   worker integration
 - `src/ax/trace/`: OpenTelemetry integration and portable trace data
@@ -205,6 +212,25 @@ normalization. Generated-language runtimes dispatch inline without hidden
 worker threads; their hosts own timers, listener supervision, and other
 asynchronous loops. See
 [`docs/EVENT_RUNTIME.md`](./EVENT_RUNTIME.md).
+
+## Learning Surface
+
+`src/ax/learn/` is opt-in and browser-safe. An agent configured with `learning`
+gains `agent.learn().run(...)`, which wraps `forward()` from outside the runtime
+scope and returns `{ output, receipt }`; the receipt makes one exchange
+addressable so late feedback can name it. Records are stamped with the content
+identity of the tree the agent was ACTUALLY serving, never with the store head.
+
+An `AxHarnessTree` is a flat, diffable list over three primitives that already
+exist — an actor instruction, a playbook bullet, a catalog skill — behind an
+admission gate that fails closed on credential-shaped content and on any
+attempt by a proposer to author bullet evidence, counters, or lineage.
+
+`axHarnessEvolve` reuses the same promotion gate `agent.playbook().evolve()`
+uses and **nominates**: it appends a release with `current: false`. A separate
+compare-and-set `promote(...)` moves the head, and nothing inside Ax calls it.
+There is no canary, no staged rollout, no online monitoring, and no automatic
+demotion. See [`docs/LEARNING_SURFACE.md`](./LEARNING_SURFACE.md).
 
 TypeScript also exposes `AxEventComponentManager` at this boundary for trusted
 process-local listener and adapter lifecycle. It owns dependency ordering,

@@ -297,12 +297,25 @@ export function buildSplitPrograms(self: any): void {
     }));
   // The base description composes the stage's optimizable instruction
   // (`stageInstruction`, the live backing of the `::instruction` component),
-  // the user/playbook-owned `executorDescription`, and any standing
-  // instruction addenda (an additive channel; see addActorInstruction).
+  // the user/playbook-owned `executorDescription`, any standing instruction
+  // addenda (an additive channel; see addActorInstruction), and finally the
+  // managed named slots (see setActorInstructionSlot). Slots render last and
+  // in slot-name order so the rendered prompt is a pure function of which
+  // slots are installed, never of the order they were written.
+  const instructionSlots = s.instructionSlots as
+    | Map<string, string>
+    | undefined;
+  const slotParts =
+    instructionSlots === undefined
+      ? []
+      : [...instructionSlots.keys()]
+          .sort()
+          .map((slot) => instructionSlots.get(slot) as string);
   const actorBaseParts = [
     s.stageInstruction,
     s.executorDescription,
     ...((s.instructionAddenda as string[] | undefined) ?? []),
+    ...slotParts,
   ].filter(
     (part: unknown): part is string =>
       typeof part === 'string' && part.trim().length > 0

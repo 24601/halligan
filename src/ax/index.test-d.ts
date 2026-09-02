@@ -29,7 +29,9 @@ import {
   type AxGuardFailureCode,
   type AxGuardOp,
   type AxHarnessEntry,
+  type AxHarnessEvolveOptions,
   type AxHarnessGateDecision,
+  type AxHarnessInstallTarget,
   type AxHarnessTree,
   AxInMemoryDemandStore,
   AxJSRuntime,
@@ -37,6 +39,7 @@ import {
   type AxLearningReceipt,
   type AxLearningRecord,
   type AxLearningStore,
+  type AxLearningSurface,
   type AxMetricFn,
   type AxMetricResult,
   type AxMultiMetricFn,
@@ -44,18 +47,27 @@ import {
   type AxProgrammable,
   type AxProgramSource,
   ax,
+  axAdmitHarnessTree,
+  axApplyHarnessTree,
   axAssertPersistableValue,
   axCollectGrantRequirements,
   axCreateLearningEngineState,
+  axCurrentHarnessInstallation,
   axDemandEventObserver,
   axEvaluateGuards,
   axEventComponentManager,
   axExecutableSkillRef,
+  axHarnessContentId,
+  axHarnessEvolve,
   axInMemoryLearningStore,
+  axInspectHarnessTree,
   axIsEvidenceRequirement,
   axIsGuardPredicateFailure,
   axLearningEngineIngest,
+  axLearningSurface,
+  axNormalizeHarnessFailureCause,
   axProgramSourceRuntimeProtocol,
+  axRenderHarnessTree,
   axReportSchema,
   axScoreWindowProcessor,
   axSelectExecutableSkills,
@@ -1126,6 +1138,26 @@ void harnessGate.metrics.taskSetDigest;
 
 void axReportSchema({ score: { type: 'number', min: 0, max: 1 } });
 void axAssertPersistableValue({ ok: true }, 'payload');
+
+// Harness tree, installer, release chain and evolve must all be reachable from
+// the generated barrel — this file is the proof that they are exported, not
+// merely written.
+void axInspectHarnessTree(harnessTree);
+void axAdmitHarnessTree(harnessTree);
+void axRenderHarnessTree(harnessTree, { now: '2026-01-01T00:00:00.000Z' });
+void axHarnessContentId(harnessTree);
+declare const harnessInstallTarget: AxHarnessInstallTarget;
+void axApplyHarnessTree(harnessTree, harnessInstallTarget, {
+  releaseId: 'rel-1',
+  now: '2026-01-01T00:00:00.000Z',
+});
+void axCurrentHarnessInstallation(harnessInstallTarget);
+void axNormalizeHarnessFailureCause('boom');
+declare const learningSurface: AxLearningSurface;
+void learningSurface.observedHeadContentId;
+void axLearningSurface;
+declare const harnessEvolveOptions: AxHarnessEvolveOptions;
+void axHarnessEvolve(harnessEvolveOptions);
 
 // --- Verifier-gated working state ------------------------------------------
 // Every symbol below must be reachable from the generated barrel; the

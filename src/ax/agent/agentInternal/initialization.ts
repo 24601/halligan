@@ -97,28 +97,18 @@ export function initializeAgentInternal(
   const skillsCatalog = Array.isArray(options.skillsCatalog)
     ? options.skillsCatalog.slice()
     : undefined;
-  s.skillsCatalog = skillsCatalog;
+  // The construction-time inputs are kept separately from the effective
+  // catalog so a managed slot (`setSkillsCatalogSlot`) can be added and
+  // removed without ever losing what the host originally supplied, and so the
+  // slot setter can refuse an agent whose search callback is the host's.
+  s.skillsCatalogBase = skillsCatalog;
+  s.hostSkillsSearch = options.onSkillsSearch;
   // Resolved ONCE and held for the agent's lifetime: the Available Skills index
   // is built at signature-build time, and recomputing eligibility per run would
   // churn the signature and therefore the prompt cache. A host whose
   // environment changed constructs a new agent.
-  const skillEnvironment = options.skillPolicy?.environment;
-  s.onSkillsSearch =
-    options.onSkillsSearch ??
-    (skillsCatalog && skillsCatalog.length > 0
-      ? createCatalogSkillsSearch(
-          skillsCatalog,
-          skillEnvironment,
-          // Read per search, not captured: the run's authority re-check is
-          // computed in `actorLoop` and a skill it parked or dropped must not
-          // come back through `discover({ skills })`.
-          () => s._skillRetrievalGate
-        )
-      : undefined);
-  s.skillsHintEnabled =
-    relevanceRankingChoice &&
-    Array.isArray(skillsCatalog) &&
-    skillsCatalog.length > 0;
+  s.skillEnvironment = options.skillPolicy?.environment;
+  rebuildSkillsSearch(s);
   s.onLoadedSkills = options.onLoadedSkills;
   s.onUsedSkills = options.onUsedSkills;
   // Memories: a static catalog backs recall(...) with a built-in local search
@@ -370,4 +360,47 @@ export function initializeAgentInternal(
     s.actorProgram as unknown as Readonly<AxTunable<any, any> & AxUsable>,
     'actor'
   );
+}
+
+/**
+ * Recompute everything derived from the skills catalog: the merged catalog,
+ * the search callback that backs `discover({ skills })`, and the two advisory
+ * hint flags.
+ *
+ * Called once at construction and again by `setSkillsCatalogSlot(...)`. The
+ * hint flags are part of the derivation on purpose: `skillsHintEnabled` gates
+ * whether the catalog is ranked into the Likely Relevant section at all
+ * (`actorLoop.ts`), so a slot that injected skills without recomputing it
+ * would install skills the actor is never hinted about.
+ */
+export function rebuildSkillsSearch(self: any): void {
+  const s = self as any;
+  const base: readonly any[] = Array.isArray(s.skillsCatalogBase)
+    ? s.skillsCatalogBase
+    : [];
+  const slots: Map<string, readonly any[]> | undefined = s.skillsCatalogSlots;
+  // Slot order is the slot NAME, not insertion order: the effective catalog
+  // has to be a pure function of the installed slots so two hosts that install
+  // the same tree get the same prompt.
+  const slotted =
+    slots === undefined
+      ? []
+      : [...slots.keys()].sort().flatMap((slot) => slots.get(slot) ?? []);
+  const merged = [...base, ...slotted];
+  s.skillsCatalog = Array.isArray(s.skillsCatalogBase) ? merged : undefined;
+  s.onSkillsSearch =
+    s.hostSkillsSearch ??
+    (merged.length > 0
+      ? createCatalogSkillsSearch(
+          merged,
+          s.skillEnvironment,
+          // Read per search, not captured: the run's authority re-check is
+          // computed in `actorLoop` and a skill it parked or dropped must not
+          // come back through `discover({ skills })`.
+          () => s._skillRetrievalGate
+        )
+      : undefined);
+  s.skillsHintEnabled = Boolean(s._relevanceRankingChoice) && merged.length > 0;
+  s.relevanceHintsEnabled =
+    s.moduleHintEnabled || s.skillsHintEnabled || s.memoriesHintEnabled;
 }

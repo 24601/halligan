@@ -5,6 +5,7 @@ actr
 aeiou
 agentic
 aiplatform
+AKIA
 alaw
 ALLCAPS
 annos
@@ -34,6 +35,7 @@ axir
 axllm
 axrejected
 backticked
+baprs
 behaviour
 behaviourally
 bootstrapper
@@ -259,6 +261,7 @@ Typesafe
 typetest
 typetests
 ulaw
+unaddressable
 unawaited
 undeclarable
 unexpressible
@@ -294,6 +297,7 @@ Xhigh
 xlarge
 xorshift
 xorshift32
+xoxb
 xpassed
 xstate
 xyzzy

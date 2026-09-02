@@ -1,0 +1,106 @@
+{
+  "name": "learn-eligibility-never-reasons",
+  "behaviour": "eligibility",
+  "description": "Six malformed or opted-out reports, one per named never reason. A silently dropped report is the failure mode that makes a learning loop look healthy while learning nothing, so every refusal is named and counted.",
+  "scenario": "support",
+  "processor": { "batchSize": 4, "minScore": 0, "maxScore": 1 },
+  "records": [
+    {
+      "kind": "interaction",
+      "id": "i1",
+      "scenario": "support",
+      "createdAt": 1000,
+      "payload": {
+        "signature": "query:string -> answer:string",
+        "programId": "root",
+        "input": { "query": "a" },
+        "output": { "answer": "a" }
+      }
+    },
+    {
+      "kind": "interaction",
+      "id": "i2",
+      "scenario": "support",
+      "createdAt": 1000,
+      "payload": {
+        "signature": "query:string -> answer:string",
+        "programId": "root",
+        "input": { "query": "b" },
+        "output": { "answer": "b" }
+      }
+    },
+    {
+      "kind": "report",
+      "id": "r-no-references",
+      "scenario": "support",
+      "createdAt": 1001,
+      "references": [],
+      "payload": { "score": 0.5 }
+    },
+    {
+      "kind": "report",
+      "id": "r-no-score",
+      "scenario": "support",
+      "createdAt": 1002,
+      "references": ["i1"],
+      "payload": {}
+    },
+    {
+      "kind": "report",
+      "id": "r-boolean-score",
+      "scenario": "support",
+      "createdAt": 1003,
+      "references": ["i1"],
+      "payload": { "score": true }
+    },
+    {
+      "kind": "report",
+      "id": "r-opted-out",
+      "scenario": "support",
+      "createdAt": 1004,
+      "references": ["i1"],
+      "payload": {
+        "score": 0.5,
+        "metadata": { "training": { "eligible": false } }
+      }
+    },
+    {
+      "kind": "report",
+      "id": "r-duplicate-references",
+      "scenario": "support",
+      "createdAt": 1005,
+      "references": ["i1", "i1"],
+      "payload": { "score": 0.5 }
+    },
+    {
+      "kind": "report",
+      "id": "r-multi-reference",
+      "scenario": "support",
+      "createdAt": 1006,
+      "references": ["i1", "i2"],
+      "payload": { "score": 0.5 }
+    }
+  ],
+  "expected": {
+    "decisions": {
+      "r-no-references": { "outcome": "never", "reason": "no-references" },
+      "r-no-score": { "outcome": "never", "reason": "no-score" },
+      "r-boolean-score": { "outcome": "never", "reason": "boolean-score" },
+      "r-opted-out": { "outcome": "never", "reason": "training-opted-out" },
+      "r-duplicate-references": {
+        "outcome": "never",
+        "reason": "duplicate-references"
+      },
+      "r-multi-reference": { "outcome": "never", "reason": "multi-reference" }
+    },
+    "neverReasons": {
+      "no-references": 1,
+      "no-score": 1,
+      "boolean-score": 1,
+      "training-opted-out": 1,
+      "duplicate-references": 1,
+      "multi-reference": 1
+    },
+    "readyCount": 0
+  }
+}

@@ -7,7 +7,10 @@
  * IO. Implementations live beside this file.
  */
 
+import type { AxAgentCatalogSkill } from '../agent/agentInternal/skillsTypes.js';
 import type { AxAuthorizationReceipt } from '../authority/types.js';
+import type { AxACEPlaybook } from '../dsp/optimizers/aceTypes.js';
+import type { AxPlaybookSnapshot } from '../dsp/playbook.js';
 import type { AxEventClock } from '../event/types.js';
 
 // ---------------------------------------------------------------------------
@@ -183,6 +186,168 @@ export type AxHarnessEntry = Readonly<
 >;
 
 export type AxHarnessTree = readonly AxHarnessEntry[];
+
+/**
+ * The comparable composition a tree renders to, over the three ax primitives
+ * it addresses. Produced by `axRenderHarnessTree`, consumed by
+ * `axApplyHarnessTree` and by candidate/current comparison.
+ */
+export interface AxHarnessRendering {
+  /** The executor actor's composed instruction text. Absent when no instruction entry is enabled. */
+  readonly instructions: Readonly<{ actor?: string }>;
+  readonly playbook: Readonly<AxACEPlaybook>;
+  readonly skills: readonly Readonly<AxAgentCatalogSkill>[];
+}
+
+/** Why one entry was refused admission. Closed; the report carries the path. */
+export type AxHarnessAdmissionReason =
+  | 'duplicate-entry-id'
+  | 'invalid-entry-id'
+  | 'unknown-kind'
+  | 'empty-text'
+  | 'invalid-name-segment'
+  | 'non-json-config'
+  | 'unknown-config-key'
+  | 'forbidden-bullet-field'
+  | 'inline-credential'
+  | 'credential-shaped-literal'
+  | 'duplicate-render-target'
+  | 'oversized-entry'
+  | 'oversized-tree';
+
+export interface AxHarnessEntryInspection {
+  readonly entryId: string;
+  readonly admitted: boolean;
+  readonly reasons: readonly Readonly<{
+    reason: AxHarnessAdmissionReason;
+    /** JSON path inside the entry, e.g. `config.metadata.apiKey`. NEVER the value. */
+    path: string;
+  }>[];
+}
+
+/**
+ * Adjudication as data: every entry is inspected, so one bad entry does not
+ * hide the verdict on the rest and a proposer gets a per-entry reason it can
+ * act on.
+ */
+export interface AxHarnessAdmissionReport {
+  readonly admitted: AxHarnessTree;
+  readonly entries: readonly Readonly<AxHarnessEntryInspection>[];
+  readonly ok: boolean;
+}
+
+export type AxHarnessMutation = Readonly<
+  | { op: 'create'; id: string; options: Readonly<Omit<AxHarnessEntry, 'id'>> }
+  /**
+   * Shallow merge at the entry root, with `config` merged one level deeper so
+   * a proposer can edit one bullet field without resupplying the rest. A
+   * `null` value deletes the key. Root-level ids only (no `:`).
+   */
+  | { op: 'update'; id: string; options: Readonly<Record<string, unknown>> }
+  | { op: 'remove'; id: string }
+>;
+
+/**
+ * The playbook handle `axApplyHarnessTree` writes rendered bullets through.
+ * Structural on purpose: the installer must not import the agent.
+ */
+export interface AxHarnessPlaybookHandle {
+  getState(): AxPlaybookSnapshot;
+  load(snapshot: Readonly<AxPlaybookSnapshot>): unknown;
+}
+
+/**
+ * The structural port the installer writes through. `AxAgent` satisfies it.
+ * Declared structurally so `src/ax/learn/apply.ts` takes no runtime dependency
+ * on `src/ax/agent/`.
+ */
+export interface AxHarnessInstallTarget {
+  setActorInstructionSlot(slot: string, text?: string): void;
+  /** The slot's current text, so an install can be undone exactly. */
+  getActorInstructionSlot?(slot: string): string | undefined;
+  setSkillsCatalogSlot(
+    slot: string,
+    skills?: readonly Readonly<AxAgentCatalogSkill>[]
+  ): void;
+  /** The slot's current skills, so an install can be undone exactly. */
+  getSkillsCatalogSlot?(
+    slot: string
+  ): readonly Readonly<AxAgentCatalogSkill>[] | undefined;
+  getPlaybook(): AxHarnessPlaybookHandle | undefined;
+  getSignature(): { toString(): string };
+  /**
+   * True when the target learns into its playbook after every completed run.
+   * Installing a tree replaces the playbook, so a target that answers `true`
+   * is refused without `acknowledgeContinuousPlaybookReset`.
+   */
+  hasContinuousPlaybookLearning?(): boolean;
+}
+
+export interface AxHarnessInstallation {
+  readonly releaseId: string;
+  readonly parentReleaseId?: string;
+  /** contentId of the entry list installed here. This is what a record stamps. */
+  readonly contentId: string;
+  readonly installedAt: number;
+  /**
+   * How many playbook bullets the install replaced.
+   *
+   * A tree install replaces the playbook wholesale on any target that has a
+   * playbook handle, so this counts whatever the prior snapshot held — host
+   * bullets and run-accumulated ones alike. On a target that learns into its
+   * playbook after every run the replacement is refused outright unless
+   * `acknowledgeContinuousPlaybookReset` is set, so a continuous learner's
+   * bullets are never discarded silently.
+   */
+  readonly discardedBulletCount: number;
+  /** Restores the exact pre-install state through the same channels. Idempotent. */
+  dispose(): void;
+}
+
+// ---------------------------------------------------------------------------
+// 4.8 Failure manifest
+// ---------------------------------------------------------------------------
+
+export interface AxHarnessFailureObservation {
+  readonly taskId: string;
+  readonly stage: 'run' | 'metric' | 'apply';
+  readonly cause: string;
+  /**
+   * Which tree was installed when this failure was observed.
+   *
+   * The manifest describes ONE side. An evolve step evaluates both, so the
+   * producer tags each observation and the caller decides which side to fold
+   * in — a manifest advanced from a mixed set tells the proposer the candidate
+   * is failing tasks the baseline failed. `side` is deliberately NOT part of
+   * the fingerprint: the same fault on the same task has one identity, so a
+   * fault that survives a mutation is `persisting`, not `new`.
+   */
+  readonly side?: 'current' | 'candidate';
+}
+
+export interface AxHarnessFailureEntry {
+  /** First 16 hex characters of the canonical digest of the normalized triple. */
+  readonly fingerprint: string;
+  readonly taskId: string;
+  readonly stage: AxHarnessFailureObservation['stage'];
+  /** Normalized, at most 200 characters. */
+  readonly cause: string;
+  readonly firstSeenStep: number;
+  readonly lastSeenStep: number;
+  readonly count: number;
+}
+
+export interface AxHarnessFailureManifest {
+  readonly step: number;
+  readonly entries: readonly Readonly<AxHarnessFailureEntry>[];
+}
+
+export interface AxHarnessFailureAdvance {
+  readonly manifest: Readonly<AxHarnessFailureManifest>;
+  readonly new: readonly string[];
+  readonly persisting: readonly string[];
+  readonly fixed: readonly string[];
+}
 
 // ---------------------------------------------------------------------------
 // 4.7 Releases
@@ -433,6 +598,136 @@ export class AxLearningReleaseConflictError extends Error {
 }
 
 /**
+ * A rollback named a release that cannot be restored.
+ *
+ * Separate from `AxLearningReleaseConflictError`, which is about a stale CAS
+ * expectation: this one says the target itself is disqualified. Typed and
+ * guarded like every other error that crosses a host boundary, rather than a
+ * bare `Error` a caller can only match on by message.
+ */
+export class AxLearningRollbackRefusedError extends Error {
+  readonly code = 'learning_rollback_refused';
+
+  constructor(
+    readonly scenario: string,
+    readonly releaseId: string,
+    message: string,
+    options?: ErrorOptions
+  ) {
+    super(message, options);
+    this.name = 'AxLearningRollbackRefusedError';
+  }
+}
+
+/**
+ * A recorded run was attempted while recording is suspended.
+ *
+ * Thrown BEFORE the forward is issued: a caller that asked for a receipt must
+ * never be handed a fake one, and a receipt without a durable record is
+ * forbidden. The suppression is counted, never silently dropped.
+ */
+export class AxLearningSuppressedError extends Error {
+  readonly code = 'learning_recording_suspended';
+
+  constructor(readonly scenario: string) {
+    super(
+      `AxAgentLearning: recording is suspended for scenario ${scenario}; no receipt can be issued`
+    );
+    this.name = 'AxLearningSuppressedError';
+  }
+}
+
+/**
+ * An evolve step was configured in a way that cannot produce a sound verdict:
+ * `requireHeldOut` with no validation split, a non-positive budget, an agent
+ * whose pre-step installation could not be restored.
+ *
+ * Always thrown before any model call.
+ */
+export class AxHarnessEvolveConfigError extends Error {
+  readonly code = 'harness_evolve_config_invalid';
+  readonly field: string;
+
+  constructor(field: string, message: string) {
+    super(message);
+    this.name = 'AxHarnessEvolveConfigError';
+    this.field = field;
+  }
+}
+
+/** One entry failed admission. Carries the FIRST denial plus the full report. */
+export class AxHarnessAdmissionError extends Error {
+  readonly code = 'harness_admission_denied';
+  readonly reason: AxHarnessAdmissionReason;
+  readonly entryId: string;
+  /** JSON path inside the entry, e.g. `config.tags[0]`. Never the value. */
+  readonly path: string;
+  /** The full per-entry verdict, so a caller sees what else would have passed. */
+  readonly report: Readonly<AxHarnessAdmissionReport>;
+
+  constructor(
+    reason: AxHarnessAdmissionReason,
+    entryId: string,
+    path: string,
+    report: Readonly<AxHarnessAdmissionReport>,
+    options?: ErrorOptions
+  ) {
+    super(
+      `AxHarnessTree: entry ${entryId} denied admission (${reason}) at ${path}`,
+      options
+    );
+    this.name = 'AxHarnessAdmissionError';
+    this.reason = reason;
+    this.entryId = entryId;
+    this.path = path;
+    this.report = report;
+  }
+}
+
+/** A mutation could not be applied. The whole batch is a no-op. */
+export class AxHarnessMutationError extends Error {
+  readonly code = 'harness_mutation_invalid';
+
+  constructor(
+    readonly op: AxHarnessMutation['op'],
+    readonly id: string,
+    message: string
+  ) {
+    super(message);
+    this.name = 'AxHarnessMutationError';
+  }
+}
+
+/** Two entries render onto the same target. Raised by render, not by admission. */
+export class AxHarnessRenderError extends Error {
+  readonly code = 'harness_render_conflict';
+
+  constructor(
+    readonly target: string,
+    message: string
+  ) {
+    super(message);
+    this.name = 'AxHarnessRenderError';
+  }
+}
+
+/** A rendered tree could not be installed on the target. */
+export class AxHarnessApplyError extends Error {
+  readonly code = 'harness_apply_failed';
+  readonly channel: 'instruction' | 'playbookBullet' | 'skill';
+
+  constructor(
+    channel: AxHarnessApplyError['channel'],
+    message: string,
+    options?: ErrorOptions
+  ) {
+    super(message, options);
+    this.name = 'AxHarnessApplyError';
+    this.channel = channel;
+  }
+}
+
+/**
  * Structural guard. `instanceof` breaks when a host store is loaded through a
  * second copy of the package, so the discriminant is the contract.
  */
@@ -459,4 +754,45 @@ export function axIsLearningReleaseConflictError(
   }
   const operation = (error as { operation?: unknown }).operation;
   return operation === 'append' || operation === 'promote';
+}
+
+/** Structural guard; see `axIsLearningRecordConflictError`. */
+export function axIsLearningRollbackRefusedError(
+  error: unknown
+): error is AxLearningRollbackRefusedError {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { code?: unknown }).code === 'learning_rollback_refused'
+  );
+}
+
+/** Structural guard; see `axIsLearningRecordConflictError`. */
+export function axIsHarnessAdmissionError(
+  error: unknown
+): error is AxHarnessAdmissionError {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { code?: unknown }).code === 'harness_admission_denied'
+  );
+}
+
+/** Structural guard; see `axIsLearningRecordConflictError`. */
+export function axIsHarnessApplyError(
+  error: unknown
+): error is AxHarnessApplyError {
+  if (
+    typeof error !== 'object' ||
+    error === null ||
+    (error as { code?: unknown }).code !== 'harness_apply_failed'
+  ) {
+    return false;
+  }
+  const channel = (error as { channel?: unknown }).channel;
+  return (
+    channel === 'instruction' ||
+    channel === 'playbookBullet' ||
+    channel === 'skill'
+  );
 }

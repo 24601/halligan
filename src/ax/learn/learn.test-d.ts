@@ -1,9 +1,22 @@
 // learn.test-d.ts — compile-time tests for the `src/ax/learn/` type surface,
 // enforced by `npm run test:type-tests` (tsc -p tsconfig.typetests.json).
 
+import type { AxLearningAgentConfig } from '../agent/index.js';
 import type {
+  AxHarnessAdmissionReport,
   AxHarnessBulletConfig,
   AxHarnessEntry,
+  AxHarnessEntryInspection,
+  AxHarnessEvolveOptions,
+  AxHarnessEvolveResult,
+  AxHarnessFailureManifest,
+  AxHarnessFailureObservation,
+  AxHarnessGateDecision,
+  AxHarnessInstallation,
+  AxHarnessInstallTarget,
+  AxHarnessMutation,
+  AxHarnessRendering,
+  AxHarnessSelector,
   AxHarnessTree,
   AxLearningDecision,
   AxLearningInteractionRecord,
@@ -11,11 +24,23 @@ import type {
   AxLearningReferenceResolution,
   AxLearningReportRecord,
   AxLearningStore,
+  AxLearningSurface,
+  AxLearningTreeDelivery,
 } from './index.js';
 import {
+  axAdmitHarnessTree,
+  axAdvanceHarnessFailureManifest,
+  axApplyHarnessMutations,
+  axApplyHarnessTree,
   axCreateLearningEngineState,
+  axCurrentHarnessInstallation,
+  axHarnessContentId,
+  axHarnessEvolve,
   axInMemoryLearningStore,
+  axInspectHarnessTree,
   axLearningEngineIngest,
+  axNormalizeHarnessFailureCause,
+  axRenderHarnessTree,
   axReportSchema,
   axScoreWindowProcessor,
 } from './index.js';
@@ -156,8 +181,24 @@ const state = axCreateLearningEngineState({
   scenario: 'support-triage',
   processor: axScoreWindowProcessor({ batchSize: 2 }),
   sampleFields: ['input', 'output'],
+  maxSampleBytes: 16_384,
+  maxParkedReports: 1_000,
 });
 void axLearningEngineIngest(state, someRecord);
+
+// The sample projection and the byte cap belong to the ENGINE, which the host
+// constructs and drives. They are not agent-config fields: a control declared
+// where nothing reads it is a containment control that does nothing.
+declare const someStore: AxLearningStore;
+declare const someSurface: AxLearningSurface;
+const learningConfig: AxLearningAgentConfig = {
+  scenario: 'support-triage',
+  store: someStore,
+  surface: someSurface,
+  // @ts-expect-error sampleFields is configured on the engine, not the agent
+  sampleFields: ['input'],
+};
+void learningConfig;
 
 // A field's value must be an `AxReportFieldSchema`; `3` is not one. The
 // `references` reservation itself is a RUNTIME check (`axReportSchema` throws),
@@ -165,3 +206,91 @@ void axLearningEngineIngest(state, someRecord);
 // @ts-expect-error 3 is not an AxReportFieldSchema
 void axReportSchema({ score: { type: 'number' }, references: 3 });
 void axReportSchema({ score: { type: 'number', min: 0, max: 1 } });
+
+// --- Rendering, admission, mutation ----------------------------------------
+
+declare const someTree: AxHarnessTree;
+
+const rendering: AxHarnessRendering = axRenderHarnessTree(someTree, {
+  now: '2026-01-01T00:00:00.000Z',
+});
+void rendering.playbook.stats.bulletCount;
+void rendering.skills[0]?.id;
+void rendering.instructions.actor;
+
+const report: AxHarnessAdmissionReport = axInspectHarnessTree(someTree);
+const inspection: AxHarnessEntryInspection | undefined = report.entries[0];
+void inspection?.reasons[0]?.path;
+void axAdmitHarnessTree(someTree);
+void axHarnessContentId(someTree);
+
+const mutations: readonly AxHarnessMutation[] = [
+  {
+    op: 'create',
+    id: 'b1',
+    options: {
+      kind: 'playbookBullet',
+      config: { id: 'be-brief', section: 'General', content: 'x' },
+    },
+  },
+  { op: 'update', id: 'b1', options: { disabled: true } },
+  { op: 'remove', id: 'b1' },
+];
+void axApplyHarnessMutations(someTree, mutations);
+
+// --- The installer writes through the structural port ----------------------
+
+declare const installTarget: AxHarnessInstallTarget;
+const installation: Promise<AxHarnessInstallation> = axApplyHarnessTree(
+  someTree,
+  installTarget,
+  { releaseId: 'rel-1', now: '2026-01-01T00:00:00.000Z' }
+);
+void installation;
+void axCurrentHarnessInstallation(installTarget)?.contentId;
+
+// --- Releases ---------------------------------------------------------------
+
+declare const surface: AxLearningSurface;
+const delivery: Promise<Readonly<AxLearningTreeDelivery> | undefined> =
+  surface.currentTree();
+void delivery;
+void surface.observedHeadContentId;
+declare const gateDecision: AxHarnessGateDecision;
+void surface.publish({ entries: someTree, gate: gateDecision });
+void surface.promote('rel-2', 'rel-1');
+void surface.rollback('rel-1', 'rel-2');
+
+// --- Failure manifest -------------------------------------------------------
+
+declare const observationList: readonly AxHarnessFailureObservation[];
+const advanced: Promise<{ manifest: AxHarnessFailureManifest }> =
+  axAdvanceHarnessFailureManifest(undefined, observationList, 1);
+void advanced;
+void axNormalizeHarnessFailureCause('boom');
+
+// --- Evolve -----------------------------------------------------------------
+
+declare const evolveOptions: AxHarnessEvolveOptions;
+const evolveResult: Promise<AxHarnessEvolveResult> =
+  axHarnessEvolve(evolveOptions);
+void evolveResult;
+
+// A result narrows on `status`.
+declare const result: AxHarnessEvolveResult;
+if (result.status === 'nominated') {
+  void result.release?.current;
+}
+
+// A selector must return the metrics it received; the type does not enforce
+// identity, but it does enforce the shape.
+const selector: AxHarnessSelector = (_candidate, evaluation) => ({
+  outcome: 'reject',
+  evaluator: evaluation.evaluator,
+  evaluatorVersion: evaluation.evaluatorVersion,
+  policy: 'custom',
+  policyVersion: '1',
+  reason: 'no',
+  metrics: evaluation.metrics,
+});
+void selector;

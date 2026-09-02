@@ -1,0 +1,35 @@
+{
+  "name": "learn-score-window-default",
+  "behaviour": "eligibility",
+  "description": "The default processor window is (-Infinity, 0]: only failures batch. Four graded exchanges in, two batched \u2014 a passing exchange is not training data by default, and a negative score is still a failure.",
+  "scenario": "support",
+  "processor": {
+    "batchSize": 4
+  },
+  "scores": [
+    {
+      "id": "a",
+      "score": 0
+    },
+    {
+      "id": "b",
+      "score": 0.4
+    },
+    {
+      "id": "c",
+      "score": 1
+    },
+    {
+      "id": "d",
+      "score": -1
+    }
+  ],
+  "expected": {
+    "trained": ["a", "d"],
+    "never": {
+      "b": "score-outside-window",
+      "c": "score-outside-window"
+    },
+    "readyCount": 2
+  }
+}
