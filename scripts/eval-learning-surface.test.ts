@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import {
+  type AxLearningSurfaceEvalReport,
   CANDIDATES,
   runLearningSurfaceEvaluation,
 } from './eval-learning-surface.js';
@@ -12,9 +13,14 @@ import {
  * inequality a reject-everything selector would also satisfy.
  */
 describe('learning-surface mechanism evaluation', { timeout: 300_000 }, () => {
-  it('holds every durability invariant under every injected fault', async () => {
-    const report = await runLearningSurfaceEvaluation();
+  // One evaluation, shared. It is deterministic by construction, so four
+  // separate runs bought nothing but ~20s on the root `npm test` chain.
+  let report: AxLearningSurfaceEvalReport;
+  beforeAll(async () => {
+    report = await runLearningSurfaceEvaluation();
+  });
 
+  it('holds every durability invariant under every injected fault', async () => {
     expect(report.kind).toBe('deterministic-mechanism-characterization');
     expect(report.independentModelHeldOut).toBe(false);
     expect(report.budget.providerCalls).toBe(0);
@@ -39,10 +45,38 @@ describe('learning-surface mechanism evaluation', { timeout: 300_000 }, () => {
         0,
       ]);
       expect([row.boundary, row.treesLeftInstalled]).toEqual([row.boundary, 0]);
+      // …and it faulted on genuinely different configurations, not on twenty
+      // byte-identical repetitions of one.
+      expect([row.boundary, row.distinctConfigurations > 1]).toEqual([
+        row.boundary,
+        true,
+      ]);
     }
 
-    // A crash between the decision and the append leaves nothing on the chain,
-    // and an aborted step appends nothing either.
+    // Pinned exactly, so a seeding regression that collapses a boundary's
+    // configuration space cannot pass as "still 20 orderings". `evolve-crash`
+    // has a four-configuration space (pre/post commit x two episode orders)
+    // and covers all of it.
+    expect(
+      Object.fromEntries(
+        report.faultInjection.map((row) => [
+          row.boundary,
+          row.distinctConfigurations,
+        ])
+      )
+    ).toEqual({
+      'append-pre-commit': 20,
+      'append-post-commit': 20,
+      'chain-append-cas-lost-race': 9,
+      'evolve-crash-between-decide-and-nominate': 4,
+      'abort-mid-evaluation': 12,
+    });
+
+    // Every `releasesAppendedAfterFault` counts UNEXPECTED appends. A crash
+    // after the commit is supposed to leave exactly its own nomination on the
+    // chain — that variant is now modelled, and the row it left must be
+    // `current: false` — while a pre-commit crash and an aborted step leave
+    // nothing at all.
     const crash = report.faultInjection.find(
       (row) => row.boundary === 'evolve-crash-between-decide-and-nominate'
     );
@@ -60,7 +94,6 @@ describe('learning-surface mechanism evaluation', { timeout: 300_000 }, () => {
   });
 
   it('pins the exact per-scenario acceptance vector for both policies', async () => {
-    const report = await runLearningSurfaceEvaluation();
     const { acceptanceVector } = report.promotionPolicy;
 
     // A selector that always rejected would satisfy "false promotions <= the
@@ -111,7 +144,6 @@ describe('learning-surface mechanism evaluation', { timeout: 300_000 }, () => {
   });
 
   it('bounds engine ingest cost by the parked reports on the arriving id', async () => {
-    const report = await runLearningSurfaceEvaluation();
     const rows = report.overhead.engineIngest;
     expect(rows.map((row) => row.parkedReports)).toEqual([0, 100, 1_000]);
     // One report waits on the arriving id, so exactly one decision is emitted
@@ -126,7 +158,6 @@ describe('learning-surface mechanism evaluation', { timeout: 300_000 }, () => {
   });
 
   it('reports the overhead columns and states its own limitations', async () => {
-    const report = await runLearningSurfaceEvaluation();
     expect(report.overhead.runs).toBe(1_000);
     expect(report.overhead.bytesPerRecord).toBeGreaterThan(0);
     expect(Number.isFinite(report.overhead.addedMsPerRun)).toBe(true);

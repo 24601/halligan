@@ -61,15 +61,25 @@ const ISO = new Date(NOW).toISOString();
 // Deterministic scaffolding
 // ---------------------------------------------------------------------------
 
-/** xorshift32 — a seeded PRNG so an "ordering" is reproducible from its seed. */
+/**
+ * xorshift32 — a seeded PRNG so an "ordering" is reproducible from its seed.
+ *
+ * The warm-up is load-bearing, not decoration. Started from 1..20 the raw
+ * generator's first few outputs are strongly correlated, so a boundary that
+ * drew one or two numbers per ordering collapsed twenty "seeded orderings"
+ * into one or two distinct configurations while reporting twenty. The rows now
+ * carry `distinctConfigurations` so that can never go unnoticed again.
+ */
 function seeded(seed: number): () => number {
-  let state = seed || 1;
-  return () => {
+  let state = seed | 0 || 1;
+  const next = (): number => {
     state ^= state << 13;
     state ^= state >>> 17;
     state ^= state << 5;
-    return (state >>> 0) / 0xff_ff_ff_ff;
+    return state >>> 0;
   };
+  for (let i = 0; i < 16; i += 1) next();
+  return () => next() / 0xff_ff_ff_ff;
 }
 
 function shuffle<T>(items: readonly T[], random: () => number): T[] {
@@ -91,9 +101,13 @@ const instruction = (id: string, text: string): AxHarnessEntry => ({
 });
 
 const SEED_TREE: AxHarnessTree = [instruction('tone', 'Answer briefly.')];
-const CANDIDATE_TREE: AxHarnessTree = [
-  instruction('tone', 'Answer in exactly one sentence.'),
+/** Distinct losing-writer payloads, so a seeded race is not one race twenty times. */
+const CONTESTED_TREES: readonly AxHarnessTree[] = [
+  [instruction('tone', 'Answer in exactly one sentence.')],
+  [instruction('tone', 'Answer with a bulleted list.')],
+  [instruction('tone', 'Answer, then name your uncertainty.')],
 ];
+
 const CANDIDATE_MUTATION: AxHarnessMutation = {
   op: 'update',
   id: 'tone',
@@ -269,10 +283,26 @@ function faultyStore(
 
 export interface FaultRow {
   boundary: string;
+  /** How many times the boundary was exercised. */
   orderings: number;
+  /**
+   * How many DISTINCT injected configurations those orderings covered.
+   *
+   * Reported beside `orderings` because a repetition count implies breadth it
+   * does not have on its own: three of these boundaries used to run 20
+   * byte-identical repetitions while claiming 20 seeded orderings. Every row
+   * must now be > 1, and the gap between the two numbers is how many
+   * repetitions are guarding nondeterminism rather than adding coverage.
+   */
+  distinctConfigurations: number;
   recordsLostAfterReceipt: number;
   receiptsWithoutRecord: number;
   headsMovedWithoutPromote: number;
+  /**
+   * Appends that should not have happened. An append the boundary EXPECTS —
+   * the post-commit crash variant, whose whole point is that the row landed
+   * before the process died — is subtracted, so this stays "0 means correct".
+   */
   releasesAppendedAfterFault: number;
   treesLeftInstalled: number;
   faultsObserved: number;
@@ -280,12 +310,12 @@ export interface FaultRow {
 
 const ORDERINGS = 20;
 
-async function faultBoundaryAppend(
-  variant: 'append-pre-commit' | 'append-post-commit'
-): Promise<FaultRow> {
-  const row: FaultRow = {
-    boundary: variant,
+/** A fresh row, so every boundary reports the same columns. */
+function faultRow(boundary: string): FaultRow {
+  return {
+    boundary,
     orderings: ORDERINGS,
+    distinctConfigurations: 0,
     recordsLostAfterReceipt: 0,
     receiptsWithoutRecord: 0,
     headsMovedWithoutPromote: 0,
@@ -293,6 +323,13 @@ async function faultBoundaryAppend(
     treesLeftInstalled: 0,
     faultsObserved: 0,
   };
+}
+
+async function faultBoundaryAppend(
+  variant: 'append-pre-commit' | 'append-post-commit'
+): Promise<FaultRow> {
+  const row = faultRow(variant);
+  const configurations = new Set<string>();
 
   for (let seed = 1; seed <= ORDERINGS; seed += 1) {
     const random = seeded(seed);
@@ -301,6 +338,7 @@ async function faultBoundaryAppend(
     const agent = new StubAgent();
     const queries = shuffle(['a', 'b', 'c', 'd', 'e'], random);
     const failAt = 1 + Math.floor(random() * queries.length);
+    configurations.add(`${queries.join('')}@${failAt}`);
     const learning = learningFor(
       agent,
       faultyStore(store, { kind: variant, atCall: failAt }),
@@ -344,28 +382,32 @@ async function faultBoundaryAppend(
       row.treesLeftInstalled += 1;
     }
   }
+  row.distinctConfigurations = configurations.size;
   return row;
 }
 
 async function faultBoundaryChainCas(): Promise<FaultRow> {
-  const row: FaultRow = {
-    boundary: 'chain-append-cas-lost-race',
-    orderings: ORDERINGS,
-    recordsLostAfterReceipt: 0,
-    receiptsWithoutRecord: 0,
-    headsMovedWithoutPromote: 0,
-    releasesAppendedAfterFault: 0,
-    treesLeftInstalled: 0,
-    faultsObserved: 0,
-  };
+  const row = faultRow('chain-append-cas-lost-race');
+  const configurations = new Set<string>();
+
   for (let seed = 1; seed <= ORDERINGS; seed += 1) {
+    const random = seeded(seed);
     const clock = new AxManualEventClock(NOW);
     const inner = new AxInMemoryLearningStore({ clock });
     let counter = 0;
+    // Seeded: how long the chain already is when the race happens, and which
+    // tree the losing writer was carrying. A fixed `atCall: 2` against a
+    // fixed one-release chain is one configuration repeated, not twenty.
+    const priorPublishes = Math.floor(random() * 3);
+    const contestedTree = shuffle(CONTESTED_TREES, random)[0] as AxHarnessTree;
     const store = faultyStore(inner, {
       kind: 'chain-append-cas',
-      atCall: 2,
+      // 1 seed + `priorPublishes` uncontested appends come first.
+      atCall: 2 + priorPublishes,
     });
+    configurations.add(
+      `${priorPublishes}@${(contestedTree[0]?.config as { text: string }).text}`
+    );
     const surface = await axLearningSurface({
       scenario: 'support',
       store,
@@ -376,24 +418,35 @@ async function faultBoundaryChainCas(): Promise<FaultRow> {
         return `rel-${counter}`;
       },
     });
+    for (let prior = 0; prior < priorPublishes; prior += 1) {
+      await surface.publish({
+        entries: [instruction('tone', `Uncontested ${prior}.`)],
+        gate: gateDecision('select', 'seeded'),
+      });
+    }
     const headBefore = (await surface.currentTree())?.releaseId;
     const before = (await surface.releases()).length;
     try {
       await surface.publish({
-        entries: CANDIDATE_TREE,
+        entries: contestedTree,
         gate: gateDecision('select', 'seeded'),
       });
     } catch {
       row.faultsObserved += 1;
     }
-    const after = (await surface.releases()).length;
+    const chain = await surface.releases();
     // The racer's row landed; ours lost the CAS. Exactly one append, never a
     // fork, and never a second copy of our own release.
-    row.releasesAppendedAfterFault += after - before === 1 ? 0 : 1;
+    row.releasesAppendedAfterFault += chain.length - before === 1 ? 0 : 1;
+    // …and the one that landed is the racer's, not ours.
+    if (chain.at(-1)?.releaseId.endsWith('-racer') !== true) {
+      row.releasesAppendedAfterFault += 1;
+    }
     if ((await surface.currentTree())?.releaseId !== headBefore) {
       row.headsMovedWithoutPromote += 1;
     }
   }
+  row.distinctConfigurations = configurations.size;
   return row;
 }
 
@@ -422,25 +475,31 @@ function gateDecision(outcome: 'select' | 'reject', reason: string) {
 }
 
 async function faultBoundaryEvolveCrash(): Promise<FaultRow> {
-  const row: FaultRow = {
-    boundary: 'evolve-crash-between-decide-and-nominate',
-    orderings: ORDERINGS,
-    recordsLostAfterReceipt: 0,
-    receiptsWithoutRecord: 0,
-    headsMovedWithoutPromote: 0,
-    releasesAppendedAfterFault: 0,
-    treesLeftInstalled: 0,
-    faultsObserved: 0,
-  };
+  const row = faultRow('evolve-crash-between-decide-and-nominate');
+  const configurations = new Set<string>();
+
   for (let seed = 1; seed <= ORDERINGS; seed += 1) {
+    const random = seeded(seed);
     const { clock, store, surface } = await freshChain();
     const headBefore = (await surface.currentTree())?.releaseId;
     const agent = new StubAgent();
     const before = (await surface.releases()).length;
-    // The publish itself throws: the decision was made, the append was not.
+    // Seeded on BOTH axes the boundary name implies: whether the process dies
+    // before the append or after it (the "append succeeded, then crash" half
+    // was never modelled), and the order the episode sweep ran in first.
+    const afterCommit = random() < 0.5;
+    const train = shuffle([evalTask('t1'), evalTask('t2')], random);
+    configurations.add(
+      `${afterCommit ? 'post' : 'pre'}@${train.map((t) => t.id).join('')}`
+    );
+
     const crashing = Object.create(surface) as AxLearningSurface;
     Object.defineProperty(crashing, 'publish', {
-      value: async () => {
+      value: async (...args: Parameters<AxLearningSurface['publish']>) => {
+        if (afterCommit) {
+          // The nomination IS durable; the process died on the way back.
+          await surface.publish(...args);
+        }
         throw new Error('injected fault: crashed between decide and nominate');
       },
     });
@@ -449,7 +508,7 @@ async function faultBoundaryEvolveCrash(): Promise<FaultRow> {
         agent: agent as unknown as AxHarnessEvolveAgent,
         ai: STUB_AI,
         surface: crashing,
-        tasks: { train: [evalTask('t1')], validation: [evalTask('v1')] },
+        tasks: { train, validation: [evalTask('v1')] },
         propose: () => [CANDIDATE_MUTATION],
         metric: () =>
           agent.instructionSlots.get('learn:tone') ===
@@ -461,38 +520,50 @@ async function faultBoundaryEvolveCrash(): Promise<FaultRow> {
     } catch {
       row.faultsObserved += 1;
     }
-    const after = (await surface.releases()).length;
-    row.releasesAppendedAfterFault += after - before;
+
+    const chain = await surface.releases();
+    // A pre-commit crash appends nothing; a post-commit crash appends exactly
+    // the row it committed, and that row must be a NOMINATION.
+    const expectedAppends = afterCommit ? 1 : 0;
+    row.releasesAppendedAfterFault += chain.length - before - expectedAppends;
+    if (afterCommit && chain.at(-1)?.current !== false) {
+      row.releasesAppendedAfterFault += 1;
+    }
     if ((await surface.currentTree())?.releaseId !== headBefore) {
       row.headsMovedWithoutPromote += 1;
     }
     if (axCurrentHarnessInstallation(agent) !== undefined) {
       row.treesLeftInstalled += 1;
     }
-    void store;
+    // The whole step ran under recording suppression, so a crashed evolution
+    // may not have left interaction records behind either.
+    const page = await store.page('support', {});
+    if (page.entries.some((entry) => entry.record.kind === 'interaction')) {
+      row.receiptsWithoutRecord += 1;
+    }
   }
+  row.distinctConfigurations = configurations.size;
   return row;
 }
 
 async function faultBoundaryAbortMidEvaluation(): Promise<FaultRow> {
-  const row: FaultRow = {
-    boundary: 'abort-mid-evaluation',
-    orderings: ORDERINGS,
-    recordsLostAfterReceipt: 0,
-    receiptsWithoutRecord: 0,
-    headsMovedWithoutPromote: 0,
-    releasesAppendedAfterFault: 0,
-    treesLeftInstalled: 0,
-    faultsObserved: 0,
-  };
+  const row = faultRow('abort-mid-evaluation');
+  const configurations = new Set<string>();
+
   for (let seed = 1; seed <= ORDERINGS; seed += 1) {
+    const random = seeded(seed);
     const { clock, surface } = await freshChain();
     const headBefore = (await surface.currentTree())?.releaseId;
     const agent = new StubAgent();
     const before = (await surface.releases()).length;
     const controller = new AbortController();
-    // Abort partway through the episode sweep, at a seed-dependent point.
-    const abortAfter = 1 + (seed % 4);
+    // Three tasks x two sides = six episodes, so the abort point sweeps the
+    // WHOLE sweep rather than its first four episodes, and the task order is
+    // seeded too.
+    const train = shuffle([evalTask('t1'), evalTask('t2')], random);
+    const episodes = (train.length + 1) * 2;
+    const abortAfter = 1 + Math.floor(random() * episodes);
+    configurations.add(`${abortAfter}@${train.map((t) => t.id).join('')}`);
     agent.onEvaluation = () => {
       if (agent.evaluationCalls >= abortAfter) controller.abort();
     };
@@ -501,10 +572,7 @@ async function faultBoundaryAbortMidEvaluation(): Promise<FaultRow> {
         agent: agent as unknown as AxHarnessEvolveAgent,
         ai: STUB_AI,
         surface,
-        tasks: {
-          train: [evalTask('t1'), evalTask('t2')],
-          validation: [evalTask('v1')],
-        },
+        tasks: { train, validation: [evalTask('v1')] },
         propose: () => [CANDIDATE_MUTATION],
         metric: () => 0.5,
         clock,
@@ -525,6 +593,7 @@ async function faultBoundaryAbortMidEvaluation(): Promise<FaultRow> {
       row.headsMovedWithoutPromote += 1;
     }
   }
+  row.distinctConfigurations = configurations.size;
   return row;
 }
 
@@ -828,6 +897,8 @@ export async function runLearningSurfaceEvaluation() {
       seededOrderingsPerBoundary: ORDERINGS,
       mockRuns: OVERHEAD_RUNS,
     },
+    method:
+      "Each fault boundary is exercised `orderings` times from a xorshift32 seed, and each row reports `distinctConfigurations` — how many distinct injected configurations those runs actually covered. Repetitions beyond that count guard nondeterminism; they do not add coverage. The seeded axes are: append — query order and which call faults; chain CAS — chain length at the race and the losing writer's payload; evolve crash — whether the process dies before or after the append, and the episode order; abort — which of the six episodes the caller aborts on, and the episode order.",
     faultInjection: faults,
     promotionPolicy: {
       scenarios: CANDIDATES.map((candidate) => candidate.name),
@@ -877,7 +948,7 @@ if (invokedDirectly) {
   console.log('fault boundaries');
   for (const row of report.faultInjection) {
     console.log(
-      `  ${row.boundary.padEnd(40)} faults=${row.faultsObserved} lost=${row.recordsLostAfterReceipt} receiptsWithoutRecord=${row.receiptsWithoutRecord} headsMoved=${row.headsMovedWithoutPromote} treesLeft=${row.treesLeftInstalled}`
+      `  ${row.boundary.padEnd(40)} faults=${row.faultsObserved}/${row.orderings} configs=${row.distinctConfigurations} lost=${row.recordsLostAfterReceipt} receiptsWithoutRecord=${row.receiptsWithoutRecord} headsMoved=${row.headsMovedWithoutPromote} treesLeft=${row.treesLeftInstalled} unexpectedAppends=${row.releasesAppendedAfterFault}`
     );
   }
   console.log('\npromotion policy (accepted?)');
