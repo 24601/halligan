@@ -345,14 +345,14 @@ describe('skillState turn loop', () => {
     const transcriptKinds = await run('transcript');
     const skillStateKinds = await run('skillState');
 
-    const compactionish = (kinds: string[]) =>
+    const compactionEvents = (kinds: string[]) =>
       kinds.filter(
         (kind) => kind === 'action_compacted' || kind === 'checkpoint_created'
       ).length;
 
     // The comparison would be vacuous if the transcript arm never compacted.
-    expect(compactionish(transcriptKinds)).toBeGreaterThan(0);
-    expect(compactionish(skillStateKinds)).toBe(0);
+    expect(compactionEvents(transcriptKinds)).toBeGreaterThan(0);
+    expect(compactionEvents(skillStateKinds)).toBe(0);
     // The budget meter still runs in both arms.
     expect(
       skillStateKinds.filter((kind) => kind === 'budget_check').length

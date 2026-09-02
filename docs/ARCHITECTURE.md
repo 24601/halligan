@@ -159,8 +159,12 @@ boundary; keep durable secrets and privileged effects in host-side functions.
 An opt-in verifier-gated working state can be maintained beside the transcript
 on the executor stage: a goal ledger keyed by stable id whose transitions
 commit only on host-checker support and harness-minted tool receipts. It is off
-by default and adds nothing to the prompt when unconfigured. The normative
-contract is [`docs/AGENT_WORKING_STATE.md`](./AGENT_WORKING_STATE.md).
+by default and adds nothing to the prompt when unconfigured. On top of it,
+`actorMemoryMode: 'skillState'` swaps the actor's prompt substrate from
+action-log replay to *frozen skill spec + typed state + latest observation*,
+with the actor emitting a typed state patch of its own. The normative
+contract for both is
+[`docs/AGENT_WORKING_STATE.md`](./AGENT_WORKING_STATE.md).
 
 Learned artifacts — ACE bullets, executable skill artifacts, and catalog skills
 — can carry the authority facts of the trajectory they were distilled from and

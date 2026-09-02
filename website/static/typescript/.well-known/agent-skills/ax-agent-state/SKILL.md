@@ -1,6 +1,6 @@
 ---
 name: ax-agent-state
-description: This skill helps an LLM generate correct verifier-gated working state code using @ax-llm/ax. Use when the user asks about AxWorkingState, goal ledgers, statePatch, state checkers, tool receipts, parked deltas, or long-horizon agent state.
+description: This skill helps an LLM generate correct verifier-gated working state and skillState memory-mode code using @ax-llm/ax. Use when the user asks about AxWorkingState, goal ledgers, actorMemoryMode, statePatch, state checkers, tool receipts, parked deltas, or long-horizon agent state.
 version: "24.0.17"
 ---
 
@@ -66,6 +66,9 @@ const inventoryAgent = agent('task:string -> answer:string', {
   field, are refused outright.
 - Read the committed document with `agent.getWorkingState()`. It is
   `undefined` when the run ended at the distiller.
+- `actorMemoryMode: 'skillState'` requires BOTH `workingState` and
+  `skillState`. It discards the transcript: anything the run needs later must
+  be written into the state document.
 
 ## Canonical Pattern
 
@@ -211,6 +214,45 @@ segments. The SHAPE below the root is NOT validated by the kernel — a host
 that needs a tighter fact contract enforces it in its checker. That is exactly
 the boundary the checker exists to hold.
 
+## skillState Memory Mode
+
+`actorMemoryMode: 'skillState'` replaces action-log replay with *frozen skill
+spec + typed state + latest observation*. Opt in only when progress really is
+a discrete, tool-evidenced state machine.
+
+```ts
+const agentWithSkillState = agent('task:string -> answer:string', {
+  functions: [pick],
+  actorMemoryMode: 'skillState',
+  // BOTH are required; `agent(...)` throws at construction otherwise.
+  workingState: { stateSignature: 'orders:json', initial: { goals } },
+  skillState: {
+    skill: { id: 'pick-flow', name: 'Picking', content: PROCEDURE_MARKDOWN },
+    observationWindow: 1,
+    onTransition: (transition) => audit.push(transition),
+  },
+});
+```
+
+- The actor gains two OPTIONAL outputs, `statePatch` and `rationale`. Emit
+  `statePatch: []` when the turn proved nothing; omitting it entirely is also
+  valid and records `proposal: 'none'`.
+- The prompt carries no action log at all. Anything needed on a later turn
+  must be written into the working state by a patch.
+- `rationale` is hashed into `AxSkillStateTransition.rationaleDigest` and the
+  TEXT IS DISCARDED. Never rely on seeing it again.
+- Only ACCEPTED transitions enter `transitions()`. Use `onTransition` to
+  observe refusals; it is fail-soft, like `onTrace`.
+- Rejections are `schema` (unparseable — the store is never touched),
+  `authority` (a harness-owned path), `fence` (the compare-and-set lost) and
+  `invariant` (the kernel or checker refused every delta).
+  `committedRevision` is always defined.
+- Pass a ref (`{id, version}`) as `skill` only with `resolveSkill`; a ref
+  carries no body text.
+- Supply a durable `store` if the discarded transcript must be recoverable
+  after the process exits. The default in-memory store makes the discard
+  irreversible.
+
 ## Trace (Gamma)
 
 One record per actor turn under `trace: true`. Digests only — never raw
@@ -266,3 +308,10 @@ expect(outcome.parked[0]?.reason).toBe('no_supporting_receipt');
   support.
 - Do NOT assume a `pending` goal blocks `final()` — it does not, unless
   `completionPolicy` is `'interlock'`.
+- Do NOT set `actorMemoryMode: 'skillState'` without BOTH `workingState` and
+  `skillState.skill`; construction throws.
+- Do NOT make `statePatch` or `rationale` required outputs, and do NOT expect
+  the rationale text to survive the turn.
+- Do NOT reach for `skillState` on a short run, or on a task whose progress no
+  tool receipt witnesses: it removes the transcript, so anything not written
+  into the state is gone.
