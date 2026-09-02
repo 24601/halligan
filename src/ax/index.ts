@@ -1181,9 +1181,15 @@ import {
 } from './dsp/optimizers/candidateEffectManifest.js';
 import {
   type AxCausalAffectedComponent,
+  AxCausalAttributionRequiredError,
+  type AxCausalAttributionStatement,
   type AxCausalCandidateAblation,
+  type AxCausalCandidateCost,
+  type AxCausalCandidateDiscrimination,
+  type AxCausalCandidateEvidenceCloneOptions,
   type AxCausalCandidateEvidenceManifest,
   type AxCausalCandidateEvidenceOptions,
+  type AxCausalCandidateEvidencePolicy,
   type AxCausalCandidateEvidenceRecord,
   type AxCausalCandidateSplitOutcome,
   type AxCausalEvidenceAuthority,
@@ -1191,12 +1197,16 @@ import {
   type AxCausalEvidenceKind,
   type AxCausalEvidenceReceipt,
   type AxCausalEvidenceReference,
+  type AxCausalLeaveOneOutMatrix,
+  type AxCausalLeaveOneOutRow,
   type AxCausalMetricOutcome,
   type AxCausalMetricPrediction,
   axCanonicalizeCausalCandidateEvidenceManifest,
   axCloneCausalCandidateEvidenceManifest,
   axCreateCausalCandidateEvidenceManifest,
+  axDeriveLeaveOneOutAttribution,
   axFingerprintCausalEvidence,
+  axIsCausalAttributionRequiredError,
 } from './dsp/optimizers/causalCandidateEvidence.js';
 import {
   type AxDigestStrength,
@@ -1293,6 +1303,8 @@ import {
   axInferComponentClass,
   axIsMutationTaxonomyError,
   axKnownComponentKinds,
+  axMutationDepths,
+  axMutationEfforts,
   axPatchClassOfType,
   axValidateMutationAnnotation,
 } from './dsp/optimizers/mutationTaxonomy.js';
@@ -2479,6 +2491,7 @@ export { AxBestOfN };
 export { AxBootstrapFewShot };
 export { AxCandidateEffectManifestError };
 export { AxCandidateStaleError };
+export { AxCausalAttributionRequiredError };
 export { AxContentProcessingError };
 export { AxContextMetricsCollector };
 export { AxDefaultCostTracker };
@@ -2723,6 +2736,7 @@ export { axDefaultTrajectoryTermination };
 export { axDefaultTrajectoryTypes };
 export { axDemandEventObserver };
 export { axDemoteSkill };
+export { axDeriveLeaveOneOutAttribution };
 export { axDeserializeOptimizedProgram };
 export { axDeterministicTrajectorySummarizer };
 export { axDigestStrength };
@@ -2788,6 +2802,7 @@ export { axIsAudioOutputEnabled };
 export { axIsCallTimeSkillNotExecuted };
 export { axIsCandidateEffectManifestError };
 export { axIsCandidateStaleError };
+export { axIsCausalAttributionRequiredError };
 export { axIsDigestStrengthError };
 export { axIsEventOutputPersistenceError };
 export { axIsEvidenceRequirement };
@@ -2900,6 +2915,8 @@ export { axModelInfoOpenAI };
 export { axModelInfoOpenAIResponses };
 export { axModelInfoReka };
 export { axModelInfoWebLLM };
+export { axMutationDepths };
+export { axMutationEfforts };
 export { axNextMindPace };
 export { axNormalizeAppliedServiceTier };
 export { axNormalizeAxIRRuntimeCapabilities };
@@ -3545,9 +3562,14 @@ export type { AxCandidateEffectDeclaration };
 export type { AxCandidateEffectPolicy };
 export type { AxCapabilityGrant };
 export type { AxCausalAffectedComponent };
+export type { AxCausalAttributionStatement };
 export type { AxCausalCandidateAblation };
+export type { AxCausalCandidateCost };
+export type { AxCausalCandidateDiscrimination };
+export type { AxCausalCandidateEvidenceCloneOptions };
 export type { AxCausalCandidateEvidenceManifest };
 export type { AxCausalCandidateEvidenceOptions };
+export type { AxCausalCandidateEvidencePolicy };
 export type { AxCausalCandidateEvidenceRecord };
 export type { AxCausalCandidateSplitOutcome };
 export type { AxCausalEvidenceAuthority };
@@ -3555,6 +3577,8 @@ export type { AxCausalEvidenceAuthorityVerifier };
 export type { AxCausalEvidenceKind };
 export type { AxCausalEvidenceReceipt };
 export type { AxCausalEvidenceReference };
+export type { AxCausalLeaveOneOutMatrix };
+export type { AxCausalLeaveOneOutRow };
 export type { AxCausalMetricOutcome };
 export type { AxCausalMetricPrediction };
 export type { AxChatAudioConfig };

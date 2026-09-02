@@ -36,7 +36,10 @@ import {
   cloneAndFreezeGEPACandidateLineageManifest,
 } from './optimizers/gepaLineage.js';
 import type { AxGEPAComponentBanditState } from './optimizers/gepaSelection.js';
-import type { AxRejectedCandidateLedgerRef } from './optimizers/rejectedCandidateLedger.js';
+import {
+  type AxRejectedCandidateLedgerRef,
+  axMergeRejectedCandidateLedgerRefs,
+} from './optimizers/rejectedCandidateLedger.js';
 import type { AxOptimizerLoggerFunction } from './optimizerTypes.js';
 import type { AxGenOut, AxProgramDemos } from './types.js';
 
@@ -1113,10 +1116,25 @@ export function axReplaceOptimizedProgramSnapshot<OUT = any>(
       'replacement snapshot has divergent causal evidence history'
     );
   }
+  // ASYMMETRIC, precisely. The causal evidence history keeps its REFUSAL above
+  // and is carried over from `current` unchanged: two chains cannot be unioned
+  // and still verify — records carry a strict sequence and a strict
+  // parent link, and receipts a strictly increasing count — and removing the
+  // refusal would delete the one control that stops a rollback substituting a
+  // fabricated history.
+  //
+  // The ledger ref is a POINTER SET into a store the artifact cannot rewrite,
+  // which is exactly why it can merge at all: rewinding the snapshot must not
+  // make the run forget which candidates it already tried and rejected.
+  const rejectedCandidateLedgerRef = axMergeRejectedCandidateLedgerRefs(
+    current.rejectedCandidateLedgerRef,
+    replacement.rejectedCandidateLedgerRef
+  );
   return new AxOptimizedProgramImpl<OUT>({
     ...axSerializeOptimizedProgram(replacement),
     causalCandidateEvidence: history,
     causalEvidenceVerifier,
+    ...(rejectedCandidateLedgerRef ? { rejectedCandidateLedgerRef } : {}),
   });
 }
 

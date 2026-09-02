@@ -39,6 +39,13 @@ const MUTATION_DEPTHS: readonly AxMutationDepth[] = Object.freeze([
   'data',
 ] as const);
 
+/**
+ * The depth vocabulary, in emission order. Exported so a validator in another
+ * module can check a host-supplied depth against ONE list rather than keeping a
+ * second copy that drifts.
+ */
+export const axMutationDepths: readonly AxMutationDepth[] = MUTATION_DEPTHS;
+
 export type AxPatchClass = 'capability' | 'steering';
 
 /**
@@ -96,6 +103,15 @@ const MUTATION_EFFORTS: ReadonlySet<string> = new Set([
   'high',
   'max',
 ]);
+
+/** The effort vocabulary, in a fixed order. Exported for the same reason as `axMutationDepths`. */
+export const axMutationEfforts: readonly AxMutationEffort[] = Object.freeze([
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'max',
+] as const);
 
 export interface AxMutationAnnotation {
   readonly depth: AxMutationDepth;
