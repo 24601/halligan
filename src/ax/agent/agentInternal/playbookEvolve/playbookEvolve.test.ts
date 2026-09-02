@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { AxMockAIService } from '../../../ai/mock/api.js';
 import { agent } from '../../index.js';
+import { axIsAgentPlaybookEvolveError } from './playbookEvidenceTypes.js';
 import { evolveAgentPlaybook } from './playbookEvolve.js';
 
 const makeModelUsage = () => ({
@@ -1689,5 +1690,930 @@ describe('agent.playbook().evolve()', () => {
         ).rejects.toThrow(/positive safe integer/);
       }
     });
+  });
+});
+
+/**
+ * Legacy identity (invariant I1). The rest of this suite uses `toMatchObject`,
+ * which passes both for an additive field and for a silently CHANGED one, so
+ * it cannot catch a legacy regression on its own. These tests strip exactly the
+ * new keys and deep-equal the remainder — `records` included — against a
+ * checked-in golden object.
+ */
+describe('agent.playbook().evolve() legacy identity', () => {
+  /** Exactly the keys the evidence work adds. Everything else must be equal. */
+  const NEW_RESULT_KEYS = [
+    'control',
+    'accounting',
+    'applied',
+    'varianceBand',
+    'transfer',
+    'redundancy',
+    'overhead',
+    'sealedTest',
+    'rolledBackReason',
+    'warnings',
+  ] as const;
+  const NEW_OUTCOME_KEYS = [
+    'kind',
+    'prune',
+    'evictions',
+    'evidence',
+    'promotion',
+  ] as const;
+
+  const stripLegacy = (result: any) => {
+    const legacy = { ...result };
+    for (const key of NEW_RESULT_KEYS) delete legacy[key];
+    legacy.outcomes = result.outcomes.map((outcome: any) => {
+      const stripped = { ...outcome };
+      for (const key of NEW_OUTCOME_KEYS) delete stripped[key];
+      return stripped;
+    });
+    // `records` is returned verbatim and gains `attempts`; omitting it from the
+    // strip list would exclude the largest field from the identity claim.
+    legacy.records = result.records.map((record: any) => {
+      const stripped = { ...record };
+      delete stripped.attempts;
+      return stripped;
+    });
+    return legacy;
+  };
+
+  it('keeps every pre-existing result field and call count identical when no evidence option is set', async () => {
+    const { ag } = makeAgent();
+    let metricCalls = 0;
+    let agentRuns = 0;
+    const runForEvaluation = (ag as any)._forwardForEvaluation.bind(ag);
+    (ag as any)._forwardForEvaluation = async (...args: any[]) => {
+      agentRuns++;
+      return runForEvaluation(...args);
+    };
+    const result = await ag.playbook().evolve(
+      { train: TASKS, validation: VALIDATION_TASKS },
+      {
+        metric: async (args: any) => {
+          metricCalls++;
+          return scoreByAnswer(args);
+        },
+        maxProposals: 1,
+      }
+    );
+
+    // Exact integers, not "greater than": a changed number of agent runs is
+    // precisely what a silent legacy regression looks like.
+    expect(metricCalls).toBe(6);
+    expect(agentRuns).toBe(6);
+    expect(result.metricCallsUsed).toBe(6);
+
+    const legacy = stripLegacy(result);
+    expect(legacy).toEqual({
+      baseline: { heldIn: 0.2, heldOut: 0.2 },
+      final: { heldIn: 1, heldOut: 1 },
+      weaknesses: result.weaknesses,
+      outcomes: [
+        {
+          proposal: result.outcomes[0]!.proposal,
+          status: 'accepted',
+          accepted: true,
+          reason: 'held-in improved, held-out non-regressing',
+          heldIn: { before: 0.2, after: 1 },
+          heldOut: { before: 0.2, after: 1 },
+        },
+      ],
+      recommendations: result.recommendations,
+      playbookSnapshot: result.playbookSnapshot,
+      metricCallsUsed: 6,
+      records: [
+        {
+          task: TASKS[0],
+          prediction: result.records[0]!.prediction,
+          score: 0.2,
+          passed: false,
+        },
+        {
+          task: TASKS[1],
+          prediction: result.records[1]!.prediction,
+          score: 0.2,
+          passed: false,
+        },
+      ],
+    });
+
+    // The deep-equal above compares `records[i].prediction` and the proposal
+    // against themselves, so those parts of the identity claim cannot fail on
+    // their own. Pin the prediction's shape explicitly.
+    for (const record of result.records) {
+      expect(record.prediction?.completionType).toBe('final');
+      expect(record.prediction?.turnCount).toBeGreaterThan(0);
+      expect(record.prediction?.functionCalls).toEqual([]);
+      expect(record.prediction?.output).toEqual({ answer: 'gave-up' });
+    }
+    expect(Object.keys(result.outcomes[0]!.proposal).sort()).toEqual([
+      'clusterSignature',
+      'feedback',
+      'weaknessId',
+    ]);
+    expect(result.outcomes[0]!.proposal.weaknessId).toBe(
+      result.weaknesses[0]!.id
+    );
+
+    // The new fields take exactly the documented no-option values.
+    expect(result.control).toEqual({
+      status: 'not_run',
+      reason: 'controlArm option not supplied',
+    });
+    expect(result.applied).toBe('live');
+    expect(result.outcomes[0]!.kind).toBe('curate');
+    expect(result.outcomes[0]!.evidence).toBeUndefined();
+    expect(result.outcomes[0]!.promotion).toBeUndefined();
+    expect(result.varianceBand).toBeUndefined();
+    expect(result.transfer).toBeUndefined();
+    expect(result.warnings).toBeUndefined();
+    expect(result.records[0]).not.toHaveProperty('attempts');
+  });
+
+  it('keeps record.task reference-identical to the evaluated split', async () => {
+    // The paired bootstrap's pairing precondition is reference equality across
+    // passes. A future "hardening" that stores `structuredClone(task)` on the
+    // record silently turns every interval into `unmeasured` — a data-flow bug
+    // that would look like a statistics bug. Without a retention policy the
+    // evaluated split IS the caller's array; with one it is the frozen corpus
+    // clone, which is created ONCE and reused by every pass (see the harness
+    // test that pins the isolateTaskInputs half of this property).
+    const { ag } = makeAgent();
+    const result = await ag
+      .playbook()
+      .evolve(
+        { train: TASKS, validation: VALIDATION_TASKS },
+        { metric: scoreByAnswer, maxProposals: 1 }
+      );
+    expect(result.records).toHaveLength(TASKS.length);
+    for (const [index, record] of result.records.entries()) {
+      expect(record.task).toBe(TASKS[index]);
+    }
+
+    const { ag: frozen } = makeAgent();
+    const withRetention = await frozen.playbook().evolve(
+      { train: TASKS, validation: VALIDATION_TASKS },
+      {
+        metric: retentionMetric({}),
+        maxProposals: 1,
+        retentionPolicy: retentionPolicy(1),
+      }
+    );
+    // The frozen corpus is a clone of the caller's array, so it is NOT the same
+    // object — but it must be frozen and stable, which is what makes every
+    // pass in the run pair against the same task objects.
+    for (const record of withRetention.records) {
+      expect(Object.isFrozen(record.task)).toBe(true);
+      expect(record.task).not.toBe(TASKS[0]);
+    }
+  });
+
+  it('defaults control to a visible not_run rather than omitting it', async () => {
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(TASKS, {
+      metric: scoreByAnswer,
+      maxProposals: 1,
+    });
+    expect(result).toHaveProperty('control');
+    expect(result.control.status).toBe('not_run');
+    expect(result.control.reason).toBeTruthy();
+  });
+
+  // One case per branch, each its own test: nine full evolve() runs in a
+  // single `it` is a wall-clock hazard under parallel load, and the point of
+  // the pinning is per-branch anyway.
+  it.each([
+    [
+      'accept without a held-out set',
+      TASKS,
+      { metric: scoreByAnswer, maxProposals: 1 },
+      'held-in improved (no held-out set provided — consider one)',
+    ],
+    [
+      'accept with a held-out set',
+      { train: TASKS, validation: VALIDATION_TASKS },
+      { metric: scoreByAnswer, maxProposals: 1 },
+      'held-in improved, held-out non-regressing',
+    ],
+    [
+      'held-in gain below the threshold',
+      TASKS,
+      { metric: async () => 0.2, maxProposals: 1 },
+      'held-in gain 0.000 below 0.05',
+    ],
+    [
+      'held-out regression',
+      { train: TASKS, validation: [{ ...TASKS[0]!, id: 'holdout' }] },
+      {
+        requireHeldOut: true,
+        maxProposals: 1,
+        metric: async ({ example, prediction }: any) =>
+          example.id === 'holdout'
+            ? prediction?.output?.answer === 'ok-fixed'
+              ? 0
+              : 1
+            : prediction?.output?.answer === 'ok-fixed'
+              ? 1
+              : 0.2,
+      },
+      'held-out regressed -1.000',
+    ],
+    [
+      'budget exhausted before validation',
+      TASKS,
+      { metric: scoreByAnswer, maxProposals: 1, maxMetricCalls: 2 },
+      'metric_budget exhausted before validation',
+    ],
+    [
+      'retention current-task gain below the policy threshold',
+      TASKS,
+      {
+        metric: async () => 0.2,
+        maxProposals: 1,
+        retentionPolicy: retentionPolicy(1),
+      },
+      'current-task gain 0.000 below 0.5',
+    ],
+    [
+      'retention historical loss over the stability threshold',
+      TASKS,
+      {
+        metric: retentionMetric({
+          'history-refunds': 0,
+          'history-routing': 0,
+        }),
+        maxProposals: 1,
+        retentionPolicy: retentionPolicy(0),
+      },
+      'historical loss exceeded retention threshold (worst 1.000, mean 1.000)',
+    ],
+    [
+      'accept under a retention policy',
+      TASKS,
+      {
+        metric: retentionMetric({
+          'history-refunds': 1,
+          'history-routing': 1,
+        }),
+        maxProposals: 1,
+        retentionPolicy: retentionPolicy(1),
+      },
+      'current task improved, historical retention thresholds satisfied',
+    ],
+    [
+      'trust batch',
+      TASKS,
+      { metric: scoreByAnswer, maxProposals: 1, verify: false },
+      'applied without verification (verify: false)',
+    ],
+  ])(
+    'pins the exact reason string for the %s branch',
+    async (_name, data, options, expected) => {
+      const { ag } = makeAgent();
+      const result = await ag.playbook().evolve(data as any, options as any);
+      expect(result.outcomes[0]!.reason).toBe(expected);
+    }
+  );
+});
+
+describe('agent.playbook().evolve() evidence option validation', () => {
+  it.each([
+    ['gates', { gates: { validity: 'require' } }],
+    ['varianceBand', { varianceBand: { extraRepeats: 1 } }],
+    ['intervalOptions', { intervalOptions: { resamples: 500 } }],
+    ['validity', { validity: { minFinalCompletionRate: 0.9 } }],
+    ['reachProbe', { reachProbe: () => undefined }],
+    ['conditionsForTask', { conditionsForTask: () => [] }],
+    ['classifyTermination', { classifyTermination: () => undefined }],
+    ['maxDiscardRedraws', { maxDiscardRedraws: 2 }],
+  ])('rejects %s combined with verify: false', async (_name, option) => {
+    const { ag } = makeAgent();
+    let metricCalls = 0;
+    const error = await ag
+      .playbook()
+      .evolve(TASKS, {
+        verify: false,
+        metric: async (args: any) => {
+          metricCalls++;
+          return scoreByAnswer(args);
+        },
+        ...(option as any),
+      })
+      .catch((err: unknown) => err);
+    expect(axIsAgentPlaybookEvolveError(error)).toBe(true);
+    expect((error as any).code).toBe('evidence_requires_verify');
+    expect((error as Error).message).toMatch(
+      /^AxAgent\.playbook\(\)\.evolve\(\): /
+    );
+    // Fails closed before any evaluation.
+    expect(metricCalls).toBe(0);
+    expect(ag.getPlaybook().getState().playbook.stats.bulletCount).toBe(0);
+  });
+
+  it('allows an all-off gates object with verify: false', async () => {
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(TASKS, {
+      verify: false,
+      metric: scoreByAnswer,
+      maxProposals: 1,
+      gates: { validity: 'off', reach: 'off' },
+    });
+    expect(result.outcomes[0]?.accepted).toBe(true);
+  });
+
+  it('fails closed when a control-arm or transfer gate has no arm to read', async () => {
+    for (const [gates, code] of [
+      [{ controlArm: 'require' }, 'control_arm_failed'],
+      [{ transfer: 'warn' }, 'transfer_target_invalid'],
+      // A margin with no gate to apply it is inert, which is the same failure
+      // shape as a gate with no arm.
+      [{ controlArmMargin: 0.1 }, 'control_arm_failed'],
+    ] as const) {
+      const { ag } = makeAgent();
+      let metricCalls = 0;
+      const error = await ag
+        .playbook()
+        .evolve(TASKS, {
+          metric: async (args: any) => {
+            metricCalls++;
+            return scoreByAnswer(args);
+          },
+          gates,
+        })
+        .catch((err: unknown) => err);
+      expect(axIsAgentPlaybookEvolveError(error)).toBe(true);
+      expect((error as any).code).toBe(code);
+      expect(metricCalls).toBe(0);
+    }
+  });
+});
+
+describe('agent.playbook().evolve() compute accounting', () => {
+  it('matches an independently counted metric tally and restates the legacy counter', async () => {
+    const { ag } = makeAgent();
+    // Counted OUTSIDE the accounting machinery: asserting the total against
+    // the sum over phases would be true by construction and prove nothing.
+    let metricCalls = 0;
+    const result = await ag.playbook().evolve(
+      { train: TASKS, validation: VALIDATION_TASKS },
+      {
+        metric: async (args: any) => {
+          metricCalls++;
+          return scoreByAnswer(args);
+        },
+        maxProposals: 1,
+      }
+    );
+    expect(result.accounting.metricCalls).toBe(metricCalls);
+    expect(result.accounting.evolveOnlyMetricCalls).toBe(
+      result.metricCallsUsed
+    );
+    // With no evidence phase running the two denominators coincide — a
+    // consequence of nothing else spending budget, not a definition.
+    expect(result.accounting.metricCalls).toBe(result.metricCallsUsed);
+    // Secondary consistency check.
+    expect(
+      result.accounting.phases.reduce(
+        (sum: number, phase: any) => sum + phase.metricCalls,
+        0
+      )
+    ).toBe(metricCalls);
+  });
+
+  it('counts mining invocations and has no proposal phase', async () => {
+    // `buildProposal` is pure — zero metric calls, zero model calls — so a
+    // phase for it would be permanent noise.
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(TASKS, {
+      metric: scoreByAnswer,
+      maxProposals: 2,
+    });
+    const phases = new Map(
+      result.accounting.phases.map((phase: any) => [phase.name, phase])
+    );
+    expect([...phases.keys()]).not.toContain('proposal');
+    // One invocation per failure cluster, whether or not the miner yielded a
+    // grounded weakness: a discarded cluster still cost a model call, so this
+    // is a floor, not an equality the mock happens to satisfy.
+    expect(phases.get('mining')?.modelCalls).toBeGreaterThanOrEqual(
+      result.weaknesses.length
+    );
+    expect(phases.get('mining')?.modelCalls).toBeGreaterThan(0);
+    expect(phases.get('mining')?.metricCalls).toBe(0);
+    expect(phases.get('mining')?.tokensBasis).toBe('unobservable');
+    // A caller-supplied deterministic metric means there is no built-in judge
+    // to account for, so the phase is absent rather than reported as zero.
+    expect(phases.get('judge')).toBeUndefined();
+    expect(phases.get('baseline')?.metricCalls).toBeGreaterThan(0);
+    expect(phases.get('candidate_eval')?.metricCalls).toBeGreaterThan(0);
+  });
+
+  it('labels an observable phase that reported nothing unreported, and names only the structurally unobservable ones in the warning', async () => {
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(TASKS, {
+      metric: scoreByAnswer,
+      maxProposals: 1,
+      gates: { validity: 'warn' },
+    });
+    const phases = new Map(
+      result.accounting.phases.map((phase: any) => [phase.name, phase])
+    );
+    // The mock service reports no usage. `baseline` reads usage off the
+    // predictions, so its absence is 'unreported' — a usageTap is not the
+    // remedy and the receipt must not claim it is.
+    expect(phases.get('baseline')?.tokensBasis).toBe('unreported');
+    expect(phases.get('candidate_eval')?.tokensBasis).not.toBe('unobservable');
+    expect(phases.get('mining')?.tokensBasis).toBe('unobservable');
+    const warning = (result.warnings ?? []).find(
+      (entry: any) => entry.code === 'tokens_unobservable'
+    );
+    expect(warning?.message).toContain('mining');
+    expect(warning?.message).not.toContain('baseline');
+    expect(warning?.message).not.toContain('candidate_eval');
+  });
+
+  it('attributes tapped usage to the open mining phase, drops it for observable phases, and always unsubscribes', async () => {
+    const { ag, ai } = makeAgent();
+    let emit: ((usage: readonly any[]) => void) | undefined;
+    const unsubscribe = vi.fn();
+    const originalChat = (ai as any).chat.bind(ai);
+    (ai as any).chat = async (req: any, chatOptions?: any) => {
+      const response = await originalChat(req, chatOptions);
+      // Every model call the caller's wrapped service sees is forwarded,
+      // including the ones made while an observable phase is open.
+      emit?.([
+        {
+          ai: 'mock',
+          model: 'tapped',
+          tokens: { promptTokens: 3, completionTokens: 4, totalTokens: 7 },
+        },
+      ]);
+      return response;
+    };
+    const result = await ag.playbook().evolve(TASKS, {
+      metric: scoreByAnswer,
+      maxProposals: 1,
+      usageTap: {
+        subscribe: (onUsage: any) => {
+          emit = onUsage;
+          return unsubscribe;
+        },
+      },
+    });
+    const phases = new Map(
+      result.accounting.phases.map((phase: any) => [phase.name, phase])
+    );
+    // Mining is structurally unobservable WITHOUT a tap. With one, the
+    // forwarded usage lands on it.
+    expect(phases.get('mining')?.tokensBasis).not.toBe('unobservable');
+    expect(phases.get('mining')?.totalTokens).toBeGreaterThan(0);
+    // The observable phases read their own usage off the predictions, so
+    // tapped usage arriving while they are open is dropped rather than added
+    // on top of what they already counted.
+    expect(phases.get('baseline')?.totalTokens).toBeUndefined();
+    expect(phases.get('candidate_eval')?.totalTokens).toBeUndefined();
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
+  });
+
+  it('unsubscribes the usage tap when the run throws', async () => {
+    const { ag } = makeAgent();
+    const unsubscribe = vi.fn();
+    await expect(
+      ag.playbook().evolve(
+        { train: [] },
+        {
+          metric: scoreByAnswer,
+          usageTap: { subscribe: () => unsubscribe },
+        }
+      )
+    ).rejects.toThrow(/at least one training task/);
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports the accepted artifact overhead on the result, not only on the receipt', async () => {
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(TASKS, {
+      metric: scoreByAnswer,
+      maxProposals: 1,
+      gates: { validity: 'warn' },
+    });
+    const accepted = result.outcomes.find((outcome: any) => outcome.accepted);
+    expect(accepted).toBeDefined();
+    // The `overhead_exceeds_gain` warning quotes worstRelativeDelta, so a
+    // reader must be able to find the block it quotes on the result.
+    expect(result.overhead).toBeDefined();
+    expect(result.overhead).toEqual(accepted!.evidence!.overhead);
+    expect(result.overhead!.splits.length).toBeGreaterThan(0);
+  });
+
+  it('omits the result overhead when nothing was accepted', async () => {
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(TASKS, {
+      metric: async () => 0.2,
+      maxProposals: 1,
+      gates: { validity: 'warn' },
+    });
+    expect(result.outcomes.every((outcome: any) => !outcome.accepted)).toBe(
+      true
+    );
+    expect(result.overhead).toBeUndefined();
+  });
+
+  it('reports cost as unknown without costFor and caller_supplied with it', async () => {
+    const { ag: bare } = makeAgent();
+    const withoutCost = await bare.playbook().evolve(TASKS, {
+      metric: scoreByAnswer,
+      maxProposals: 1,
+    });
+    expect(withoutCost.accounting.costUsd).toBeUndefined();
+    expect(withoutCost.accounting.costBasis).toBe('unknown');
+
+    const { ag } = makeAgent();
+    const costFor = vi.fn(() => 1.25);
+    const withCost = await ag.playbook().evolve(TASKS, {
+      metric: scoreByAnswer,
+      maxProposals: 1,
+      costFor,
+    });
+    expect(costFor).toHaveBeenCalledTimes(1);
+    expect(withCost.accounting.costUsd).toBe(1.25);
+    expect(withCost.accounting.costBasis).toBe('caller_supplied');
+  });
+
+  it('captures attempt records once an evidence option is set', async () => {
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(TASKS, {
+      metric: scoreByAnswer,
+      maxProposals: 1,
+      classifyTermination: () => undefined,
+    });
+    expect(result.records[0]?.attempts).toHaveLength(1);
+    // The baseline runs reach `completionType: 'final'` with a finite score,
+    // so the conservative default calls them completed.
+    expect(result.records[0]?.attempts?.[0]?.termination.kind).toBe(
+      'completed'
+    );
+  });
+});
+
+describe('agent.playbook().evolve() variance band', () => {
+  it('re-runs the unchanged artifact and reports the band with its own cost', async () => {
+    const { ag } = makeAgent();
+    let metricCalls = 0;
+    const events: string[] = [];
+    const result = await ag.playbook().evolve(
+      { train: TASKS, validation: VALIDATION_TASKS },
+      {
+        metric: async (args: any) => {
+          metricCalls++;
+          return scoreByAnswer(args);
+        },
+        maxProposals: 1,
+        varianceBand: { extraRepeats: 1 },
+        onProgress: (e: any) => void events.push(e.phase),
+      }
+    );
+    expect(events).toContain('band');
+    expect(result.varianceBand?.status).toBe('completed');
+    const bands = (result.varianceBand as any).bands;
+    expect(bands.map((b: any) => b.split)).toEqual(['current', 'heldOut']);
+    for (const band of bands) {
+      expect(band.repeats).toBe(2);
+      expect(band.means).toHaveLength(2);
+      expect(band.spread).toBeGreaterThanOrEqual(0);
+      expect(band.interval.unit).toBe('task');
+    }
+    // The band's calls land in the honest run total but NEVER in the legacy
+    // evolve-only counter (invariant I6).
+    const bandCalls = TASKS.length + VALIDATION_TASKS.length;
+    expect(result.accounting.metricCalls).toBe(metricCalls);
+    expect(result.accounting.evolveOnlyMetricCalls).toBe(
+      result.metricCallsUsed
+    );
+    expect(result.accounting.metricCalls).toBeGreaterThan(
+      result.accounting.evolveOnlyMetricCalls
+    );
+    expect((result.varianceBand as any).accounting.metricCalls).toBe(bandCalls);
+  });
+
+  it('fails closed before any mutation when the budget cannot cover the band', async () => {
+    const { ag } = makeAgent();
+    const error = await ag
+      .playbook()
+      .evolve(TASKS, {
+        metric: scoreByAnswer,
+        maxProposals: 1,
+        maxMetricCalls: TASKS.length, // baseline only
+        varianceBand: { extraRepeats: 2 },
+      })
+      .catch((err: unknown) => err);
+    expect(axIsAgentPlaybookEvolveError(error)).toBe(true);
+    expect((error as any).code).toBe('budget_insufficient');
+    expect((error as any).phase).toBe('variance_band');
+    expect(ag.getPlaybook().getState().playbook.stats.bulletCount).toBe(0);
+  });
+
+  it('rejects a required interval gate with no band rather than silently weakening it', async () => {
+    const { ag } = makeAgent();
+    let metricCalls = 0;
+    const error = await ag
+      .playbook()
+      .evolve(TASKS, {
+        metric: async (args: any) => {
+          metricCalls++;
+          return scoreByAnswer(args);
+        },
+        gates: { interval: 'require' },
+      })
+      .catch((err: unknown) => err);
+    expect(axIsAgentPlaybookEvolveError(error)).toBe(true);
+    expect((error as any).code).toBe('interval_options_invalid');
+    expect((error as Error).message).toContain('silently degrades');
+    expect(metricCalls).toBe(0);
+  });
+
+  it('rejects out-of-range interval options before evaluating anything', async () => {
+    const { ag } = makeAgent();
+    let metricCalls = 0;
+    await expect(
+      ag.playbook().evolve(TASKS, {
+        metric: async (args: any) => {
+          metricCalls++;
+          return scoreByAnswer(args);
+        },
+        intervalOptions: { resamples: 10 },
+      })
+    ).rejects.toThrow(/intervalOptions\.resamples must be a safe integer/);
+    expect(metricCalls).toBe(0);
+  });
+
+  it('leaves varianceBand undefined when the option is absent', async () => {
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(TASKS, {
+      metric: scoreByAnswer,
+      maxProposals: 1,
+    });
+    expect(result.varianceBand).toBeUndefined();
+  });
+});
+
+describe('agent.playbook().evolve() evidence receipt and gates', () => {
+  it('emits a receipt for every fully evaluated candidate, accepted or rejected', async () => {
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(
+      { train: TASKS, validation: VALIDATION_TASKS },
+      {
+        metric: scoreByAnswer,
+        maxProposals: 1,
+        gates: { validity: 'warn' },
+      }
+    );
+    const receipt = result.outcomes[0]!.evidence!;
+    expect(receipt.schema).toBe('ax-agent-playbook-evidence-v1');
+    expect(receipt.decision).toBe('accepted');
+    expect(receipt.kind).toBe('curate');
+    expect(receipt.digest).toMatch(/^fnv1a64:[0-9a-f]{16}$/);
+    expect(Object.isFrozen(receipt)).toBe(true);
+    // Every gate is on the record, including the skipped ones.
+    expect(receipt.gates.entries.map((e: any) => e.id)).toEqual([
+      'gain',
+      'held_out',
+      'retention',
+      'validity',
+      'interval',
+      'reach',
+      'prune_size',
+      'veto',
+      'authority',
+    ]);
+    expect(receipt.intervals.current.unit).toBe('task');
+    expect(receipt.termination.splits.length).toBeGreaterThan(0);
+    expect(receipt.promotion.status).toBe('not_required');
+    // A held-out reading always carries its contamination disclosure.
+    expect(receipt.heldOutContamination.sealed).toBe(false);
+    expect(
+      result.warnings?.some(
+        (w: any) => w.code === 'held_out_reused_for_selection'
+      )
+    ).toBe(true);
+  });
+
+  it('carries a paired interval per retention slice on the receipt', async () => {
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(
+      { train: TASKS, validation: VALIDATION_TASKS },
+      {
+        metric: retentionMetric({}),
+        maxProposals: 1,
+        retentionPolicy: retentionPolicy(1),
+        gates: { validity: 'warn' },
+      }
+    );
+    const receipt = result.outcomes[0]!.evidence!;
+    // One entry per configured slice, each with its own bootstrap interval —
+    // not the empty array a receipt carried before the slices were paired.
+    expect(receipt.intervals.slices.map((slice: any) => slice.name)).toEqual(
+      RETENTION_TASKS.map((slice) => slice.name)
+    );
+    for (const [index, slice] of receipt.intervals.slices.entries()) {
+      expect(slice.version).toBe(RETENTION_TASKS[index]!.version);
+      expect(slice.interval.unit).toBe('task');
+      expect(slice.interval.clusters).toBe(
+        RETENTION_TASKS[index]!.tasks.length
+      );
+      expect(Number.isFinite(slice.interval.point)).toBe(true);
+    }
+  });
+
+  it('rejects a candidate on a required validity predicate and names it in the reason', async () => {
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(
+      { train: TASKS, validation: VALIDATION_TASKS },
+      {
+        metric: scoreByAnswer,
+        maxProposals: 1,
+        gates: { validity: 'require' },
+        // The fixture's runs complete normally, so force a failure through a
+        // ceiling the run cannot satisfy.
+        validity: { maxMeanLatencyMs: -1 },
+      }
+    );
+    expect(result.outcomes[0]?.accepted).toBe(false);
+    expect(result.outcomes[0]?.reason).toMatch(
+      /^validity gate failed: validity:latency_ceiling@current/
+    );
+    expect(result.outcomes[0]?.evidence?.decision).toBe('rejected');
+    expect(result.outcomes[0]?.evidence?.gates.failedGate).toBe('validity');
+    // Rejected means rolled back exactly, as before.
+    expect(ag.getPlaybook().getState().playbook.stats.bulletCount).toBe(0);
+  });
+
+  it('cannot satisfy a required reach gate on a counterfactual basis', async () => {
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(
+      { train: TASKS, validation: VALIDATION_TASKS },
+      {
+        metric: scoreByAnswer,
+        maxProposals: 1,
+        gates: { reach: 'require' },
+        // An evolve-curated bullet has no applicability tokens, so this basis
+        // reads 1.0 for every task — and still cannot pass the gate.
+        conditionsForTask: () => ['anything'],
+      }
+    );
+    expect(result.outcomes[0]?.accepted).toBe(false);
+    expect(result.outcomes[0]?.evidence?.gates.failedGate).toBe('reach');
+    const reach = result.outcomes[0]!.evidence!.reach;
+    expect(reach.basis).toBe('applicability_counterfactual');
+    expect(reach.counterfactual).toBe(true);
+    expect(reach.gateEligible).toBe(false);
+    expect(reach.splits[0]?.reachRate).toBe(1);
+    expect(
+      result.outcomes[0]?.evidence?.warnings.some(
+        (w: any) => w.code === 'reach_counterfactual_basis'
+      )
+    ).toBe(true);
+  });
+
+  it('accepts under a host probe that observes the bullet at the deciding step', async () => {
+    const { ag } = makeAgent();
+    const seen: string[] = [];
+    const result = await ag.playbook().evolve(
+      { train: TASKS, validation: VALIDATION_TASKS },
+      {
+        metric: scoreByAnswer,
+        maxProposals: 1,
+        gates: { reach: 'require' },
+        reachProbe: ({ candidateBulletIds }: any) => {
+          seen.push(...candidateBulletIds);
+          return { applicableAtDecidingStep: true, invocations: 1 };
+        },
+      }
+    );
+    expect(seen.length).toBeGreaterThan(0);
+    expect(result.outcomes[0]?.accepted).toBe(true);
+    const reach = result.outcomes[0]!.evidence!.reach;
+    expect(reach.basis).toBe('host_probe');
+    expect(reach.gateEligible).toBe(true);
+    expect(reach.splits.every((s: any) => s.reachRate === 1)).toBe(true);
+  });
+
+  it('does not fail the run when the reach probe throws', async () => {
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(
+      { train: TASKS, validation: VALIDATION_TASKS },
+      {
+        metric: scoreByAnswer,
+        maxProposals: 1,
+        gates: { reach: 'warn' },
+        reachProbe: () => {
+          throw new Error('probe exploded');
+        },
+      }
+    );
+    // Reach is evidence, not scoring: the run completes and the split is
+    // marked unmeasured.
+    expect(result.outcomes).toHaveLength(1);
+    expect(result.outcomes[0]?.evidence?.reach.gateEligible).toBe(false);
+    expect(
+      result.outcomes[0]?.evidence?.warnings.some(
+        (w: any) => w.code === 'reach_probe_failed'
+      )
+    ).toBe(true);
+  });
+
+  it('surfaces the absence of a control arm, transfer and sealed test', async () => {
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(TASKS, {
+      metric: scoreByAnswer,
+      maxProposals: 1,
+      gates: { validity: 'warn' },
+    });
+    const codes = (result.warnings ?? []).map((w: any) => w.code);
+    expect(codes).toContain('control_arm_not_run');
+    expect(codes).toContain('transfer_not_run');
+    expect(codes).toContain('sealed_test_not_run');
+    expect(codes).toContain('tokens_unobservable');
+    // cost_unknown fires only when a candidate was accepted, so it stays
+    // signal rather than firing on every run.
+    expect(codes).toContain('cost_unknown');
+  });
+
+  it('does not emit cost_unknown when nothing was accepted', async () => {
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(TASKS, {
+      metric: async () => 0.2, // never accepts
+      maxProposals: 1,
+      gates: { validity: 'warn' },
+    });
+    expect(result.outcomes[0]?.accepted).toBe(false);
+    expect((result.warnings ?? []).map((w: any) => w.code)).not.toContain(
+      'cost_unknown'
+    );
+  });
+
+  it('scopes each receipt accounting to that candidate, not the running total', async () => {
+    // Candidate 2's receipt must not carry candidate 1's calls: a receipt read
+    // in isolation has to state what THAT candidate cost.
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(
+      { train: TASKS, validation: VALIDATION_TASKS },
+      {
+        metric: async () => 0.2, // reject every candidate so several are evaluated
+        maxProposals: 2,
+        gates: { validity: 'warn' },
+      }
+    );
+    const perCandidate = TASKS.length + VALIDATION_TASKS.length;
+    expect(result.outcomes.length).toBeGreaterThan(0);
+    for (const outcome of result.outcomes) {
+      expect(outcome.evidence?.accounting.metricCalls).toBe(perCandidate);
+      expect(
+        outcome.evidence?.accounting.phases.find(
+          (phase: any) => phase.name === 'judge'
+        )
+      ).toBeUndefined();
+    }
+    // The run total still counts every candidate.
+    expect(result.accounting.metricCalls).toBeGreaterThanOrEqual(
+      perCandidate * result.outcomes.length
+    );
+  });
+
+  it('does not repeat the same run-level warning once per candidate', async () => {
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(
+      { train: TASKS, validation: VALIDATION_TASKS },
+      {
+        metric: async () => 0.2,
+        maxProposals: 2,
+        gates: { validity: 'warn' },
+      }
+    );
+    const keys = (result.warnings ?? []).map(
+      (w: any) => `${w.code}|${w.scope ?? ''}`
+    );
+    expect(new Set(keys).size).toBe(keys.length);
+    expect(keys).toContain('held_out_reused_for_selection|heldOut');
+  });
+
+  it('reports the interval as unresolved rather than as an effect', async () => {
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(TASKS, {
+      metric: scoreByAnswer,
+      maxProposals: 1,
+      gates: { validity: 'warn' },
+      intervalOptions: { resamples: 500, seed: 12_345 },
+    });
+    const interval = result.outcomes[0]!.evidence!.intervals.current;
+    expect(interval.seed).toBe(12_345);
+    expect(interval.resamples).toBe(500);
+    expect(interval.unit).toBe('task');
+    expect(['positive', 'negative', 'unresolved']).toContain(
+      interval.direction
+    );
   });
 });

@@ -2963,6 +2963,23 @@ func TestAxAgentConformanceFixturesLoad(t *testing.T) {
 			if _, ok := fixture["runtime_script"]; !ok {
 				t.Fatalf("%s missing runtime_script", file)
 			}
+		case "program_contract":
+			// A TS-derived agent contract the generated targets cannot assert yet:
+			// they build it through the generic program_contract shape and assert
+			// nothing, so the executable assertions must live in a named TS consumer
+			// and the fixture must still carry a buildable program.
+			for _, key := range []string{"program", "program_id", "signature"} {
+				if _, ok := fixture[key]; !ok {
+					t.Fatalf("%s missing %s", file, key)
+				}
+			}
+			source, ok := fixture["source"].(map[string]any)
+			if !ok {
+				t.Fatalf("%s missing source", file)
+			}
+			if consumer, ok := source["consumer"].(string); !ok || consumer == "" {
+				t.Fatalf("%s missing source.consumer naming the TS assertions", file)
+			}
 		default:
 			t.Fatalf("%s has unknown axagent kind %v", file, fixture["kind"])
 		}

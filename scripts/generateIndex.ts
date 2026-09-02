@@ -31,6 +31,21 @@ const internalExportNames = new Set([
   'AxAIOpenAIResponsesImpl',
   'AxAgentInternalCompletionPayload',
   'AxAppliedProposal',
+  // Playbook-evidence implementation plumbing. The evidence CONTRACT types
+  // (receipts, reports, options, the error class and its guard) are public;
+  // these are the ledger/collector/cluster shapes the modules pass between
+  // themselves and are free to change.
+  'AxAccountingLedger',
+  'AxAgentEvalAttemptObserver',
+  'AxAgentPlaybookTerminationTally',
+  'AxErrorIdentity',
+  'AxGateChainInput',
+  'AxOverheadRecord',
+  'AxPairedRecord',
+  'AxPhaseHandle',
+  'AxReachCollector',
+  'AxTaskCluster',
+  'AxValiditySplitInput',
   'AxFlowDependencyAnalyzer',
   'AxFlowExecutionPlanner',
   'AxFlowBlockLabel',

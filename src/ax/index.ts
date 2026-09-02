@@ -107,6 +107,78 @@ import type {
 } from './agent/agentInternal/playbookEvolve/evalHarness.js';
 import type { AxAgentFailureCluster } from './agent/agentInternal/playbookEvolve/failureClusters.js';
 import type {
+  AxGateAuthorityOutcome,
+  AxGateVetoOutcome,
+} from './agent/agentInternal/playbookEvolve/gates.js';
+import {
+  type AxAgentEnvironmentFailureCause,
+  type AxAgentPlaybookAttemptRecord,
+  type AxAgentPlaybookComputeAccounting,
+  type AxAgentPlaybookComputePhase,
+  type AxAgentPlaybookComputePhaseName,
+  type AxAgentPlaybookControlArmKind,
+  type AxAgentPlaybookControlArmOptions,
+  type AxAgentPlaybookControlArmReport,
+  type AxAgentPlaybookControlArmResult,
+  type AxAgentPlaybookCostFn,
+  type AxAgentPlaybookEviction,
+  type AxAgentPlaybookEvidenceGates,
+  type AxAgentPlaybookEvidenceReceipt,
+  type AxAgentPlaybookEvidenceWarning,
+  type AxAgentPlaybookEvidenceWarningCode,
+  AxAgentPlaybookEvolveError,
+  type AxAgentPlaybookEvolveErrorCode,
+  type AxAgentPlaybookGateEntry,
+  type AxAgentPlaybookGateId,
+  type AxAgentPlaybookGateMode,
+  type AxAgentPlaybookGateReport,
+  type AxAgentPlaybookInterval,
+  type AxAgentPlaybookIntervalOptions,
+  type AxAgentPlaybookModelIdentity,
+  type AxAgentPlaybookNomination,
+  type AxAgentPlaybookOverheadMeasure,
+  type AxAgentPlaybookOverheadReport,
+  type AxAgentPlaybookOverheadSplit,
+  type AxAgentPlaybookPromotionAuthority,
+  type AxAgentPlaybookPromotionDenialCode,
+  type AxAgentPlaybookPromotionRecord,
+  type AxAgentPlaybookPromotionVeto,
+  type AxAgentPlaybookPruneOperation,
+  type AxAgentPlaybookPruneOptions,
+  type AxAgentPlaybookPruneProposal,
+  type AxAgentPlaybookPruneTrigger,
+  type AxAgentPlaybookReachBasis,
+  type AxAgentPlaybookReachObservation,
+  type AxAgentPlaybookReachProbe,
+  type AxAgentPlaybookReachReport,
+  type AxAgentPlaybookReachSplit,
+  type AxAgentPlaybookRedundancyEntry,
+  type AxAgentPlaybookRedundancyReport,
+  type AxAgentPlaybookSealedTestReport,
+  type AxAgentPlaybookSplitName,
+  type AxAgentPlaybookSplitScore,
+  type AxAgentPlaybookTerminationReport,
+  type AxAgentPlaybookTerminationSplit,
+  type AxAgentPlaybookTokensBasis,
+  type AxAgentPlaybookTransferCell,
+  type AxAgentPlaybookTransferOptions,
+  type AxAgentPlaybookTransferReport,
+  type AxAgentPlaybookTransferTarget,
+  type AxAgentPlaybookUsageTap,
+  type AxAgentPlaybookValidityOptions,
+  type AxAgentPlaybookValidityPredicate,
+  type AxAgentPlaybookValidityPredicateId,
+  type AxAgentPlaybookValidityReport,
+  type AxAgentPlaybookVarianceBand,
+  type AxAgentPlaybookVarianceBandOptions,
+  type AxAgentPlaybookVarianceBandReport,
+  type AxAgentPlaybookVetoResult,
+  type AxAgentTrajectoryClassifier,
+  type AxAgentTrajectoryTermination,
+  type AxAgentTrajectoryTerminationKind,
+  axIsAgentPlaybookEvolveError,
+} from './agent/agentInternal/playbookEvolve/playbookEvidenceTypes.js';
+import type {
   AxAgentPlaybookEvolveOptions,
   AxAgentPlaybookEvolveOutcome,
   AxAgentPlaybookEvolveProgressEvent,
@@ -119,6 +191,7 @@ import type {
   AxAgentPlaybookRetentionSlice,
   AxAgentPlaybookWeakness,
 } from './agent/agentInternal/playbookEvolve/playbookEvolveTypes.js';
+import { axClassifyAxServiceTermination } from './agent/agentInternal/playbookEvolve/termination.js';
 import type {
   AxModuleRankInput,
   AxRankableDocument,
@@ -1947,6 +2020,7 @@ export { AxAgent };
 export { AxAgentClarificationError };
 export { AxAgentContextMap };
 export { AxAgentPlaybook };
+export { AxAgentPlaybookEvolveError };
 export { AxAgentProtocolCompletionSignal };
 export { AxAgentSessionAuthorizationError };
 export { AxAgentSessionClient };
@@ -2126,6 +2200,7 @@ export { axBuildMutationDepthHistogram };
 export { axBuildResponderDefinition };
 export { axCanonicalizeCausalCandidateEvidenceManifest };
 export { axCheckMetricsHealth };
+export { axClassifyAxServiceTermination };
 export { axClassifyTrajectory };
 export { axCloneCausalCandidateEvidenceManifest };
 export { axCodeRuntimeProtocol };
@@ -2205,6 +2280,7 @@ export { axHarnessStamp };
 export { axInferComponentClass };
 export { axIpwPairedDifference };
 export { axIpwScore };
+export { axIsAgentPlaybookEvolveError };
 export { axIsAudioOutputEnabled };
 export { axIsCandidateEffectManifestError };
 export { axIsCandidateStaleError };
@@ -2624,6 +2700,7 @@ export type { AxAgentContextStage };
 export type { AxAgentDemos };
 export type { AxAgentDirectResponse };
 export type { AxAgentDiscoveryPromptState };
+export type { AxAgentEnvironmentFailureCause };
 export type { AxAgentEvalBatchResult };
 export type { AxAgentEvalBudget };
 export type { AxAgentEvalDataset };
@@ -2664,22 +2741,82 @@ export type { AxAgentOptimizeOptions };
 export type { AxAgentOptimizeResult };
 export type { AxAgentOptimizeTarget };
 export type { AxAgentOptions };
+export type { AxAgentPlaybookAttemptRecord };
+export type { AxAgentPlaybookComputeAccounting };
+export type { AxAgentPlaybookComputePhase };
+export type { AxAgentPlaybookComputePhaseName };
 export type { AxAgentPlaybookConfig };
+export type { AxAgentPlaybookControlArmKind };
+export type { AxAgentPlaybookControlArmOptions };
+export type { AxAgentPlaybookControlArmReport };
+export type { AxAgentPlaybookControlArmResult };
+export type { AxAgentPlaybookCostFn };
+export type { AxAgentPlaybookEviction };
+export type { AxAgentPlaybookEvidenceGates };
+export type { AxAgentPlaybookEvidenceReceipt };
+export type { AxAgentPlaybookEvidenceWarning };
+export type { AxAgentPlaybookEvidenceWarningCode };
+export type { AxAgentPlaybookEvolveErrorCode };
 export type { AxAgentPlaybookEvolveOptions };
 export type { AxAgentPlaybookEvolveOutcome };
 export type { AxAgentPlaybookEvolveProgressEvent };
 export type { AxAgentPlaybookEvolveProposal };
 export type { AxAgentPlaybookEvolveResult };
 export type { AxAgentPlaybookEvolveRunRecord };
+export type { AxAgentPlaybookGateEntry };
+export type { AxAgentPlaybookGateId };
+export type { AxAgentPlaybookGateMode };
+export type { AxAgentPlaybookGateReport };
+export type { AxAgentPlaybookInterval };
+export type { AxAgentPlaybookIntervalOptions };
 export type { AxAgentPlaybookLearnOptions };
+export type { AxAgentPlaybookModelIdentity };
+export type { AxAgentPlaybookNomination };
 export type { AxAgentPlaybookOptions };
+export type { AxAgentPlaybookOverheadMeasure };
+export type { AxAgentPlaybookOverheadReport };
+export type { AxAgentPlaybookOverheadSplit };
+export type { AxAgentPlaybookPromotionAuthority };
+export type { AxAgentPlaybookPromotionDenialCode };
+export type { AxAgentPlaybookPromotionRecord };
+export type { AxAgentPlaybookPromotionVeto };
+export type { AxAgentPlaybookPruneOperation };
+export type { AxAgentPlaybookPruneOptions };
+export type { AxAgentPlaybookPruneProposal };
+export type { AxAgentPlaybookPruneTrigger };
+export type { AxAgentPlaybookReachBasis };
+export type { AxAgentPlaybookReachObservation };
+export type { AxAgentPlaybookReachProbe };
+export type { AxAgentPlaybookReachReport };
+export type { AxAgentPlaybookReachSplit };
+export type { AxAgentPlaybookRedundancyEntry };
+export type { AxAgentPlaybookRedundancyReport };
 export type { AxAgentPlaybookRetentionAnchor };
 export type { AxAgentPlaybookRetentionPolicy };
 export type { AxAgentPlaybookRetentionReceipt };
 export type { AxAgentPlaybookRetentionSlice };
+export type { AxAgentPlaybookSealedTestReport };
 export type { AxAgentPlaybookSkipReason };
+export type { AxAgentPlaybookSplitName };
+export type { AxAgentPlaybookSplitScore };
+export type { AxAgentPlaybookTerminationReport };
+export type { AxAgentPlaybookTerminationSplit };
+export type { AxAgentPlaybookTokensBasis };
+export type { AxAgentPlaybookTransferCell };
+export type { AxAgentPlaybookTransferOptions };
+export type { AxAgentPlaybookTransferReport };
+export type { AxAgentPlaybookTransferTarget };
 export type { AxAgentPlaybookUpdateResult };
 export type { AxAgentPlaybookUpdateStatus };
+export type { AxAgentPlaybookUsageTap };
+export type { AxAgentPlaybookValidityOptions };
+export type { AxAgentPlaybookValidityPredicate };
+export type { AxAgentPlaybookValidityPredicateId };
+export type { AxAgentPlaybookValidityReport };
+export type { AxAgentPlaybookVarianceBand };
+export type { AxAgentPlaybookVarianceBandOptions };
+export type { AxAgentPlaybookVarianceBandReport };
+export type { AxAgentPlaybookVetoResult };
 export type { AxAgentPlaybookWeakness };
 export type { AxAgentRecursionOptions };
 export type { AxAgentRecursiveExpensiveNode };
@@ -2730,6 +2867,9 @@ export type { AxAgentStreamingForwardOptions };
 export type { AxAgentStructuredClarification };
 export type { AxAgentTestCompletionPayload };
 export type { AxAgentTestResult };
+export type { AxAgentTrajectoryClassifier };
+export type { AxAgentTrajectoryTermination };
+export type { AxAgentTrajectoryTerminationKind };
 export type { AxAgentUsage };
 export type { AxAgentUsedMemoriesCallback };
 export type { AxAgentUsedMemory };
@@ -3024,6 +3164,8 @@ export type { AxGEPARejectedPriorBlock };
 export type { AxGEPAResolvedLineageOptions };
 export type { AxGEPATraceSummary };
 export type { AxGEPATraceSummaryCall };
+export type { AxGateAuthorityOutcome };
+export type { AxGateVetoOutcome };
 export type { AxGenDeltaOut };
 export type { AxGenIn };
 export type { AxGenInput };
