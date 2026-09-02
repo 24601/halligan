@@ -1,3 +1,8 @@
+export type { AxHarnessApplyOptions } from './apply.js';
+export {
+  axApplyHarnessTree,
+  axCurrentHarnessInstallation,
+} from './apply.js';
 export type {
   AxLearningStoreConformanceFactory,
   AxLearningStoreConformanceFactoryOptions,
@@ -51,12 +56,28 @@ export type {
   AxReportSchema,
 } from './reportSchema.js';
 export { axReportSchema } from './reportSchema.js';
+export {
+  axAdmitHarnessTree,
+  axApplyHarnessMutations,
+  axHarnessContentId,
+  axHarnessLooksLikeCredential,
+  axInspectHarnessTree,
+  axRenderHarnessTree,
+} from './tree.js';
 export type {
+  AxHarnessAdmissionReason,
+  AxHarnessAdmissionReport,
   AxHarnessBulletConfig,
   AxHarnessEntry,
+  AxHarnessEntryInspection,
   AxHarnessEntryKind,
   AxHarnessGateDecision,
   AxHarnessGateMetrics,
+  AxHarnessInstallation,
+  AxHarnessInstallTarget,
+  AxHarnessMutation,
+  AxHarnessPlaybookHandle,
+  AxHarnessRendering,
   AxHarnessTree,
   AxLearningAppendResult,
   AxLearningArtifactRef,
@@ -78,10 +99,16 @@ export type {
   AxLearningValue,
 } from './types.js';
 export {
+  AxHarnessAdmissionError,
+  AxHarnessApplyError,
+  AxHarnessMutationError,
+  AxHarnessRenderError,
   AxLearningRecordConflictError,
   AxLearningRecordValidationError,
   AxLearningReleaseConflictError,
   AxLearningReportValidationError,
+  axIsHarnessAdmissionError,
+  axIsHarnessApplyError,
   axIsLearningRecordConflictError,
   axIsLearningReleaseConflictError,
 } from './types.js';

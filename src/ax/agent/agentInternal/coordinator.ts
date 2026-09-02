@@ -1039,6 +1039,37 @@ export class AxAgent<IN extends AxGenIn, OUT extends AxGenOut>
     stage._buildSplitPrograms?.();
   }
 
+  /** The current text of a named instruction slot, or `undefined`. */
+  public getActorInstructionSlot(slot: string): string | undefined {
+    const stage: any = this.executor;
+    return (stage.instructionSlots as Map<string, string> | undefined)?.get(
+      slot.trim()
+    );
+  }
+
+  /** The current skills of a named catalog slot, or `undefined`. */
+  public getSkillsCatalogSlot(
+    slot: string
+  ): readonly AxAgentCatalogSkill[] | undefined {
+    const stage: any = this.executor;
+    return (
+      stage.skillsCatalogSlots as
+        | Map<string, readonly AxAgentCatalogSkill[]>
+        | undefined
+    )?.get(slot.trim());
+  }
+
+  /**
+   * True when this agent learns into its playbook after every completed run
+   * (the construction-time `playbook: { learn: ... }` config).
+   *
+   * Installing a harness tree REPLACES the playbook, so a caller that would
+   * discard run-accumulated bullets has to know before it writes.
+   */
+  public hasContinuousPlaybookLearning(): boolean {
+    return this.playbookConfigResolved?.learn.enabled === true;
+  }
+
   /**
    * Set (or, with no `skills`, clear) a NAMED skills-catalog slot, merged
    * after the construction-time catalog in slot-name order.

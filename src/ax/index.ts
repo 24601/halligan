@@ -1727,6 +1727,11 @@ import {
   axWorkerRuntime,
 } from './funcs/worker.runtime.js';
 import {
+  type AxHarnessApplyOptions,
+  axApplyHarnessTree,
+  axCurrentHarnessInstallation,
+} from './learn/apply.js';
+import {
   type AxLearningStoreConformanceFactory,
   type AxLearningStoreConformanceFactoryOptions,
   type AxLearningStoreConformanceReport,
@@ -1776,11 +1781,31 @@ import {
   axReportSchema,
 } from './learn/reportSchema.js';
 import {
+  axAdmitHarnessTree,
+  axApplyHarnessMutations,
+  axHarnessContentId,
+  axHarnessLooksLikeCredential,
+  axInspectHarnessTree,
+  axRenderHarnessTree,
+} from './learn/tree.js';
+import {
+  AxHarnessAdmissionError,
+  type AxHarnessAdmissionReason,
+  type AxHarnessAdmissionReport,
+  AxHarnessApplyError,
   type AxHarnessBulletConfig,
   type AxHarnessEntry,
+  type AxHarnessEntryInspection,
   type AxHarnessEntryKind,
   type AxHarnessGateDecision,
   type AxHarnessGateMetrics,
+  type AxHarnessInstallation,
+  type AxHarnessInstallTarget,
+  type AxHarnessMutation,
+  AxHarnessMutationError,
+  type AxHarnessPlaybookHandle,
+  AxHarnessRenderError,
+  type AxHarnessRendering,
   type AxHarnessTree,
   type AxLearningAppendResult,
   type AxLearningArtifactRef,
@@ -1804,6 +1829,8 @@ import {
   type AxLearningStorePageEntry,
   type AxLearningTreeDelivery,
   type AxLearningValue,
+  axIsHarnessAdmissionError,
+  axIsHarnessApplyError,
   axIsLearningRecordConflictError,
   axIsLearningReleaseConflictError,
 } from './learn/types.js';
@@ -2426,7 +2453,11 @@ export { AxGEPA };
 export { AxGEPAComponentSelector };
 export { AxGen };
 export { AxGenerateError };
+export { AxHarnessAdmissionError };
+export { AxHarnessApplyError };
+export { AxHarnessMutationError };
 export { AxHarnessRecipeError };
+export { AxHarnessRenderError };
 export { AxInMemoryAgentSessionScheduler };
 export { AxInMemoryAgentSessionStore };
 export { AxInMemoryBalancerStatsStore };
@@ -2553,9 +2584,12 @@ export { axAIProviderProfiles };
 export { axAIWebLLMCreativeConfig };
 export { axAIWebLLMDefaultConfig };
 export { axActorSkillView };
+export { axAdmitHarnessTree };
 export { axAnalyzeChatPromptRequirements };
 export { axAnalyzeRequestRequirements };
 export { axApplyEventEffectTransition };
+export { axApplyHarnessMutations };
+export { axApplyHarnessTree };
 export { axApplyMCPAuthentication };
 export { axApplyOpenAIChatAudioRequest };
 export { axApplyStatePatch };
@@ -2610,6 +2644,7 @@ export { axCreateRuntimeAdmissionReceipt };
 export { axCreateRuntimeCapabilities };
 export { axCreateSkillProvenanceAccumulator };
 export { axCreateTaskStatTable };
+export { axCurrentHarnessInstallation };
 export { axDeclaresToolCapability };
 export { axDedupeRailDiagnostics };
 export { axDefaultFlowLogger };
@@ -2672,6 +2707,8 @@ export { axGetRuntimeHookFrame };
 export { axGetSupportedAIModels };
 export { axGlobals };
 export { axGoogleGeminiLiveAudioDefaults };
+export { axHarnessContentId };
+export { axHarnessLooksLikeCredential };
 export { axHarnessPortId };
 export { axHarnessRecipe };
 export { axHarnessRecipeVersion };
@@ -2680,6 +2717,7 @@ export { axInMemoryLearningStore };
 export { axInferComponentClass };
 export { axInitialMindPacerState };
 export { axInitialVerificationBudgetState };
+export { axInspectHarnessTree };
 export { axIpwPairedDifference };
 export { axIpwScore };
 export { axIsAgentPlaybookEvolveError };
@@ -2693,6 +2731,8 @@ export { axIsFnv1a64Digest };
 export { axIsGeminiLiveAudioModel };
 export { axIsGrokVoiceModel };
 export { axIsGuardPredicateFailure };
+export { axIsHarnessAdmissionError };
+export { axIsHarnessApplyError };
 export { axIsHarnessPortId };
 export { axIsHarnessRecipeError };
 export { axIsHarnessStampStale };
@@ -2829,6 +2869,7 @@ export { axRejectedCandidateDigest };
 export { axRejectedCandidateLedgerEntry };
 export { axRejectedCandidatePrior };
 export { axRenderActorPlaybook };
+export { axRenderHarnessTree };
 export { axRenderTrajectoryProjection };
 export { axRenewPreferenceEvidence };
 export { axReplaceOptimizedProgramSnapshot };
@@ -3707,14 +3748,23 @@ export type { AxGuardEvaluationContext };
 export type { AxGuardFailure };
 export type { AxGuardFailureCode };
 export type { AxGuardOp };
+export type { AxHarnessAdmissionReason };
+export type { AxHarnessAdmissionReport };
+export type { AxHarnessApplyOptions };
 export type { AxHarnessAtom };
 export type { AxHarnessBulletConfig };
 export type { AxHarnessEntry };
+export type { AxHarnessEntryInspection };
 export type { AxHarnessEntryKind };
 export type { AxHarnessGateDecision };
 export type { AxHarnessGateMetrics };
+export type { AxHarnessInstallTarget };
+export type { AxHarnessInstallation };
+export type { AxHarnessMutation };
+export type { AxHarnessPlaybookHandle };
 export type { AxHarnessPortId };
 export type { AxHarnessRecipe };
+export type { AxHarnessRendering };
 export type { AxHarnessStamp };
 export type { AxHarnessTree };
 export type { AxIField };
