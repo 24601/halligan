@@ -132,7 +132,7 @@
       "type": "skill-md",
       "description": "Use mind() to run a persistent agent whose thinkers wake from trajectory appends, a paced spontaneity ladder, and a liveness watchdog, with ledgered outbound messages and exactly-one-reply chat semantics. Use when the user asks about mind(), AxMind, AxMindThinker, thinkers, persistent agency, spontaneous wakes, salience injection, or an always-on agent.",
       "url": "ax-mind/SKILL.md",
-      "digest": "sha256:4f50018669772ed64746dfc803a71ad3b6a4761e9ec6fb5dd4db22dbf87f18db"
+      "digest": "sha256:873abdb3158ee8638cc3084f59da9cf78eb5f473d0b41e329208c80e79508d8e"
     },
     {
       "name": "ax-playbook",
