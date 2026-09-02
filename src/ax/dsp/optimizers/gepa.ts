@@ -594,6 +594,31 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       'completed';
     let terminationPhase = 'num_trials_exhausted';
     let terminationRound = this.numTrials;
+    /**
+     * Record why the run stopped, ONCE.
+     *
+     * `'excessive_environment_failures'` is terminal: the run has already been
+     * declared unpublishable, and the loop can still walk through an
+     * early-stopping check or a budget-exhausted candidate on its way out. A
+     * later reason would overwrite the only signal a reader has that the
+     * classifier — not the search — ended the run.
+     */
+    const markRunStopped = (
+      reason: AxGEPACandidateLineageManifest['stoppedReason'],
+      phase: string,
+      round: number
+    ): void => {
+      if (stoppedReason === 'excessive_environment_failures') return;
+      stoppedReason = reason;
+      terminationPhase = phase;
+      terminationRound = round;
+    };
+    /**
+     * Trial the loop is currently inside, 1-based; 0 before the loop starts.
+     * `this.currentRound` is only advanced once a candidate reaches a decision,
+     * so it cannot name the round an evaluation-time failure happened in.
+     */
+    let currentTrialRound = 0;
 
     const candidateEvaluation = lineageEnabled
       ? (
@@ -675,9 +700,11 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
     const stoppedCandidate = lineageEnabled
       ? (budgetReason: string, phase: string, round: number) => {
           const aborted = evaluationState.stopReason === 'aborted';
-          stoppedReason = aborted ? 'aborted' : 'budget_exhausted';
-          terminationPhase = phase;
-          terminationRound = round;
+          markRunStopped(
+            aborted ? 'aborted' : 'budget_exhausted',
+            phase,
+            round
+          );
           return {
             reason: aborted ? 'abort_signal' : budgetReason,
             failure: buildGEPACandidateFailure(
@@ -743,6 +770,16 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
           axExceedsRunDiscardCeiling(runAdmission, admissionOptions)
         ) {
           admissionCeilingFired = true;
+          // Set here, at the one point the ceiling can be raised, rather than
+          // at the loop checkpoints that react to it: the ceiling can also
+          // cross during a final validation evaluation or after an
+          // early-stopping break, and those paths leave the loop without
+          // passing another checkpoint.
+          markRunStopped(
+            'excessive_environment_failures',
+            _phase.toLowerCase().replace(/\s+/g, '_'),
+            currentTrialRound
+          );
           verboseLog(
             `Run discard rate ${runAdmission.discardRate.toFixed(3)} exceeds maxRunDiscardRate ${admissionOptions.maxRunDiscardRate}; ending the run without publishing a best score`
           );
@@ -871,7 +908,8 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
     ).map((p) => p.idx);
 
     const buildLineageManifest = (
-      selectedCandidateIdx?: number
+      selectedCandidateIdx?: number,
+      extra?: Readonly<{ terminal?: boolean }>
     ): AxGEPACandidateLineageManifest | undefined => {
       if (!lineageEnabled) return undefined;
       const selectedCandidateId =
@@ -903,6 +941,16 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
                   : 'not_on_final_pareto_frontier',
       }));
       let omittedRecordCount = omittedLineageRecords;
+      /**
+       * "No candidate selected" and "the run terminated without publishing
+       * one" are different states and only the first is `in_progress`. The run
+       * discard ceiling produces the second: it suppresses `bestCandidateIdx`
+       * BY DESIGN, so keying the manifest on a missing selection alone would
+       * erase the one reason a reader needs — and would label a terminated run
+       * a periodic snapshot.
+       */
+      const inProgress =
+        selectedCandidateIdx === undefined && extra?.terminal !== true;
       const makeManifest = (): AxGEPACandidateLineageManifest => {
         const retainedIds = new Set(records.map((record) => record.id));
         return {
@@ -920,17 +968,10 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
           ),
           metricCallsUsed: this.stats.totalCalls,
           metricCallBudget: rolloutBudgetPareto,
-          stoppedReason:
-            selectedCandidateIdx === undefined ? 'in_progress' : stoppedReason,
+          stoppedReason: inProgress ? 'in_progress' : stoppedReason,
           termination: {
-            phase:
-              selectedCandidateIdx === undefined
-                ? 'checkpoint_snapshot'
-                : terminationPhase,
-            round:
-              selectedCandidateIdx === undefined
-                ? this.currentRound
-                : terminationRound,
+            phase: inProgress ? 'checkpoint_snapshot' : terminationPhase,
+            round: inProgress ? this.currentRound : terminationRound,
             metricCallsUsed: this.stats.totalCalls,
           },
           checkpointSemantics: 'snapshot_only',
@@ -973,25 +1014,19 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
     let _prevHypervolume: number | undefined;
 
     for (let t = 0; t < this.numTrials; t++) {
-      if (admissionCeilingFired) {
-        stoppedReason = 'excessive_environment_failures';
-        terminationPhase = 'loop_boundary';
-        terminationRound = t;
-        break;
-      }
+      currentTrialRound = t + 1;
+      // `markRunStopped` already recorded the phase the ceiling fired in, which
+      // is more informative than this checkpoint; the checkpoint only breaks.
+      if (admissionCeilingFired) break;
       if (gepaAbortSignal?.aborted) {
-        stoppedReason = 'aborted';
-        terminationPhase = 'loop_boundary';
-        terminationRound = t;
+        markRunStopped('aborted', 'loop_boundary', t);
         break;
       }
       if (
         rolloutBudgetPareto !== undefined &&
         this.stats.totalCalls >= Math.max(1, Math.floor(rolloutBudgetPareto))
       ) {
-        stoppedReason = 'budget_exhausted';
-        terminationPhase = 'loop_boundary';
-        terminationRound = t;
+        markRunStopped('budget_exhausted', 'loop_boundary', t);
         break;
       }
       // Parent selection via per-instance fronts (frequency sampling)
@@ -1494,12 +1529,7 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
         break;
       }
       recordTaskStats(parentMiniEval, t);
-      if (admissionCeilingFired) {
-        stoppedReason = 'excessive_environment_failures';
-        terminationPhase = 'parent_minibatch';
-        terminationRound = t + 1;
-        break;
-      }
+      if (admissionCeilingFired) break;
       // Too few admitted rows means the batch cannot decide anything. No
       // candidate has been proposed yet at this point, so the round is skipped
       // rather than a candidate being recorded as rejected on evidence that
@@ -1770,20 +1800,10 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
             failures: mutationFailures!.length ? mutationFailures : undefined,
           };
         });
-        if (admissionCeilingFired) {
-          stoppedReason = 'excessive_environment_failures';
-          terminationPhase = 'child_minibatch';
-          terminationRound = t + 1;
-          break;
-        }
+        if (admissionCeilingFired) break;
         continue;
       }
-      if (admissionCeilingFired) {
-        stoppedReason = 'excessive_environment_failures';
-        terminationPhase = 'child_minibatch';
-        terminationRound = t + 1;
-        break;
-      }
+      if (admissionCeilingFired) break;
 
       const parentComparisonSum = pairedMinibatchIndices
         ? sumOverIndices(pairedMinibatchIndices, parentMiniEval.scalars)
@@ -1936,9 +1956,7 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
         });
         await publishDecision('rejected');
         if (++stagnation >= this.earlyStoppingTrials) {
-          stoppedReason = 'early_stopping';
-          terminationPhase = 'early_stopping';
-          terminationRound = t + 1;
+          markRunStopped('early_stopping', 'early_stopping', t + 1);
           verboseLog(
             `Early stopping: ${stagnation} iterations without improvement`
           );
@@ -2053,9 +2071,7 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
           `Iteration ${t + 1}: Archive unchanged (stagnation=${stagnation}/${this.earlyStoppingTrials})`
         );
         if (stagnation >= this.earlyStoppingTrials) {
-          stoppedReason = 'early_stopping';
-          terminationPhase = 'early_stopping';
-          terminationRound = t + 1;
+          markRunStopped('early_stopping', 'early_stopping', t + 1);
           verboseLog(
             `Early stopping: ${stagnation} iterations without archive improvement`
           );
@@ -2120,7 +2136,9 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       customLabels
     );
 
-    const candidateLineage = buildLineageManifest(bestCandidateIdx);
+    const candidateLineage = buildLineageManifest(bestCandidateIdx, {
+      terminal: admissionCeilingFired,
+    });
     const discriminationSummary = buildDiscriminationSummary();
 
     // Build a unified optimized program (mirrors MiPRO) for the selected best candidate

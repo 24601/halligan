@@ -1310,6 +1310,7 @@ describe('AxGEPA trajectory admission', () => {
     compile?: Record<string, unknown>;
   }) => {
     const events: any[] = [];
+    const checkpoints: any[] = [];
     const optimizer = new AxGEPA({
       studentAI: {} as AxAIService,
       teacherAI: {} as AxAIService,
@@ -1318,6 +1319,10 @@ describe('AxGEPA trajectory admission', () => {
       minImprovementThreshold: 0,
       debugOptimizer: true,
       optimizerLogger: (event: any) => events.push(event),
+      checkpointSave: async (checkpoint: any) => {
+        checkpoints.push(checkpoint);
+        return `cp${checkpoints.length}`;
+      },
       ...args.optimizer,
     } as any);
     (optimizer as any).reflectTargetInstruction = async () => 'better';
@@ -1332,7 +1337,7 @@ describe('AxGEPA trajectory admission', () => {
         ...args.compile,
       } as any
     );
-    return { result, events };
+    return { result, events, checkpoints };
   };
 
   const lineageRecords = (result: any) =>
@@ -1429,7 +1434,7 @@ describe('AxGEPA trajectory admission', () => {
   });
 
   it('ends the run and publishes no best score above the run discard ceiling', async () => {
-    const { result, events } = await runOptimizer({
+    const { result, events, checkpoints } = await runOptimizer({
       examples: [{ i: 0 }, { i: 1 }, { i: 2 }, { i: 3 }, { i: 4 }, { i: 5 }],
       forward: () => {
         throw new Error('provider 429');
@@ -1449,6 +1454,112 @@ describe('AxGEPA trajectory admission', () => {
     expect(complete.value.bestScore).toBe(0);
     expect(complete.value.bestConfiguration).toEqual({});
     expect(complete.value.admission.discardRate).toBeGreaterThan(0.4);
+
+    // The terminal state has to be READABLE, not merely reached. The ceiling
+    // suppresses `bestCandidateIdx` by design, so a manifest that keys
+    // `in_progress` on "no candidate selected" erases the only reason a reader
+    // has for an empty artifact and labels the terminated run a periodic
+    // snapshot.
+    const finalCheckpoint = checkpoints.at(-1);
+    expect(finalCheckpoint.optimizerState.final).toBe(true);
+    const manifest = finalCheckpoint.optimizerState.candidateLineage;
+    expect(manifest.stoppedReason).toBe('excessive_environment_failures');
+    expect(manifest.termination.phase).not.toBe('checkpoint_snapshot');
+    expect(manifest.selectedCandidateId).toBeUndefined();
+  });
+
+  it('reports the ceiling as terminal even when it fires on the last round', async () => {
+    // The ceiling is raised inside `evalBatch`, so it can cross during a phase
+    // no loop checkpoint follows. Two trials with a classifier that only starts
+    // discarding once the second round's own evaluation runs: the loop then
+    // ends by exhausting its trials, and only a stop reason recorded where the
+    // ceiling was raised survives that path.
+    let evaluatedBatches = 0;
+    const { result, checkpoints } = await runOptimizer({
+      examples: [{ i: 0 }, { i: 1 }, { i: 2 }, { i: 3 }],
+      optimizer: { numTrials: 2, earlyStoppingTrials: 100 },
+      forward: () => ({ score: 0.5 }),
+      compile: {
+        trajectoryTermination: {
+          classifier: () => {
+            evaluatedBatches += 1;
+            return evaluatedBatches > 8
+              ? { kind: 'environment_failure' as const, cause: 'transport' }
+              : { kind: 'completed' as const };
+          },
+          minAdmittedFraction: 0,
+          maxRunDiscardRate: 0.3,
+          minRunRowsForCeiling: 12,
+        },
+      },
+    });
+
+    expect(result.optimizedProgram).toBeUndefined();
+    const manifest = checkpoints.at(-1).optimizerState.candidateLineage;
+    expect(manifest.stoppedReason).toBe('excessive_environment_failures');
+    expect(manifest.termination.phase).not.toBe('checkpoint_snapshot');
+  });
+
+  it('fires the discard ceiling only from the accumulated run, not from any one batch', async () => {
+    // The whole reason the ceiling is run-level: a classifier that discards a
+    // steady fraction of EVERY batch is invisible to a per-batch floor. Here
+    // `minAdmittedFraction: 0` disables the per-batch floor entirely, every
+    // batch is 4 rows against a `minRunRowsForCeiling` of 12, and exactly half
+    // of each batch is discarded. No single batch can reach the row floor, so
+    // the ceiling can only fire from the accumulated fold — an implementation
+    // that keeps only the latest batch's report never fires it.
+    const discardEveryOtherRow: AxTrajectoryTerminationClassifier = (input) =>
+      input.exampleIndex % 2 === 1
+        ? { kind: 'environment_failure', cause: 'transport' }
+        : { kind: 'completed' };
+    const { result, events, checkpoints } = await runOptimizer({
+      examples: [{ i: 0 }, { i: 1 }, { i: 2 }, { i: 3 }],
+      optimizer: { numTrials: 4, earlyStoppingTrials: 100 },
+      forward: () => ({ score: 0.5 }),
+      compile: {
+        trajectoryTermination: {
+          classifier: discardEveryOtherRow,
+          minAdmittedFraction: 0,
+          maxRunDiscardRate: 0.4,
+          minRunRowsForCeiling: 12,
+        },
+      },
+    });
+
+    const complete = events.find((e) => e.name === 'OptimizationComplete');
+    expect(complete.value.admission.evaluatedRows).toBeGreaterThanOrEqual(12);
+    expect(complete.value.admission.discardRate).toBeCloseTo(0.5, 10);
+    expect(result.bestScore).toBe(0);
+    expect(result.optimizedProgram).toBeUndefined();
+    expect(
+      checkpoints.at(-1).optimizerState.candidateLineage.stoppedReason
+    ).toBe('excessive_environment_failures');
+  });
+
+  it('does not fire the ceiling before the run has accumulated enough rows', async () => {
+    // The negative control for the test above: the same 50% steady discard
+    // under a row floor no run of this length can reach must NOT end the run.
+    const discardEveryOtherRow: AxTrajectoryTerminationClassifier = (input) =>
+      input.exampleIndex % 2 === 1
+        ? { kind: 'environment_failure', cause: 'transport' }
+        : { kind: 'completed' };
+    const { result, events } = await runOptimizer({
+      examples: [{ i: 0 }, { i: 1 }, { i: 2 }, { i: 3 }],
+      optimizer: { numTrials: 4, earlyStoppingTrials: 100 },
+      forward: () => ({ score: 0.5 }),
+      compile: {
+        trajectoryTermination: {
+          classifier: discardEveryOtherRow,
+          minAdmittedFraction: 0,
+          maxRunDiscardRate: 0.4,
+          minRunRowsForCeiling: 10_000,
+        },
+      },
+    });
+
+    const complete = events.find((e) => e.name === 'OptimizationComplete');
+    expect(complete.value.admission.discardRate).toBeCloseTo(0.5, 10);
+    expect(result.optimizedProgram).toBeDefined();
   });
 
   it('keeps running below the ceiling on the same fixture', async () => {
