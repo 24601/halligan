@@ -19,6 +19,7 @@ import type {
   AxAuthorityContext,
   AxAuthorizationReceipt,
 } from '../../../authority/types.js';
+import type { AxPlaybookSnapshot } from '../../../dsp/playbook.js';
 import type { AxProgramUsage } from '../../../dsp/types.js';
 import type {
   AxAgentEvalFunctionCall,
@@ -1125,12 +1126,22 @@ export class AxAgentPlaybookEvolveError extends Error {
   public readonly code: AxAgentPlaybookEvolveErrorCode;
   /** Where it failed, for the receipt. */
   public readonly phase: AxAgentPlaybookComputePhaseName;
+  /**
+   * The artifact the caller can recover to with one `getPlaybook()?.load(...)`.
+   *
+   * Set on exactly ONE path: the control arm restored the unevolved playbook,
+   * ran, and then could not put the evolved one back after two attempts. That
+   * leaves the agent in the baseline state while the run describes the evolved
+   * one, so the snapshot rides on the error — a thrown run has no result to
+   * carry it.
+   */
+  public readonly playbookSnapshot?: AxPlaybookSnapshot;
 
   constructor(
     code: AxAgentPlaybookEvolveErrorCode,
     phase: AxAgentPlaybookComputePhaseName,
     message: string,
-    options?: { cause?: unknown }
+    options?: { cause?: unknown; playbookSnapshot?: AxPlaybookSnapshot }
   ) {
     super(
       `AxAgent.playbook().evolve(): ${message}`,
@@ -1138,6 +1149,9 @@ export class AxAgentPlaybookEvolveError extends Error {
     );
     this.code = code;
     this.phase = phase;
+    if (options?.playbookSnapshot !== undefined) {
+      this.playbookSnapshot = options.playbookSnapshot;
+    }
   }
 }
 
