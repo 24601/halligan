@@ -79,6 +79,8 @@ jobs:
         run: npm run test:gepa-lineage-benchmark
       - name: Evaluate GEPA discriminative search
         run: npm run test:gepa-search
+      - name: Evaluate GEPA evidence manifests
+        run: npm run test:gepa-manifests
       - name: Check AxIR backlog coverage for portable TypeScript changes
         # On push events origin/main already equals HEAD, so diff against the
         # pre-push tip; the script falls back safely when it is unreachable.
