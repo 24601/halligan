@@ -1,0 +1,91 @@
+{
+  "name": "working_state_commit",
+  "kind": "agent",
+  "operation": "working_state_commit",
+  "description": "Core-owned working-state commit kernel: receipt-set membership, expects matching, the closed classification table, test-as-guard semantics, and the compare-and-set revision advance. Host-supplied checker behaviour is deliberately NOT expected here; the checker declared below is a no-op.",
+  "source": {
+    "tsDerived": true,
+    "extractor": "src/ax/agent/workingState.ts",
+    "reference": ["src/ax/agent/workingState.ts", "src/ax/agent/statePatch.ts"]
+  },
+  "input": {
+    "stateSignature": "orderId:string, itemsPacked:number, shipped:boolean",
+    "factDepthLimit": 4,
+    "allowModelAuthoredGoals": false,
+    "checker": { "id": "noop", "verdict": "pass" },
+    "believedState": {
+      "schemaVersion": 1,
+      "goals": {
+        "g_pick": {
+          "id": "g_pick",
+          "goal": "Pick every line on order 42",
+          "status": "pending",
+          "evidence": [],
+          "expects": ["inventory.pick"],
+          "createdTurn": 1,
+          "updatedTurn": 1
+        },
+        "g_ship": {
+          "id": "g_ship",
+          "goal": "Ship order 42",
+          "status": "pending",
+          "evidence": [],
+          "expects": ["shipping.dispatch"],
+          "createdTurn": 1,
+          "updatedTurn": 1
+        }
+      },
+      "facts": { "orderId": "42", "itemsPacked": 0, "shipped": false },
+      "parked": []
+    },
+    "receipts": [
+      {
+        "kind": "tool_receipt",
+        "ref": "r1",
+        "qualifiedName": "inventory.pick",
+        "turn": 5,
+        "at": 1700000120000,
+        "observations": 1,
+        "call": {
+          "qualifiedName": "inventory.pick",
+          "arguments": { "order": "42" },
+          "result": { "picked": 3 }
+        },
+        "fingerprint": "eb8caa16c4464d59ae25a7d926b60a30cc36cbf896def9235bee6cb4ea5f32ec"
+      }
+    ],
+    "turn": 5,
+    "patch": [
+      { "op": "test", "path": "/facts/shipped", "value": false },
+      {
+        "op": "add",
+        "path": "/goals/g_pick/evidence/-",
+        "value": { "kind": "tool_receipt", "ref": "r1" }
+      },
+      { "op": "replace", "path": "/goals/g_pick/status", "value": "done" },
+      { "op": "replace", "path": "/facts/itemsPacked", "value": 3 },
+      {
+        "op": "add",
+        "path": "/goals/g_ship/evidence/-",
+        "value": { "kind": "tool_receipt", "ref": "r1" }
+      },
+      { "op": "replace", "path": "/goals/g_ship/status", "value": "done" },
+      { "op": "replace", "path": "/facts/carrier", "value": "UPS" }
+    ]
+  },
+  "expected": {
+    "outcome": "partially_committed",
+    "appliedOps": 5,
+    "committedClasses": [
+      "evidence_append",
+      "goal_complete",
+      "fact_write",
+      "evidence_append"
+    ],
+    "parkedReasons": ["receipt_not_expected", "undeclared_fact_path"],
+    "revision": 1,
+    "goalStatuses": { "g_pick": "done", "g_ship": "pending" },
+    "facts": { "orderId": "42", "itemsPacked": 3, "shipped": false },
+    "evidenceRefs": { "g_pick": ["r1"], "g_ship": ["r1"] }
+  }
+}
