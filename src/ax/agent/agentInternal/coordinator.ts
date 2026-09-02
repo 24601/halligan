@@ -124,6 +124,9 @@ const SHARED_KNOB_KEYS = [
   'skillsCatalog',
   'onLoadedSkills',
   'onUsedSkills',
+  'skillPolicy',
+  'verifierRails',
+  'onSkillCost',
   'contextCache',
 ] as const;
 

@@ -15,6 +15,18 @@ import {
   buildInternalSummaryRequestOptions,
   formatStructuredRuntimeState,
 } from '../runtime.js';
+import type {
+  AxAgentSkillCostProfile,
+  AxAgentVerificationBudgetState,
+  AxAgentVerifierRail,
+  AxAgentVerifierRailBinding,
+} from '../skillCost.js';
+import {
+  axAttributeSkillCost,
+  axInitialVerificationBudgetState,
+  axRecordSkillLoad,
+  axUpdateSkillCostProfile,
+} from '../skillCost.js';
 import {
   buildRuntimeRestoreNotice,
   mergeRuntimeStateProvenance,
@@ -33,7 +45,7 @@ import { buildActorLoopSetup } from './actorLoopSetup.js';
 import { runActorTurn } from './actorLoopTurn.js';
 import type { AxAgentFailureReport } from './failureReport.js';
 import { buildFailureReport } from './failureReport.js';
-import { renderGuidanceLog } from './guidanceHelpers.js';
+import { appendGuidanceEntry, renderGuidanceLog } from './guidanceHelpers.js';
 import {
   mergeUsedMemoryResults,
   rankCatalogMemories,
@@ -46,6 +58,7 @@ import {
   mergeUsedSkillResults,
   rankCatalogSkills,
 } from './skillsHelpers.js';
+import type { AxAgentSkillPolicy } from './skillsTypes.js';
 import { resolveStagePolicy } from './stagePolicy.js';
 import type {
   AxAgentEvalFunctionCall,
@@ -159,6 +172,59 @@ export async function runActorLoop<IN extends AxGenIn>(
   } else {
     s._workingStateReceiptSink = undefined;
     s._workingStateClockNow = undefined;
+  }
+
+  // Verifier rails and the verification budget. Both are opt-in: with no rails
+  // configured the binding is absent and every tool call runs exactly as it
+  // does today. The budget is counted here, in the runtime, and is never stated
+  // in a prompt — a test asserts the prompt bytes are unchanged when one is set.
+  const skillPolicy = s.skillPolicy as AxAgentSkillPolicy | undefined;
+  // Injected clock, defaulting to the system clock, so cost accounting is
+  // reproducible in tests and in the conformance fixtures.
+  const costClock: () => number = skillPolicy?.now ?? (() => Date.now());
+  const costTrackingEnabled =
+    typeof s.onSkillCost === 'function' && s.skillUsageTrackingEnabled === true;
+  const runStartedAtMs = costTrackingEnabled ? costClock() : 0;
+  const usageEntriesBefore = costTrackingEnabled
+    ? (s.actorProgram?.getUsage()?.length ?? 0)
+    : 0;
+  const configuredRails = (s.verifierRails ??
+    []) as readonly AxAgentVerifierRail[];
+  let budgetState = axInitialVerificationBudgetState();
+  const railSignaturesSeen = new Set<string>();
+  if (configuredRails.length > 0) {
+    const budget = skillPolicy?.verificationBudget;
+    s._verifierRailBinding = {
+      rails: configuredRails,
+      ...(budget ? { budget } : {}),
+      stage: contextStage,
+      getState: () => budgetState,
+      setState: (next: AxAgentVerificationBudgetState) => {
+        budgetState = next;
+      },
+      seen: railSignaturesSeen,
+      emit: (diagnostics) => {
+        for (const diagnostic of diagnostics) {
+          appendGuidanceEntry(guidanceState.entries, {
+            turn: actionLogEntries.length,
+            guidance: `[${diagnostic.severity}] ${diagnostic.message}`,
+            triggeredBy: `verifier-rail:${diagnostic.code}`,
+          });
+        }
+      },
+      onStateChange: (next: AxAgentVerificationBudgetState) => {
+        void emitContextEvent(s.onContextEvent, {
+          kind: 'verification_budget',
+          stage: contextStage,
+          rounds: next.rounds,
+          maxRounds: budget?.maxRounds ?? Number.POSITIVE_INFINITY,
+          status: next.status,
+          disabledRails: next.disabledRails,
+        });
+      },
+    } satisfies AxAgentVerifierRailBinding;
+  } else {
+    s._verifierRailBinding = undefined;
   }
 
   // Forward-time preset skills are executor-ingested — except for a static
@@ -623,6 +689,60 @@ export async function runActorLoop<IN extends AxGenIn>(
     }
   }
 
+  // Cost accounting closes here, once, with the run's own totals. Attribution
+  // is BY DECLARATION: the turn's cost is split equally across the ids the
+  // actor declared used, which is not a causal measurement of what a skill
+  // cost, and a skill nobody declared accrues no cost rather than looking free.
+  if (costTrackingEnabled) {
+    const usage = (s.actorProgram?.getUsage()?.slice(usageEntriesBefore) ??
+      []) as readonly { tokens?: { totalTokens?: number } }[];
+    const tokens = usage.reduce(
+      (total, entry) => total + (entry.tokens?.totalTokens ?? 0),
+      0
+    );
+    const nowMs = costClock();
+    const nowIso = new Date(nowMs).toISOString();
+    const declaredUsed = mutableState.usedSkills.map((skill) => skill.id);
+    const samples = axAttributeSkillCost({
+      declaredUsed,
+      tokens,
+      wallMs: Math.max(0, nowMs - runStartedAtMs),
+      verificationRounds: budgetState.rounds,
+      success: completionState.payload?.type === 'final',
+    });
+    const sampleById = new Map(samples.map((sample) => [sample.id, sample]));
+    for (const skill of mutableState.usedSkills) {
+      const sample = sampleById.get(skill.id);
+      if (!sample) continue;
+      if (sample.tokensAttributed !== undefined)
+        skill.tokensAttributed = sample.tokensAttributed;
+      if (sample.wallMs !== undefined) skill.wallMs = sample.wallMs;
+      if (sample.verificationRounds !== undefined)
+        skill.verificationRounds = sample.verificationRounds;
+    }
+    const profiles = new Map<string, AxAgentSkillCostProfile>(
+      (skillPolicy?.costProfiles ?? []).map((profile) => [profile.id, profile])
+    );
+    // `loads` and `uses` stay separate numbers: a skill rendered and never
+    // declared is uninformative, not cheap.
+    for (const id of loadedSkillIdsForRun(s)) {
+      profiles.set(id, axRecordSkillLoad(profiles.get(id), id, nowIso));
+    }
+    for (const sample of samples) {
+      profiles.set(
+        sample.id,
+        axUpdateSkillCostProfile(profiles.get(sample.id), sample, nowIso)
+      );
+    }
+    Promise.resolve(
+      s.onSkillCost?.(
+        [...profiles.values()].sort((a, b) =>
+          a.id < b.id ? -1 : a.id > b.id ? 1 : 0
+        )
+      )
+    ).catch(() => {});
+  }
+
   const executorResult =
     completionState.payload && 'args' in completionState.payload
       ? completionState.payload
@@ -649,4 +769,12 @@ export async function runActorLoop<IN extends AxGenIn>(
     turnCount: actionLogEntries.length,
     failureReport: buildFailureReport(actionLogEntries, contextStage),
   };
+}
+
+/** Ids rendered into this run's Loaded Skills section, for the `loads` counter. */
+function loadedSkillIdsForRun(s: any): readonly string[] {
+  const loaded = s.currentSkillsPromptState?.loaded as
+    | Map<string, unknown>
+    | undefined;
+  return loaded ? [...loaded.keys()] : [];
 }

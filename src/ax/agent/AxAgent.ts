@@ -714,10 +714,15 @@ export class ActorAgentRLM<
       typeof (this as any).onMemoriesSearch === 'function' &&
       (typeof (this as any).onUsedMemories === 'function' ||
         typeof (options as any)?.onUsedMemories === 'function');
+    // `onSkillCost` enables tracking on its own: without it `noteUsed`'s
+    // skills branch returns early, every cost profile stays empty, and
+    // cost-aware ranking is silently inert.
     const nextSkillUsageTracking =
       canTrackSkills &&
       (typeof (this as any).onUsedSkills === 'function' ||
-        typeof (options as any)?.onUsedSkills === 'function');
+        typeof (options as any)?.onUsedSkills === 'function' ||
+        typeof (this as any).onSkillCost === 'function' ||
+        typeof (options as any)?.onSkillCost === 'function');
     const nextUsageTracking = nextMemoryUsageTracking || nextSkillUsageTracking;
     if (
       previousMemoryUsageTracking !== nextMemoryUsageTracking ||

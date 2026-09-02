@@ -30,6 +30,10 @@ import {
   resolveDiscoveryCallableNamespaces,
   sortDiscoveryModules,
 } from '../runtimeDiscovery.js';
+import {
+  type AxAgentVerifierRailBinding,
+  axFireVerifierRails,
+} from '../skillCost.js';
 import { normalizeMemoriesInput } from './memoriesHelpers.js';
 import type { AxAgentMemoryResult } from './memoriesTypes.js';
 import type { AxAgentSkillResult } from './skillsTypes.js';
@@ -178,7 +182,8 @@ export function wrapFunction(
   eventContext?: import('../../event/types.js').AxEventContext,
   authority?: AxAuthorityContext,
   authorityInheritance?: AxAuthorityInheritance,
-  receipts?: AxAgentToolReceiptBinding
+  receipts?: AxAgentToolReceiptBinding,
+  rails?: AxAgentVerifierRailBinding
 ): (...args: unknown[]) => Promise<unknown> {
   const normalizedQualifiedName = qualifiedName ?? fn.name;
 
@@ -221,10 +226,41 @@ export function wrapFunction(
     }
   };
 
+  /**
+   * Rails fire only after the tool call has already settled, and nothing they
+   * do reaches the caller: the value or error returned below is the tool's own.
+   * The deadline inside `axFireVerifierRails`, not this `await`, is what bounds
+   * a rail that never resolves.
+   */
+  const fireRails = async (
+    callArgs: Record<string, unknown>,
+    outcome: Readonly<{ result?: unknown; error?: string }>,
+    invocationSignal: AbortSignal | undefined
+  ): Promise<void> => {
+    if (!rails || rails.rails.length === 0) return;
+    try {
+      const signal =
+        mergeAbortSignals(abortSignal, invocationSignal) ??
+        new AbortController().signal;
+      await axFireVerifierRails(rails, {
+        stage: rails.stage,
+        qualifiedName: normalizedQualifiedName,
+        name: fn.name,
+        args: callArgs,
+        signal,
+        ...outcome,
+      });
+    } catch {
+      // A rail failure is contained inside axFireVerifierRails; this catch is
+      // the same belt-and-braces the existing observers use.
+    }
+  };
+
   const observeResult = async (
     callArgs: Record<string, unknown>,
     result: Promise<unknown>,
-    serializedArguments?: Promise<unknown>
+    serializedArguments?: Promise<unknown>,
+    invocationSignal?: AbortSignal
   ): Promise<unknown> => {
     const getSerializedArguments = async (): Promise<
       ReturnType<typeof serializeForEval>
@@ -257,6 +293,7 @@ export function wrapFunction(
           at: receipts.now(),
         });
       }
+      await fireRails(callArgs, { result: value }, invocationSignal);
       return value;
     } catch (err) {
       if (err instanceof AxAgentProtocolCompletionSignal) {
@@ -281,6 +318,11 @@ export function wrapFunction(
           error: err instanceof Error ? err.message : String(err),
         });
       }
+      await fireRails(
+        callArgs,
+        { error: err instanceof Error ? err.message : String(err) },
+        invocationSignal
+      );
       throw err;
     }
   };
@@ -417,7 +459,9 @@ export function wrapFunction(
         invocationSignal,
         protocolForTrigger?.(normalizedQualifiedName),
         authorization
-      )
+      ),
+      undefined,
+      invocationSignal
     );
   };
 
@@ -614,6 +658,13 @@ export function buildRuntimeGlobals(
       ? { eligible, sink: receiptSink, now: receiptNow }
       : undefined;
 
+  // Rails ride the stage the way the receipt sink does: absent unless the host
+  // supplied `verifierRails`, so the default path allocates and observes
+  // nothing.
+  const railBinding = s._verifierRailBinding as
+    | AxAgentVerifierRailBinding
+    | undefined;
+
   // Agent functions under namespace.* (e.g. utils.myFn, custom.otherFn).
   // Agent-derived entries carry `_kind: 'internal'` so that `onFunctionCall`
   // observers can still distinguish them from user-registered tools; everything
@@ -640,7 +691,8 @@ export function buildRuntimeGlobals(
           // Agent-derived callables (every child agent normalizes to
           // `_kind: 'internal'`) can never mint a receipt: their return value
           // is another model's self-report.
-          receiptBinding(agentFn._kind !== 'internal')
+          receiptBinding(agentFn._kind !== 'internal'),
+          railBinding
         )
       : buildStageToolStub(qualifiedName);
     if (agentFn._alwaysInclude !== true) {
@@ -684,7 +736,8 @@ export function buildRuntimeGlobals(
               eventContext,
               authority,
               authorityInheritance,
-              receiptBinding(true)
+              receiptBinding(true),
+              railBinding
             )
           : buildStageToolStub(qualifiedName);
         registerCallable(
@@ -880,7 +933,8 @@ export function buildRuntimeGlobals(
               eventContext,
               authority,
               authorityInheritance,
-              receiptBinding(true)
+              receiptBinding(true),
+              railBinding
             )
           : buildStageToolStub(qualifiedName);
         registerCallable(

@@ -131,7 +131,17 @@ export function initializeAgentInternal(
     memoriesCatalog.length > 0;
   s.relevanceHintsEnabled =
     s.moduleHintEnabled || s.skillsHintEnabled || s.memoriesHintEnabled;
-  s.skillUsageTrackingEnabled = typeof options.onUsedSkills === 'function';
+  s.skillPolicy = options.skillPolicy;
+  s.verifierRails = Array.isArray(options.verifierRails)
+    ? options.verifierRails.slice()
+    : undefined;
+  s.onSkillCost = options.onSkillCost;
+  // `onSkillCost` alone must enable tracking: without it `noteUsed`'s skills
+  // branch returns early, every profile stays empty, and cost-aware ranking is
+  // silently inert.
+  s.skillUsageTrackingEnabled =
+    typeof options.onUsedSkills === 'function' ||
+    typeof options.onSkillCost === 'function';
   s.usageTrackingEnabled =
     s.memoryUsageTrackingEnabled || s.skillUsageTrackingEnabled;
   s.currentSkillsPromptState = createMutableSkillsPromptState();
@@ -217,6 +227,9 @@ export function initializeAgentInternal(
     onSkillsSearch: _oss,
     onLoadedSkills: _ols,
     onUsedSkills: _ous,
+    skillPolicy: _sp,
+    verifierRails: _vr,
+    onSkillCost: _osc,
     onMemoriesSearch: _oms,
     onLoadedMemories: _olm,
     onUsedMemories: _oum,

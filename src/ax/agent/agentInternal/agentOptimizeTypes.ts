@@ -393,6 +393,30 @@ export type AxAgentOptions<IN extends AxGenIn = AxGenIn> = Omit<
   onUsedSkills?: import('./skillsTypes.js').AxAgentUsedSkillsCallback;
 
   /**
+   * Skill tiering, eligibility gating, cost-aware ranking, retrieval-time
+   * precondition policy, and the verification budget. Absent means today's
+   * behaviour exactly. NOT inherited by child agents, matching the existing
+   * rule that child agents do not inherit memory or skills-search callbacks.
+   */
+  skillPolicy?: import('./skillsTypes.js').AxAgentSkillPolicy;
+
+  /**
+   * Unconditional post-tool-call verifiers. Diagnostics are deduped against
+   * the run's seen-signature set; only novel ones are surfaced. Every rail is
+   * deadline-bounded, error-contained, and disabled on fault, and no rail can
+   * change a tool call's own result, error, or timing. Not inherited by child
+   * agents.
+   */
+  verifierRails?: readonly import('../skillCost.js').AxAgentVerifierRail[];
+
+  /**
+   * Fired at run end with the updated per-skill cost profiles for persistence.
+   * Setting this also enables skill usage tracking, without which every
+   * profile stays empty. Not inherited by child agents.
+   */
+  onSkillCost?: import('./skillsTypes.js').AxAgentSkillCostCallback;
+
+  /**
    * Optional memories search callback. When set, the distiller and executor
    * stages gain a `recall(searches: string[]): void` global, and both
    * stages get a `memories` input field. The callback receives the raw

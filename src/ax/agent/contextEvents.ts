@@ -77,6 +77,19 @@ export type AxAgentContextEvent =
    * truncated preview (or nothing when `promptPreviewChars` is undefined)
    * plus a `contextMetadata` entry.
    */
+  /**
+   * Emitted whenever the deterministic verification budget advances or a rail
+   * is disabled. The budget is runtime-counted and NEVER stated in a prompt; a
+   * host escalates by handling this event.
+   */
+  | {
+      kind: 'verification_budget';
+      stage: AxAgentContextStage;
+      rounds: number;
+      maxRounds: number;
+      status: 'within' | 'exceeded';
+      disabledRails: readonly string[];
+    }
   | {
       kind: 'field_auto_promoted';
       stage: AxAgentContextStage;
