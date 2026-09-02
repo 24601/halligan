@@ -1914,9 +1914,9 @@ describe('agent.playbook().evolve() legacy identity', () => {
       true
     );
     expect(result.playbookSnapshot).toBeUndefined();
-    // phase 0, applyProposal's pre/post snapshots, phase 7. Without phase 0 the
-    // first reading would already carry the applied bullet's neighbourhood, and
-    // without phase 7 there would be no trailing post-rollback reading at all.
+    // phase 0, applyProposal's pre/post snapshots, phase 7. Without phase 0
+    // there is no reading before the proposal is applied, and without phase 7
+    // there is no trailing post-rollback reading at all.
     expect(observed).toHaveLength(4);
     expect(observed[0]).toBe('');
     expect(observed[2]).toContain(BULLET_MARKER);

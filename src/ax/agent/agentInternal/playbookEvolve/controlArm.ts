@@ -407,8 +407,8 @@ export async function runControlArms<IN extends AxGenIn, OUT extends AxGenOut>(
       absorb(tally, first, before - budget.remaining);
       scores = scoresByTaskIndex(first, ctx.tasks);
       let answers = answersByTaskIndex(first, ctx.tasks);
-      let refinable = true;
-      for (let round = 1; round <= n && refinable; round++) {
+      let canRefine = true;
+      for (let round = 1; round <= n && canRefine; round++) {
         if (budget.remaining < passCost) break;
         const derived: AxAgentEvalTask<IN>[] = [];
         const origins = new Map<object, AxAgentEvalTask<IN>>();
@@ -426,7 +426,7 @@ export async function runControlArms<IN extends AxGenIn, OUT extends AxGenOut>(
         }
         if (derived.length === 0) {
           // No task can carry a critique, so there is no refinement to make.
-          refinable = false;
+          canRefine = false;
           if (round === 1) {
             skipped.push({
               kind,
