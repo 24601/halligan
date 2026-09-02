@@ -149,7 +149,8 @@ Per segment:
 | state | action |
 |---|---|
 | segment entirely `< M` | **prune before descent** — otherwise the descent forks once per node over the whole empty tree on every call |
-| block exists at tier `k` | emit `{ kind: 'summary', block }` |
+| descent budget spent | emit `{ kind: 'gap' }`, reason `missing`, without probing further |
+| block exists at tier `k` | emit `{ kind: 'summary', block }` — only when its `tier`, `start` *and* `end` all match the segment |
 | block missing at tier `k > 1` | **descend into the `F` children at tier `k-1`** and apply this table to each |
 | block missing at tier 1 | emit `{ kind: 'gap' }`, reason `pre-enable` below `M`, else `missing` |
 
@@ -182,6 +183,49 @@ deleted, `axProjectTrajectory` degrades to the raw tail plus drill-down and
 reports the rest in `coverage.gaps`. Recency plus fetch-by-id is the
 load-bearing core; tiers are an optimization.
 
+**Degrading cleanly is not the same as degrading cheaply.** A missing coarse
+block forks into `F` children, so an empty or not-yet-sealed subtree costs
+`O(N / F)` store round-trips — measured at 1,104 `getBlock` calls to emit a
+single gap section over a 10k-step log, and ~111,000 at a million steps, paid
+on *every* wake and over whatever port the host backs rollups with.
+`axTrajectoryDescentBudget(cut0, F) = F² · (ceil(log_F cut0) + 1)` bounds the
+nodes one assembly may visit; beyond it the remainder is reported as a
+`missing` gap rather than probed. A healthy pyramid costs one probe per
+emitted section and never reaches the budget. The projection evaluation
+reports `degradedRollupReads` beside `degradedRecentSteps` and gates it.
+
+The budget is deliberately *not* a prune at `sealedIndex`: a block whose
+summarizer throws leaves the checkpoint parked below blocks that did seal in
+the same call, and pruning there would report a whole life as `missing` for as
+long as one poisoned block keeps failing.
+
+**Bounded writes.** `maxBlocks` (default 8) bounds summarizer *attempts* per
+build, not successes: a summarizer that is failing never increments `sealed`,
+so a guard on successes is a no-op exactly when a provider is down — one wake
+would then make one provider request per `F` steps for the whole log.
+Summaries and themes are clipped at seal time
+(`axTrajectoryMaxSummaryBytes`, `axTrajectoryMaxThemes`), because a summarizer
+whose output grows with its input keeps the staircase logarithmic in
+*sections* while its rendered size tracks the log.
+
+**The rendered frames are structural.** `render` is newline-delimited, and its
+headers and `[seq type]` frames are the only thing separating a summary from
+verbatim testimony. Every interpolated value — a block summary, a theme, and
+each field of a step body — is one-lined (a real newline becomes the two
+characters `\n`) before it is written, so neither model output nor a
+user-authored step can open a section or a frame of its own.
+
+**The checkpoint is checked against the log.** A rollup meta sealed past the
+end of the trajectory it is loaded for — a fork, a restore from backup, or a
+rebuilt log under a reused id — throws
+`AxTrajectoryRollupError('meta_conflict')` in both the projection and the
+build. Trusting it makes the projection report a life that was never lived,
+because `N` comes straight from `sealedIndex` when the scan has nothing to do.
+
+**`signal` is honoured between store round-trips**, not inside them: a caller
+cannot rely on abort to escape a scan over a synchronous store, so every knob
+that sizes a scan page is clamped to at least one step.
+
 **Drill-down.** Coarse entries are pointers, not testimony.
 `axResolveTrajectoryCitations` batches within the 256-id ceiling and
 rehydrates spilled fields. A summarizer that cites an id outside its own
@@ -210,15 +254,23 @@ coverage cannot be faked by a summarizer that read nothing.
    descent, drill-down, renderer) and `rollups.ts` (the cache path: the
    block/meta/store port, the in-memory store, the summarizer port and its two
    implementations, and sealing).
+5. **Four bounds the RFC does not name**: the descent budget, attempt-bounded
+   `maxBlocks`, the seal-time summary/theme clip, and the clamped scan page.
+   Each closes an unbounded path the RFC's own invariants ("one wakeup cannot
+   stall", "coarse entries are pointers") assume is already closed.
+6. **`AxTrajectoryQueryError` gains an `unsupported_types` reason.** A `types`
+   request that no narrative type survives resolves to `[]`, which every store
+   matcher reads as "matches nothing"; returning an empty projection silently
+   is indistinguishable from an empty log.
 
 ### Line budgets and why they moved
 
 `src/ax/trajectory/budget.test.ts` caps every production file and the
 directory total, so raising a cap is a visible one-line diff. RFC §5.1
 estimated 2,190 lines for lane A1 and 620 for lane A2, a 2,900 total. The
-shipped directory is **3,785**, and the ceiling is restated to 3,860.
+shipped directory is **3,922**, and the ceiling is restated to 3,990.
 
-Three things account for the difference, none of them added scope:
+Four things account for the difference, none of them added scope:
 
 - **`log.ts` (A1)** is not in the RFC. It holds the append-only index and every
   read primitive, shared verbatim by both shipped stores; before it, ~230 lines
@@ -233,6 +285,10 @@ Three things account for the difference, none of them added scope:
   of which gained a normative assertion during A1's adversarial review.
 - **The projection is split in two** (deviation 4 above). Neither half is
   understandable in an afternoon inside the other.
+- **A2's adversarial review** added six guards (deviations 5 and 6 above) and
+  their regression tests. Each is a few lines of code and a paragraph saying
+  what it defends against, which is the ratio this directory has had from the
+  start: 3,785 → 3,922.
 
 ## Store capability matrix
 
@@ -284,9 +340,13 @@ npm run trajectory:projection:eval     # coverage, size, chronology, drill-down
 ```
 
 The projection evaluation reports coverage **beside** the drill-down
-resolution rate and the count of citations falling outside their block, and
-carries a `hollow-blocks` control row whose blocks never read the log: it
-still scores coverage 1.0, and only the paired metrics catch it. Below `R` the
+resolution rate, the count of citations falling outside their block, and the
+store round-trips a fully degraded projection spends
+(`degradedRollupReads`, gated against `descentBudget`); it carries a
+`hollow-blocks` control row whose blocks never read the log: that row still
+scores coverage 1.0, and only the paired metrics catch it. `providerCalls` is
+an instrumented count of outbound fetches made while the rows were measured,
+not a literal. Below `R` the
 projection is pure overhead — at 10 filtered steps it renders *more* characters
 than a raw replay, because the headers cost more than the log does. That is
 reported rather than hidden.

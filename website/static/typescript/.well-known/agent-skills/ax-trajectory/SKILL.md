@@ -212,10 +212,27 @@ every finer summary that exists. Only a tier-1 miss becomes a
 
 Rollups are an optimization, not a dependency: with no rollup store, or with
 every block deleted, `axProjectTrajectory` still returns the raw tail and
-reports the rest as a gap.
+reports the rest as a gap — for a bounded number of store round-trips
+(`axTrajectoryDescentBudget`), after which the remainder is reported as one
+`missing` gap instead of being probed node by node.
+
+Three bounds are load-bearing and easy to miss:
+
+- `maxBlocks` (default 8) bounds summarizer **attempts** per build, not
+  successes, so a failing provider cannot turn one wake into one request per
+  `fanout` steps for the whole log.
+- Summaries and themes are clipped at seal time
+  (`axTrajectoryMaxSummaryBytes`, `axTrajectoryMaxThemes`).
+- `render` is newline-delimited and every interpolated value is one-lined, so
+  a summary or a step body cannot forge a section header or a verbatim
+  `[seq type]` frame.
+
+A rollup meta sealed past the end of the log it is loaded for throws
+`AxTrajectoryRollupError('meta_conflict')` rather than reporting a life that
+was never lived.
 
 A mind's context assembler is the primary consumer of this API — see
-`ax-mind.md`, which links back here.
+`ax-mind.md` (lane A3, not yet in the tree), which will link back here.
 
 ## Node-Only JSONL Store
 

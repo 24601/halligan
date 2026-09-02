@@ -132,7 +132,7 @@
       "type": "skill-md",
       "description": "Use AxTrajectoryStore to keep an append-only agent life log with digest-verified blob spill, fork/merge, durable per-consumer cursors, a bounded filtered backward tail, and tiered-rollup context projection. Use when the user asks about AxTrajectoryStore, AxTrajectoryStep, axProjectTrajectory, rollups, drill-down, AxJSONLTrajectoryStore, or runAxTrajectoryStoreConformance.",
       "url": "ax-trajectory/SKILL.md",
-      "digest": "sha256:0c2ef5c59bf88156f86eeeec9cabf66b308ab86ef3cac559b8a3b5a31cb48c87"
+      "digest": "sha256:9467e8fd1aa9c7b81df4e79d1fb7f65a663ff3db371455cfc8d3ce3bad463370"
     }
   ]
 }
