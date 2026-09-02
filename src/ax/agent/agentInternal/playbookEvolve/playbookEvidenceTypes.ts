@@ -19,6 +19,7 @@ import type {
   AxAuthorityContext,
   AxAuthorizationReceipt,
 } from '../../../authority/types.js';
+import type { AxPlaybookSnapshot } from '../../../dsp/playbook.js';
 import type { AxProgramUsage } from '../../../dsp/types.js';
 import type {
   AxAgentEvalFunctionCall,
@@ -259,7 +260,13 @@ export type AxAgentPlaybookControlArmKind =
 
 export type AxAgentPlaybookControlArmResult = Readonly<{
   kind: AxAgentPlaybookControlArmKind;
-  /** Samples per task (best_of_n), rounds (self_refine), or 1 (harness_term). */
+  /**
+   * What the arm ACTUALLY ran: samples drawn per task (best_of_n), refinement
+   * rounds re-invoked (self_refine), or 1 (harness_term). Never the planned
+   * figure — an arm that drew one sample under a starved budget and reported
+   * best-of-2 would overstate the control the evolved artifact was compared
+   * against, biasing the comparison towards accepting the artifact.
+   */
   n: number;
   /**
    * How best-of-N picked a sample. Only 'metric' is implemented: it selects
@@ -275,6 +282,18 @@ export type AxAgentPlaybookControlArmResult = Readonly<{
   /** Reported for completeness only. Never the comparison basis. */
   current?: AxAgentPlaybookSplitScore;
   accounting: AxAgentPlaybookComputeAccounting;
+  /**
+   * `harness_term` only: the digest of the content-free artifact that occupied
+   * the playbook slot. Recorded so the ablation is reproducible — an arm whose
+   * neutral text is unknown proves nothing about the artifact it replaced.
+   */
+  neutralArtifactDigest?: string;
+  /**
+   * `harness_term` only: what the neutral artifact actually rendered to. The
+   * size match is what makes the ablation an ablation, so the number is on the
+   * receipt rather than asserted in prose.
+   */
+  neutralArtifactTokens?: number;
 }>;
 
 /** REQUIRED on the result. `not_run` is the default so its absence is visible. */
@@ -963,6 +982,20 @@ export type AxAgentPlaybookEvidenceWarningCode =
   | 'interval_unresolved'
   | 'delta_within_variance_band'
   | 'control_arm_not_run'
+  /**
+   * A matched-budget arm reproduced (or beat) the evolved run's held-out score
+   * while `gates.controlArm` was only `'warn'`. Without it a warn-mode gate
+   * would produce no observable output at all, which is the silent absence this
+   * machinery exists to remove.
+   */
+  | 'control_arm_not_beaten'
+  /**
+   * A run-level control-arm gate had nothing to read: the arm did not run,
+   * failed, measured no task on the deciding split, or produced no record
+   * that could be paired. Kept distinct from `control_arm_not_beaten`, which asserts that a
+   * comparison happened and the evolved artifact lost it.
+   */
+  | 'control_arm_unmeasured'
   | 'harness_term_not_run'
   | 'transfer_not_run'
   | 'cost_unknown'
@@ -1125,12 +1158,22 @@ export class AxAgentPlaybookEvolveError extends Error {
   public readonly code: AxAgentPlaybookEvolveErrorCode;
   /** Where it failed, for the receipt. */
   public readonly phase: AxAgentPlaybookComputePhaseName;
+  /**
+   * The artifact the caller can recover to with one `getPlaybook()?.load(...)`.
+   *
+   * Set on exactly ONE path: the control arm restored the unevolved playbook,
+   * ran, and then could not put the evolved one back after two attempts. That
+   * leaves the agent in the baseline state while the run describes the evolved
+   * one, so the snapshot rides on the error — a thrown run has no result to
+   * carry it.
+   */
+  public readonly playbookSnapshot?: AxPlaybookSnapshot;
 
   constructor(
     code: AxAgentPlaybookEvolveErrorCode,
     phase: AxAgentPlaybookComputePhaseName,
     message: string,
-    options?: { cause?: unknown }
+    options?: { cause?: unknown; playbookSnapshot?: AxPlaybookSnapshot }
   ) {
     super(
       `AxAgent.playbook().evolve(): ${message}`,
@@ -1138,6 +1181,9 @@ export class AxAgentPlaybookEvolveError extends Error {
     );
     this.code = code;
     this.phase = phase;
+    if (options?.playbookSnapshot !== undefined) {
+      this.playbookSnapshot = options.playbookSnapshot;
+    }
   }
 }
 

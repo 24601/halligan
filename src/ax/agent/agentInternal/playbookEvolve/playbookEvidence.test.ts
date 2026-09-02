@@ -7,6 +7,7 @@ import {
   emptyAccounting,
   overheadReportFrom,
   overheadSplitFrom,
+  phaseAccounting,
   unobservableTokenPhases,
 } from './accounting.js';
 import type { AxAgentEvalBudget } from './evalHarness.js';
@@ -790,6 +791,40 @@ describe('compute accounting', () => {
     expect(accounting.phases[0]?.tokensBasis).toBe('unreported');
     expect(accounting.tokensBasis).toBe('unreported');
     expect(accounting.totalTokens).toBeUndefined();
+  });
+
+  it('keeps candidateAccounting byte-identical to its phaseAccounting delegate', () => {
+    // `candidateAccounting` was refactored into a `phaseAccounting` call. The
+    // refactor is only "pure" if the two produce the same block, and the
+    // candidate's own `evolveOnlyMetricCalls` rule (its metric calls ARE
+    // evolve-only, a control arm's are not) is exactly what a careless later
+    // edit would flatten.
+    const args = {
+      metricCalls: 3,
+      usage: [usageOf(40), usageOf(60)],
+      wallClockMs: 21,
+      usesBuiltInJudge: true,
+    } as const;
+    expect(candidateAccounting({ ...args, usage: [...args.usage] })).toEqual(
+      phaseAccounting({
+        phase: 'candidate_eval',
+        ...args,
+        usage: [...args.usage],
+        evolveOnlyMetricCalls: args.metricCalls,
+      })
+    );
+    // And it is NOT the same as a phase block that zeroes the legacy counter,
+    // which is what a control arm's block does.
+    expect(
+      candidateAccounting({ ...args, usage: [...args.usage] })
+    ).not.toEqual(
+      phaseAccounting({
+        phase: 'candidate_eval',
+        ...args,
+        usage: [...args.usage],
+        evolveOnlyMetricCalls: 0,
+      })
+    );
   });
 
   it('reports partial when only some calls surfaced usage', () => {

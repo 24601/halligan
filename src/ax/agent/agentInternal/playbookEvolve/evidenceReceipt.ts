@@ -17,6 +17,7 @@ import type {
   AxAgentPlaybookComputeAccounting,
   AxAgentPlaybookEvidenceReceipt,
   AxAgentPlaybookEvidenceWarning,
+  AxAgentPlaybookGateId,
   AxAgentPlaybookGateReport,
   AxAgentPlaybookInterval,
   AxAgentPlaybookNomination,
@@ -100,6 +101,69 @@ export function buildEvidenceReceipt(args: {
   return deepFreeze({
     ...body,
     digest: canonicalDigest(body),
+  }) as AxAgentPlaybookEvidenceReceipt;
+}
+
+/**
+ * Move a promotion to `promoted_then_rolled_back` when a RUN-LEVEL gate
+ * rescinds it.
+ *
+ * The receipt is kept: it really was issued, and Ax cannot revoke one —
+ * `axAuthorize` exposes no revoke path, and revocation is a host lifecycle
+ * operation. The honest report is "issued, then superseded", and the distinct
+ * status is what makes a live promotion structurally distinguishable from a
+ * rescinded one. Without it a consumer reading `outcomes[].promotion` could not
+ * tell them apart, which would defeat the point of moving authority off the
+ * judge.
+ *
+ * Every other status is returned unchanged: a candidate that was never promoted
+ * has nothing to rescind, and inventing a rollback status for it would report a
+ * promotion that never happened.
+ */
+export function rescindPromotion(
+  promotion: Readonly<AxAgentPlaybookPromotionRecord>,
+  args: Readonly<{ gate: AxAgentPlaybookGateId; reason: string }>
+): AxAgentPlaybookPromotionRecord {
+  if (promotion.status !== 'promoted') return promotion;
+  return {
+    status: 'promoted_then_rolled_back',
+    nomination: promotion.nomination,
+    receipt: promotion.receipt,
+    vetoes: promotion.vetoes,
+    rolledBackByGate: args.gate,
+    rolledBackReason: args.reason,
+  };
+}
+
+/**
+ * Rebuild an accepted candidate's receipt as `superseded` after a run-level
+ * rollback (invariant I8). The receipt is frozen and digested over its own
+ * body, so this rebuilds rather than mutates — and the new digest covers the
+ * new decision, so a superseded receipt cannot be mistaken for the accepted one
+ * it replaced.
+ */
+export function supersedeEvidenceReceipt(
+  receipt: Readonly<AxAgentPlaybookEvidenceReceipt>,
+  args: Readonly<{ gate: AxAgentPlaybookGateId; reason: string }>
+): AxAgentPlaybookEvidenceReceipt {
+  const promotion = rescindPromotion(receipt.promotion, args);
+  const warnings: AxAgentPlaybookEvidenceWarning[] = [
+    ...receipt.warnings,
+    {
+      code: 'promotion_rolled_back',
+      message: `the whole accepted set was rolled back by the ${args.gate} gate: ${args.reason}`,
+    },
+  ];
+  const { digest: _ignored, ...body } = receipt;
+  const next = {
+    ...body,
+    promotion,
+    warnings,
+    decision: 'superseded' as const,
+  };
+  return deepFreeze({
+    ...next,
+    digest: canonicalDigest(next),
   }) as AxAgentPlaybookEvidenceReceipt;
 }
 

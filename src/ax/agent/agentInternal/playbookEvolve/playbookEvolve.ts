@@ -14,6 +14,10 @@
  * `requireHeldOut` adds a fail-closed production promotion policy on top.
  */
 
+import {
+  estimateTokenCount,
+  renderPlaybook,
+} from '../../../dsp/optimizers/acePlaybook.js';
 import type { AxGenIn, AxGenOut } from '../../../dsp/types.js';
 import { normalizeAgentEvalDataset } from '../../optimize.js';
 import type {
@@ -27,6 +31,7 @@ import {
   accountingForPhases,
   candidateAccounting,
   createAccountingLedger,
+  emptyAccounting,
   overheadReportFrom,
   overheadSplitFrom,
   unobservableTokenPhases,
@@ -37,18 +42,30 @@ import {
   cloneAndFreeze,
   deepFreeze,
 } from './canonical.js';
+import {
+  bestControlArmOf,
+  controlArmComparisonMade,
+  controlArmVerdict,
+  runControlArms,
+} from './controlArm.js';
 import type {
   AxAgentEvalBatchResult,
   AxAgentEvalBudget,
 } from './evalHarness.js';
 import { runAgentEvalBatch } from './evalHarness.js';
-import { buildEvidenceReceipt } from './evidenceReceipt.js';
+import {
+  buildEvidenceReceipt,
+  rescindPromotion,
+  supersedeEvidenceReceipt,
+} from './evidenceReceipt.js';
 import { clusterFailures } from './failureClusters.js';
 import { evaluateAgentPromotionGate } from './gate.js';
 import { evaluateGateChain, gateChainAccepts } from './gates.js';
 import type {
   AxAgentPlaybookComputeAccounting,
   AxAgentPlaybookComputePhaseName,
+  AxAgentPlaybookControlArmKind,
+  AxAgentPlaybookControlArmOptions,
   AxAgentPlaybookControlArmReport,
   AxAgentPlaybookEvidenceReceipt,
   AxAgentPlaybookEvidenceWarning,
@@ -79,6 +96,12 @@ import {
   currentPlaybookText,
 } from './proposals.js';
 import { createReachCollector } from './reach.js';
+import {
+  captureSnapshot,
+  snapshotStateOf,
+  withRestoredArtifact,
+} from './snapshots.js';
+import type { AxTaskCluster } from './statistics.js';
 import {
   clustersFromPairedRecords,
   pairedBootstrapInterval,
@@ -259,6 +282,7 @@ function assertRequiredHeldOut<IN extends AxGenIn>(args: {
  */
 const EVIDENCE_OPTION_KEYS = [
   'gates',
+  'controlArm',
   'varianceBand',
   'intervalOptions',
   'validity',
@@ -267,6 +291,79 @@ const EVIDENCE_OPTION_KEYS = [
   'classifyTermination',
   'maxDiscardRedraws',
 ] as const;
+
+const CONTROL_ARM_KINDS: ReadonlySet<AxAgentPlaybookControlArmKind> =
+  new Set<AxAgentPlaybookControlArmKind>([
+    'best_of_n',
+    'self_refine',
+    'harness_term',
+  ]);
+
+const DEFAULT_CONTROL_ARMS: readonly AxAgentPlaybookControlArmKind[] = [
+  'best_of_n',
+  'self_refine',
+  'harness_term',
+];
+
+/**
+ * Every rejection here is permanent behaviour, not a stub: a control arm that
+ * cannot be compared against anything is worse than no control arm, because it
+ * produces a number a reader will treat as a comparison.
+ */
+function validateControlArmOptions(
+  controlArm: Readonly<AxAgentPlaybookControlArmOptions>,
+  hasHeldOut: boolean
+): void {
+  const fail = (message: string): never => {
+    throw new AxAgentPlaybookEvolveError(
+      'control_arm_failed',
+      'control_arm',
+      message
+    );
+  };
+  if (!hasHeldOut) {
+    // Gate 1 REQUIRES a current-task gain, so the evolved artifact was selected
+    // on `current` by construction. A control comparison there would reject good
+    // candidates and accept over-fit ones roughly at random.
+    fail(
+      'controlArm requires a non-empty validation set; comparing an arm on the current split measures selection, not capability, and there is no fallback to it.'
+    );
+  }
+  if (controlArm.arms !== undefined) {
+    if (controlArm.arms.length === 0) {
+      fail('controlArm.arms must name at least one arm.');
+    }
+    for (const kind of controlArm.arms) {
+      if (!CONTROL_ARM_KINDS.has(kind)) {
+        fail(`controlArm.arms contains an unknown arm '${String(kind)}'.`);
+      }
+    }
+  }
+  if (controlArm.selector !== undefined && controlArm.selector !== 'metric') {
+    // Reserved, not implemented: a judge selector costs one judge call per task
+    // on a non-default path. The field exists so the receipt records the
+    // strength of the control the run was compared against.
+    fail(
+      `controlArm.selector '${controlArm.selector}' is reserved and not implemented; only 'metric' selection ships today.`
+    );
+  }
+  for (const [name, value] of [
+    ['bestOfN', controlArm.bestOfN],
+    ['refineRounds', controlArm.refineRounds],
+    ['maxMetricCalls', controlArm.maxMetricCalls],
+  ] as const) {
+    if (value === undefined) continue;
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      fail(`controlArm.${name} must be a positive safe integer.`);
+    }
+  }
+  if (
+    controlArm.neutralArtifact !== undefined &&
+    typeof controlArm.neutralArtifact !== 'string'
+  ) {
+    fail('controlArm.neutralArtifact must be a string.');
+  }
+}
 
 function activeEvidenceOptions(
   options?: Readonly<AxAgentPlaybookEvolveOptions<any>>
@@ -289,7 +386,8 @@ function activeEvidenceOptions(
 
 function validateEvidenceOptions(
   options: Readonly<AxAgentPlaybookEvolveOptions<any>> | undefined,
-  verify: boolean
+  verify: boolean,
+  hasHeldOut: boolean
 ): void {
   const active = activeEvidenceOptions(options);
   if (!verify && active.length > 0) {
@@ -300,7 +398,7 @@ function validateEvidenceOptions(
     );
   }
   const gates = options?.gates;
-  if (gates?.controlArm && gates.controlArm !== 'off') {
+  if (gates?.controlArm && gates.controlArm !== 'off' && !options?.controlArm) {
     // A required (or warned) control-arm gate with no arm to compare against
     // is a gate that can never read anything. Fail closed at validation.
     throw new AxAgentPlaybookEvolveError(
@@ -308,6 +406,9 @@ function validateEvidenceOptions(
       'control_arm',
       'gates.controlArm needs a controlArm configuration; a control-arm gate with no arm cannot be evaluated.'
     );
+  }
+  if (options?.controlArm) {
+    validateControlArmOptions(options.controlArm, hasHeldOut);
   }
   if (
     gates?.controlArmMargin !== undefined &&
@@ -418,7 +519,11 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
     options?.metric ?? createAgentOptimizeMetric(self, judgeAI, judgeOptions);
 
   const verify = options?.verify !== false;
-  validateEvidenceOptions(options, verify);
+  validateEvidenceOptions(
+    options,
+    verify,
+    (normalized.validation?.length ?? 0) > 0
+  );
   const evidenceEnabled = activeEvidenceOptions(options).length > 0;
   const usesBuiltInJudge = options?.metric === undefined;
   const maxDiscardRedraws =
@@ -588,16 +693,27 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
     tasks: readonly AxAgentEvalTask<IN>[],
     split: AxAgentPlaybookSplitName,
     sliceName?: string,
-    reach?: { observe: (args: any) => void }
+    reach?: { observe: (args: any) => void },
+    /**
+     * A SEPARATE counter, used only by the control arm. Its spend still lands
+     * in `accounting.metricCalls` (the honest run total, I6) but it never moves
+     * the run's own budget or the legacy `metricCallsUsed`, so an arm can
+     * neither starve the search nor be hidden from the denominator.
+     */
+    armBudget?: AxAgentEvalBudget,
+    metricTaskOf?: (task: AxAgentEvalTask<IN>) => AxAgentEvalTask<IN>
   ): Promise<AxAgentEvalBatchResult<IN, OUT>> => {
     const handle = ledger.phase(phase);
-    const before = budget.remaining;
+    const spendFrom = armBudget ?? budget;
+    const before = spendFrom.remaining;
     try {
       const result = await runAgentEvalBatch<IN, OUT>({
         ...batchArgs,
+        budget: spendFrom,
         tasks,
         split,
         ...(sliceName ? { sliceName } : {}),
+        ...(metricTaskOf ? { metricTaskOf } : {}),
         ...(reach
           ? {
               onAttempt: (observed: any) =>
@@ -617,10 +733,14 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
       handle.addUsage(result.usage);
       return result;
     } finally {
-      const spent = before - budget.remaining;
+      const spent = before - spendFrom.remaining;
       handle.addMetricCalls(spent);
       handle.close();
-      if (!EVOLVE_ONLY_PHASES.has(phase)) evidenceMetricCalls += spent;
+      // An arm draws from its own counter, so `usedCalls()` is already blind to
+      // it; adding it to the evidence tally would double-subtract.
+      if (!armBudget && !EVOLVE_ONLY_PHASES.has(phase)) {
+        evidenceMetricCalls += spent;
+      }
       if (usesBuiltInJudge && spent > 0) {
         const judge = ledger.phase('judge');
         judge.addModelCalls(spent);
@@ -643,6 +763,15 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
       s.playbookHandle = handle;
       return handle;
     })();
+
+  // ---- Phase 0: capture the UNEVOLVED artifact ----
+  // Unconditional, even with zero accepts and no evidence options: it is one
+  // `getState()` and no metric calls, and a run-level phase must never have to
+  // reconstruct a state that no longer exists. `captureSnapshot` is defensive
+  // (a handle that cannot produce a state yields `undefined`) so this cannot
+  // turn a working legacy call into a throw; the absence then surfaces as a
+  // control arm that reports `failed`.
+  const baselineSnapshot = captureSnapshot(playbookHandle);
 
   // ---- Baseline ----
   progress('baseline', `evaluating ${trainTasks.length} train tasks`);
@@ -1656,11 +1785,323 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
     throw err;
   }
 
-  // ---- Finalize ----
-  const playbookSnapshot =
-    accepted.length > 0 ? playbookHandle?.getState() : undefined;
+  // ---- Phase 7: capture the EVOLVED artifact ----
+  // Captured before any run-level phase can disturb it, and unconditionally so
+  // the digest a restore is checked against is the state the curate loop
+  // actually left behind. It is only RETURNED when something was accepted,
+  // which keeps `playbookSnapshot` byte-identical to the legacy contract.
+  const evolvedSnapshot = captureSnapshot(playbookHandle);
 
-  if (options?.apply === false) {
+  /**
+   * Phase 9. Runs inside `load(baseline) … finally load(evolved)` (§7.1), which
+   * is what makes "on the unevolved program" true rather than asserted, and
+   * spends from a SEPARATE counter so it can never starve the search.
+   */
+  const runControlArmPhase = async (
+    armOptions: Readonly<AxAgentPlaybookControlArmOptions>
+  ): Promise<AxAgentPlaybookControlArmReport> => {
+    const heldOutTasks = validationTasks ?? [];
+    // Scoped to the arm's own phases, and assembled WITHOUT `costFor` so a
+    // caller's cost hook is invoked exactly once, in the run's own accounting.
+    const armAccounting = () =>
+      accountingForPhases(
+        ledger.assemble({ evolveOnlyMetricCalls: usedCalls() }),
+        ['control_arm', 'harness_term_ablation']
+      );
+    if (!baselineSnapshot || !evolvedSnapshot) {
+      return {
+        status: 'failed',
+        reason:
+          'the playbook handle produced no snapshot, so no arm could be run against the unevolved program',
+        accounting: emptyAccounting(),
+      };
+    }
+    const arms = armOptions.arms ?? DEFAULT_CONTROL_ARMS;
+    // The ceiling is read HERE — at the instant the curate loop ends and before
+    // the arm spends anything — so the matching is not circular.
+    const matched = armOptions.maxMetricCalls ?? usedCalls();
+    const budgetBasis: 'evolve_total' | 'caller_supplied' =
+      armOptions.maxMetricCalls === undefined
+        ? 'evolve_total'
+        : 'caller_supplied';
+    const baselineState = snapshotStateOf(baselineSnapshot);
+    const evolvedState = snapshotStateOf(evolvedSnapshot);
+    const evolvedRenderedTokens = estimateTokenCount(
+      renderPlaybook(evolvedSnapshot.playbook, { now: nowIso() })
+    );
+    progress(
+      'control',
+      `matched budget ${matched} metric calls (${budgetBasis}) across ${arms.length} arm(s) on ${heldOutTasks.length} held-out task(s)`
+    );
+
+    let armFailure: unknown;
+    const restored = await withRestoredArtifact({
+      handle: playbookHandle,
+      restoreTo: baselineState,
+      returnTo: evolvedState,
+      run: async () => {
+        try {
+          return await runControlArms<IN, OUT>({
+            arms,
+            tasks: heldOutTasks,
+            runsPerTask,
+            matched,
+            options: armOptions,
+            evolvedRenderedTokens,
+            nowIso: nowIso(),
+            now: nowFn,
+            usesBuiltInJudge,
+            evaluate: (evaluateArgs) =>
+              runPhaseBatch(
+                evaluateArgs.phase,
+                evaluateArgs.tasks,
+                'heldOut',
+                undefined,
+                undefined,
+                evaluateArgs.budget,
+                evaluateArgs.metricTaskOf
+              ),
+            loadNeutralArtifact: (playbook) => {
+              playbookHandle?.load?.({
+                playbook,
+                // A synthetic artifact has no history of its own; borrowing the
+                // baseline's would attribute the neutral text to real curation.
+                artifact: { playbook, feedback: [], history: [] },
+              });
+            },
+            restoreUnevolvedArtifact: () => {
+              playbookHandle?.load?.(baselineState.snapshot);
+            },
+            progress,
+            ...(options?.abortSignal
+              ? { abortSignal: options.abortSignal }
+              : {}),
+          });
+        } catch (error) {
+          // An abort is the caller's decision and keeps its exact legacy
+          // message; anything else makes the arm `failed`, which is a run-level
+          // rollback under `require` and never a silent pass.
+          if (options?.abortSignal?.aborted) throw error;
+          armFailure = error;
+          return undefined;
+        }
+      },
+    });
+
+    if (restored.status === 'restore_failed') {
+      return {
+        status: 'failed',
+        reason: restored.reason,
+        accounting: armAccounting(),
+      };
+    }
+    if (armFailure !== undefined || restored.value === undefined) {
+      return {
+        status: 'failed',
+        reason: `a control arm threw: ${armFailure instanceof Error ? armFailure.message : String(armFailure)}`,
+        accounting: armAccounting(),
+      };
+    }
+    const { runs, skipped } = restored.value;
+    if (runs.length === 0) {
+      return {
+        status: 'failed',
+        reason: `no control arm could run (${skipped.map((entry) => `${entry.kind}: ${entry.reason}`).join('; ')})`,
+        accounting: armAccounting(),
+      };
+    }
+    const best = bestControlArmOf(runs);
+    const evolvedHeldOutMean = heldOut ?? 0;
+    // Pair the BEST arm's per-task scores against the final artifact's own
+    // held-out records, by split position: the arm ran over the same split, but
+    // a refinement round hands the agent a derived task object, so object
+    // identity is not the pairing key here.
+    const positionOf = new Map<object, number>();
+    for (const [position, task] of heldOutTasks.entries()) {
+      if (!positionOf.has(task as object)) {
+        positionOf.set(task as object, position);
+      }
+    }
+    const clusters: AxTaskCluster[] = [];
+    for (const record of anchorHeldOutRecords ?? []) {
+      const position = positionOf.get(record.task as object);
+      if (position === undefined) continue;
+      const armScore = best.scores[position];
+      if (armScore === undefined) continue;
+      clusters.push({
+        weight: heldOutTasks[position]?.weight ?? 1,
+        deltas: [record.score - armScore],
+      });
+    }
+    const evolvedAdvantage = evolvedHeldOutMean - best.result.heldOut.mean;
+    const interval =
+      clusters.length > 0
+        ? pairedBootstrapInterval({
+            clusters,
+            seed: heldOutSeed(),
+            resamples: intervalSettings.resamples,
+            level: intervalSettings.level,
+          })
+        : undefined;
+    const incomplete =
+      skipped.length > 0 ||
+      interval === undefined ||
+      runs.some((run) => !run.result.heldOut.complete);
+    return {
+      status: incomplete ? 'partial' : 'completed',
+      matchedBudget: accountingForPhases(
+        ledger.assemble({ evolveOnlyMetricCalls: usedCalls() }),
+        [...EVOLVE_ONLY_PHASES]
+      ),
+      budgetBasis,
+      arms: runs.map((run) => run.result),
+      best: {
+        kind: best.result.kind,
+        split: 'heldOut',
+        mean: best.result.heldOut.mean,
+      },
+      evolvedAdvantage,
+      interval:
+        interval ??
+        ({
+          point: evolvedAdvantage,
+          lower: evolvedAdvantage,
+          upper: evolvedAdvantage,
+          level: intervalSettings.level,
+          resamples: 0,
+          unit: 'task',
+          clusters: 0,
+          seed: heldOutSeed(),
+          direction: 'unresolved',
+        } as AxAgentPlaybookInterval),
+      heldOutSelectionComparisons,
+      accounting: armAccounting(),
+    };
+  };
+
+  // ---- Phase 9: matched-budget control arm on the UNEVOLVED artifact ----
+  let control: AxAgentPlaybookControlArmReport = {
+    status: 'not_run',
+    reason: 'controlArm option not supplied',
+  };
+  const controlArmOptions = options?.controlArm;
+  if (controlArmOptions) {
+    control = await runControlArmPhase(controlArmOptions);
+  }
+
+  // ---- Phase 10: run-level verdict ----
+  // A run-level gate judges the RUN, not a candidate, so its only remedy is to
+  // roll the whole accepted set back. `warn` still has to say something: a mode
+  // that produces no observable output is the silent absence this machinery
+  // exists to remove.
+  let rolledBackReason: string | undefined;
+  const controlGateMode = options?.gates?.controlArm ?? 'off';
+  if (
+    (control.status === 'partial' || control.status === 'completed') &&
+    control.interval.clusters === 0
+  ) {
+    // The report carries an interval field whatever happens, so an interval
+    // that was never computed says so on the record rather than sitting on the
+    // receipt shaped exactly like a real paired bootstrap.
+    runWarnings.push({
+      code: 'interval_unresolved',
+      message:
+        "the control arm's advantage carries no paired interval: no held-out task could be paired between the best arm and the evolved artifact's own records, so `interval` is reported with clusters 0 and resamples 0 rather than as a computed comparison",
+      scope: 'heldOut',
+    });
+  }
+  if (controlGateMode !== 'off') {
+    const verdict = controlArmVerdict({
+      margin: options?.gates?.controlArmMargin ?? 0,
+      report: control,
+    });
+    if (!verdict.passed) {
+      // A dry run applied nothing, so there is no live artifact change for a
+      // run-level gate to rescind: relabelling it `rolled_back` would tell a
+      // caller who asked for `apply: false` that the artifact went live and was
+      // then withdrawn, and would run the I8 cascade over a state that was
+      // always going to be thrown away. I1 pins `applied` for a dry run.
+      const dryRun = options?.apply === false;
+      if (controlGateMode === 'require' && accepted.length > 0 && !dryRun) {
+        rolledBackReason = `control_arm gate failed: ${verdict.detail}`;
+      } else {
+        // A run that accepted nothing has no artifact change for a run-level
+        // gate to reject, and calling its unchanged baseline 'rolled_back'
+        // would label a perfectly good artifact as poison. The finding is still
+        // on the record, in `control` and in this warning.
+        const suffix =
+          accepted.length === 0
+            ? '; no candidate was accepted, so there is no artifact change to roll back'
+            : dryRun
+              ? '; this run was a dry run (apply: false), so nothing was applied for a run-level gate to roll back'
+              : '';
+        runWarnings.push({
+          // `not_beaten` asserts a comparison happened. When the arm did not
+          // run, threw, or measured nothing, that assertion would be false.
+          code: controlArmComparisonMade(control)
+            ? 'control_arm_not_beaten'
+            : 'control_arm_unmeasured',
+          message: `${verdict.detail}${suffix}`,
+          scope: 'heldOut',
+        });
+      }
+    }
+  }
+
+  // ---- Finalize ----
+  let applied: 'live' | 'dry_run' | 'rolled_back' =
+    options?.apply === false ? 'dry_run' : 'live';
+  let playbookSnapshot =
+    accepted.length > 0
+      ? (evolvedSnapshot ?? playbookHandle?.getState())
+      : undefined;
+
+  if (rolledBackReason) {
+    const rollbackErrors = rollbackAccepted();
+    if (rollbackErrors.length > 0) {
+      throw new AggregateError(
+        rollbackErrors,
+        'AxAgent.playbook().evolve(): run-level rollback failed.'
+      );
+    }
+    applied = 'rolled_back';
+    // The artifact a run-level gate just rejected is POISON, not a draft: the
+    // documented `getPlaybook()?.load(...)` recovery idiom must never hand a
+    // caller one. This is exactly why `applied` is three-state and not a
+    // boolean.
+    playbookSnapshot = undefined;
+    // Invariant I8: every accepted candidate becomes `superseded`, every live
+    // promotion becomes `promoted_then_rolled_back`, and all of it moves
+    // together with `applied` / `playbookSnapshot` / `rolledBackReason`.
+    let rescindedPromotions = 0;
+    for (const [index, outcome] of outcomes.entries()) {
+      if (!outcome.accepted) continue;
+      const evidence = outcome.evidence
+        ? supersedeEvidenceReceipt(outcome.evidence, {
+            gate: 'control_arm',
+            reason: rolledBackReason,
+          })
+        : undefined;
+      const promotion = outcome.promotion
+        ? rescindPromotion(outcome.promotion, {
+            gate: 'control_arm',
+            reason: rolledBackReason,
+          })
+        : undefined;
+      if (promotion?.status === 'promoted_then_rolled_back') {
+        rescindedPromotions++;
+      }
+      outcomes[index] = {
+        ...outcome,
+        ...(evidence ? { evidence } : {}),
+        ...(promotion ? { promotion } : {}),
+      };
+    }
+    runWarnings.push({
+      code: 'promotion_rolled_back',
+      message: `${rolledBackReason}; the accepted set was rolled back, ${rescindedPromotions} promotion(s) rescinded, and every accepted candidate's receipt now reads 'superseded'`,
+    });
+  } else if (options?.apply === false) {
     const rollbackErrors = rollbackAccepted();
     if (rollbackErrors.length > 0) {
       throw new AggregateError(
@@ -1680,18 +2121,27 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
     ...(options?.costFor ? { costFor: options.costFor } : {}),
     ...(options?.usageTap ? { usageTapped: true } : {}),
   });
-  const control: AxAgentPlaybookControlArmReport = {
-    status: 'not_run',
-    reason: 'controlArm option not supplied',
-  };
   if (evidenceEnabled) {
-    // Absence is visible, never silent: a run with evidence machinery on that
-    // did NOT run a matched-budget arm says so on the record.
-    runWarnings.push({
-      code: 'control_arm_not_run',
-      message:
-        'no matched-budget control arm was configured, so this run cannot say whether simple test-time scaling reproduces the gain',
-    });
+    if (!controlArmOptions) {
+      // Absence is visible, never silent: a run with evidence machinery on that
+      // did NOT run a matched-budget arm says so on the record.
+      runWarnings.push({
+        code: 'control_arm_not_run',
+        message:
+          'no matched-budget control arm was configured, so this run cannot say whether simple test-time scaling reproduces the gain',
+      });
+    } else if (
+      !(controlArmOptions.arms ?? DEFAULT_CONTROL_ARMS).includes('harness_term')
+    ) {
+      // The neutral-artifact ablation is the only arm that separates "this
+      // bullet helped" from "any text in that slot helped", so dropping it is
+      // recorded rather than inferred from the arms list.
+      runWarnings.push({
+        code: 'harness_term_not_run',
+        message:
+          'the harness_term arm was excluded, so this run cannot attribute its gain to the bullet rather than to any text of the same size in the playbook slot',
+      });
+    }
     runWarnings.push({
       code: 'transfer_not_run',
       message:
@@ -1753,9 +2203,10 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
     records: baselineTrain.records,
     control,
     accounting,
-    applied: options?.apply === false ? 'dry_run' : 'live',
+    applied,
     ...(varianceBand ? { varianceBand } : {}),
     ...(finalOverhead ? { overhead: finalOverhead } : {}),
+    ...(rolledBackReason ? { rolledBackReason } : {}),
     ...(runWarnings.length > 0 ? { warnings: runWarnings } : {}),
   };
 }
