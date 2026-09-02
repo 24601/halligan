@@ -17,11 +17,7 @@ import {
 } from '../event/types.js';
 import type { AxAgentSkillResult } from './agentInternal/skillsTypes.js';
 import type { AxExecutableSkillRef } from './executableSkills.js';
-import {
-  type AxSkillStateConfig,
-  AxSkillStateRuntime,
-  axSkillStateRuntime,
-} from './skillState.js';
+import { type AxSkillStateConfig, axSkillStateRuntime } from './skillState.js';
 import {
   type AxWorkingState,
   type AxWorkingStateConfig,
@@ -387,6 +383,74 @@ describe('AxSkillStateRuntime transitions', () => {
     expect(runtime.transitions()).toHaveLength(0);
   });
 
+  it('keeps step().state on the revision the run rebased onto after a lost write', async () => {
+    // The envelope exists (rather than `current()`) so a host can use its
+    // revision as the expected revision for its OWN compareAndSet. A rebase
+    // that advanced the kernel's revision without advancing the envelope would
+    // hand out a stale fence and lose that write deterministically.
+    let revision = 4;
+    const storedDocument = () => ({
+      schemaVersion: 1,
+      goals: { g_pick: goal('g_pick') },
+      facts: { orderId: '42' },
+      parked: [],
+    });
+    const store: AxProgramStateStore = {
+      load: async () => {
+        revision += 1;
+        return {
+          schemaVersion: 1,
+          programVersion: 'ws:test:1',
+          revision,
+          state: storedDocument(),
+          updatedAt: 1_000,
+        } satisfies AxProgramStateEnvelope;
+      },
+      compareAndSet: async () => {
+        throw new Error('revision mismatch');
+      },
+      delete: async () => {},
+    };
+    const state = await makeState({ store });
+    const seedRevision = state.currentRevision();
+    const receipt = await mint(state, 'inventory.pick');
+    const runtime = await makeRuntime(state);
+
+    const transition = await runtime.applyPatch(
+      completionPatch(receipt.ref),
+      undefined,
+      TURN
+    );
+    const step = runtime.step();
+
+    expect(transition.rejection).toBe('fence');
+    // The rebase really moved, so the assertion below is not vacuous.
+    expect(state.currentRevision()).toBeGreaterThan(seedRevision);
+    expect(step.state.revision).toBe(state.currentRevision());
+    // ...and the document travelled with the revision: the envelope carries
+    // the reloaded goals, not the pre-reload ones.
+    expect(step.state.state.goals).toEqual(state.current().goals);
+    expect(step.state.state.facts).toEqual(storedDocument().facts);
+  });
+
+  it('keeps step().state.revision equal to currentRevision() after an accepted commit', async () => {
+    const state = await makeState();
+    const receipt = await mint(state, 'inventory.pick');
+    const runtime = await makeRuntime(state);
+
+    const before = runtime.step().state.revision;
+    const transition = await runtime.applyPatch(
+      completionPatch(receipt.ref),
+      undefined,
+      TURN
+    );
+
+    expect(transition.accepted).toBe(true);
+    expect(runtime.step().state.revision).toBeGreaterThan(before);
+    expect(runtime.step().state.revision).toBe(state.currentRevision());
+    expect(runtime.step().state.revision).toBe(transition.committedRevision);
+  });
+
   it('commits through compareAndSet carrying the configured fence by identity', async () => {
     const fence = { deliveryId: 'd-1', fencingToken: 7 } as const;
     const inner = new AxInMemoryProgramStateStore();
@@ -448,20 +512,27 @@ describe('AxSkillStateRuntime transitions', () => {
     expect(retained).not.toContain('SECRET-RATIONALE-TOKEN');
   });
 
-  it('digests an absent rationale to a stable value', async () => {
+  it('distinguishes an absent rationale from an empty one', async () => {
+    // "The model declined to explain" and "the model explained with nothing"
+    // are different events. Digesting `undefined` as `''` would collapse them
+    // and make the audit record unable to tell them apart.
     const state = await makeState();
     const receipt = await mint(state, 'inventory.pick');
     const runtime = await makeRuntime(state);
 
-    const first = await runtime.applyPatch(
+    const absent = await runtime.applyPatch(
       completionPatch(receipt.ref),
       undefined,
       TURN
     );
-    const second = await runtime.applyPatch([], '', TURN);
+    const empty = await runtime.applyPatch([], '', TURN);
+    const nonEmpty = await runtime.applyPatch([], 'because', TURN);
 
-    expect(first.rationaleDigest).toMatch(/^[0-9a-f]{64}$/);
-    expect(second.rationaleDigest).toBe(first.rationaleDigest);
+    expect(absent.rationaleDigest).toBeUndefined();
+    expect('rationaleDigest' in absent).toBe(false);
+    expect(empty.rationaleDigest).toMatch(/^[0-9a-f]{64}$/);
+    expect(nonEmpty.rationaleDigest).toMatch(/^[0-9a-f]{64}$/);
+    expect(empty.rationaleDigest).not.toBe(nonEmpty.rationaleDigest);
   });
 
   it('surfaces harness guidance codes for a refused delta and never model text', async () => {
@@ -531,11 +602,17 @@ describe('AxSkillStateRuntime transitions', () => {
     ]);
   });
 
-  it('exposes AxSkillStateRuntime as a class with a private constructor', () => {
-    // The house pattern: validation lives in the factory, so a host cannot
-    // construct an unvalidated runtime.
-    expect(
-      () => new (AxSkillStateRuntime as unknown as new () => unknown)()
-    ).toThrow();
+  it('refuses an absent config with a typed error rather than a TypeError', async () => {
+    // `axSkillStateRuntime` is reachable directly, so a bad value must fail
+    // the way the file's stated contract says it fails.
+    const state = await makeState();
+    const opened = axSkillStateRuntime<Facts>(
+      undefined as unknown as AxSkillStateConfig<Facts>,
+      state
+    );
+
+    await expect(opened).rejects.toBeInstanceOf(AxWorkingStateSchemaError);
+    await expect(opened).rejects.not.toBeInstanceOf(TypeError);
+    await expect(opened).rejects.toThrow(/skillstate_requires_skill/);
   });
 });

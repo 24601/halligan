@@ -31,11 +31,10 @@ import { type AxStatePatch, axValidateStatePatch } from './statePatch.js';
 import {
   type AxWorkingState,
   type AxWorkingStateCommitContext,
-  AxWorkingStateConflictError,
   type AxWorkingStateDocument,
-  AxWorkingStateForbiddenPathError,
   type AxWorkingStateGuidanceNote,
   AxWorkingStateSchemaError,
+  axIsWorkingStateError,
 } from './workingState.js';
 
 const DEFAULT_OBSERVATION_WINDOW = 1;
@@ -72,8 +71,13 @@ export type AxSkillStateTransition<S = Record<string, unknown>> = Readonly<{
    * SHA-256 of the model's rationale text. The text itself is discarded: it is
    * never written to the action log, never rendered into a later prompt and
    * never persisted. The digest still proves two runs reasoned identically.
+   *
+   * ABSENT when the actor emitted no rationale at all. An empty rationale is a
+   * different event from a missing one — the model declined to explain versus
+   * explained with nothing — so it digests to the SHA-256 of `""` rather than
+   * collapsing onto the same value.
    */
-  rationaleDigest: string;
+  rationaleDigest?: string;
   action: string;
   accepted: boolean;
   rejection?: AxSkillStateRejection;
@@ -99,7 +103,16 @@ export type AxSkillStateEnvelope<S = Record<string, unknown>> = Readonly<
 export type AxSkillStateStep<S = Record<string, unknown>> = Readonly<{
   /** The frozen versioned procedure the actor is executing. */
   skill: AxAgentSkillResult;
-  /** sigma_t as stored, including the fence-bearing revision. */
+  /**
+   * sigma_t as STORED, including the fence-bearing revision: `state.revision`
+   * always equals the kernel's `currentRevision()`, so a host can use it as
+   * the expected revision for its own `compareAndSet`.
+   *
+   * Stored is not the same as believed. A parks-only turn appends to the
+   * model-visible parked ledger without a store write, so the kernel's
+   * `current()` can carry parked entries this envelope's `state.parked` does
+   * not. Read `state` for the fence; read the kernel for what the model sees.
+   */
   state: AxSkillStateEnvelope<S>;
   /** o_t, truncated to `maxObservationChars`. */
   observation: string;
@@ -125,6 +138,12 @@ export interface AxSkillStateConfig<S = Record<string, unknown>> {
    * Observability sink for every attempted transition, accepted or not. Called
    * once per `applyPatch`. Fail-soft like `AxWorkingStateConfig.onTrace`: a
    * throwing sink never fails the turn.
+   *
+   * AWAITED, and — like `onTrace` and `onFunctionCall` — with no timeout and
+   * no abort signal, so a sink that never settles stalls the turn. Bounding
+   * every host observability sink is one change to that shared contract, not a
+   * private rule for this one; until then, a sink that can block should do its
+   * own bounding.
    */
   onTransition?: (
     transition: Readonly<AxSkillStateTransition<S>>
@@ -152,6 +171,11 @@ function isSkillRef(
 export function axValidateSkillStateConfig<S>(
   config: Readonly<AxSkillStateConfig<S>>
 ): void {
+  // A host can reach `axSkillStateRuntime` directly, so the absent-config case
+  // is a typed error rather than a raw `TypeError` off a property read.
+  if (!config || typeof config !== 'object') {
+    throw new AxWorkingStateSchemaError('skillstate_requires_skill');
+  }
   if (!config.skill || typeof config.skill !== 'object') {
     throw new AxWorkingStateSchemaError('skillstate_requires_skill');
   }
@@ -295,7 +319,12 @@ export class AxSkillStateRuntime<S = Record<string, unknown>> {
     context: AxWorkingStateCommitContext,
     signal?: AbortSignal
   ): Promise<AxSkillStateTransition<S>> {
-    const rationaleDigest = await axEventCanonicalDigest(rationale ?? '');
+    // ABSENT rationale and EMPTY rationale are different events, so an absent
+    // one produces no digest field at all rather than the digest of `''`.
+    const rationaleDigest =
+      rationale === undefined
+        ? undefined
+        : await axEventCanonicalDigest(rationale);
     const validation = axValidateStatePatch(document);
     if (validation.status !== 'valid') {
       // The store is not reached at all: a document that never parsed is not a
@@ -308,7 +337,7 @@ export class AxSkillStateRuntime<S = Record<string, unknown>> {
       return await this.record({
         turn: context.turn,
         patch: [],
-        rationaleDigest,
+        ...(rationaleDigest === undefined ? {} : { rationaleDigest }),
         action: context.action,
         accepted: false,
         rejection: 'schema',
@@ -332,7 +361,7 @@ export class AxSkillStateRuntime<S = Record<string, unknown>> {
     return await this.record({
       turn: context.turn,
       patch: validation.patch,
-      rationaleDigest,
+      ...(rationaleDigest === undefined ? {} : { rationaleDigest }),
       action: context.action,
       accepted,
       ...(rejection ? { rejection } : {}),
@@ -387,8 +416,14 @@ function rejectionFor(
   error: unknown,
   parkedCount: number
 ): AxSkillStateRejection | undefined {
-  if (error instanceof AxWorkingStateForbiddenPathError) return 'authority';
-  if (error instanceof AxWorkingStateConflictError) return 'fence';
+  // Discriminated by the typed `code`, not by `instanceof`: two copies of the
+  // package in one process would make the constructor check fail and silently
+  // downgrade an `authority` or `fence` rejection to `undefined`, which is the
+  // one value that means "nothing was refused".
+  if (axIsWorkingStateError(error)) {
+    if (error.code === 'working_state_forbidden_path') return 'authority';
+    if (error.code === 'state_revision_conflict') return 'fence';
+  }
   if (parkedCount > 0) return 'invariant';
   return undefined;
 }

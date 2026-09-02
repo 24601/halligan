@@ -1324,9 +1324,20 @@ export class AxWorkingState<S = Record<string, unknown>> {
   }
 
   /**
-   * The last envelope this run committed (or the seed envelope before the
-   * first commit). A CLONE, for the same reason `current()` clones: a host
-   * that mutated it would silently corrupt the kernel's believed state.
+   * The STORED envelope: the last one this run committed, the last one it
+   * reloaded while rebasing off a competing writer, or the seed envelope
+   * before either happened. `envelope().revision` therefore always equals
+   * `currentRevision()`, which is what makes it usable as the expected
+   * revision for a host's own `compareAndSet`.
+   *
+   * It is NOT always `current()`. `current()` is the kernel's BELIEVED
+   * document, and a parks-only turn appends to the model-visible parked ledger
+   * without a store write, so after such a turn `current().parked` can carry
+   * entries `envelope().state.parked` does not. Stored is stored; believed is
+   * believed.
+   *
+   * A CLONE, for the same reason `current()` clones: a host that mutated it
+   * would silently corrupt the kernel's believed state.
    */
   public envelope(): AxProgramStateEnvelope {
     return structuredClone(this.lastEnvelope) as AxProgramStateEnvelope;
@@ -2101,7 +2112,13 @@ export class AxWorkingState<S = Record<string, unknown>> {
             ),
           };
         }
+        // The rebase moves the run onto the STORED envelope, so all three
+        // views of it move together. Advancing `revision` without advancing
+        // `lastEnvelope` would leave `envelope().revision` one behind
+        // `currentRevision()`, and a host that used the stale value as its own
+        // expected revision would lose its write deterministically.
         this.revision = reloaded.revision;
+        this.lastEnvelope = reloaded;
         if (isRecord(reloaded.state)) {
           this.document = reloaded.state as AxWorkingStateDocument<S>;
         }
