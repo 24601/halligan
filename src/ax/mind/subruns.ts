@@ -4,6 +4,7 @@ import type {
 } from '../agent/retainedSessions.js';
 import type { AxEventClock } from '../event/types.js';
 import type { AxTrajectoryStore } from '../trajectory/types.js';
+import { axTrajectoryTruncateUtf8 } from '../trajectory/util.js';
 import {
   AxMindBudgetExceededError,
   type AxMindThinkerBudget,
@@ -17,12 +18,21 @@ const DEFAULT_POLL_MS = 25;
  */
 export const axMindMaxSubRunPolls = 10_000;
 
+/** Bound on the merge-step content when no `summarize` is supplied. */
+export const axMindSubRunSummaryBytes = 4_000;
+
 export interface AxMindSubRunRequest<OUT> {
   readonly registrationKey: string;
   readonly input: unknown;
   readonly slug?: string;
   readonly limits?: Partial<AxAgentSessionLimits>;
   readonly summarize?: (output: OUT) => string;
+  /**
+   * Whose per-step budget this sub-run spends. Required whenever more than one
+   * thinker step is in flight: the mind refuses to guess, because guessing
+   * charges one thinker's cap to another's work (M5).
+   */
+  readonly thinker?: string;
 }
 
 export interface AxMindSubRunResult<OUT> {
@@ -77,9 +87,14 @@ export async function axMindSubRun<OUT>(
     if (!options.sessions) throw new Error('no AxAgentSessionHost configured');
     output = await runChild(options, signal);
     outcome = 'succeeded';
+    // An unbounded `JSON.stringify` here puts the child's whole output into
+    // the PARENT's merge step, and every future projection then carries it.
     content = request.summarize
       ? request.summarize(output)
-      : JSON.stringify(output);
+      : axTrajectoryTruncateUtf8(
+          JSON.stringify(output) ?? 'undefined',
+          axMindSubRunSummaryBytes
+        );
   } catch (error) {
     outcome = signal?.aborted ? 'cancelled' : 'failed';
     content = `(${outcome}: ${String(error)})`;
@@ -123,5 +138,10 @@ async function runChild<OUT>(
     }
     await options.clock.sleep(pollMs, signal);
   }
-  throw new AxMindBudgetExceededError('wallClock', axMindMaxSubRunPolls);
+  // Reported as the wall-clock the polls stand for, not as a poll count: every
+  // other `wallClock` limit in this package is milliseconds.
+  throw new AxMindBudgetExceededError(
+    'wallClock',
+    axMindMaxSubRunPolls * pollMs
+  );
 }

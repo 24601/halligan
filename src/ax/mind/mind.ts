@@ -82,6 +82,7 @@ import {
   type AxMindArtifacts,
   AxMindBudgetExceededError,
   type AxMindChat,
+  AxMindChatError,
   type AxMindChatTransport,
   AxMindConfigurationError,
   type AxMindContextRequest,
@@ -209,6 +210,11 @@ interface PendingStep {
   readonly before: Awaited<ReturnType<typeof axMindWorkProbe>>;
   readonly budget: Readonly<AxMindThinkerBudget>;
   readonly startedAt: number;
+  /** The run's result, held until the settle runs -- possibly in a sink. */
+  output?: unknown;
+  error?: unknown;
+  /** Set the moment a settle is committed to, so it can never run twice. */
+  settled?: boolean;
 }
 
 function usageTokens(usage: unknown): number {
@@ -304,6 +310,7 @@ export class AxMind {
           this.runThinkerStep(one, inner, ai, values, forwardOptions),
         assemble: (_one, ingress, eventContext) =>
           this.assembleContext(runtime, ingress, eventContext),
+        settle: (deliveryId) => this.settleDelivery(deliveryId),
         mind: () => this,
       });
       (runtime as { target: AxEventTarget<any, any> }).target = target;
@@ -318,6 +325,8 @@ export class AxMind {
       registry: this.registry,
       sourceId: axMindEventSource(this.id),
       tickMs,
+      now: () => this.clock.now(),
+      ...(options.onDiagnostic ? { onDiagnostic: options.onDiagnostic } : {}),
     });
     this.trajectorySource = new AxTrajectoryEventSource({
       id: `${this.id}.trajectory`,
@@ -344,10 +353,15 @@ export class AxMind {
       clock: this.clock,
       intervalMs: tickMs,
       eventSource: axMindEventSource(this.id),
-      due: () =>
-        axMindTickDue(this.dueDuties(), this.clock.now(), {
+      due: () => {
+        // M7 layer (b) lives on the one always-alive tick: a delivery that
+        // terminalised without a settle is found here, not by the code path
+        // that failed.
+        this.reapAbandonedSteps();
+        return axMindTickDue(this.dueDuties(), this.clock.now(), {
           intervalMs: tickMs,
-        }),
+        });
+      },
       ...(options.onDiagnostic ? { onDiagnostic: options.onDiagnostic } : {}),
     });
     this.bootstrapSource = new AxPushEventSource(`${this.id}.bootstrap`);
@@ -638,7 +652,11 @@ export class AxMind {
         },
         signal
       );
-      throw new AxMindLivenessError(explanation, 'source_failed');
+      // M13 names ONE error for self-addressed traffic in both directions:
+      // a host guarding inbound with `axIsMindChatError` has to see the same
+      // shape the send half throws, and `source_failed` says a source failed,
+      // which is not what happened.
+      throw new AxMindChatError(explanation, 'self_addressed');
     }
     return this.append(
       {
@@ -744,14 +762,21 @@ export class AxMind {
           : {}),
       });
     } catch (error) {
-      // A typed projection failure (a sealed checkpoint past the end of the
-      // log, a `types` request no narrative type survives) dead-letters HERE,
-      // before any token is spent.
+      // A typed projection failure -- `AxTrajectoryRollupError('meta_conflict')`
+      // from a sealed block whose meta disagrees, or
+      // `AxTrajectoryQueryError('unsupported_types')` from a `types` request no
+      // narrative type survives -- dead-letters HERE, before any token is
+      // spent. `dispatchedWakeAt` was already stamped above, so without the
+      // re-arm the pace duty would stay suppressed for the wake that died.
       this.diagnose(
         'context-assembly-failed',
         `${runtime.thinker.name} could not assemble context: ${String(error)}`,
         runtime.thinker.name,
         trigger.stepId
+      );
+      this.armLivenessFallback(
+        runtime,
+        `context assembly failed for ${trigger.stepId}`
       );
       throw error;
     }
@@ -797,6 +822,10 @@ export class AxMind {
         runtime.thinker.name,
         trigger.stepId
       );
+      this.armLivenessFallback(
+        runtime,
+        `context assembler threw for ${trigger.stepId}`
+      );
       throw error;
     }
   }
@@ -827,9 +856,7 @@ export class AxMind {
     request: Readonly<AxMindSubRunRequest<OUT>>,
     signal?: AbortSignal
   ): Promise<Readonly<AxMindSubRunResult<OUT>>> {
-    // The thinker whose step is running owns the spend: a sub-run started
-    // outside a step charges the mind's default budget instead.
-    const runtime = [...this.thinkers.values()].find((one) => one.running > 0);
+    const runtime = this.resolveSubRunOwner(request.thinker);
     const budget =
       runtime?.thinker.budget ??
       this.options.defaultThinkerBudget ??
@@ -862,9 +889,11 @@ export class AxMind {
   }
 
   /**
-   * One thinker step, end to end. The arming `finally` is installed BEFORE
-   * anything expensive, so the next spontaneous wake is armed on every exit
-   * path -- error, refusal, or a throw inside this orchestration itself (M7).
+   * One thinker step, end to end. The arm is a RUNTIME guarantee, not a code
+   * path: every exit that skips the settle below -- a dead-lettered assembly, a
+   * missing delivery record, a settle that throws, a sink that never ran --
+   * re-arms one wake through `armLivenessFallback`, and the tick's reaper is
+   * the backstop for the paths that cannot report themselves at all (M7).
    */
   async runThinkerStep(
     thinker: Readonly<AxMindThinker<any, any>>,
@@ -882,12 +911,18 @@ export class AxMind {
       // Without the delivery record there is no probe, no budget and no pace
       // decision: running the program anyway would spend tokens outside every
       // guard this class exists to apply.
+      const orphan = this.thinkers.get(thinker.name);
+      if (orphan) {
+        this.armLivenessFallback(
+          orphan,
+          'a wake arrived with no in-flight record'
+        );
+      }
       throw new AxMindLivenessError(
         `AxMind has no in-flight record for ${thinker.name}; a thinker program runs only through the dispatcher`,
         'source_failed'
       );
     }
-    this.pending.delete(deliveryId);
     const runtime = step.runtime;
     runtime.running++;
     const deadline = new AbortController();
@@ -900,6 +935,13 @@ export class AxMind {
       })
       .catch(() => undefined);
     const signal = mergeAbortSignals(options?.abortSignal, deadline.signal);
+    // `AxProgram.getUsage()` ACCUMULATES until `resetUsage()`, and the runtime
+    // resolves one program per `instanceKey` and reuses it for the mind's whole
+    // life. Comparing the raw total against a PER-STEP cap turns the ceiling
+    // into a lifetime total: a thinker spending 4k a wake under the shipped
+    // 120k cap starts erroring around wake 30 and never recovers. The delta is
+    // this step's spend, which is what M10 says is capped (B1).
+    const spentBefore = usageTokens(inner.getUsage());
     let output: unknown;
     let error: unknown;
     try {
@@ -907,7 +949,7 @@ export class AxMind {
         ...(options ?? {}),
         ...(signal ? { abortSignal: signal } : {}),
       } as Readonly<AxProgramForwardOptions<string>>);
-      const tokens = usageTokens(inner.getUsage());
+      const tokens = usageTokens(inner.getUsage()) - spentBefore;
       if (tokens > step.budget.maxTokens) {
         throw new AxMindBudgetExceededError('tokens', step.budget.maxTokens);
       }
@@ -920,9 +962,118 @@ export class AxMind {
       await timer;
       runtime.running--;
     }
-    await this.settleStep(step, output, error);
+    step.output = output;
+    step.error = error;
+    // A thinker's sinks run AFTER `forward` resolves and only when the run
+    // produced an output (`AxEventRuntime.dispatchFinalSinks`). This mirrors
+    // that condition exactly, so the mind never waits for a sink pass the
+    // runtime will not make; the trailing `mind-settle` sink closes the step
+    // once the thinker's own sinks have had their turn.
+    if (error === undefined && output !== undefined && thinker.sinks?.length) {
+      return output;
+    }
+    await this.settleDelivery(deliveryId);
     if (error !== undefined) throw error;
     return output;
+  }
+
+  /**
+   * Closes one delivery exactly once. Reached from the run, from the trailing
+   * `mind-settle` sink, and from the tick's reaper, so the identity of the
+   * caller cannot decide whether the ladder advances.
+   */
+  private async settleDelivery(deliveryId: string): Promise<void> {
+    const step = this.pending.get(deliveryId);
+    if (!step || step.settled) return;
+    step.settled = true;
+    this.pending.delete(deliveryId);
+    if (this.closed) return;
+    try {
+      await this.settleStep(step, step.output, step.error);
+    } catch (thrown) {
+      // The settle is the arming path, so it has to survive its own failure:
+      // an append that throws here would otherwise end the ladder silently.
+      this.armLivenessFallback(
+        step.runtime,
+        `settling ${deliveryId} failed: ${String(thrown)}`
+      );
+    }
+  }
+
+  /**
+   * M7 layer (b). A delivery that terminalised without a settle recorded no
+   * arm, and `dispatchedWakeAt` was stamped at delivery, so the pace duty would
+   * stay suppressed forever. One wake is re-armed a bounded delay out -- the
+   * thinker's own slowest scheduled cadence, never the stale `wakeAt` -- so a
+   * projection that keeps throwing retries on a grid instead of hot-looping.
+   */
+  private armLivenessFallback(runtime: ThinkerRuntime, reason: string): void {
+    const config = runtime.thinker.pacer ?? this.pacerConfig;
+    runtime.nextWakeAt = this.clock.now() + Math.max(1, config.capMs);
+    runtime.dispatchedWakeAt = undefined;
+    this.diagnose(
+      'liveness-fallback-armed',
+      `${runtime.thinker.name}: ${reason}; one wake re-armed in ${config.capMs}ms`,
+      runtime.thinker.name
+    );
+  }
+
+  /**
+   * A delivery whose settle never ran -- an abort between `forward` and the
+   * sinks, a lost lease, a `createProgram` throw -- would hold a `PendingStep`
+   * (a whole step plus both probe results) forever AND leave the pace duty
+   * suppressed. Both are bounded HERE, on the one always-alive tick: a step
+   * cannot legitimately outlive its own deadline, and the doubling is slack for
+   * the settle's own IO.
+   */
+  private reapAbandonedSteps(): void {
+    const now = this.clock.now();
+    for (const [deliveryId, step] of [...this.pending]) {
+      if (step.settled) continue;
+      if (now - step.startedAt < step.budget.maxWallClockMs * 2) continue;
+      step.error ??= new AxMindLivenessError(
+        `AxMind never settled delivery ${deliveryId} for ${step.runtime.thinker.name}; the wake terminalised with no pace decision`,
+        'source_failed'
+      );
+      // Armed HERE and not only inside the settle: a mind that is closing
+      // appends nothing, and the record still has to be released.
+      this.armLivenessFallback(
+        step.runtime,
+        `delivery ${deliveryId} outlived its own deadline without settling`
+      );
+      void this.settleDelivery(deliveryId).catch(() => undefined);
+    }
+  }
+
+  /**
+   * The thinker whose step is running owns the spend. "Whichever thinker is
+   * running, in insertion order" charges a responder's sub-run to the
+   * monolith's cap and then refuses the monolith's own sub-runs with a spend it
+   * never made, so an ambiguous caller is refused instead of guessed at (M5).
+   */
+  private resolveSubRunOwner(name?: string): ThinkerRuntime | undefined {
+    if (name !== undefined) {
+      const named = this.thinkers.get(name);
+      if (!named) {
+        throw new AxMindConfigurationError(
+          `AxMind has no thinker named ${name}; a sub-run charges the budget of a thinker in the table`,
+          'unknown_thinker'
+        );
+      }
+      return named;
+    }
+    const running = [...this.thinkers.values()].filter(
+      (one) => one.running > 0
+    );
+    if (running.length > 1) {
+      throw new AxMindConfigurationError(
+        `AxMind has ${running.length} thinker steps in flight; a sub-run must name the thinker whose budget it spends`,
+        'ambiguous_subrun'
+      );
+    }
+    // None running is legitimate: a host sub-run outside a step charges the
+    // mind's default budget, and says so by finding no owner.
+    return running[0];
   }
 
   /**
@@ -1059,6 +1210,13 @@ export class AxMind {
           ...rest,
           spontaneousWakes: Object.freeze(kept),
         });
+        // Clearing `parked` alone changes NOTHING: the fuse's decision is
+        // `unchanged`, so the kept `wakeAt` is still the one this thinker was
+        // already dispatched for, and the pace duty is edge-triggered on that
+        // pair. Unstamping is what makes the one re-evaluation actually due;
+        // without it a `watchdogMs: 0` thinker is silent forever (M1).
+        runtime.nextWakeAt = runtime.pacer.wakeAt ?? now;
+        runtime.dispatchedWakeAt = undefined;
       }
       states.push({
         thinker: runtime.thinker.name,
@@ -1120,6 +1278,15 @@ export class AxMind {
       },
       this.thresholds
     );
+  }
+
+  /**
+   * The mind's own clock. Model-facing code renders expiry against it rather
+   * than `Date.now()`: a mind under an injected clock must not read one time
+   * in the ladder and another in the prompt.
+   */
+  now(): number {
+    return this.clock.now();
   }
 
   getPacerState(thinker: string): Readonly<AxMindPacerState> | undefined {
@@ -1248,6 +1415,9 @@ export class AxMind {
     if (this.closed) return;
     this.closed = true;
     await this.runtime.close(options ?? { drain: true });
+    // Nothing can settle after this, so the records are released rather than
+    // held for the lifetime of the object.
+    this.pending.clear();
     if (this.options.ownership && this.ownershipRevision !== undefined) {
       await this.options.ownership.compareAndSet(
         this.id,

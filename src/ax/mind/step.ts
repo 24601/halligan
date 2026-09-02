@@ -14,6 +14,7 @@ import type {
 import type {
   AxEventContext,
   AxEventIngress,
+  AxEventSink,
   AxEventTarget,
 } from '../event/types.js';
 import type { AxMind } from './mind.js';
@@ -27,6 +28,13 @@ export type AxMindStepRunner = (
   values: unknown,
   options?: Readonly<AxProgramForwardOptions<string>>
 ) => Promise<unknown>;
+
+/**
+ * Closes one delivery: the work probe AFTER, the outcome step and the pace
+ * decision. Idempotent by delivery id, because it is reached from three places
+ * -- the run itself, the trailing sink below, and the tick's reaper.
+ */
+export type AxMindStepSettler = (deliveryId: string) => Promise<void>;
 
 /** Builds IN from the wake. Throwing here dead-letters before any model call. */
 export type AxMindStepAssembler = (
@@ -110,19 +118,37 @@ export class AxMindStepProgram implements AxProgrammable<any, any> {
  * A thinker rendered as an `AxEventTarget`, which is what makes it compose as
  * a flow node, an event target and an `optimize()` subject for free. The
  * assembler lands in `mapInput` position on purpose: the runtime wraps a throw
- * there as `AxEventInputError` and dead-letters the delivery BEFORE the
- * program is resolved, so a broken projection never spends a token (M19).
+ * there as `AxEventInputError` and dead-letters the delivery before it forwards
+ * anything, so a broken projection never spends a token (M19). The program is
+ * RESOLVED first (`AxEventRuntime` resolves, then maps), which costs nothing --
+ * resolution builds the object, `forward` is what spends.
  */
 export function axMindThinkerTarget(
   thinker: Readonly<AxMindThinker<any, any>>,
   hooks: Readonly<{
     run: AxMindStepRunner;
     assemble: AxMindStepAssembler;
+    settle: AxMindStepSettler;
     mind: () => AxMind;
   }>
 ): AxEventTarget<any, any> {
   const wrap = (inner: AxProgrammable<any, any>) =>
     new AxMindStepProgram(hooks.run, thinker, inner);
+  // The mind's own settle runs LAST, after the thinker's own sinks. Sinks are
+  // dispatched by the runtime AFTER `forward` resolves, so a probe that
+  // brackets `forward` alone sees none of their work: the shipped responder
+  // REPLIES from a sink, and the wake that sent the reply was being recorded
+  // as `idle` -- a false step in an append-only autobiography (B2).
+  const sinks: AxEventSink<any>[] | undefined = thinker.sinks?.length
+    ? [
+        ...thinker.sinks,
+        {
+          id: `${thinker.name}.mind-settle`,
+          write: async (_output, context) =>
+            hooks.settle(context.eventContext.deliveryId),
+        } satisfies AxEventSink<any>,
+      ]
+    : undefined;
   return {
     id: thinker.name,
     ai: thinker.ai,
@@ -144,7 +170,7 @@ export function axMindThinkerTarget(
     ...(thinker.forwardOptions
       ? { forwardOptions: thinker.forwardOptions }
       : {}),
-    ...(thinker.sinks ? { sinks: [...thinker.sinks] } : {}),
+    ...(sinks ? { sinks } : {}),
     ...(thinker.retrySafety ? { retrySafety: thinker.retrySafety } : {}),
   };
 }

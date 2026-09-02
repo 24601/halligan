@@ -87,6 +87,7 @@ export {
 export type {
   AxMindStepAssembler,
   AxMindStepRunner,
+  AxMindStepSettler,
 } from './step.js';
 export { AxMindStepProgram, axMindThinkerTarget } from './step.js';
 export type {
@@ -94,7 +95,11 @@ export type {
   AxMindSubRunRequest,
   AxMindSubRunResult,
 } from './subruns.js';
-export { axMindMaxSubRunPolls, axMindSubRun } from './subruns.js';
+export {
+  axMindMaxSubRunPolls,
+  axMindSubRun,
+  axMindSubRunSummaryBytes,
+} from './subruns.js';
 export type {
   AxMindMonolithOptions,
   AxMindResponderOptions,
@@ -102,6 +107,10 @@ export type {
 export {
   AxMindDeterministicProgram,
   axMindMonolith,
+  axMindQuote,
+  axMindQuotedNameBytes,
+  axMindQuotedTextBytes,
+  axMindRememberBounded,
   axMindRenderContext,
   axMindRenderGoals,
   axMindRenderSignals,

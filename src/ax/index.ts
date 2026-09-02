@@ -2203,6 +2203,7 @@ import {
   type AxMindStepAssembler,
   AxMindStepProgram,
   type AxMindStepRunner,
+  type AxMindStepSettler,
   axMindThinkerTarget,
 } from './mind/step.js';
 import {
@@ -2211,12 +2212,17 @@ import {
   type AxMindSubRunResult,
   axMindMaxSubRunPolls,
   axMindSubRun,
+  axMindSubRunSummaryBytes,
 } from './mind/subruns.js';
 import {
   AxMindDeterministicProgram,
   type AxMindMonolithOptions,
   type AxMindResponderOptions,
   axMindMonolith,
+  axMindQuote,
+  axMindQuotedNameBytes,
+  axMindQuotedTextBytes,
+  axMindRememberBounded,
   axMindRenderContext,
   axMindRenderGoals,
   axMindRenderSignals,
@@ -2949,7 +2955,11 @@ export { axMindPaceStepData };
 export { axMindPaceStepType };
 export { axMindPacerFuse };
 export { axMindPendingClass };
+export { axMindQuote };
+export { axMindQuotedNameBytes };
+export { axMindQuotedTextBytes };
 export { axMindReconcileChatSends };
+export { axMindRememberBounded };
 export { axMindRenderContext };
 export { axMindRenderGoals };
 export { axMindRenderSignals };
@@ -2965,6 +2975,7 @@ export { axMindStaticArtifacts };
 export { axMindStepEventExtensions };
 export { axMindStoreDurability };
 export { axMindSubRun };
+export { axMindSubRunSummaryBytes };
 export { axMindSubscribedStepTypes };
 export { axMindSyntheticTrigger };
 export { axMindThinkerSubject };
@@ -4213,6 +4224,7 @@ export type { AxMindSkillSelection };
 export type { AxMindStepAssembler };
 export type { AxMindStepResult };
 export type { AxMindStepRunner };
+export type { AxMindStepSettler };
 export type { AxMindSubRunOptions };
 export type { AxMindSubRunRequest };
 export type { AxMindSubRunResult };

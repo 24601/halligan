@@ -8,7 +8,11 @@ import type {
   AxTrajectoryStep,
   AxTrajectoryTypeRegistry,
 } from '../trajectory/types.js';
-import type { AxMindSubscription, AxMindThinker } from './types.js';
+import type {
+  AxMindDiagnostic,
+  AxMindSubscription,
+  AxMindThinker,
+} from './types.js';
 import { AxMindConfigurationError } from './types.js';
 
 /**
@@ -114,6 +118,9 @@ export interface AxMindWakeRouteOptions {
    */
   readonly pending?: 'queue' | 'coalesce';
   readonly routeId?: string;
+  readonly onDiagnostic?: (diagnostic: Readonly<AxMindDiagnostic>) => void;
+  /** Injected, never `Date.now()`: the diagnostic timestamps the mind's clock. */
+  readonly now?: () => number;
 }
 
 /**
@@ -124,7 +131,9 @@ export interface AxMindWakeRouteOptions {
  */
 function suppression(
   thinker: Readonly<AxMindThinker>,
-  registry: AxTrajectoryTypeRegistry
+  registry: AxTrajectoryTypeRegistry,
+  onDiagnostic?: (diagnostic: Readonly<AxMindDiagnostic>) => void,
+  now?: () => number
 ): (ingress: Readonly<AxEventIngress>) => boolean {
   return (ingress) => {
     const source = extension(ingress, 'stepsource');
@@ -135,8 +144,22 @@ function suppression(
     // M3: a thinker never re-triggers on its own error step, even under
     // triggerSelf. The registry owns that flag and the builder cannot override
     // it, which is what stops the error loop.
-    if (registry.describe(type).neverRetriggersSelf === true) return false;
-    return thinker.subscription.triggerSelf;
+    const allowed =
+      registry.describe(type).neverRetriggersSelf === true
+        ? false
+        : thinker.subscription.triggerSelf;
+    if (!allowed) {
+      // A suppressed wake creates NO delivery, so it is invisible in the run
+      // store and in the trajectory alike. This diagnostic is the only place a
+      // host can see that the mind declined to trigger on its own writing.
+      onDiagnostic?.({
+        code: 'wake-suppressed-self',
+        thinker: thinker.name,
+        at: now?.() ?? 0,
+        message: `${thinker.name} wrote ${type || 'a step'} itself; the wake is suppressed`,
+      });
+    }
+    return allowed;
   };
 }
 
@@ -179,7 +202,12 @@ export function axMindWakeRoute(
     action: 'wake',
     target,
     instanceKey: () => thinker.name,
-    authorize: suppression(thinker, options.registry),
+    authorize: suppression(
+      thinker,
+      options.registry,
+      options.onDiagnostic,
+      options.now
+    ),
     ordering: 'strict',
     // validateEventRoute rejects `coalesce` without `debounceMs`, so the
     // builder always sets both -- never one without the other.
@@ -196,6 +224,8 @@ export interface AxMindEventRoutesOptions {
   readonly registry: AxTrajectoryTypeRegistry;
   readonly sourceId: string;
   readonly tickMs: number;
+  readonly onDiagnostic?: (diagnostic: Readonly<AxMindDiagnostic>) => void;
+  readonly now?: () => number;
 }
 
 /** The mind's complete, inspectable route table. */
@@ -219,6 +249,8 @@ export function axMindEventRoutes(
         registry: options.registry,
         sourceId: options.sourceId,
         tickMs: options.tickMs,
+        ...(options.onDiagnostic ? { onDiagnostic: options.onDiagnostic } : {}),
+        ...(options.now ? { now: options.now } : {}),
         pending,
         routeId: `${options.mindId}.wake.${thinker.name}${
           pending === 'coalesce' ? '.signals' : ''

@@ -506,6 +506,14 @@ export class AxMindConfigurationError extends Error {
       | 'unknown_trajectory'
       | 'reserved_namespace'
       | 'missing_target'
+      /** A sub-run named a thinker the table does not contain. */
+      | 'unknown_thinker'
+      /**
+       * Two thinker steps are in flight and the sub-run named neither. The
+       * budget is per step; charging it to whichever thinker was first in
+       * insertion order spends a cap the caller never asked for (M5).
+       */
+      | 'ambiguous_subrun'
       | 'append_atomicity_required',
     options?: ErrorOptions
   ) {
@@ -616,6 +624,12 @@ export type AxMindDiagnosticCode =
   | 'unknown-step-type'
   | 'pacer-rate-fuse'
   | 'effect-step-reconciled'
+  /**
+   * A delivery terminalised without a pace decision and the mind re-armed one
+   * wake a bounded delay out. M7 layer (b): the arm is a runtime guarantee, so
+   * a throw anywhere in the orchestration degrades to a delay, never silence.
+   */
+  | 'liveness-fallback-armed'
   | 'cursor-paused';
 
 export interface AxMindDiagnostic {
