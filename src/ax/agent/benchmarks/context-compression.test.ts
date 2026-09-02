@@ -6,11 +6,12 @@
  * deterministically and offline (mock AI). This is the baseline a future
  * plan-aware foresight retention strategy is A/B'd against.
  *
- * The sweep is split one test per scenario. Every assertion here is scoped to a
- * single scenario, so nothing is lost by the split, and no single test carries
- * the wall-clock cost of all twelve scenario/preset runs. Running all twelve in
- * one test took 1.1s to 2.8s idle against vitest's 5s default budget, which is
- * not enough headroom on a loaded host: it timed out in 5 of 10 local runs.
+ * The sweep is split one test per scenario, and each test runs against a budget
+ * measured on the host rather than vitest's fixed 5s default. Every assertion
+ * here is scoped to a single scenario, so nothing is lost by the split, and no
+ * single test carries the wall-clock cost of all twelve scenario/preset runs.
+ * Running all twelve in one test took 1.1s to 2.8s idle against the 5s default,
+ * which is not enough headroom on a loaded host: it timed out in 5 of 10 runs.
  *
  * Run `AX_PRINT_METRICS=1 npx vitest run src/ax/agent/benchmarks/context-compression.test.ts`
  * to print the metrics grid.
@@ -75,48 +76,71 @@ function scenario(name: string): AxContextScenario {
   return found;
 }
 
-describe('context-compression baseline sweep', () => {
-  it('captures long-padded metrics across presets', async () => {
-    const sweep = await sweepScenario(scenario('long-padded'));
-    expectSweepInvariants(sweep);
+// A measured budget instead of vitest's fixed 5s default: time one
+// scenario/preset run on THIS host, then allow each test 20x that. Every test
+// below runs four presets, so the budget carries 5x headroom over its own work
+// and scales with however loaded the host is when the file is imported.
+const baselineStartedAt = Date.now();
+await runOfflineScenario(scenario('long-padded'), 'full');
+const BASELINE_RUN_MS = Math.max(1, Date.now() - baselineStartedAt);
+const SWEEP_BUDGET_MS = Math.max(5_000, BASELINE_RUN_MS * 20);
 
-    // Trimming presets keep peak context <= raw 'full'.
-    const full = sweep.get('full');
-    for (const preset of ['checkpointed', 'adaptive', 'lean']) {
-      expect(sweep.get(preset).peakMutablePromptChars).toBeLessThanOrEqual(
+describe('context-compression baseline sweep', () => {
+  it(
+    'captures long-padded metrics across presets',
+    async () => {
+      const sweep = await sweepScenario(scenario('long-padded'));
+      expectSweepInvariants(sweep);
+
+      // Trimming presets keep peak context <= raw 'full'.
+      const full = sweep.get('full');
+      for (const preset of ['checkpointed', 'adaptive', 'lean']) {
+        expect(sweep.get(preset).peakMutablePromptChars).toBeLessThanOrEqual(
+          full.peakMutablePromptChars
+        );
+      }
+      // ...and at least one trimming preset actually checkpoints under pressure.
+      const trimmingCheckpoints = (
+        ['checkpointed', 'adaptive', 'lean'] as const
+      )
+        .map((preset) => sweep.get(preset).checkpoints)
+        .reduce((sum, count) => sum + count, 0);
+      expect(trimmingCheckpoints).toBeGreaterThan(0);
+      // The core thesis: the most aggressive preset strictly beats raw replay,
+      // and compaction is actually happening (non-zero chars removed).
+      expect(sweep.get('lean').peakMutablePromptChars).toBeLessThan(
         full.peakMutablePromptChars
       );
-    }
-    // ...and at least one trimming preset actually checkpoints under pressure.
-    const trimmingCheckpoints = (['checkpointed', 'adaptive', 'lean'] as const)
-      .map((preset) => sweep.get(preset).checkpoints)
-      .reduce((sum, count) => sum + count, 0);
-    expect(trimmingCheckpoints).toBeGreaterThan(0);
-    // The core thesis: the most aggressive preset strictly beats raw replay,
-    // and compaction is actually happening (non-zero chars removed).
-    expect(sweep.get('lean').peakMutablePromptChars).toBeLessThan(
-      full.peakMutablePromptChars
-    );
-    expect(sweep.get('checkpointed').compactionRatio).toBeGreaterThan(0);
-  });
+      expect(sweep.get('checkpointed').compactionRatio).toBeGreaterThan(0);
+    },
+    SWEEP_BUDGET_MS
+  );
 
-  it('captures short-clean metrics across presets', async () => {
-    const sweep = await sweepScenario(scenario('short-clean'));
-    expectSweepInvariants(sweep);
+  it(
+    'captures short-clean metrics across presets',
+    async () => {
+      const sweep = await sweepScenario(scenario('short-clean'));
+      expectSweepInvariants(sweep);
 
-    // No pressure means no checkpoints under any preset.
-    for (const preset of AX_CONTEXT_PRESETS) {
-      expect(sweep.get(preset).checkpoints).toBe(0);
-    }
-  });
+      // No pressure means no checkpoints under any preset.
+      for (const preset of AX_CONTEXT_PRESETS) {
+        expect(sweep.get(preset).checkpoints).toBe(0);
+      }
+    },
+    SWEEP_BUDGET_MS
+  );
 
-  it('captures error-recovery metrics across presets', async () => {
-    const sweep = await sweepScenario(scenario('error-recovery'));
-    expectSweepInvariants(sweep);
+  it(
+    'captures error-recovery metrics across presets',
+    async () => {
+      const sweep = await sweepScenario(scenario('error-recovery'));
+      expectSweepInvariants(sweep);
 
-    // An errorPruning preset (lean) tombstones the resolved error.
-    expect(sweep.get('lean').tombstones).toBeGreaterThan(0);
-  });
+      // An errorPruning preset (lean) tombstones the resolved error.
+      expect(sweep.get('lean').tombstones).toBeGreaterThan(0);
+    },
+    SWEEP_BUDGET_MS
+  );
 
   it('covers every declared scenario', () => {
     expect(AX_CONTEXT_SCENARIOS.map((entry) => entry.name).sort()).toEqual([

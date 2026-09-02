@@ -2706,9 +2706,11 @@ describe('retained session crash recovery adapters', () => {
     const root = await firstHost.createRoot({
       authorizedChildren: ['parent'],
     });
+    // Held on a gate rather than a real 100ms timer: the attempt has to still
+    // be in flight when the recovering host fences it.
     const parent = await root.spawn('parent', {
       value: 'uncertain-parent',
-      delayMs: 100,
+      gate: 'stale-root',
     });
     const inFlight = scheduler.runOne();
     await waitFor(
@@ -2754,6 +2756,7 @@ describe('retained session crash recovery adapters', () => {
       }
     );
     expect((await recoveredRoot.inspectRoot()).childCount).toBe(2);
+    gates.release('stale-root');
     await inFlight;
     expect(
       (await recoveredHost.snapshot(parent.rootId)).sessions[leaf.id]
@@ -2768,9 +2771,11 @@ describe('retained session crash recovery adapters', () => {
     const root = await sessions.createRoot({
       authorizedChildren: ['worker'],
     });
+    // Held on a gate: the stale completion must land after recovery, not race
+    // it on a real timer.
     const handle = await root.spawn('worker', {
       value: 'uncertain',
-      delayMs: 100,
+      gate: 'same-host-stale',
     });
     const staleAttempt = scheduler.runOne();
     await waitFor(
@@ -2788,6 +2793,7 @@ describe('retained session crash recovery adapters', () => {
     scheduler.clearJobs();
     const beforeStaleCompletion = await sessions.snapshot(root.sessionId);
 
+    gates.release('same-host-stale');
     await staleAttempt;
     const afterStaleCompletion = await sessions.snapshot(root.sessionId);
     expect(scheduler.queuedJobs()).toEqual([]);
@@ -2879,9 +2885,11 @@ describe('retained session crash recovery adapters', () => {
     const root = await firstHost.createRoot({
       authorizedChildren: ['worker'],
     });
+    // Held on a gate: the first attempt must still be running when the first
+    // host closes and the second recovers it.
     const handle = await root.spawn('worker', {
       value: 'uncertain',
-      delayMs: 120,
+      gate: 'fenced-in-flight',
     });
     const inFlight = firstScheduler.runOne();
     await waitFor(
@@ -2910,6 +2918,7 @@ describe('retained session crash recovery adapters', () => {
       value: 'durable-follow-up',
       count: 1,
     });
+    gates.release('fenced-in-flight');
     await inFlight;
     expect(
       (await restoredRoot.inspect(recoveredHandle)).mailbox[0]?.status
@@ -2923,9 +2932,11 @@ describe('retained session crash recovery adapters', () => {
     const root = await firstHost.createRoot({
       authorizedChildren: ['worker'],
     });
+    // Held on a gate: the stale worker must still hold process-local state when
+    // the second host recovers the session.
     const handle = await root.spawn('worker', {
       value: 'uncertain',
-      delayMs: 100,
+      gate: 'stale-process-local',
     });
     const staleAttempt = firstScheduler.runOne();
     await waitFor(
@@ -2945,6 +2956,7 @@ describe('retained session crash recovery adapters', () => {
     ).toMatchObject({
       history: ['confirmed'],
     });
+    gates.release('stale-process-local');
     await staleAttempt;
 
     await expect(

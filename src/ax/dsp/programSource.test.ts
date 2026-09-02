@@ -1064,10 +1064,48 @@ describe('AxProgramSource', () => {
   });
 
   it('revokes timed-out bridge epochs and records a late host-tool completion', async () => {
-    await programSource('question:string -> answer:string', {
-      source: source([returnAnswer(literal('warm'))]),
-      timeoutMs: 1_000,
-    }).forward({} as never, { question: 'warm' });
+    // This test genuinely measures wall-clock behaviour: the session budget has
+    // to expire while a host tool is still in flight. The only thing that can
+    // race it is the dispatch itself (signature parse, source compile, bridge
+    // setup, first tool call), so the budget is measured here rather than
+    // guessed. A fixed 250ms lost that race on a loaded host.
+    const dispatchSamples: number[] = [];
+    for (let sample = 0; sample < 5; sample++) {
+      let dispatchedAt = 0;
+      const probeTool: AxFunction = {
+        name: 'probe',
+        description: 'Records how long dispatch to a host tool takes.',
+        parameters: { type: 'object', properties: {} },
+        returns: { type: 'object' },
+        func: async () => {
+          dispatchedAt = Date.now();
+          return { answer: 'probe' };
+        },
+      };
+      const probeSource = source(
+        [
+          {
+            op: 'tool',
+            name: 'probe',
+            as: 'result',
+            args: { op: 'object', entries: {} },
+          },
+          returnAnswer(ref('result.answer')),
+        ],
+        ['tool:probe']
+      );
+      const startedAt = Date.now();
+      await programSource('question:string -> answer:string', {
+        source: probeSource,
+        tools: [probeTool],
+        timeoutMs: 30_000,
+      }).forward({} as never, { question: 'warm' });
+      dispatchSamples.push(Math.max(0, dispatchedAt - startedAt));
+    }
+    const worstDispatchMs = Math.max(...dispatchSamples);
+    // Ten times the worst warm dispatch this host just recorded, floored at the
+    // original 250ms so the fast path keeps its old shape.
+    const timeoutMs = Math.max(250, worstDispatchMs * 10);
 
     let markStarted!: () => void;
     const started = new Promise<void>((resolve) => {
@@ -1116,10 +1154,22 @@ describe('AxProgramSource', () => {
     const program = programSource('question:string -> answer:string', {
       source: delayedSource,
       tools: [delayedTool],
-      timeoutMs: 250,
+      timeoutMs,
     });
     const pending = program.forward({} as never, { question: 'q' });
-    await started;
+    const reached = await Promise.race([
+      started.then(() => 'tool-dispatched' as const),
+      // Settling first means the budget expired before the tool ever ran, which
+      // would otherwise hang this test on the vitest timeout with no diagnosis.
+      pending.then(
+        () => 'session-settled' as const,
+        () => 'session-settled' as const
+      ),
+    ]);
+    expect(
+      reached,
+      `the ${timeoutMs}ms session budget (10x the ${worstDispatchMs}ms worst warm dispatch of ${dispatchSamples.join('/')}ms) expired before the held tool was dispatched`
+    ).toBe('tool-dispatched');
     await expect(pending).rejects.toBeInstanceOf(
       AxProgramSourceSessionExpiredError
     );
@@ -1148,7 +1198,7 @@ describe('AxProgramSource', () => {
         kind: 'tool',
         name: 'delayed',
         phase: 'completion',
-        reason: 'timed out after 250ms',
+        reason: `timed out after ${timeoutMs}ms`,
       },
     ]);
   });
