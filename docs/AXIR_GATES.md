@@ -7,7 +7,7 @@ passed), and the examples "demonstrated" it by hand-feeding canned `{"completion
 payloads (so `verify` exited 0). No gate ever required a real model's prose to flow through a real
 engine and produce a real completion.
 
-## Status — the port landed (all gates exercised)
+## Status: the port landed (all gates exercised)
 
 The RLM-prompt port is complete: `agent()` now renders the executor/responder/distiller RLM
 prompts from AxIR (byte-identical to the TypeScript reference) and injects them so they reach the
@@ -16,8 +16,8 @@ model's chat request, in **all five languages**. The gates have flipped accordin
   `runtime-forward-javascript-final` regression fixture's `expected_request_contains` check. A
   companion **source-sync** gate (`npm run axir:gate:prompt-sync`,
   `scripts/axir-prompt-sync-check.mjs`) additionally asserts the two prompt copies are
-  byte-identical — `src/ax/agent/templates/rlm/{executor,distiller,responder}.md` (the TS source of
-  truth) vs the `*_template` fields of `ir/axcore/data/rlm-prompts.json` — catching silent drift at
+  byte-identical: `src/ax/agent/templates/rlm/{executor,distiller,responder}.md` (the TS source of
+  truth) vs the `*_template` fields of `ir/axcore/data/rlm-prompts.json`, catching silent drift at
   edit time, before any regen or conformance run. (G3 only substring-checks the rendered IR side.)
 - **G1 real-engine antidote**: GREEN in **all five** -- Go (goja), Rust/C++/Python (quickjs),
   Java (quickjs4j/Chicory) -- each runs the full `forward()` loop through a real engine that
@@ -36,13 +36,13 @@ model's chat request, in **all five languages**. The gates have flipped accordin
 - **G5 ledger**: GREEN, wired into CI; tracks real-execution verified targets.
 - **G9 public-API parity**: GREEN, wired into CI (`go test -C tools/axir`). Asserts every language's
   `AxAgent` exposes the same required public methods (`optimize`, `playbook`). Added after the Rust
-  agent shipped without `optimize()`/`playbook()` and Go without `optimize()` — drift the prior
+  agent shipped without `optimize()`/`playbook()` and Go without `optimize()`, drift the prior
   (behavioral-only) gates could not see.
 - **G7 CI wiring**: GREEN. G3's `agent_prompt` is folded into the default `axagent` suite (runs for
   all five via the `axir-verify` matrix); the `axir-agent-antidote` job runs the G1 in-process engine
   antidote for Go (goja), Python (quickjs wheel), Rust (rquickjs), and Java (quickjs4j/Chicory);
   G2/G4/G5 already gate `axir-checks`/`go test`. All five in-process engines pass the antidote
-  locally; cpp is the only one not wired to CI (native libquickjs) — the exact command is in G1 below.
+  locally; cpp is the only one not wired to CI (native libquickjs). The exact command is in G1 below.
 
 ## Why the prior gates were blind
 
@@ -53,14 +53,14 @@ model's chat request, in **all five languages**. The gates have flipped accordin
 | Perturbation (`axir-perturb-check.mjs`) | mutate one `expected_*` → runner must fail | hardens the *scripted contract*; never introduces real prose or a real engine |
 | Verify (`verify.go`) | example/conformance process exits 0 | the facade example exits 0; replaying `responses` is indistinguishable from a real run |
 | Capabilities (`codegen.go`) | a coverage *entry exists* for the claimed suite | checks an entry exists, not that a real run passed |
-| Package hygiene | bans a fixed list of disallowed words in shipped text | token-level only — matches words, not behavior |
+| Package hygiene | bans a fixed list of disallowed words in shipped text | token-level only: matches words, not behavior |
 
 **The unifying gap:** every gate was satisfiable by a hollow implementation. None required a real
 `model-prose → real-engine → real final() → completion` loop. The new gates add that requirement.
 
 ## The gates
 
-### G1 — Real-engine end-to-end conformance (the antidote)
+### G1: Real-engine end-to-end conformance (the antidote)
 Fixture kind `agent_runtime_real` runs the **full `forward()` loop against a real embedded engine**
 (goja today): the recorded transcript supplies the model turns, but the executor's `javascriptCode`
 is genuinely executed by the engine and the completion must be **produced by that execution**.
@@ -70,14 +70,14 @@ import cycle, the `package main` conformance binary injects one via
 - Source: `tools/axir/.../templates/go/goRuntime.go.txt` (runner + registry),
   `templates/go/goConformance.go.txt` (goja registration).
 - Fixture: `ir/conformance/axagent-real/agent-runtime-real-javascript-final.json`.
-- **State: GREEN on current core, Go** — proves the runtime substrate already works end-to-end with a
+- **State: GREEN on current core, Go.** It proves the runtime substrate already works end-to-end with a
   real engine; the shipped defect was purely the un-rendered prompt (see G3). Teeth verified: fails
   on an unregistered engine and on a wrong `expected_output` (the engine, not the fixture, produces
   the value).
 - Run: `cd packages/go && go run ./conformance ../../ir/conformance/axagent-real/agent-runtime-real-javascript-final.json`
 - Remaining: rust/cpp/java (quickjs) + python (quickjs extra) register their engines in Phase 5.
 
-### G2 — Anti-facade lint
+### G2: Anti-facade lint
 Bans any **shipped example** that hand-constructs an agent completion payload
 (`"completion"` envelope + `type:"final"|"askClarification"`) **as the agent's result**. A real
 example must run a real runtime so the model + engine produce the completion. Two hardenings, both
@@ -95,7 +95,7 @@ motivated by a payload that evaded the first version of this lint:
 - **State: GREEN.** The `agent_openai_api.*` and `axagent_pipeline.*` facades are deleted; the
   surviving `runtime_profiles` examples drive a real engine and are correctly exempt.
 
-### G3 — Prompt-parity gate
+### G3: Prompt-parity gate
 Conformance kind `agent_prompt` builds a real agent and asserts the RLM stage instructions were
 actually rendered into `agent.State` (executor description contains `final(` / `askClarification(`).
 The exact defect that shipped (empty executor instruction) fails this.
@@ -108,7 +108,7 @@ The exact defect that shipped (empty executor instruction) fails this.
   Enforced in CI via this fixture and the `runtime-forward-javascript-final`
   `expected_request_contains` check.
 
-### G4 — Capability-backed-by-real-run (IMPLEMENTED)
+### G4: Capability-backed-by-real-run (IMPLEMENTED)
 Every generated package claims the `axagent` capability (`axagent` is in `supported_suites` for all
 targets), so the build-gating test `TestG4AgentCapabilityBackedByRealRunner`
 (`tools/axir/internal/axir/axir_test.go`) requires every language's conformance runner to carry the
@@ -119,20 +119,20 @@ fixtures exist on disk and that the behavioral-parity ledger lists all five lang
 claim is no longer backed, so the gate fails. Teeth verified -- hiding the real fixture turns it red.
 Runs in CI via `go test -C tools/axir ./...`.
 
-### G5 — Behavioral-parity ledger (planned)
+### G5: Behavioral-parity ledger (planned)
 A checked manifest mapping each TS behavioral capability → the IR op(s) implementing it → at least
 one conformance fixture that exercises it for real. This is the structural answer to "provenance
 proves origin, not completeness": it adds a completeness ledger that an audit gate enforces.
 
-### G6 — Perturbation extended to the real loop
+### G6: Perturbation extended to the real loop
 The existing `axir-perturb-check.mjs` already mutates `expected_*` values and asserts the runner
 fails (verified manually against `agent_runtime_real`: a wrong `expected_output` is caught because
 the engine, not the fixture, produced the value). Once the agent gates are green it auto-covers
 them; agent-specific perturbations (remove the engine, prose-without-`final()`) are added then.
 
-### G9 — Cross-language public-API parity (IMPLEMENTED)
+### G9: Cross-language public-API parity (IMPLEMENTED)
 
-**The blind spot.** G1–G6 verify *behavior* (the real `forward()` loop, prompts, the capability
+**The blind spot.** G1-G6 verify *behavior* (the real `forward()` loop, prompts, the capability
 ledger) and intrinsic/dispatch wiring, but nothing asserted that each language's `AxAgent` exposes
 the **same public method surface**. `runtime_model.go` merely *appends* claimed public symbols
 (`optimize`, `playbook`, `AxPlaybook`) to a manifest without verifying each emitted package actually
@@ -146,15 +146,15 @@ if a required method (`optimize`, `playbook`) is missing in any language. Runs i
 `go test -C tools/axir` (hence `npm run test:axir`). Extend coverage by adding names to the
 `patterns` map. Negative-tested: renaming any one method's declaration fails the gate.
 
-### G7 — CI wiring (`.github/workflows/ci.yml`)
+### G7: CI wiring (`.github/workflows/ci.yml`)
 Each gate runs as a required pipeline phase, aggregated by the `ci-summary` job:
-- **G2 / G4 / G5** — `axir-checks` runs `axir:gate:anti-facade` (G2) and `axir:gate:ledger` (G5);
+- **G2 / G4 / G5**: `axir-checks` runs `axir:gate:anti-facade` (G2) and `axir:gate:ledger` (G5);
   `test:axir:tools` runs the Go suite, which includes `TestG4AgentCapabilityBackedByRealRunner` (G4).
-- **G3** — the engine-less `agent_prompt` fixture now lives in the default `axagent/` conformance
+- **G3**: the engine-less `agent_prompt` fixture now lives in the default `axagent/` conformance
   suite, so the `axir-verify` matrix runs it for **all five** targets (no engine needed). This is the
   "folded in" step: it was held out of the default enumeration until the port landed, and now that
   the prompt renders green everywhere it runs by default.
-- **G1** — the `axir-agent-antidote` job runs the real-engine antidote in-process for **Go** (goja),
+- **G1**: the `axir-agent-antidote` job runs the real-engine antidote in-process for **Go** (goja),
   **Python** (quickjs wheel), **Rust** (rquickjs), and **Java** (quickjs4j/Chicory from Maven
   Central). All five in-process engines pass the antidote locally; **cpp** is the only one not wired
   to CI (it needs a native libquickjs). Reproduce the cpp antidote with:
@@ -170,7 +170,7 @@ g++ -std=c++17 -DAX_CONFORMANCE_QUICKJS -I packages/cpp \
 ```
 
 ## Principle to preserve
-Every claimed capability needs at least one **"real water through real pipes"** proof — a fixture
-whose passing requires the real runtime to actually do the work — plus a completeness-ledger entry.
+Every claimed capability needs at least one **"real water through real pipes"** proof, a fixture
+whose passing requires the real runtime to actually do the work, plus a completeness-ledger entry.
 Origin-tracking (provenance) and script-faithfulness (coverage/conformance/perturbation/verify) are
 all satisfiable by a hollow implementation; only a real-execution gate is not.

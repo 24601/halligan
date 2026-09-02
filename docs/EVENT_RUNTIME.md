@@ -801,8 +801,8 @@ during/after acquisition and after commit, undefined and malformed source
 handles, startup rollback, and cleanup failure continuation. The command fails
 if any exact boundary invariant regresses. It also prints resource leaks,
 restoration and ordering outcomes, and descriptive timing. The timing comparison
-is deliberately asymmetric—a minimal unmanaged disposer call versus full
-manager define/activate/deactivate—and is neither a semantics-equivalent
+is deliberately asymmetric, comparing a minimal unmanaged disposer call with
+full manager define/activate/deactivate, and is neither a semantics-equivalent
 benchmark nor a CI threshold or model-quality claim. The unmanaged-effect result
 reports one leak for both implementations; the disposer-error result reports the
 resource whose own disposer failed while verifying that later cleanup ran.

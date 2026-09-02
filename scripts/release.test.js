@@ -6,6 +6,8 @@ import { describe, expect, it } from 'vitest';
 
 import {
   assertAlignedReleaseVersions,
+  normalizeAddedChangelogSection,
+  normalizeChangelogDashes,
   parseReleaseArguments,
   parseRemoteTagTarget,
   publishFetchArguments,
@@ -162,5 +164,74 @@ describe('protected-main release workflow', () => {
     expect(workflow).toContain(
       'node scripts/release.mjs publish-merged "$RELEASE_SHA"'
     );
+  });
+});
+
+describe('generated changelog dash normalisation', () => {
+  const EM = String.fromCharCode(0x2014);
+  const EN = String.fromCharCode(0x2013);
+
+  it('rewrites an em dash from a commit subject as a colon', () => {
+    expect(normalizeChangelogDashes(`* fix ${EM} drop the retry loop`)).toBe(
+      '* fix: drop the retry loop'
+    );
+  });
+
+  it('rewrites a trailing em dash without leaving a trailing space', () => {
+    expect(normalizeChangelogDashes(`* fix ${EM}\nnext\n`)).toBe(
+      '* fix:\nnext\n'
+    );
+  });
+
+  it('keeps an unspaced en dash range as a hyphen', () => {
+    expect(normalizeChangelogDashes(`* covers steps 1${EN}10`)).toBe(
+      '* covers steps 1-10'
+    );
+  });
+
+  it('rewrites a spaced en dash as a comma', () => {
+    expect(normalizeChangelogDashes(`* fix ${EN} the reducer`)).toBe(
+      '* fix, the reducer'
+    );
+  });
+
+  it('leaves dash-free text byte-identical', () => {
+    const text = '## [1.2.3] (2026-01-01)\n\n* fix: a thing\n';
+    expect(normalizeChangelogDashes(text)).toBe(text);
+  });
+
+  it('normalises only the newly prepended section', () => {
+    const history = `## [1.0.0]\n\n* old ${EM} entry\n`;
+    const added = `## [1.1.0]\n\n* new ${EM} entry\n\n`;
+    expect(normalizeAddedChangelogSection(history, added + history)).toBe(
+      `## [1.1.0]\n\n* new: entry\n\n${history}`
+    );
+  });
+
+  it('normalises the whole file when there is no prior content', () => {
+    expect(normalizeAddedChangelogSection('', `* new ${EM} entry\n`)).toBe(
+      '* new: entry\n'
+    );
+  });
+
+  it('normalises the whole file when the generator rewrote history', () => {
+    expect(
+      normalizeAddedChangelogSection(
+        `* old ${EM} entry\n`,
+        `* rebuilt ${EM} file\n`
+      )
+    ).toBe('* rebuilt: file\n');
+  });
+
+  it('is applied by prepare before the prepared release is verified', () => {
+    const source = readFileSync(
+      path.join(repoRoot, 'scripts', 'release.mjs'),
+      'utf8'
+    );
+    const normalizeAt = source.indexOf('normalizeAddedChangelogSection(');
+    const verifyAt = source.indexOf('verifyPreparedRelease(version, branch);');
+    expect(normalizeAt).toBeGreaterThan(-1);
+    expect(verifyAt).toBeGreaterThan(normalizeAt);
+    expect(source).toContain("run('git', ['commit', '--amend', '--no-edit']);");
   });
 });

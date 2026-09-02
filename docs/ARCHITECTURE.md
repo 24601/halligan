@@ -37,13 +37,14 @@ Ax has nine main runtime surfaces:
    classification, digest-verified blob spill, bounded filtered reads, durable
    per-consumer cursors, a fork/merge DAG, and a tiered-rollup context
    projection with drill-down.
-8. **AxMind**: a persistent-agency runtime over AxEventRuntime — thinkers that
-   wake from trajectory appends, a deterministic spontaneity backoff ladder with
-   an absolute rate fuse, a synthetic-idle liveness watchdog, lag-based health,
-   and ledgered outbound messages with exactly-one-reply chat semantics.
-9. **AxLearn**: an opt-in learning surface — addressable interaction records and
-   receipts, late out-of-order feedback with a pure eligibility reducer, a
-   diffable harness tree with a fail-closed admission gate, and a
+8. **AxMind**: a persistent-agency runtime over AxEventRuntime, covering
+   thinkers that wake from trajectory appends, a deterministic spontaneity
+   backoff ladder with an absolute rate fuse, a synthetic-idle liveness
+   watchdog, lag-based health, and ledgered outbound messages with
+   exactly-one-reply chat semantics.
+9. **AxLearn**: an opt-in learning surface covering addressable interaction
+   records and receipts, late out-of-order feedback with a pure eligibility
+   reducer, a diffable harness tree with a fail-closed admission gate, and a
    content-addressed release chain whose head only a human moves.
 10. **AxIR generated libraries**: Python, Java, C++, Go, and Rust packages emitted
     from the shared portable semantics.
@@ -171,10 +172,10 @@ with the actor emitting a typed state patch of its own. The normative
 contract for both is
 [`docs/AGENT_WORKING_STATE.md`](./AGENT_WORKING_STATE.md).
 
-Learned artifacts — ACE bullets, executable skill artifacts, and catalog skills
-— can carry the authority facts of the trajectory they were distilled from and
-have them re-checked against current host authority at retrieval time. The same
-contract covers the optimizer-only visibility tier for ACE guidance and
+Learned artifacts (ACE bullets, executable skill artifacts, and catalog
+skills) can carry the authority facts of the trajectory they were distilled
+from and have them re-checked against current host authority at retrieval
+time. The same contract covers the optimizer-only visibility tier for ACE guidance and
 per-skill cost accounting; see
 [`docs/SKILL_PROVENANCE.md`](./SKILL_PROVENANCE.md).
 
@@ -231,7 +232,7 @@ addressable so late feedback can name it. Records are stamped with the content
 identity of the tree the agent was ACTUALLY serving, never with the store head.
 
 An `AxHarnessTree` is a flat, diffable list over three primitives that already
-exist — an actor instruction, a playbook bullet, a catalog skill — behind an
+exist (an actor instruction, a playbook bullet, a catalog skill) behind an
 admission gate that fails closed on credential-shaped content and on any
 attempt by a proposer to author bullet evidence, counters, or lineage.
 
