@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Upstream Ax bug or feature
+    url: https://github.com/ax-llm/ax/issues
+    about: Portable Ax behavior (providers, dsp, agent, flow, mcp, AxIR, generated packages) is fixed upstream first.
+  - name: Security vulnerability
+    url: https://github.com/24601/halligan/security/advisories/new
+    about: Report privately. Do not open a public issue.
+  - name: Pry playground
+    url: https://24601.github.io/halligan/
+    about: The playground deployment.

@@ -626,40 +626,45 @@ remain under `packages/<language>/examples` for AxIR verification, but the publi
 catalog and website are generated only from `src/examples/<language>/`.
 
 Highlights: `extract.ts`, `react.ts`, `agent.ts`, `streaming1.ts`, `multi-modal.ts`, `audio-chat.ts`, `audio-batch-and-agent.ts`, `interaction-timeline.ts`, `standard-schema.ts`, `rlm-memories-and-skills.ts`, `executable-skill-compatibility-eval.ts`, `rlm-discovery.ts`, `gepa-flow.ts`, `gepa-qualitative-feedback-live-eval.ts`, `openai-compatible.ts`, `ax-flow-enhanced-demo.ts`, `ax-flow-mermaid.ts`. [Browse all examples →](src/examples/)
-
 ## Community
 
-- [Discord](https://discord.gg/DSHg3dU7dW) — questions and discussion
-- [Twitter](https://twitter.com/dosco) — updates
-- [GitHub](https://github.com/ax-llm/ax) — source and issues
-- [DeepWiki](https://deepwiki.com/ax-llm/ax) — AI-generated docs
+- [Halligan issues](https://github.com/24601/halligan/issues) for anything in
+  Halligan's own subsystems, its packaging, or the Pry playground.
+- [Ax on GitHub](https://github.com/ax-llm/ax) and the
+  [Ax Discord](https://discord.gg/DSHg3dU7dW) for questions about Ax itself:
+  providers, signatures, agents, flows, MCP, and the generated language
+  packages. Halligan carries that code from upstream and syncs regularly.
+- [DeepWiki](https://deepwiki.com/ax-llm/ax) for generated Ax documentation.
 
 ## Contributing
 
-Ax is TypeScript-first. Most contributors and coding agents should focus on the
-TypeScript source change they are making and should not try to update every
-generated language backend by hand.
+Halligan accepts contributions. Read
+[CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 
-When a PR changes portable behavior under `src/ax/ai/`, `src/ax/dsp/`,
-`src/ax/agent/`, `src/ax/flow/`, or `src/ax/mcp/`, CI will ask for either
-AxIR/conformance updates or an AxIR backlog entry. If you are not already
-working in AxIR, use the backlog path:
+The routing question comes first. Changes to Halligan's own subsystems belong
+here: `src/ax/trajectory`, `src/ax/mind`, `src/ax/learn`, the playbook evolve
+and GEPA evidence discipline, skill provenance and host authority, verifier
+gated working state, the maintainer skills under `tools/*/skills`, and the Pry
+playground. Portable Ax behavior under `src/ax/ai`, `src/ax/dsp`,
+`src/ax/agent`, `src/ax/flow`, `src/ax/mcp`, the AxIR toolchain, and the
+generated packages under `packages/` should go to
+[ax-llm/ax](https://github.com/ax-llm/ax) first, and Halligan picks it up on the
+next sync. We will still take a downstream fix when upstream is slow or the fix
+only makes sense given something Halligan added, and we offer those fixes
+upstream. If you are unsure, open it here and we will route it.
 
-```bash
-npm run axir:backlog -- add --title "..." --surface axai --impact "..." --paths src/ax/ai/...
-npm run axir:backlog:validate
-```
+Behavioral changes carry an evaluation with a declared baseline and a bounded
+budget. The pull request template asks for it.
 
-That keeps normal TypeScript PRs small while giving AxIR maintainers and coding
-agents a precise queue for migrating the behavior into Python, Java, C++, Go,
-and future generated backends later.
-
-## Questions or feedback?
-
-**Follow [@dosco](https://x.com/intent/follow?screen_name=dosco) on X** to keep up with new releases and chat with
-me about the project — or [open an issue](https://github.com/ax-llm/ax/issues) or join the
-[Discord](https://discord.gg/DSHg3dU7dW).
+Security reports go through [SECURITY.md](SECURITY.md), privately, never in a
+public issue. Participation is governed by
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 
 ## License
 
-Apache 2.0
+Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+Halligan is a fork of [Ax](https://github.com/ax-llm/ax), Copyright the Ax
+authors, also licensed under Apache-2.0. Most of this repository is Ax code
+carried downstream; the additions listed above are Halligan's, Copyright 2026
+Basit Mustafa.

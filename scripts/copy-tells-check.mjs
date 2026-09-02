@@ -31,6 +31,9 @@ const SKIP_DIRS = new Set([
 
 export const ROOT_SPECS = [
   { kind: 'file', path: 'README.md' },
+  { kind: 'file', path: 'CONTRIBUTING.md', optional: true },
+  { kind: 'file', path: 'SECURITY.md', optional: true },
+  { kind: 'file', path: 'NOTICE', optional: true },
   { kind: 'dir', path: 'docs', exts: ['.md'], recursive: false },
   { kind: 'dir', path: 'src/ax/skills', exts: ['.md'], recursive: false },
   {
