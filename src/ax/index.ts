@@ -1983,6 +1983,7 @@ import {
   type AxMindSalienceBufferOptions,
   axMindSalienceBuffer,
   axMindSalienceGuidance,
+  axMindSalienceTextBytes,
   axRecordMindSalience,
   axWithMindSalience,
 } from './mind/salience.js';
@@ -2673,6 +2674,7 @@ export { axMindPendingClass };
 export { axMindReconcileChatSends };
 export { axMindSalienceBuffer };
 export { axMindSalienceGuidance };
+export { axMindSalienceTextBytes };
 export { axMindSkillTokens };
 export { axMindStepEventExtensions };
 export { axMindStoreDurability };

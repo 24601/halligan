@@ -43,6 +43,7 @@ export type { AxMindSalienceBufferOptions } from './salience.js';
 export {
   axMindSalienceBuffer,
   axMindSalienceGuidance,
+  axMindSalienceTextBytes,
   axRecordMindSalience,
   axWithMindSalience,
 } from './salience.js';
