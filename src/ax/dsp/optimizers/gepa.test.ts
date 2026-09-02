@@ -1496,3 +1496,284 @@ describe('AxGEPA trajectory admission', () => {
     });
   });
 });
+
+describe('AxGEPA paired admitted promotion gates', () => {
+  /**
+   * Gate 1 (`reflective_mutation`). The child wins comfortably on the raw
+   * all-rows sum and loses on the rows BOTH evaluations admitted. Only a paired
+   * denominator can tell those apart.
+   */
+  const parentScores = [0.1, 0.1, 0.5, 0.5, 0.5, 0.5, 0.5, 0.1];
+  const childScores = [0.9, 0.9, 0.4, 0.4, 0.4, 0.4, 0.4, 0.9];
+  const examples = Array.from({ length: 8 }, (_, index) => ({ index }));
+
+  const runMutationGate = async (
+    trajectoryTermination?: Record<string, unknown>
+  ) => {
+    const optimizer = new AxGEPA({
+      studentAI: {} as AxAIService,
+      teacherAI: {} as AxAIService,
+      numTrials: 1,
+      minibatch: false,
+      minImprovementThreshold: 0,
+      mergeMax: 0,
+    } as any);
+    (optimizer as any).reflectTargetInstruction = async () => 'better';
+    const program = createSingleRootProgram(
+      'base',
+      (instruction, example: any) => ({
+        score:
+          instruction === 'better'
+            ? childScores[example.index]!
+            : parentScores[example.index]!,
+        index: example.index,
+      })
+    );
+    const result = await optimizer.compile(
+      program as any,
+      examples as any,
+      async ({ prediction }: any) => prediction.score,
+      {
+        maxMetricCalls: 200,
+        skipPerfectScore: false,
+        candidateLineage: true,
+        ...(trajectoryTermination ? { trajectoryTermination } : {}),
+      } as any
+    );
+    const records = (result.optimizedProgram?.candidateLineage?.records ??
+      []) as any[];
+    return records.find((r) => r.strategy === 'reflective_mutation');
+  };
+
+  const discardBy = (
+    rows: Readonly<Record<string, readonly number[]>>
+  ): AxTrajectoryTerminationClassifier => {
+    return (input) => {
+      const index = (input.prediction as any)?.index;
+      return (rows[input.phase] ?? []).includes(index)
+        ? { kind: 'environment_failure', cause: 'transport' }
+        : { kind: 'completed' };
+    };
+  };
+
+  it('promotes the child on the raw all-rows sum when nothing is discarded', async () => {
+    // The baseline the paired test is measured against: 4.7 > 2.8.
+    await expect(runMutationGate()).resolves.toMatchObject({
+      decision: 'accepted',
+      reason: 'improved_minibatch_score',
+    });
+  });
+
+  it('compares only paired admitted rows on the uniform strategy', async () => {
+    const record = await runMutationGate({
+      minAdmittedFraction: 0,
+      maxRunDiscardRate: 1,
+      classifier: discardBy({
+        'parent minibatch': [0, 1],
+        'child minibatch': [7],
+      }),
+    });
+    // Over the intersection {2..6}: child 2.0 <= parent 2.5.
+    expect(record).toMatchObject({
+      decision: 'rejected',
+      reason: 'insufficient_minibatch_improvement',
+    });
+  });
+
+  it('reaches the same decision when both sides discard the same rows', async () => {
+    // Restoring the parent's two rows to the parent while also removing them
+    // from the child leaves the intersection identical, so the decision must be
+    // identical too: the gate depends on the intersection, not on which side
+    // dropped what.
+    const record = await runMutationGate({
+      minAdmittedFraction: 0,
+      maxRunDiscardRate: 1,
+      classifier: discardBy({
+        'parent minibatch': [0, 1, 7],
+        'child minibatch': [0, 1, 7],
+      }),
+    });
+    expect(record).toMatchObject({
+      decision: 'rejected',
+      reason: 'insufficient_minibatch_improvement',
+    });
+  });
+
+  it('still promotes the child when the discarded rows are outside the disagreement', async () => {
+    // Negative control: discarding rows the two candidates agree on must not
+    // flip the decision, or the test above would prove nothing about pairing.
+    const record = await runMutationGate({
+      minAdmittedFraction: 0,
+      maxRunDiscardRate: 1,
+      classifier: discardBy({
+        'parent minibatch': [3],
+        'child minibatch': [4],
+      }),
+    });
+    expect(record).toMatchObject({ decision: 'accepted' });
+  });
+});
+
+describe('AxGEPA merge gate paired admitted rows', () => {
+  /**
+   * Gate 2 (`system_merge`, on by default: `mergeMax` is 5). It compares a
+   * fresh subsample evaluation against CACHED per-instance scores of the two
+   * parents, so its denominator has three sources, not two.
+   *
+   * Two components over nine examples whose rows rotate through three kinds:
+   * `a` rows that A's improvement helps, `b` rows that B's helps, and `n` rows
+   * that every improvement hurts slightly — the `n` rows are what keep the
+   * siblings mutually non-dominated so a merge is reachable at all.
+   *
+   * `pickSome` draws two `a` rows, two `b` rows and one `n` row, and every row
+   * of a kind carries the same score, so the subsample's composition is fixed
+   * and these sums are exact:
+   *
+   *   merge over all 5:  2(0.53125) + 2(0.6875) + 0.46875 = 2.90625
+   *   parent A over all: 2(0.75)    + 2(0.5)    + 0.46875 = 2.96875
+   *   parent B over all: 2(0.5)     + 2(0.625)  + 0.46875 = 2.71875
+   *   -> 2.90625 < max(...) = 2.96875, so the merge is REJECTED.
+   *
+   * Drop the two `a` rows from the denominator and it inverts:
+   *
+   *   merge over {b,b,n}: 1.375   + 0.46875 = 1.84375
+   *   parent A:           1.0     + 0.46875 = 1.46875
+   *   parent B:           1.25    + 0.46875 = 1.71875
+   *   -> 1.84375 >= 1.71875, so the merge is ACCEPTED.
+   *
+   * The merge candidate is deliberately WORSE than the better parent overall
+   * and better than both on the rows that survive, which is the only shape that
+   * can tell an intersected denominator from a raw one.
+   */
+  const MERGE_TABLE = {
+    a: { none: 0.5, A: 0.75, B: 0.5, AB: 0.53125 },
+    b: { none: 0.5, A: 0.5, B: 0.625, AB: 0.6875 },
+    n: { none: 0.5, A: 0.46875, B: 0.46875, AB: 0.46875 },
+  } as const;
+
+  const buildTwoComponentProgram = () => {
+    const componentA = 'root::instruction';
+    const componentB = 'root::description';
+    const values: Record<string, string> = {
+      [componentA]: 'base',
+      [componentB]: 'base',
+    };
+    const rowKind = (index: number) => (['a', 'b', 'n'] as const)[index % 3]!;
+    const improvedKey = () => {
+      const a = values[componentA] === `better-${componentA}`;
+      const b = values[componentB] === `better-${componentB}`;
+      if (a && b) return 'AB' as const;
+      if (a) return 'A' as const;
+      if (b) return 'B' as const;
+      return 'none' as const;
+    };
+    return {
+      getId: () => 'root',
+      setId: () => {},
+      getInstruction: () => values[componentA]!,
+      setInstruction: (value: string) => {
+        values[componentA] = value;
+      },
+      getSignature: () => ({
+        getDescription: () => values[componentB]!,
+        toString: () => '"base" question:string -> answer:string',
+      }),
+      namedProgramInstances: () => [],
+      getOptimizableComponents: () => [
+        { key: componentA, kind: 'instruction', current: values[componentA]! },
+        { key: componentB, kind: 'description', current: values[componentB]! },
+      ],
+      applyOptimizedComponents: (updates: Readonly<Record<string, string>>) => {
+        for (const id of [componentA, componentB]) {
+          const next = updates[id];
+          if (typeof next === 'string') values[id] = next;
+        }
+      },
+      forward: async (_ai: AxAIService, example: any) => ({
+        score: MERGE_TABLE[rowKind(example.index)][improvedKey()],
+        index: example.index,
+        kind: rowKind(example.index),
+      }),
+      getTraces: () => [],
+      setDemos: () => {},
+      applyOptimization: () => {},
+      getUsage: () => [],
+      resetUsage: () => {},
+    };
+  };
+
+  const runMergeGate = async (
+    trajectoryTermination?: Record<string, unknown>
+  ) => {
+    const optimizer = new AxGEPA({
+      studentAI: {} as AxAIService,
+      teacherAI: {} as AxAIService,
+      numTrials: 12,
+      earlyStoppingTrials: 30,
+      minibatch: true,
+      minibatchSize: 2,
+      mergeMax: 5,
+    } as any);
+    (optimizer as any).reflectTargetInstruction = async (componentId: string) =>
+      `better-${componentId}`;
+    const result = await optimizer.compile(
+      buildTwoComponentProgram() as any,
+      Array.from({ length: 9 }, (_, index) => ({ index })) as any,
+      async ({ prediction }: any) => prediction.score,
+      {
+        maxMetricCalls: 400,
+        skipPerfectScore: false,
+        candidateLineage: true,
+        ...(trajectoryTermination ? { trajectoryTermination } : {}),
+      } as any
+    );
+    return (
+      (result.optimizedProgram?.candidateLineage?.records ?? []) as any[]
+    ).filter((r) => r.strategy === 'system_merge');
+  };
+
+  const subsampleSum = (record: any): number => {
+    const merge = record.evaluations.find(
+      (evaluation: any) => evaluation.phase === 'merge_subsample'
+    );
+    return merge.scalarScore * merge.evaluatedExamples;
+  };
+
+  const discardKindInPhase =
+    (phase: string): AxTrajectoryTerminationClassifier =>
+    (input) =>
+      input.phase === phase && (input.prediction as any)?.kind === 'a'
+        ? { kind: 'environment_failure', cause: 'rate_limit' }
+        : { kind: 'completed' };
+
+  it('rejects the merge on the full denominator', async () => {
+    const merges = await runMergeGate();
+    expect(merges.length).toBeGreaterThan(0);
+    expect(merges.every((r) => r.decision === 'rejected')).toBe(true);
+    expect(merges.map(subsampleSum)).toContainEqual(2.90625);
+  });
+
+  it('compares only paired admitted rows at the merge gate', async () => {
+    const merges = await runMergeGate({
+      minAdmittedFraction: 0,
+      maxRunDiscardRate: 1,
+      classifier: discardKindInPhase('merge subsample'),
+    });
+    expect(merges.length).toBeGreaterThan(0);
+    expect(merges.some((r) => r.decision === 'accepted')).toBe(true);
+  });
+
+  it('honours the cached per-instance admitted mask of both parents', async () => {
+    // Nothing is discarded during the merge subsample here: the rows leave the
+    // denominator only because the PARENTS' cached validation evaluations
+    // discarded them. Without `perInstanceAdmitted` there is no way to know
+    // that, and the merge stays rejected.
+    const merges = await runMergeGate({
+      minAdmittedFraction: 0,
+      maxRunDiscardRate: 1,
+      classifier: discardKindInPhase('validation evaluation'),
+    });
+    expect(merges.length).toBeGreaterThan(0);
+    expect(merges.some((r) => r.decision === 'accepted')).toBe(true);
+  });
+});

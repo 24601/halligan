@@ -440,6 +440,89 @@ const mergeRejected = await runScenario(buildMergeGateScenario(BETWEEN_TABLE));
 const mergeTied = await runScenario(buildMergeGateScenario(TIED_TABLE));
 
 /**
+ * Scenario 5 — the reflective-mutation gate's BOUNDARY.
+ *
+ * Scenarios 3 and 4 pin the merge gate's comparison. The mutation gate at
+ * `gepa.ts:1318-1319` is still only pinned by its code path and by the
+ * `minImprovementThreshold` default, not by the operator itself: with
+ * `minImprovementThreshold` at 0 (`gepa.ts:218`), `>` and `>=` differ nowhere
+ * except at an exact tie, and no other scenario produces one.
+ *
+ * Here the proposed component text changes on every round but changes NOTHING
+ * about the score, so the child's minibatch sum equals the parent's exactly
+ * (2 rows x 0.5 = 1). The real `>` gate REJECTS every round; a `>=` gate would
+ * accept, push a candidate, run a validation evaluation and rewrite the whole
+ * lineage, selection and event projection. The component delta is non-empty, so
+ * the rejection is `insufficient_minibatch_improvement` rather than
+ * `no_component_change` — the score comparison is what decided it.
+ */
+const mutationGateTied = await runScenario(() => {
+  let instruction = 'base';
+  const events: unknown[] = [];
+  const checkpoints: unknown[] = [];
+  const program = {
+    getId: () => 'root',
+    setId: () => {},
+    getInstruction: () => instruction,
+    setInstruction: (value: string) => {
+      instruction = value;
+    },
+    getSignature: () => ({
+      getDescription: () => 'base',
+      toString: () => '"base" question:string -> answer:string',
+    }),
+    namedProgramInstances: () => [],
+    getOptimizableComponents: () => [
+      { key: 'root::instruction', kind: 'instruction', current: instruction },
+    ],
+    applyOptimizedComponents: (updates: Readonly<Record<string, string>>) => {
+      const next = updates['root::instruction'];
+      if (typeof next === 'string') instruction = next;
+    },
+    // Deliberately independent of `instruction`: the proposal is real, its
+    // effect is exactly zero.
+    forward: async () => ({ score: 0.5 }),
+    getTraces: () => [],
+    setDemos: () => {},
+    applyOptimization: () => {},
+    getUsage: () => [],
+    resetUsage: () => {},
+  };
+  return {
+    program,
+    optimizerArgs: {
+      studentAI: {},
+      teacherAI: {},
+      numTrials: 4,
+      earlyStoppingTrials: 30,
+      minibatch: true,
+      minibatchSize: 2,
+      mergeMax: 0,
+      checkpointInterval: 1,
+      checkpointSave: async (checkpoint: unknown) => {
+        checkpoints.push(checkpoint);
+        return `checkpoint-${checkpoints.length}`;
+      },
+      debugOptimizer: true,
+      optimizerLogger: (event: unknown) => events.push(event),
+    },
+    examples: Array.from({ length: 6 }, (_, index) => ({
+      index,
+      question: `q${index}`,
+    })),
+    metric: async ({ prediction }: any) => prediction.score,
+    compileOptions: {
+      maxMetricCalls: 200,
+      skipPerfectScore: false,
+      candidateLineage: mode !== 'false',
+    },
+    reflect: async (componentId: string) => `better-${componentId}`,
+    events,
+    checkpoints,
+  };
+});
+
+/**
  * In-fixture coverage self-check.
  *
  * The gate only compares this fixture's output across two revisions, so it
@@ -453,8 +536,9 @@ const mergeTied = await runScenario(buildMergeGateScenario(TIED_TABLE));
  * merge candidate off the "strictly between" or "exactly equal" boundary trips
  * here instead of silently retiring the tripwire.
  */
-const mergeRecords = (
+const strategyRecords = (
   result: ScenarioResult,
+  strategy: string,
   decision: string
 ): readonly Record<string, unknown>[] => {
   const lineage = (
@@ -463,19 +547,28 @@ const mergeRecords = (
     }
   ).candidateLineage;
   return (lineage?.records ?? []).filter(
-    (record) =>
-      record.strategy === 'system_merge' && record.decision === decision
+    (record) => record.strategy === strategy && record.decision === decision
   );
 };
 
-const subsampleSum = (record: Record<string, unknown>): number => {
+const mergeRecords = (
+  result: ScenarioResult,
+  decision: string
+): readonly Record<string, unknown>[] =>
+  strategyRecords(result, 'system_merge', decision);
+
+const phaseSum = (record: Record<string, unknown>, phase: string): number => {
   const evaluations = record.evaluations as readonly Record<string, unknown>[];
-  const merge = evaluations.find(
-    (evaluation) => evaluation.phase === 'merge_subsample'
+  const evaluation = evaluations.find((entry) => entry.phase === phase);
+  if (!evaluation) throw new Error(`record has no ${phase} evaluation`);
+  return (
+    (evaluation.scalarScore as number) *
+    (evaluation.evaluatedExamples as number)
   );
-  if (!merge) throw new Error('merge record has no merge_subsample evaluation');
-  return (merge.scalarScore as number) * (merge.evaluatedExamples as number);
 };
+
+const subsampleSum = (record: Record<string, unknown>): number =>
+  phaseSum(record, 'merge_subsample');
 
 const requireMergeCoverage = (
   label: string,
@@ -500,11 +593,48 @@ const requireMergeCoverage = (
   }
 };
 
+/**
+ * The mutation gate's own coverage assertion. It fails on both revisions at
+ * once if the tie ever stops being a tie — a rejected record whose child
+ * minibatch sum is exactly the parent's is the only shape that can distinguish
+ * `>` from `>=` there.
+ */
+const requireMutationGateCoverage = (
+  label: string,
+  result: ScenarioResult,
+  expectedChildSum: number
+): void => {
+  const rejected = strategyRecords(result, 'reflective_mutation', 'rejected');
+  const tied = rejected.filter(
+    (record) =>
+      record.reason === 'insufficient_minibatch_improvement' &&
+      Math.abs(phaseSum(record, 'child_minibatch') - expectedChildSum) < 1e-9
+  );
+  if (tied.length === 0) {
+    throw new Error(
+      `fixture coverage lost: ${label} emitted no rejected reflective_mutation record whose child minibatch sum is ${expectedChildSum}; the mutation gate's comparison is no longer pinned`
+    );
+  }
+  const accepted = strategyRecords(result, 'reflective_mutation', 'accepted');
+  if (accepted.length > 0) {
+    throw new Error(
+      `fixture coverage lost: ${label} accepted a reflective mutation whose score change is exactly zero`
+    );
+  }
+};
+
 if (mode !== 'false') {
   requireMergeCoverage('scenario 3', mergeRejected, 'rejected', 2.9375);
   requireMergeCoverage('scenario 4', mergeTied, 'accepted', 2.96875);
+  requireMutationGateCoverage('scenario 5', mutationGateTied, 1);
 }
 
 process.stdout.write(
-  JSON.stringify({ legacy, minibatchMerge, mergeRejected, mergeTied })
+  JSON.stringify({
+    legacy,
+    minibatchMerge,
+    mergeRejected,
+    mergeTied,
+    mutationGateTied,
+  })
 );

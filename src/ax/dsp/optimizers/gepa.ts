@@ -63,6 +63,7 @@ import {
   type AxTrajectoryAdmissionReport,
   axExceedsRunDiscardCeiling,
   axMergeTrajectoryAdmission,
+  axPairedAdmittedIndices,
   axResolveTrajectoryAdmissionOptions,
 } from './trajectoryTermination.js';
 
@@ -407,6 +408,23 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
     };
     let runAdmission: AxTrajectoryAdmissionReport | undefined;
     let admissionCeilingFired = false;
+    /**
+     * Per-row admitted mask for a completed evaluation, positionally parallel
+     * to `AxGEPABatchEvaluation.scalars`. `undefined` when no classifier ran,
+     * which is what keeps every legacy comparison character-identical.
+     */
+    const admittedMask = (
+      evaluation: Readonly<AxGEPABatchEvaluation>
+    ): readonly boolean[] | undefined => {
+      if (!evaluation.admittedIndices) return undefined;
+      const admitted = new Set(evaluation.admittedIndices);
+      return evaluation.scalars.map((_, index) => admitted.has(index));
+    };
+    const sumOverIndices = (
+      indices: readonly number[],
+      scalars: readonly number[]
+    ): number =>
+      indices.reduce((total, index) => total + (scalars[index] ?? 0), 0);
     const lineageEnabled =
       lineageInput === true ||
       (typeof lineageInput === 'object' && lineageInput !== null);
@@ -618,6 +636,15 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
     ];
 
     const perInstanceScores: number[][] = [baseEval.scalars];
+    /**
+     * Kept in lockstep with `perInstanceScores`. The merge gate compares a
+     * fresh subsample evaluation against these CACHED per-instance scores, so
+     * without a matching admitted mask the two sides of that comparison can sit
+     * on different denominators.
+     */
+    const perInstanceAdmitted: (readonly boolean[] | undefined)[] = [
+      admittedMask(baseEval),
+    ];
 
     optLogger?.({
       name: 'OptimizationStart',
@@ -1043,9 +1070,47 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
             continue;
           }
 
-          const newSum = mergeEval.sum;
-          const id1Sum = idxs.reduce((sum, z) => sum + (s1[z] ?? 0), 0);
-          const id2Sum = idxs.reduce((sum, z) => sum + (s2[z] ?? 0), 0);
+          // GATE 2 (system merge). Its denominator is the subsample positions
+          // admitted by the fresh merge evaluation AND by both parents' cached
+          // validation evaluations. Without the intersection, dropping k rows
+          // from one side lowers only that side's raw total and the merge is
+          // decided by whichever evaluation a flaky provider hit hardest.
+          // With no classifier every mask is absent, `mergeComparisonPositions`
+          // is `0..idxs.length-1` in order, and all three sums reduce in the
+          // same order from the same seed as before — character-identical.
+          const mergeComparisonPositions: readonly number[] =
+            mergeEval.admittedIndices === undefined
+              ? idxs.map((_, position) => position)
+              : (() => {
+                  const positionByIndex = new Map(
+                    idxs.map((z, position) => [z, position] as const)
+                  );
+                  const admittedParetoIndices = (
+                    mask: readonly boolean[] | undefined
+                  ): readonly number[] =>
+                    mask ? idxs.filter((z) => mask[z] === true) : idxs;
+                  return axPairedAdmittedIndices(
+                    axPairedAdmittedIndices(
+                      mergeEval.admittedIndices.map(
+                        (position) => idxs[position]!
+                      ),
+                      admittedParetoIndices(perInstanceAdmitted[i])
+                    ),
+                    admittedParetoIndices(perInstanceAdmitted[j])
+                  ).map((z) => positionByIndex.get(z)!);
+                })();
+          const newSum = mergeComparisonPositions.reduce(
+            (sum, position) => sum + (mergeEval.scalars[position] ?? 0),
+            0
+          );
+          const id1Sum = mergeComparisonPositions.reduce(
+            (sum, position) => sum + (s1[idxs[position]!] ?? 0),
+            0
+          );
+          const id2Sum = mergeComparisonPositions.reduce(
+            (sum, position) => sum + (s2[idxs[position]!] ?? 0),
+            0
+          );
 
           if (
             newSum >=
@@ -1108,6 +1173,7 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
               scores: childEval.avg,
             });
             perInstanceScores.push(childEval.scalars);
+            perInstanceAdmitted.push(admittedMask(childEval));
             const beforeSize = archive.length;
             const hvBefore =
               hypervolume2D(archive.map((idx) => candidates[idx]!.scores)) ?? 0;
@@ -1471,8 +1537,29 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
         break;
       }
 
+      // GATE 1 (reflective mutation). Parent and child are two separate
+      // evaluations of the same minibatch, so they can discard different rows.
+      // `sum` is a raw total: comparing each side's own admitted total means
+      // dropping k rows from the parent lowers the parent's number while
+      // leaving the child's untouched, and the child gets promoted for it.
+      // Intersecting first gives both sides the same denominator by
+      // construction. With no classifier both `admittedIndices` are absent and
+      // this is the untouched `childMiniEval.sum > parentMiniEval.sum + t`.
+      const pairedMinibatchIndices =
+        parentMiniEval.admittedIndices && childMiniEval.admittedIndices
+          ? axPairedAdmittedIndices(
+              parentMiniEval.admittedIndices,
+              childMiniEval.admittedIndices
+            )
+          : undefined;
+      const parentComparisonSum = pairedMinibatchIndices
+        ? sumOverIndices(pairedMinibatchIndices, parentMiniEval.scalars)
+        : parentMiniEval.sum;
+      const childComparisonSum = pairedMinibatchIndices
+        ? sumOverIndices(pairedMinibatchIndices, childMiniEval.scalars)
+        : childMiniEval.sum;
       const accepted =
-        childMiniEval.sum > parentMiniEval.sum + this.minImprovementThreshold;
+        childComparisonSum > parentComparisonSum + this.minImprovementThreshold;
 
       this.currentRound = t + 1;
       const serializableCompileOptions = (() => {
@@ -1548,7 +1635,7 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
           componentSelector.recordResult(groupTarget.id, false, t);
         }
         verboseLog(
-          `Iteration ${t + 1}: Rejected (child=${childMiniEval.sum.toFixed(3)} <= parent=${parentMiniEval.sum.toFixed(3)})`
+          `Iteration ${t + 1}: Rejected (child=${childComparisonSum.toFixed(3)} <= parent=${parentComparisonSum.toFixed(3)})`
         );
         recordCandidate?.(() => {
           const delta = buildGEPACandidateComponentDelta(
@@ -1589,7 +1676,7 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       }
 
       verboseLog(
-        `Iteration ${t + 1}: Accepted (child=${childMiniEval.sum.toFixed(3)} > parent=${parentMiniEval.sum.toFixed(3)})`
+        `Iteration ${t + 1}: Accepted (child=${childComparisonSum.toFixed(3)} > parent=${parentComparisonSum.toFixed(3)})`
       );
       for (const groupTarget of targetGroup) {
         componentSelector.recordResult(groupTarget.id, true, t);
@@ -1646,6 +1733,7 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
         scores: childEval.avg,
       });
       perInstanceScores.push(childEval.scalars);
+      perInstanceAdmitted.push(admittedMask(childEval));
 
       const beforeSize = archive.length;
       const hvBefore =
