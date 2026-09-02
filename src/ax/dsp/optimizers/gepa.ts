@@ -13,6 +13,7 @@ import {
   AxOptimizedProgramImpl,
   type AxParetoResult,
 } from '../optimizer.js';
+import type { AxGEPARunAdmissionReport } from '../optimizerTypes.js';
 import { ax } from '../template.js';
 import type { AxGenOut, AxProgrammable } from '../types.js';
 import type { AxGEPAAdapter } from './gepaAdapter.js';
@@ -64,6 +65,7 @@ import {
   type AxTaskDiscriminationSummary,
   type AxTaskInclusion,
   type AxTaskInclusionSnapshot,
+  type AxTaskStatPhase,
   type AxTaskStatTable,
   axComputeInclusionProbabilities,
   axCreateTaskStatTable,
@@ -431,11 +433,14 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
     };
     const minibatchStrategy =
       ownDataOption<AxMinibatchStrategy>('minibatchStrategy') ?? 'uniform';
+    // Read unconditionally so the "supplied but ignored" case can be reported
+    // instead of silently dropped. Reading an own data property is not
+    // observable in any artifact, event or draw sequence.
+    const taskDiscriminationInput =
+      ownDataOption<AxTaskDiscriminationOptions>('taskDiscrimination');
     const discriminationOptions =
       minibatchStrategy === 'discriminative'
-        ? axResolveTaskDiscriminationOptions(
-            ownDataOption<AxTaskDiscriminationOptions>('taskDiscrimination')
-          )
+        ? axResolveTaskDiscriminationOptions(taskDiscriminationInput)
         : undefined;
     // The sampler only replaces the MINIBATCH draw, so it is inert when GEPA is
     // evaluating the whole feedback set every round.
@@ -458,6 +463,17 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
     let discriminativeIterations = 0;
     let announcedEstimator = false;
     let runAdmission: AxTrajectoryAdmissionReport | undefined;
+    /**
+     * `inconclusive` is a PER-BATCH verdict, and the run-level fold of it is an
+     * OR, so it is republished under a name that says so rather than telling a
+     * reader the whole run was inconclusive because one batch was.
+     */
+    const runAdmissionReport = (
+      report: Readonly<AxTrajectoryAdmissionReport>
+    ): AxGEPARunAdmissionReport => {
+      const { inconclusive, ...rest } = report;
+      return { ...rest, anyBatchInconclusive: inconclusive };
+    };
     let admissionCeilingFired = false;
     /**
      * Per-row admitted mask for a completed evaluation, positionally parallel
@@ -543,18 +559,27 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
      */
     const recordTaskStats = (
       evaluation: Readonly<AxGEPABatchEvaluation>,
-      iteration: number
+      iteration: number,
+      // Typed to the two phases §7.2 allows, so a future call site from a merge
+      // subsample, a merge validation, the seed evaluation or a Pareto
+      // evaluation does not compile.
+      phase: AxTaskStatPhase
     ): void => {
       if (!statTable || !evaluation.exampleIndices) return;
       const admitted = evaluation.admittedIndices
         ? new Set(evaluation.admittedIndices)
         : undefined;
+      let recorded = 0;
       for (const [rowIndex, scalar] of evaluation.scalars.entries()) {
         if (admitted && !admitted.has(rowIndex)) continue;
         const taskIndex = evaluation.exampleIndices[rowIndex];
         if (taskIndex === undefined) continue;
         statTable.record(taskIndex, scalar, iteration);
+        recorded += 1;
       }
+      verboseLog(
+        `task statistics: recorded ${recorded} of ${evaluation.scalars.length} rows from ${phase}`
+      );
     };
 
     const buildDiscriminationSummary = ():
@@ -688,6 +713,11 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
     if (discriminationOptions && !this.minibatch) {
       verboseLog(
         "minibatchStrategy: 'discriminative' was requested but minibatch is off, so every round already evaluates the whole feedback set and there is nothing to sample; the strategy is inert and no discrimination summary is emitted"
+      );
+    }
+    if (taskDiscriminationInput !== undefined && !discriminationOptions) {
+      verboseLog(
+        `taskDiscrimination was supplied but minibatchStrategy is '${minibatchStrategy}', so the sampler that reads it never runs and every one of its settings is ignored`
       );
     }
     if (
@@ -1293,6 +1323,11 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
             continue;
           }
 
+          // The run has already been declared unpublishable, and the accept
+          // branch below spends a full validation evaluation over the Pareto
+          // set. Stop here rather than at the next round's checkpoint.
+          if (admissionCeilingFired) break;
+
           // GATE 2 (system merge). Its denominator is the subsample positions
           // admitted by the fresh merge evaluation AND by both parents' cached
           // validation evaluations. Without the intersection, dropping k rows
@@ -1546,7 +1581,7 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
         }
         break;
       }
-      recordTaskStats(parentMiniEval, t);
+      recordTaskStats(parentMiniEval, t, 'parent_minibatch');
       if (admissionCeilingFired) break;
       // Too few admitted rows means the batch cannot decide anything. No
       // candidate has been proposed yet at this point, so the round is skipped
@@ -1755,7 +1790,7 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
         }
         break;
       }
-      recordTaskStats(childMiniEval, t);
+      recordTaskStats(childMiniEval, t, 'child_minibatch');
       mutationEvaluations?.push(
         candidateEvaluation!(
           'child_minibatch',
@@ -1841,7 +1876,9 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
           runAdmission || draw
             ? {
                 ...(draw ? { inclusionSnapshot: draw.snapshot } : {}),
-                ...(runAdmission ? { admission: runAdmission } : {}),
+                ...(runAdmission
+                  ? { admission: runAdmissionReport(runAdmission) }
+                  : {}),
               }
             : undefined
         );
@@ -2232,7 +2269,9 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
                 },
           totalCalls: this.stats.totalCalls,
           stats: this.stats,
-          ...(runAdmission ? { admission: runAdmission } : {}),
+          ...(runAdmission
+            ? { admission: runAdmissionReport(runAdmission) }
+            : {}),
           ...(discriminationSummary
             ? { discrimination: discriminationSummary }
             : {}),

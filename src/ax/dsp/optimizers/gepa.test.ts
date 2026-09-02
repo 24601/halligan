@@ -804,11 +804,13 @@ describe('AxGEPA Optimizer', () => {
 
       // One own-descriptor read per opt-in option reached on the default path:
       // candidateLineage, abortSignal, trajectoryTermination,
-      // minibatchStrategy. `taskDiscrimination` is read only once the strategy
-      // is 'discriminative', so it does not appear here. This count is the
-      // tripwire that a new option was added without being routed through
-      // `ownDataOption`.
-      expect(descriptorCalls).toBe(4);
+      // minibatchStrategy and taskDiscrimination. The last is read even on the
+      // uniform path so that supplying it without the strategy that consumes it
+      // can be REPORTED rather than silently ignored; reading an own data
+      // property is not observable in any artifact, event or draw sequence.
+      // This count is the tripwire that a new option was added without being
+      // routed through `ownDataOption`.
+      expect(descriptorCalls).toBe(5);
       expect(result.optimizedProgram?.candidateLineage).toBeUndefined();
     });
 
@@ -1562,6 +1564,49 @@ describe('AxGEPA trajectory admission', () => {
     expect(rounds[0].value.configuration.decision).toBe('aborted');
     expect(rounds[0].value.round).toBe(1);
     expect(rounds[0].value.admission.discardedRows).toBeGreaterThan(0);
+
+    // The per-batch verdict is not republished under its own name at run
+    // level: this run HAS an inconclusive batch, but "the run is
+    // inconclusive" is a different and unsupported claim.
+    const complete = events.find((e) => e.name === 'OptimizationComplete');
+    expect(complete.value.admission.anyBatchInconclusive).toBe(true);
+    expect('inconclusive' in complete.value.admission).toBe(false);
+    expect('inconclusive' in rounds[0].value.admission).toBe(false);
+  });
+
+  it('reports no inconclusive batch when every batch cleared the floor', async () => {
+    const { events } = await runOptimizer({
+      examples: [{ i: 0 }, { i: 1 }, { i: 2 }, { i: 3 }],
+      forward: (_instruction, example) => {
+        if (example.i === 3) throw new Error('provider 429');
+        return { score: 0.5 };
+      },
+      compile: { trajectoryTermination: { classifier: discardEveryFailure } },
+    });
+
+    const complete = events.find((e) => e.name === 'OptimizationComplete');
+    expect(complete.value.admission.discardedRows).toBeGreaterThan(0);
+    expect(complete.value.admission.anyBatchInconclusive).toBe(false);
+  });
+
+  it('ends the run when the host classifier throws, rather than admitting the row', async () => {
+    // The classifier is called outside the per-row try/catch that turns a
+    // failing rollout into a zero row, so it fails closed: a run whose
+    // admission verdicts are unreliable must not silently fall back to
+    // admitting everything, which is the lax direction.
+    await expect(
+      runOptimizer({
+        examples: [{ i: 0 }, { i: 1 }, { i: 2 }, { i: 3 }],
+        forward: () => ({ score: 0.5 }),
+        compile: {
+          trajectoryTermination: {
+            classifier: () => {
+              throw new Error('host classifier is broken');
+            },
+          },
+        },
+      })
+    ).rejects.toThrow('host classifier is broken');
   });
 
   it('ends the run and publishes no best score above the run discard ceiling', async () => {
@@ -2192,6 +2237,40 @@ describe('AxGEPA discriminative minibatch selection', () => {
     );
     return { result, events };
   };
+
+  it('says so when taskDiscrimination is supplied without the strategy that reads it', async () => {
+    const logs: string[] = [];
+    const spy = console.log;
+    console.log = (message?: unknown) => {
+      logs.push(String(message));
+    };
+    try {
+      const optimizer = new AxGEPA({
+        studentAI: {} as AxAIService,
+        teacherAI: {} as AxAIService,
+        numTrials: 1,
+        minibatch: true,
+        minibatchSize: 2,
+        mergeMax: 0,
+      } as any);
+      (optimizer as any).reflectTargetInstruction = async () => 'better';
+      await optimizer.compile(
+        buildDiscriminatingFixture() as any,
+        Array.from({ length: 4 }, (_, index) => ({ index })) as any,
+        async ({ prediction }: any) => prediction.score,
+        {
+          maxMetricCalls: 100,
+          verbose: true,
+          taskDiscrimination: { explorationFloor: 0.3 },
+        } as any
+      );
+    } finally {
+      console.log = spy;
+    }
+    expect(
+      logs.some((line) => line.includes('taskDiscrimination was supplied'))
+    ).toBe(true);
+  });
 
   it('draws no inclusion snapshot and reports no summary under the default strategy', async () => {
     const { events } = await run({ numTrials: 2 });

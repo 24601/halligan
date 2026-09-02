@@ -145,6 +145,16 @@ export function axClassifyTrajectory(
 }
 
 export interface AxTrajectoryAdmissionOptions {
+  /**
+   * Host-owned verdict on why each rollout ended.
+   *
+   * FAILS CLOSED: it is invoked OUTSIDE the per-row `try/catch` that scores a
+   * failing rollout as zero, so a classifier that throws propagates out of
+   * `compile()` and ends the run. That asymmetry with `metricFn` is
+   * deliberate — this function decides which evidence counts, and a run whose
+   * admission verdicts are unreliable must not quietly fall back to admitting
+   * everything, which is the lax direction.
+   */
   readonly classifier?: AxTrajectoryTerminationClassifier;
   /**
    * Minimum admitted fraction of a batch before its result may decide a

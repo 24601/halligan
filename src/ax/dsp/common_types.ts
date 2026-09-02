@@ -227,7 +227,11 @@ export interface AxCompileOptions {
    * whose meaning never changes) and the run reports its discard rate. Ax
    * never infers an environment failure, and it overrides one on rows whose
    * candidate carries a `program-source` component or whose config failed to
-   * validate.
+   * validate — so a program declaring a `program-source` component admits
+   * nothing at all, and GEPA logs one line saying so.
+   *
+   * The classifier fails closed: unlike `metricFn`, a classifier that throws
+   * is not scored as a zero row, it ends the run.
    */
   trajectoryTermination?: AxTrajectoryAdmissionOptions;
   /**

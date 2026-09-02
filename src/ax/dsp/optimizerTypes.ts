@@ -5,6 +5,23 @@ import type {
 } from './optimizers/taskDiscrimination.js';
 import type { AxTrajectoryAdmissionReport } from './optimizers/trajectoryTermination.js';
 
+/**
+ * Whole-run admission accounting: the fold of every batch's report.
+ *
+ * `AxTrajectoryAdmissionReport.inconclusive` is a PER-BATCH verdict — "this
+ * batch admitted too few rows to decide anything" — and the run-level fold of
+ * it is an OR. Publishing that under the same name would tell a reader the RUN
+ * was inconclusive because one batch out of forty was, so the folded value
+ * travels under its own name and the per-batch name is not reused.
+ */
+export type AxGEPARunAdmissionReport = Omit<
+  AxTrajectoryAdmissionReport,
+  'inconclusive'
+> & {
+  /** True when AT LEAST ONE batch in the run was inconclusive. */
+  readonly anyBatchInconclusive: boolean;
+};
+
 // Optimizer logging types
 export type AxOptimizerLoggerData =
   | {
@@ -28,7 +45,7 @@ export type AxOptimizerLoggerData =
          * GEPA only, and only when a trajectory-termination classifier was
          * supplied. Cumulative run-level admission at the end of this round.
          */
-        admission?: AxTrajectoryAdmissionReport;
+        admission?: AxGEPARunAdmissionReport;
         /**
          * GEPA only, and only under `minibatchStrategy: 'discriminative'`.
          * The inclusion probabilities this round's minibatch was drawn from.
@@ -60,7 +77,7 @@ export type AxOptimizerLoggerData =
          * GEPA only, and only when a trajectory-termination classifier was
          * supplied. Whole-run admission accounting.
          */
-        admission?: AxTrajectoryAdmissionReport;
+        admission?: AxGEPARunAdmissionReport;
         /**
          * GEPA only, and only under `minibatchStrategy: 'discriminative'`.
          * Bounded run-level sampler report.
