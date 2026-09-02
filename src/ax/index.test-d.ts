@@ -1245,6 +1245,12 @@ type BenchRowIsNotPublic =
 const benchRowIsNotPublic: BenchRowIsNotPublic | undefined = undefined;
 void benchRowIsNotPublic;
 
+type PromptGrowthIsNotPublic =
+  // @ts-expect-error the package root must not export the benchmark slope helper
+  typeof import('./index.js').axWorkingStatePromptGrowth;
+const promptGrowthIsNotPublic: PromptGrowthIsNotPublic | undefined = undefined;
+void promptGrowthIsNotPublic;
+
 type ScriptTurnIsNotPublic =
   // @ts-expect-error the package root must not export the scripted-mock turn type
   import('./index.js').AxWorkingStateScriptTurn;

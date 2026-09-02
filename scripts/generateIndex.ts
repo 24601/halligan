@@ -88,6 +88,8 @@ const internalExportNames = new Set([
   'AxWorkingStatePromptMeter',
   'AxWorkingStateScenarioResult',
   'axWorkingStatePromptOverhead',
+  'axWorkingStatePromptGrowth',
+
   // Test-only offline harness for the working-state loop tests.
   'AxWorkingStateScript',
   'axCreateEvaluatingRuntime',
