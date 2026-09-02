@@ -400,6 +400,24 @@ import {
   axRuntimePrimitives,
 } from './agent/runtimePrimitives.js';
 import {
+  type AxAgentActorSkillView,
+  type AxAgentSkillEligibility,
+  type AxAgentSkillEnvironment,
+  type AxAgentSkillIndexEntry,
+  type AxAgentSkillRequirementFailure,
+  type AxAgentSkillRequirements,
+  type AxAgentSkillSelection,
+  type AxAgentSkillSelectionOptions,
+  type AxAgentSkillTier,
+  axActorSkillView,
+  axCheckSkillRequirements,
+  axDemoteSkill,
+  axEligibleCatalogSkills,
+  axEstimateSkillTokens,
+  axPromoteSkill,
+  axSelectCatalogSkills,
+} from './agent/skillCatalog.js';
+import {
   type AxAgentRailDiagnostic,
   type AxAgentRailOutcome,
   type AxAgentSkillCostProfile,
@@ -2528,6 +2546,7 @@ export { axAIProviderProfileIds };
 export { axAIProviderProfiles };
 export { axAIWebLLMCreativeConfig };
 export { axAIWebLLMDefaultConfig };
+export { axActorSkillView };
 export { axAnalyzeChatPromptRequirements };
 export { axAnalyzeRequestRequirements };
 export { axApplyEventEffectTransition };
@@ -2556,6 +2575,7 @@ export { axBuildResponderDefinition };
 export { axBuildTrajectoryRollups };
 export { axCanonicalizeCausalCandidateEvidenceManifest };
 export { axCheckMetricsHealth };
+export { axCheckSkillRequirements };
 export { axClassifyAxServiceTermination };
 export { axClassifyTrajectory };
 export { axCloneCausalCandidateEvidenceManifest };
@@ -2599,11 +2619,14 @@ export { axDefaultTrajectorySpillPolicy };
 export { axDefaultTrajectoryTermination };
 export { axDefaultTrajectoryTypes };
 export { axDemandEventObserver };
+export { axDemoteSkill };
 export { axDeserializeOptimizedProgram };
 export { axDeterministicTrajectorySummarizer };
 export { axDigestStrength };
+export { axEligibleCatalogSkills };
 export { axEmitUsageEvent };
 export { axErasePreferenceEvidence };
+export { axEstimateSkillTokens };
 export { axEvaluateGuards };
 export { axEventCanonicalDigest };
 export { axEventCanonicalJson };
@@ -2786,6 +2809,7 @@ export { axProgramSourceRuntimeProtocol };
 export { axProgramSourceVersion };
 export { axProjectActorPlaybook };
 export { axProjectTrajectory };
+export { axPromoteSkill };
 export { axReactCanonicalJSON };
 export { axReactSerializeHistory };
 export { axRecheckSkillProvenance };
@@ -2828,6 +2852,7 @@ export { axRuntimeProtocolFromToken };
 export { axSampleByInclusion };
 export { axScoreProvidersForRequest };
 export { axScoreWindowProcessor };
+export { axSelectCatalogSkills };
 export { axSelectCodeRuntime };
 export { axSelectExecutableSkills };
 export { axSelectMindSkills };
@@ -3142,6 +3167,7 @@ export type { AxAPI };
 export type { AxAPIConfig };
 export type { AxAPIResponseMetadata };
 export type { AxActor };
+export type { AxAgentActorSkillView };
 export type { AxAgentActorTurnCallback };
 export type { AxAgentActorTurnCallbackArgs };
 export type { AxAgentAutoPromotionRecord };
@@ -3323,10 +3349,18 @@ export type { AxAgentSessionUsage };
 export type { AxAgentSkillCostCallback };
 export type { AxAgentSkillCostProfile };
 export type { AxAgentSkillCostSample };
+export type { AxAgentSkillEligibility };
+export type { AxAgentSkillEnvironment };
+export type { AxAgentSkillIndexEntry };
 export type { AxAgentSkillPolicy };
 export type { AxAgentSkillProvenanceAccumulator };
 export type { AxAgentSkillRankingWeights };
+export type { AxAgentSkillRequirementFailure };
+export type { AxAgentSkillRequirements };
 export type { AxAgentSkillResult };
+export type { AxAgentSkillSelection };
+export type { AxAgentSkillSelectionOptions };
+export type { AxAgentSkillTier };
 export type { AxAgentSkillsPromptState };
 export type { AxAgentSkillsSearchFn };
 export type { AxAgentStagePolicy };

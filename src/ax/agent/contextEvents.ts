@@ -78,6 +78,34 @@ export type AxAgentContextEvent =
    * plus a `contextMetadata` entry.
    */
   /**
+   * Emitted once per run per skill whose recorded authority no longer holds.
+   * Carries failure KINDS and COUNTS only — never an id, a value, or a
+   * resource name.
+   */
+  | {
+      kind: 'skill_precondition';
+      stage: AxAgentContextStage;
+      skillId: string;
+      outcome: import('../authority/skillProvenance.js').AxSkillPreconditionOutcome;
+      failures: readonly {
+        kind: import('../authority/skillProvenance.js').AxSkillPreconditionFailureKind;
+        count: number;
+      }[];
+    }
+  /**
+   * Emitted once per run when a catalog skill was hidden by `requires` gating
+   * or demoted out of the kernel by the token budget. An ineligible skill is
+   * visible here and nowhere else.
+   */
+  | {
+      kind: 'skill_eligibility';
+      stage: AxAgentContextStage;
+      hidden: readonly { id: string; unmet: readonly string[] }[];
+      kernelTokensUsed: number;
+      kernelTokenBudget: number;
+      overflow: readonly string[];
+    }
+  /**
    * Emitted whenever the deterministic verification budget advances or a rail
    * is disabled. The budget is runtime-counted and NEVER stated in a prompt; a
    * host escalates by handling this event.

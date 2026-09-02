@@ -11,6 +11,7 @@ import {
   getRuntimePrimitiveOverrides,
 } from '../rlm.js';
 import { compareCanonicalDiscoveryStrings } from '../runtimeDiscovery.js';
+import { axEligibleCatalogSkills } from '../skillCatalog.js';
 import { type AxAgentStagePolicy, resolveStagePolicy } from './stagePolicy.js';
 import type {
   AxLlmQueryPromptMode,
@@ -326,13 +327,14 @@ export function buildSplitPrograms(self: any): void {
     hasAgentStatusCallback: Boolean(s.agentStatusCallback),
     discoveryMode: s.functionDiscoveryEnabled,
     relevanceHintsMode: s.relevanceHintsEnabled === true,
-    skillsCatalog: (s.skillsCatalog ?? []).map(
-      (skill: { id: string; name: string; description?: string }) => ({
-        id: skill.id,
-        name: skill.name,
-        ...(skill.description ? { description: skill.description } : {}),
-      })
-    ),
+    skillsCatalog: axEligibleCatalogSkills(
+      s.skillsCatalog ?? [],
+      s.skillPolicy?.environment
+    ).map((skill: { id: string; name: string; description?: string }) => ({
+      id: skill.id,
+      name: skill.name,
+      ...(skill.description ? { description: skill.description } : {}),
+    })),
     skillsMode:
       typeof s.onSkillsSearch === 'function' ||
       s.skillUsageTrackingEnabled === true ||

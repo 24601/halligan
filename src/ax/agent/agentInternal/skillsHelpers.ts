@@ -1,4 +1,11 @@
 import type { AxAgentContextStage } from '../contextEvents.js';
+import type { AxAgentSkillEnvironment } from '../skillCatalog.js';
+import { axEligibleCatalogSkills } from '../skillCatalog.js';
+import type {
+  AxAgentSkillCostProfile,
+  AxAgentSkillRankingWeights,
+} from '../skillCost.js';
+import { axSkillValueScore } from '../skillCost.js';
 import type { AxMutableSkillsPromptState } from './agentInternalTypes.js';
 import type { AxAgentSkillsPromptState } from './agentStateTypes.js';
 import { rankDocuments } from './relevanceRanker.js';
@@ -71,17 +78,26 @@ export function serializeSkillsPromptState(
   return { loaded };
 }
 
+/**
+ * `resolveAdvisory` is how a downgraded skill gets its annotation without the
+ * annotation ever being stored: it is recomputed here on every render from the
+ * catalog's provenance and the current authority snapshot, so it cannot arrive
+ * through `agent.setState()` and it does not change the serialized state shape.
+ */
 export function renderSkillsPromptMarkdown(
-  state: Readonly<AxMutableSkillsPromptState>
+  state: Readonly<AxMutableSkillsPromptState>,
+  resolveAdvisory?: (id: string) => string | undefined
 ): string | undefined {
   if (state.loaded.size === 0) {
     return undefined;
   }
   const blocks = [...state.loaded.values()]
     .sort((left, right) => left.id.localeCompare(right.id))
-    .map(
-      ({ id, name, content }) => `### ${name}\n\nID: \`${id}\`\n\n${content}`
-    );
+    .map(({ id, name, content }) => {
+      const advisory = resolveAdvisory?.(id);
+      const body = advisory ? `${advisory}\n\n${content}` : content;
+      return `### ${name}\n\nID: \`${id}\`\n\n${body}`;
+    });
   return blocks.join('\n\n');
 }
 
@@ -112,9 +128,13 @@ const SKILLS_CATALOG_RANK_CONTENT_CHARS = 600;
  * `loadedSkills` prompt field stays byte-stable for identical skill sets.
  */
 export function createCatalogSkillsSearch(
-  catalog: readonly AxAgentCatalogSkill[]
+  catalog: readonly AxAgentCatalogSkill[],
+  environment?: Readonly<AxAgentSkillEnvironment>
 ): AxAgentSkillsSearchFn {
-  const docs = catalog.map((skill) => ({
+  // An ineligible skill is hidden from `discover({ skills })` too, not only
+  // from the kernel and the Available Skills index.
+  const eligible = axEligibleCatalogSkills(catalog, environment);
+  const docs = eligible.map((skill) => ({
     id: skill.id,
     fields: [
       { text: skill.id, identifier: true },
@@ -123,7 +143,7 @@ export function createCatalogSkillsSearch(
       { text: skill.content.slice(0, SKILLS_CATALOG_RANK_CONTENT_CHARS) },
     ],
   }));
-  const byId = new Map(catalog.map((skill) => [skill.id, skill]));
+  const byId = new Map(eligible.map((skill) => [skill.id, skill]));
   return (searches: readonly string[]): AxAgentSkillResult[] => {
     const matchedIds: string[] = [];
     for (const search of searches) {
@@ -153,9 +173,16 @@ export function createCatalogSkillsSearch(
 export function rankCatalogSkills(
   task: string,
   catalog: readonly AxAgentCatalogSkill[],
-  opts?: Readonly<{ topK?: number; minScore?: number }>
+  opts?: Readonly<{
+    topK?: number;
+    minScore?: number;
+    environment?: Readonly<AxAgentSkillEnvironment>;
+    costProfiles?: readonly Readonly<AxAgentSkillCostProfile>[];
+    weights?: Readonly<AxAgentSkillRankingWeights>;
+  }>
 ): { id: string; name: string; score: number }[] {
-  const docs = catalog.map((skill) => ({
+  const eligible = axEligibleCatalogSkills(catalog, opts?.environment);
+  const docs = eligible.map((skill) => ({
     id: skill.id,
     fields: [
       { text: skill.id, identifier: true },
@@ -164,12 +191,22 @@ export function rankCatalogSkills(
       { text: skill.content.slice(0, SKILLS_CATALOG_RANK_CONTENT_CHARS) },
     ],
   }));
-  const nameById = new Map(catalog.map((skill) => [skill.id, skill.name]));
-  return rankDocuments(task, docs, opts).map((r) => ({
+  const nameById = new Map(eligible.map((skill) => [skill.id, skill.name]));
+  const profiles = opts?.costProfiles
+    ? new Map(opts.costProfiles.map((profile) => [profile.id, profile]))
+    : undefined;
+  const ranked = rankDocuments(task, docs, opts).map((r) => ({
     id: r.id,
     name: nameById.get(r.id) ?? r.id,
-    score: r.score,
+    // With no profile the value score is a positive constant multiple of the
+    // similarity, so ranking order is provably unchanged.
+    score: profiles
+      ? axSkillValueScore(r.score, profiles.get(r.id), opts?.weights)
+      : r.score,
   }));
+  return profiles
+    ? ranked.sort((left, right) => right.score - left.score)
+    : ranked;
 }
 
 export function normalizeSkillsInput(input: unknown): string[] {

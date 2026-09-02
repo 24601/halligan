@@ -11,6 +11,16 @@ export type AxAgentSkillResult = {
   name: string;
   /** Opaque markdown body (frontmatter, if any, is not parsed). */
   content: string;
+  /**
+   * Retrieval-time advisory for a downgraded skill. IN-MEMORY ONLY:
+   * `serializeSkillsPromptState` does not write it and `normalizeSkillEntry`
+   * does not read it, so the cross-language `AxAgentSkillsPromptState` shape is
+   * untouched. After a state restore the advisory is re-derived at render time
+   * from the catalog's provenance and the current authority snapshot — which is
+   * also what keeps `agent.setState()` from injecting free text into the Loaded
+   * Skills prompt section.
+   */
+  advisory?: string;
 };
 
 /**
@@ -29,6 +39,18 @@ export type AxAgentCatalogSkill = {
   description?: string;
   /** Full markdown body returned when the skill is loaded. */
   content: string;
+  /** `'kernel'` is always loaded within the token budget. Default `'indexed'`. */
+  tier?: import('../skillCatalog.js').AxAgentSkillTier;
+  /** Eligibility gating. An ineligible skill is hidden, with a diagnosis. */
+  requires?: import('../skillCatalog.js').AxAgentSkillRequirements;
+  /** Overrides the 4-chars-per-token estimate for kernel budgeting. */
+  tokenEstimate?: number;
+  /**
+   * Authority facts of the trajectory this skill was distilled from. Named to
+   * match `AxACEBulletEvidence.authorityProvenance` and
+   * `AxExecutableSkillArtifact.authorityProvenance` — one concept, one name.
+   */
+  authorityProvenance?: import('../../authority/skillProvenance.js').AxSkillProvenance;
 };
 
 export type AxAgentSkillsSearchFn = (
@@ -63,6 +85,9 @@ export type AxAgentUsedSkill = {
  * the prompt cache. A host whose environment changed constructs a new agent.
  */
 export type AxAgentSkillPolicy = Readonly<{
+  environment?: Readonly<import('../skillCatalog.js').AxAgentSkillEnvironment>;
+  kernelTokenBudget?: number;
+  ranking?: Readonly<import('../skillCost.js').AxAgentSkillRankingWeights>;
   costProfiles?: readonly Readonly<AxAgentSkillCostProfile>[];
   precondition?: Readonly<
     import('../../authority/skillProvenance.js').AxSkillPreconditionPolicy

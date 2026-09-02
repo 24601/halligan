@@ -15,6 +15,10 @@ import {
   buildInternalSummaryRequestOptions,
   formatStructuredRuntimeState,
 } from '../runtime.js';
+import {
+  AX_DEFAULT_KERNEL_TOKEN_BUDGET,
+  axSelectCatalogSkills,
+} from '../skillCatalog.js';
 import type {
   AxAgentSkillCostProfile,
   AxAgentVerificationBudgetState,
@@ -227,6 +231,84 @@ export async function runActorLoop<IN extends AxGenIn>(
     s._verifierRailBinding = undefined;
   }
 
+  // Kernel tiering, eligibility gating, and the retrieval-time re-check for the
+  // catalog path. Computed once per run: the selection is deterministic for a
+  // fixed authority snapshot, and recomputing it per turn would churn the
+  // prompt for no new information.
+  s._skillAdvisoryResolver = undefined;
+  if (Array.isArray(s.skillsCatalog) && s.skillsCatalog.length > 0) {
+    const selectionNow = skillPolicy?.now
+      ? new Date(skillPolicy.now()).toISOString()
+      : undefined;
+    const selection = axSelectCatalogSkills(s.skillsCatalog, {
+      ...(skillPolicy?.environment
+        ? { environment: skillPolicy.environment }
+        : {}),
+      ...(skillPolicy?.kernelTokenBudget !== undefined
+        ? { kernelTokenBudget: skillPolicy.kernelTokenBudget }
+        : {}),
+      ...(skillPolicy?.ranking ? { ranking: skillPolicy.ranking } : {}),
+      ...(skillPolicy?.costProfiles
+        ? { costProfiles: skillPolicy.costProfiles }
+        : {}),
+      ...(skillPolicy?.authoritySnapshot
+        ? { authority: skillPolicy.authoritySnapshot }
+        : {}),
+      ...(skillPolicy?.precondition
+        ? { precondition: skillPolicy.precondition }
+        : {}),
+      ...(selectionNow ? { now: selectionNow } : {}),
+    });
+    // Kernel skills are seeded into the skills prompt STATE, never straight
+    // into the rendered values: `used(<kernelId>)` resolves through that map,
+    // and a kernel skill injected past it could never be declared used, would
+    // never accrue a use, and would sit permanently at the 0.5 prior.
+    if (selection.kernel.length > 0) {
+      ingestSkillResults(
+        s.currentSkillsPromptState,
+        selection.kernel.map(({ id, name, content }) => ({
+          id,
+          name,
+          content,
+        }))
+      );
+    }
+    // Derived at render, never stored (see `renderSkillsPromptMarkdown`).
+    const advisoryById = new Map(
+      selection.kernel
+        .filter((view) => view.advisory)
+        .map((view) => [view.id, view.advisory as string])
+    );
+    s._skillAdvisoryResolver =
+      advisoryById.size > 0 ? (id: string) => advisoryById.get(id) : undefined;
+    if (selection.hidden.length > 0 || selection.overflow.length > 0) {
+      await emitContextEvent(s.onContextEvent, {
+        kind: 'skill_eligibility',
+        stage: contextStage,
+        hidden: selection.hidden.map((entry) => ({
+          id: entry.id,
+          unmet: entry.unmet.flatMap((failure) => [...failure.missing]),
+        })),
+        kernelTokensUsed: selection.kernelTokensUsed,
+        kernelTokenBudget:
+          skillPolicy?.kernelTokenBudget ?? AX_DEFAULT_KERNEL_TOKEN_BUDGET,
+        overflow: selection.overflow.map((entry) => entry.id),
+      });
+    }
+    for (const decision of selection.decisions) {
+      await emitContextEvent(s.onContextEvent, {
+        kind: 'skill_precondition',
+        stage: contextStage,
+        skillId: decision.id,
+        outcome: decision.check.outcome,
+        failures: decision.check.failures.map((failure) => ({
+          kind: failure.kind,
+          count: failure.count,
+        })),
+      });
+    }
+  }
+
   // Forward-time preset skills are executor-ingested — except for a static
   // direct-respond agent, whose runs may end at the distiller: the distiller
   // ingests them there so respond-only runs still see call-time skills.
@@ -280,11 +362,16 @@ export async function runActorLoop<IN extends AxGenIn>(
       });
     }
     if (s.skillsHintEnabled) {
-      const rankedSkills = rankCatalogSkills(
-        rankTask,
-        s.skillsCatalog ?? [],
-        s.relevanceRankingOptions
-      );
+      const rankedSkills = rankCatalogSkills(rankTask, s.skillsCatalog ?? [], {
+        ...s.relevanceRankingOptions,
+        ...(skillPolicy?.environment
+          ? { environment: skillPolicy.environment }
+          : {}),
+        ...(skillPolicy?.costProfiles
+          ? { costProfiles: skillPolicy.costProfiles }
+          : {}),
+        ...(skillPolicy?.ranking ? { weights: skillPolicy.ranking } : {}),
+      });
       s._relevanceHintsForTurn.skills = rankedSkills;
       await emitContextEvent(s.onContextEvent, {
         kind: 'relevance_ranking',

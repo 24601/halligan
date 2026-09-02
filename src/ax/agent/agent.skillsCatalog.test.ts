@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { AxMockAIService } from '../ai/mock/api.js';
+import { axExtractSkillProvenance } from '../authority/skillProvenance.js';
 import {
   AX_HOST_SNIPPET_MARKER,
   AX_INPUTS_PATCH_GLOBAL,
@@ -7,6 +8,7 @@ import {
 import {
   createCatalogSkillsSearch,
   rankCatalogSkills,
+  serializeSkillsPromptState,
 } from './agentInternal/skillsHelpers.js';
 import type { AxAgentCatalogSkill } from './agentInternal/skillsTypes.js';
 import type { AxAgentContextEvent } from './contextEvents.js';
@@ -327,3 +329,224 @@ describe('skills catalog — end to end', () => {
     expect(first).toBe(second);
   });
 });
+
+// ----- Tiering, eligibility gating, and the retrieval-time re-check -----
+
+const GATED_CATALOG: AxAgentCatalogSkill[] = [
+  {
+    id: 'kernel-skill',
+    name: 'Kernel skill',
+    description: 'Always loaded',
+    content: 'Kernel guidance the actor always sees.',
+    tier: 'kernel',
+    tokenEstimate: 5,
+  },
+  {
+    id: 'gated-skill',
+    name: 'Gated skill',
+    description: 'Needs a binary this host does not have',
+    content: 'Gated guidance.',
+    requires: { bins: ['jq'] },
+  },
+  ...CATALOG,
+];
+
+describe('skills catalog — tiers, eligibility, and cost', () => {
+  it('seeds kernel skills into the prompt state so used(id) resolves', async () => {
+    // Injecting the kernel past `currentSkillsPromptState` would make every
+    // kernel skill permanently undeclarable, and therefore permanently stuck
+    // at the ranking prior.
+    const capture: ExecutorCapture = { systems: [], users: [] };
+    const mockAI = makeSkillsMockAI(capture);
+    const used: { id: string }[] = [];
+    const a = agent('query:string -> answer:string', {
+      ai: mockAI,
+      runtime: makeSkillsUsedRuntime('kernel-skill'),
+      skillsCatalog: GATED_CATALOG,
+      skillPolicy: { environment: { bins: [] } },
+      maxTurns: 4,
+      onUsedSkills: (skills: readonly { id: string }[]) => {
+        used.push(...skills);
+      },
+    } as never);
+
+    await a.forward(mockAI, { query: 'help me ship the release' });
+
+    expect(used.map((skill) => skill.id)).toContain('kernel-skill');
+    expect(capture.users[0] ?? '').toContain(
+      'Kernel guidance the actor always sees.'
+    );
+  });
+
+  it('hides an ineligible skill from the index and from discover({skills})', async () => {
+    const capture: ExecutorCapture = { systems: [], users: [] };
+    const mockAI = makeSkillsMockAI(capture);
+    const loaded: string[] = [];
+    const a = agent('query:string -> answer:string', {
+      ai: mockAI,
+      runtime: makeSkillsDiscoverRuntime('gated'),
+      skillsCatalog: GATED_CATALOG,
+      skillPolicy: { environment: { bins: [] } },
+      maxTurns: 4,
+      onLoadedSkills: (results: readonly { id?: string; name: string }[]) => {
+        loaded.push(...results.map((r) => r.id ?? r.name));
+      },
+    } as never);
+
+    await a.forward(mockAI, { query: 'gated' });
+
+    expect(capture.systems[0]).not.toContain('`gated-skill`');
+    expect(capture.systems[0]).toContain('`kernel-skill`');
+    expect(loaded).not.toContain('gated-skill');
+  });
+
+  it('emits a skill_eligibility event naming the missing token', async () => {
+    const events: AxAgentContextEvent[] = [];
+    const capture: ExecutorCapture = { systems: [], users: [] };
+    const mockAI = makeSkillsMockAI(capture);
+    const a = agent('query:string -> answer:string', {
+      ai: mockAI,
+      runtime: makeSkillsDiscoverRuntime('release'),
+      skillsCatalog: GATED_CATALOG,
+      skillPolicy: { environment: { bins: [] } },
+      maxTurns: 4,
+      onContextEvent: (event: AxAgentContextEvent) => {
+        events.push(event);
+      },
+    } as never);
+
+    await a.forward(mockAI, { query: 'help me ship the release' });
+
+    const eligibility = events.find(
+      (event) => event.kind === 'skill_eligibility'
+    );
+    if (eligibility?.kind !== 'skill_eligibility')
+      throw new Error('unreachable');
+    expect(eligibility.hidden).toEqual([{ id: 'gated-skill', unmet: ['jq'] }]);
+    expect(eligibility.kernelTokensUsed).toBe(5);
+  });
+
+  it('re-derives a downgraded skill advisory rather than storing it', async () => {
+    const provenance = axExtractSkillProvenance({
+      receipts: [
+        {
+          version: 1,
+          receiptId: 'r-1',
+          requestId: 'q-1',
+          decision: 'allow',
+          operation: 'files.read',
+          resource: { type: 'file', id: 'f-1' },
+          principalId: 'p-1',
+          actor: { id: 'a-1', kind: 'agent' },
+          grantIds: ['grant:held'],
+          leaseEpoch: 1,
+          authorizedAt: 1,
+        },
+      ],
+      leaseEpoch: 1,
+      capturedAt: '2026-01-01T00:00:00.000Z',
+    });
+    const capture: ExecutorCapture = { systems: [], users: [] };
+    const mockAI = makeSkillsMockAI(capture);
+    const events: AxAgentContextEvent[] = [];
+    const a = agent('query:string -> answer:string', {
+      ai: mockAI,
+      runtime: makeSkillsUsedRuntime('kernel-skill'),
+      skillsCatalog: [
+        { ...GATED_CATALOG[0]!, authorityProvenance: provenance },
+        ...CATALOG,
+      ],
+      skillPolicy: {
+        authoritySnapshot: { grantIds: [], leaseEpoch: 1 },
+        now: () => 0,
+      },
+      maxTurns: 4,
+      onContextEvent: (event: AxAgentContextEvent) => {
+        events.push(event);
+      },
+    } as never);
+
+    await a.forward(mockAI, { query: 'help me ship the release' });
+
+    expect(capture.users[0] ?? '').toContain('[advisory]');
+    expect(capture.users[0] ?? '').toContain('grant_revoked:1');
+    // The advisory is derived, so it is nowhere in the serialized skills
+    // state: the round-trip shape five generated packages restore is untouched.
+    const serialized = serializeSkillsPromptState(
+      (a as unknown as { executor: { currentSkillsPromptState: never } })
+        .executor.currentSkillsPromptState
+    );
+    expect(JSON.stringify(serialized ?? {})).not.toContain('advisory');
+    expect(JSON.stringify(serialized ?? {})).toContain('kernel-skill');
+    const decision = events.find(
+      (event) => event.kind === 'skill_precondition'
+    );
+    if (decision?.kind !== 'skill_precondition') throw new Error('unreachable');
+    expect(decision.outcome).toBe('downgrade');
+    expect(decision.failures).toEqual([{ kind: 'grant_revoked', count: 1 }]);
+  });
+
+  it('does not inherit skillPolicy, verifierRails, or onSkillCost into a child agent', () => {
+    const child = agent('taskBrief:string -> taskOutcome:string', {
+      ai: new AxMockAIService({ features: { functions: false } }),
+      name: 'child',
+      description: 'A child agent used as a tool by its parent',
+    } as never);
+    const parent = agent('query:string -> answer:string', {
+      ai: new AxMockAIService({ features: { functions: false } }),
+      agents: [child],
+      skillsCatalog: CATALOG,
+      skillPolicy: { environment: { bins: ['jq'] } },
+      verifierRails: [
+        { id: 'rail', stage: 'afterToolCall' as const, verify: () => [] },
+      ],
+      onSkillCost: () => {},
+    } as never);
+    void parent;
+    const childOptions = (
+      child as unknown as { options?: Record<string, unknown> }
+    ).options;
+    expect(childOptions?.skillPolicy).toBeUndefined();
+    expect(childOptions?.verifierRails).toBeUndefined();
+    expect(childOptions?.onSkillCost).toBeUndefined();
+  });
+});
+
+/** Runtime whose first turn declares a skill used and second turn finishes. */
+function makeSkillsUsedRuntime(skillId: string): AxCodeRuntime {
+  return {
+    getUsageInstructions: () => '',
+    createSession(globals) {
+      return {
+        execute: async (code: string) => {
+          if (code.startsWith(AX_HOST_SNIPPET_MARKER)) return 'host-snippet';
+          if (globals?.final && code.includes('final(')) {
+            (globals.final as (...args: unknown[]) => void)('done', {
+              data: 'done',
+            });
+            return 'done';
+          }
+          if (code.includes('discover(') && globals?.used) {
+            (globals.used as (id: string, reason: string) => void)(
+              skillId,
+              'followed it'
+            );
+            return 'used ok';
+          }
+          return 'ok';
+        },
+        patchGlobals: async (patch: Record<string, unknown>) => {
+          const { [AX_INPUTS_PATCH_GLOBAL]: staged, ...rest } = patch;
+          Object.assign(globals ?? {}, rest);
+          if (globals && staged && typeof staged === 'object') {
+            globals.inputs = Object.assign(
+              (globals.inputs as Record<string, unknown>) ?? {},
+              staged
+            );
+          }
+        },
+        close: () => {},
+      };
+    },
+  } as AxCodeRuntime;
+}

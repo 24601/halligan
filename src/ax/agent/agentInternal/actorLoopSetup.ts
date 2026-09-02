@@ -168,7 +168,14 @@ export function buildActorLoopSetup(
     if (discoveredToolDocs) {
       values.discoveredToolDocs = discoveredToolDocs;
     }
-    const loadedSkills = renderSkillsPromptMarkdown(s.currentSkillsPromptState);
+    // The advisory is re-derived here on every render, never restored: the
+    // serialized skills-prompt state has no place to carry it.
+    const loadedSkills = renderSkillsPromptMarkdown(
+      s.currentSkillsPromptState,
+      s._skillAdvisoryResolver as
+        | ((id: string) => string | undefined)
+        | undefined
+    );
     if (loadedSkills) {
       values.loadedSkills = loadedSkills;
     }

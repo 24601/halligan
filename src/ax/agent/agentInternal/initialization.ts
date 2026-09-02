@@ -98,10 +98,15 @@ export function initializeAgentInternal(
     ? options.skillsCatalog.slice()
     : undefined;
   s.skillsCatalog = skillsCatalog;
+  // Resolved ONCE and held for the agent's lifetime: the Available Skills index
+  // is built at signature-build time, and recomputing eligibility per run would
+  // churn the signature and therefore the prompt cache. A host whose
+  // environment changed constructs a new agent.
+  const skillEnvironment = options.skillPolicy?.environment;
   s.onSkillsSearch =
     options.onSkillsSearch ??
     (skillsCatalog && skillsCatalog.length > 0
-      ? createCatalogSkillsSearch(skillsCatalog)
+      ? createCatalogSkillsSearch(skillsCatalog, skillEnvironment)
       : undefined);
   s.skillsHintEnabled =
     relevanceRankingChoice &&
