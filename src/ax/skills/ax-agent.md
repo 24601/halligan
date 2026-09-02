@@ -338,7 +338,7 @@ Rules:
 - A group is `{ namespace, title, description, functions: [...] }`.
 - `selectionCriteria` is optional but useful in discovery mode; it tells the actor when to choose that module.
 - The group's `namespace`, `title`, `selectionCriteria`, and `description` show up in `discover(...)` module docs.
-- `relevanceRanking` (default ON — set `false` to opt out): a deterministic local ranker that injects an advisory `### Likely Relevant` shortlist into the executor turn (dynamic, non-cached field — the cached prompt stays byte-stable). Enabled by default after its A/B gate passed on both small and frontier models and implemented in the generated language ports through AxIR Core. Details in `ax-agent-memory-skills`; outcomes observable via the `relevance_ranking` context event (`ax-agent-observability`).
+- `relevanceRanking` (default ON; set `false` to opt out): a deterministic local ranker that injects an advisory `### Likely Relevant` shortlist into the executor turn (dynamic, non-cached field, so the cached prompt stays byte-stable). Enabled by default after its A/B gate passed on both small and frontier models and implemented in the generated language ports through AxIR Core. Details in `ax-agent-memory-skills`; outcomes observable via the `relevance_ranking` context event (`ax-agent-observability`).
 - Add `alwaysInclude: true` to a group when discovery mode is on but the actor should always see that group's full callable definitions inline in the prompt.
 - Keep `functions: [...]` either flat or grouped. Runtime validation rejects mixed plain function entries and group objects.
 - In flat mode, pass `fn(...)` tools and child agents directly.
@@ -654,7 +654,7 @@ Use `promptMaxChars` when partial data is worse than no data. Use `keepInPromptC
 `autoUpgrade` is ON by default: the agent applies both knobs above on the user's behalf based on character counts, so forgetting them no longer floods prompts.
 
 - Function discovery: when `functionDiscovery` is left unset and the estimated inline docs of discoverable functions exceed ~10k chars, discovery is enabled automatically. An explicit `functionDiscovery: true | false` always wins.
-- Context fields: per run, an undeclared input value whose serialized size exceeds 8k chars is kept runtime-only like a declared context field — the prompt gets a 1,200-char truncated preview plus a `contextMetadata` entry, while the full value stays addressable as `inputs.<field>` in the code runtime (the responder stage gets the same preview). Fields declared in `contextFields` keep their declared config.
+- Context fields: per run, an undeclared input value whose serialized size exceeds 8k chars is kept runtime-only like a declared context field: the prompt gets a 1,200-char truncated preview plus a `contextMetadata` entry, while the full value stays addressable as `inputs.<field>` in the code runtime (the responder stage gets the same preview). Fields declared in `contextFields` keep their declared config.
 
 ```typescript
 autoUpgrade?: boolean | {
@@ -666,7 +666,7 @@ autoUpgrade?: boolean | {
 Rules:
 
 - Set `autoUpgrade: false` (or disable one side) to restore fully manual behavior.
-- Values in required non-string fields (arrays, objects, numbers, media) are never auto-promoted — declare those in `contextFields` explicitly when they can be large.
+- Values in required non-string fields (arrays, objects, numbers, media) are never auto-promoted. Declare those in `contextFields` explicitly when they can be large.
 - Each promotion emits a `field_auto_promoted` context event (`onContextEvent`) with the field name, original size, and preview size; use it to observe what was kept out of the prompt.
 
 ### Learning And Citations
@@ -674,9 +674,9 @@ Rules:
 These construction-time options are portable across TypeScript and the generated
 Python, Java, C++, Go, and Rust packages (both default off):
 
-- `playbook`: attach an ACE playbook at construction. `learn` is on by default — after each run that produced failure signals (error turns, dead-ends, failing tool calls) one bounded update curates durable avoidance rules that ride the next run's actor prompt; zero LLM cost on clean runs. TypeScript seeds a prior session with `playbook: { playbook: snapshot }`; generated packages accept their full `{ playbook, artifact }` snapshot under `seed`. Persist via `onUpdate`, read the live handle with `getPlaybook()` (or the language-shaped equivalent), gate with `learn: { minSignals, dedupe }`, or disable with `learn: false`. To grow the same playbook from a task set with a held-out verify gate, use the agent-bound playbook evolve method — see `ax-playbook`.
-- TypeScript playbook bullets may carry optional evidence, applicability, lifecycle, and revision-lineage metadata. Runtime rendering excludes unmet, malformed, expired, deprecated, or superseded bullets by default; `render({ includeInactive: true })` preserves audit inspection. Trusted callers can attach host IDs/receipts through `update({ ..., evidence })` or `recordEvidence(...)`; curator output cannot populate those fields. This is a caller authority boundary, not cryptographic authenticity—loaded snapshots remain caller-trusted. See `ax-playbook`; generated-language parity is tracked in AxIR.
-- `citations`: add an optional `evidenceCitations: string[]` responder output listing which evidence entries (top-level keys of the curated evidence, plus memory ids) the answer relied on. Validated in-pipeline — the model cannot cite evidence it never collected (existence, not entailment). Pass `true`, or `{ field?, surface?: 'output' | 'hidden', includeMemoryIds?, onCitations? }`.
+- `playbook`: attach an ACE playbook at construction. `learn` is on by default: after each run that produced failure signals (error turns, dead-ends, failing tool calls) one bounded update curates durable avoidance rules that ride the next run's actor prompt; zero LLM cost on clean runs. TypeScript seeds a prior session with `playbook: { playbook: snapshot }`; generated packages accept their full `{ playbook, artifact }` snapshot under `seed`. Persist via `onUpdate`, read the live handle with `getPlaybook()` (or the language-shaped equivalent), gate with `learn: { minSignals, dedupe }`, or disable with `learn: false`. To grow the same playbook from a task set with a held-out verify gate, use the agent-bound playbook evolve method (see `ax-playbook`).
+- TypeScript playbook bullets may carry optional evidence, applicability, lifecycle, and revision-lineage metadata. Runtime rendering excludes unmet, malformed, expired, deprecated, or superseded bullets by default; `render({ includeInactive: true })` preserves audit inspection. Trusted callers can attach host IDs/receipts through `update({ ..., evidence })` or `recordEvidence(...)`; curator output cannot populate those fields. This is a caller authority boundary, not cryptographic authenticity. Loaded snapshots remain caller-trusted. See `ax-playbook`; generated-language parity is tracked in AxIR.
+- `citations`: add an optional `evidenceCitations: string[]` responder output listing which evidence entries (top-level keys of the curated evidence, plus memory ids) the answer relied on. Validated in-pipeline: the model cannot cite evidence it never collected (existence, not entailment). Pass `true`, or `{ field?, surface?: 'output' | 'hidden', includeMemoryIds?, onCitations? }`.
 
 Stage guidance is portable too. `setInstruction` replaces the stage-owned actor
 instruction and `addActorInstruction` appends an additive rule. Both are real

@@ -120,7 +120,7 @@ and the bounded `npm run eval:react` comparison.
 
 ### Signatures from zod / valibot / arktype
 
-`ax()` accepts any signature built with `f()`, and `f().input()` / `.output()` accept [Standard Schema v1](https://standardschema.dev) validators directly — per-field or a whole `z.object({...})`:
+`ax()` accepts any signature built with `f()`, and `f().input()` / `.output()` accept [Standard Schema v1](https://standardschema.dev) validators directly, either per-field or as a whole `z.object({...})`:
 
 ```typescript
 import { z } from 'zod';
@@ -140,9 +140,9 @@ const gen = ax(
 );
 ```
 
-Constraints (`.min()`, `.email()`, `.regex()`) and custom logic (`.refine()`, `.transform()`, `.superRefine()`) execute in the normal validation/retry pipeline — at parse time on complete field values, including at field boundaries during streaming. For cache/internal hints pass companion options: `.input('ctx', z.string(), { cache: true })` or `.output('reasoning', z.string(), { internal: true })`.
+Constraints (`.min()`, `.email()`, `.regex()`) and custom logic (`.refine()`, `.transform()`, `.superRefine()`) execute in the normal validation/retry pipeline: at parse time on complete field values, including at field boundaries during streaming. For cache/internal hints pass companion options: `.input('ctx', z.string(), { cache: true })` or `.output('reasoning', z.string(), { internal: true })`.
 
-Define tool functions with zod the same way — `fn().arg()` / `.returns()` accept per-argument or whole-object schemas and infer the handler's argument type:
+Define tool functions with zod the same way: `fn().arg()` / `.returns()` accept per-argument or whole-object schemas and infer the handler's argument type:
 
 ```typescript
 import { z } from 'zod';
@@ -509,7 +509,7 @@ Rules:
 
 ### getChatLog()
 
-After any `.forward()` or `streamingForward()` call, `gen.getChatLog()` returns the full normalized chat history — every `ai.chat()` round-trip, including the system prompt, all messages, and the model response. The log is reset at the start of each `.forward()` call. Multi-step generators (with function calls) produce one entry per step.
+After any `.forward()` or `streamingForward()` call, `gen.getChatLog()` returns the full normalized chat history: every `ai.chat()` round-trip, including the system prompt, all messages, and the model response. The log is reset at the start of each `.forward()` call. Multi-step generators (with function calls) produce one entry per step.
 
 ```typescript
 await gen.forward(llm, { question: 'What is 2+2?' });
@@ -524,8 +524,8 @@ for (const entry of gen.getChatLog()) {
 ```
 
 Message roles: `system`, `user`, `assistant`, `tool`. Assistant content uses inline XML:
-- `<think>...</think>` — reasoning/thinking tokens
-- `<tool_call>\n{...}\n</tool_call>` — tool invocations
+- `<think>...</think>`: reasoning/thinking tokens
+- `<tool_call>\n{...}\n</tool_call>`: tool invocations
 
 The system message includes a `<tools>` JSON block when functions are present.
 
@@ -562,16 +562,16 @@ gen.resetUsage();
 
 Fetch these for full working code:
 
-- [Streaming](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/streaming.ts) — field-by-field streaming
-- [Best Of N](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/best-of-n.ts) — reward-scored sample selection
-- [Refine](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/refine.ts) — retry rounds with generated feedback
-- [Streaming Assert](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/streaming-asserts.ts) — fail-fast partial-output correction
-- [Structured Output](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/structured_output.ts) — fluent API with validation
-- [Debug Logging](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/debug-logging.ts) — debug mode and step hooks
-- [Stop Function](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/stop-function.ts) — stop functions
-- [Fibonacci](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/fibonacci.ts) — streaming with thinking
-- [Extraction](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/extract.ts) — information extraction
-- [Multi-Sampling](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/sample-count.ts) — sample count usage
+- [Streaming](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/streaming.ts): field-by-field streaming
+- [Best Of N](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/best-of-n.ts): reward-scored sample selection
+- [Refine](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/refine.ts): retry rounds with generated feedback
+- [Streaming Assert](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/streaming-asserts.ts): fail-fast partial-output correction
+- [Structured Output](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/structured_output.ts): fluent API with validation
+- [Debug Logging](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/debug-logging.ts): debug mode and step hooks
+- [Stop Function](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/stop-function.ts): stop functions
+- [Fibonacci](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/fibonacci.ts): streaming with thinking
+- [Extraction](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/extract.ts): information extraction
+- [Multi-Sampling](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/sample-count.ts): sample count usage
 
 ## Native MCP/UCP
 
