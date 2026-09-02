@@ -4,6 +4,7 @@ import type {
 } from '../contextManager.js';
 import type { AxWorkingState } from '../workingState.js';
 import type { buildActorLoopSetup } from './actorLoopSetup.js';
+import type { AxAgentToolReceiptObservation } from './runtimeGlobals.js';
 import type {
   AxAgentContextStage,
   AxAgentEvalFunctionCall,
@@ -46,6 +47,11 @@ export interface ActorLoopContext {
    * configured `workingState` AND this stage's policy maintains it.
    */
   workingState?: AxWorkingState<any>;
+  /**
+   * Successful, receipt-eligible dispatches observed since the last drain.
+   * Filled at the dispatch site (`wrapFunction`) and drained once per turn.
+   */
+  workingStateObservations?: AxAgentToolReceiptObservation[];
   mutableState: MutableActorLoopState;
   helpers: ReturnType<typeof buildActorLoopSetup>;
 }

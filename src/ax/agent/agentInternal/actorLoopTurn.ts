@@ -144,6 +144,8 @@ export async function runActorTurn<_IN extends AxGenIn>(
     contextStage,
     contextThreshold,
     mutableState,
+    workingState,
+    workingStateObservations,
     helpers,
   } = ctx;
 
@@ -536,6 +538,29 @@ export async function runActorTurn<_IN extends AxGenIn>(
       return calls.length > 0 ? { _functionCalls: calls } : {};
     })(),
   });
+
+  // Working state, when configured, mints this turn's receipts from the
+  // dispatches the harness observed. Nothing here can run for a default agent:
+  // `workingState` is undefined and the observation buffer does not exist.
+  const mintedReceiptRefs: string[] = [];
+  if (workingState && workingStateObservations) {
+    const observed = workingStateObservations.splice(
+      0,
+      workingStateObservations.length
+    );
+    for (const observation of observed) {
+      const receipt = await workingState.recordReceipt({
+        qualifiedName: observation.qualifiedName,
+        arguments: observation.arguments,
+        result: observation.result,
+        turn: entryTurn,
+        at: observation.at,
+      });
+      if (!mintedReceiptRefs.includes(receipt.ref)) {
+        mintedReceiptRefs.push(receipt.ref);
+      }
+    }
+  }
 
   if (actorTurnCallback) {
     await actorTurnCallback({

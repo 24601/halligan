@@ -140,6 +140,32 @@ function normalizeDiscoverInput(
   };
 }
 
+/**
+ * One observed successful dispatch, as the working-state receipt ledger needs
+ * it. `at` is captured HERE, at the dispatch site, when the call returned —
+ * not later at turn-hook time.
+ */
+export type AxAgentToolReceiptObservation = Readonly<{
+  qualifiedName: string;
+  arguments: unknown;
+  result: unknown;
+  at: number;
+}>;
+
+/**
+ * Receipt binding for one registered callable. `eligible` is set EXPLICITLY at
+ * each registration site and is never inferred: an agent-derived callable and
+ * every child-agent program are ineligible, because a child agent's return
+ * value is its own `final()` payload — model self-report — and promoting that
+ * to environment evidence is exactly what the receipt gate exists to forbid.
+ * `llmQuery` never reaches this path at all.
+ */
+export type AxAgentToolReceiptBinding = Readonly<{
+  eligible: boolean;
+  sink: (observation: AxAgentToolReceiptObservation) => void;
+  now: () => number;
+}>;
+
 export function wrapFunction(
   fn: AxFunction | AxAgentFunction,
   abortSignal?: AbortSignal,
@@ -151,7 +177,8 @@ export function wrapFunction(
   onFunctionCall?: AxAgentOnFunctionCall,
   eventContext?: import('../../event/types.js').AxEventContext,
   authority?: AxAuthorityContext,
-  authorityInheritance?: AxAuthorityInheritance
+  authorityInheritance?: AxAuthorityInheritance,
+  receipts?: AxAgentToolReceiptBinding
 ): (...args: unknown[]) => Promise<unknown> {
   const normalizedQualifiedName = qualifiedName ?? fn.name;
 
@@ -209,12 +236,25 @@ export function wrapFunction(
     };
     try {
       const value = await result;
+      const serialized = await getSerializedArguments();
       if (functionCallRecorder) {
         functionCallRecorder({
           qualifiedName: normalizedQualifiedName,
           name: fn.name,
-          arguments: await getSerializedArguments(),
+          arguments: serialized,
           result: serializeForEval(value),
+        });
+      }
+      // Success is `no error thrown`, never `a result was returned`: a
+      // void-returning tool (adjustStock, mailer.send) is still evidence, and
+      // inferring success from a missing optional field would be the exact
+      // anti-brittle-contract failure this gate must not have.
+      if (receipts?.eligible === true) {
+        receipts.sink({
+          qualifiedName: normalizedQualifiedName,
+          arguments: serialized,
+          result: serializeForEval(value),
+          at: receipts.now(),
         });
       }
       return value;
@@ -227,6 +267,10 @@ export function wrapFunction(
             arguments: await getSerializedArguments(),
           });
         }
+        // A protocol completion is NOT an environment effect. It is
+        // disambiguated here, at the source, rather than by the absence of an
+        // optional `result` field on a recorder record — the completion record
+        // is byte-identical in shape to a void-returning tool's.
         throw err;
       }
       if (functionCallRecorder) {
@@ -556,6 +600,20 @@ export function buildRuntimeGlobals(
     | AxAuthorityInheritance
     | undefined;
 
+  // Receipt minting is opt-in: absent unless this stage maintains a working
+  // state. `receiptBinding` is built per registration site so eligibility is
+  // stated explicitly there rather than inferred from the callable's shape.
+  const receiptSink = s._workingStateReceiptSink as
+    | ((observation: AxAgentToolReceiptObservation) => void)
+    | undefined;
+  const receiptNow = s._workingStateClockNow as (() => number) | undefined;
+  const receiptBinding = (
+    eligible: boolean
+  ): AxAgentToolReceiptBinding | undefined =>
+    receiptSink && receiptNow
+      ? { eligible, sink: receiptSink, now: receiptNow }
+      : undefined;
+
   // Agent functions under namespace.* (e.g. utils.myFn, custom.otherFn).
   // Agent-derived entries carry `_kind: 'internal'` so that `onFunctionCall`
   // observers can still distinguish them from user-registered tools; everything
@@ -578,7 +636,11 @@ export function buildRuntimeGlobals(
           onFunctionCall,
           eventContext,
           authority,
-          authorityInheritance
+          authorityInheritance,
+          // Agent-derived callables (every child agent normalizes to
+          // `_kind: 'internal'`) can never mint a receipt: their return value
+          // is another model's self-report.
+          receiptBinding(agentFn._kind !== 'internal')
         )
       : buildStageToolStub(qualifiedName);
     if (agentFn._alwaysInclude !== true) {
@@ -621,7 +683,8 @@ export function buildRuntimeGlobals(
               onFunctionCall,
               eventContext,
               authority,
-              authorityInheritance
+              authorityInheritance,
+              receiptBinding(true)
             )
           : buildStageToolStub(qualifiedName);
         registerCallable(
@@ -816,7 +879,8 @@ export function buildRuntimeGlobals(
               onFunctionCall,
               eventContext,
               authority,
-              authorityInheritance
+              authorityInheritance,
+              receiptBinding(true)
             )
           : buildStageToolStub(qualifiedName);
         registerCallable(

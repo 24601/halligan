@@ -39,6 +39,7 @@ import {
   rankCatalogMemories,
 } from './memoriesHelpers.js';
 import { buildModuleRankInputs, rankModules } from './relevanceRanker.js';
+import type { AxAgentToolReceiptObservation } from './runtimeGlobals.js';
 import type { AxAgentSharedRuntimeSession } from './sharedSession.js';
 import {
   ingestSkillResults,
@@ -137,6 +138,27 @@ export async function runActorLoop<IN extends AxGenIn>(
       ...(s.state?.workingState ? { restored: s.state.workingState } : {}),
     });
     s._workingStateRun = workingState;
+  }
+
+  // The receipt sink lives on the stage the way `_activeAuthority` does, so
+  // `buildRuntimeGlobals` can bind it per registration site without another
+  // positional parameter. It is cleared when working state is off, so the
+  // default path allocates nothing and observes nothing.
+  const workingStateObservations: AxAgentToolReceiptObservation[] = [];
+  if (workingState) {
+    const ws = workingState;
+    s._workingStateReceiptSink = (
+      observation: AxAgentToolReceiptObservation
+    ) => {
+      // `receiptSources` is the tightest available Goodhart control and is
+      // applied before an observation ever becomes evidence.
+      if (!ws.receiptEligibleSource(observation.qualifiedName)) return;
+      workingStateObservations.push(observation);
+    };
+    s._workingStateClockNow = () => ws.now();
+  } else {
+    s._workingStateReceiptSink = undefined;
+    s._workingStateClockNow = undefined;
   }
 
   // Forward-time preset skills are executor-ingested — except for a static
@@ -408,7 +430,7 @@ export async function runActorLoop<IN extends AxGenIn>(
     contextStage,
     contextThreshold,
     delegatedContextSummary,
-    ...(workingState ? { workingState } : {}),
+    ...(workingState ? { workingState, workingStateObservations } : {}),
     mutableState,
     helpers,
   };

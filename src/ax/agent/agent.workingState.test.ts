@@ -66,6 +66,48 @@ const noteFn: AxAgentFunction = {
   func: async () => undefined,
 };
 
+/**
+ * A tool that completes the run from inside its own implementation. Its
+ * recorder record is byte-identical in SHAPE to a void-returning tool's, which
+ * is why the two are disambiguated at the dispatch site rather than by the
+ * absence of an optional `result` field.
+ */
+const completeFn: AxAgentFunction = {
+  name: 'submit',
+  description: 'Submit the answer and end the run',
+  namespace: 'inventory',
+  parameters: {
+    type: 'object',
+    properties: { answer: { type: 'string', description: 'answer' } },
+    required: ['answer'],
+  },
+  func: async (args, options) => {
+    (
+      options as { protocol?: { final: (...parts: unknown[]) => never } }
+    ).protocol?.final('done', { answer: (args as { answer: string }).answer });
+    return undefined;
+  },
+};
+
+/**
+ * An agent-derived callable. `normalizeAgentFunctionCollection` stamps exactly
+ * this `_kind: 'internal'` marker on every child agent passed through
+ * `functions: [...]`; a child agent's return value is its own `final()`
+ * payload, i.e. model self-report, so it can never be environment evidence.
+ */
+const childAgentFn: AxAgentFunction = {
+  name: 'delegate',
+  description: 'Ask a child agent',
+  namespace: 'agents',
+  _kind: 'internal',
+  parameters: {
+    type: 'object',
+    properties: { question: { type: 'string', description: 'question' } },
+    required: ['question'],
+  },
+  func: async () => ({ answer: 'the child says it is done' }),
+};
+
 const failFn: AxAgentFunction = {
   name: 'fail',
   description: 'Always throws',
@@ -83,7 +125,7 @@ function makeAgent(
 ) {
   const { ai, executorPrompts } = axCreateScriptedMock(script);
   const built = agent('task:string -> answer:string', {
-    functions: [pickFn, noteFn, failFn],
+    functions: [pickFn, noteFn, completeFn, childAgentFn, failFn],
     runtime: axCreateEvaluatingRuntime(),
     maxTurns: 6,
     ...(workingState ? { workingState } : {}),
@@ -177,5 +219,133 @@ describe('working state stage scoping', () => {
 
     await built.forward(ai, { task: 'second' } as never);
     expect(built.getWorkingState()).toBeUndefined();
+  });
+});
+
+describe('working state receipts from the dispatch site', () => {
+  const receiptConfig = (
+    overrides?: Partial<AxWorkingStateConfig<any>>
+  ): AxWorkingStateConfig<any> => ({
+    stateSignature: STATE_SIGNATURE,
+    proposer: 'actor',
+    initial: {
+      goals: { g_pick: seededGoal('g_pick', { expects: ['inventory.pick'] }) },
+    },
+    ...overrides,
+  });
+
+  it('mints a receipt for a successful tool call', async () => {
+    const { agent: built, ai } = makeAgent(
+      {
+        distiller: [DISTILL],
+        executor: ['await inventory.pick({order:"42"})', FINAL],
+      },
+      receiptConfig()
+    );
+
+    await built.forward(ai, { task: 'pack' } as never);
+    const receipts = built.getState()?.workingState?.receipts ?? [];
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0]).toMatchObject({
+      kind: 'tool_receipt',
+      ref: 'r1',
+      qualifiedName: 'inventory.pick',
+      observations: 1,
+    });
+    expect(receipts[0]!.fingerprint).toMatch(/^[0-9a-f]{64}$/);
+    // The clock is read at the dispatch site, not at turn-hook time.
+    expect(receipts[0]!.at).toBeGreaterThan(0);
+  });
+
+  it('mints a receipt for a successful tool that returns undefined', async () => {
+    // The success predicate is `error === undefined`, never
+    // `result !== undefined`: a void-returning tool is still evidence.
+    const { agent: built, ai } = makeAgent(
+      {
+        distiller: [DISTILL],
+        executor: ['await inventory.note({text:"packed"})', FINAL],
+      },
+      receiptConfig()
+    );
+
+    await built.forward(ai, { task: 'note' } as never);
+    const receipts = built.getState()?.workingState?.receipts ?? [];
+    expect(receipts.map((receipt) => receipt.qualifiedName)).toEqual([
+      'inventory.note',
+    ]);
+  });
+
+  it('mints no receipt for an errored tool call', async () => {
+    const { agent: built, ai } = makeAgent(
+      {
+        distiller: [DISTILL],
+        executor: ['await inventory.fail({})', FINAL],
+      },
+      receiptConfig()
+    );
+
+    await built.forward(ai, { task: 'fail' } as never);
+    expect(built.getState()?.workingState?.receipts ?? []).toHaveLength(0);
+  });
+
+  it('mints no receipt for a tool that completes the run', async () => {
+    // The completion record reaches `observeResult` through the same recorder
+    // and is shape-identical to a void-returning tool's. It is disambiguated
+    // at the SOURCE, never by a missing optional field — so the void-returning
+    // tool above mints while this one does not.
+    const { agent: built, ai } = makeAgent(
+      {
+        distiller: [DISTILL],
+        executor: ['await inventory.submit({answer:"ok"})'],
+      },
+      receiptConfig()
+    );
+
+    const result = await built.forward(ai, { task: 'finish' } as never);
+    // The tool really ran and really completed the run, so the absence of a
+    // receipt is a decision rather than a no-op.
+    expect(result).toMatchObject({ answer: expect.any(String) });
+    expect(built.getState()?.actionLogEntries?.length).toBe(1);
+    expect(built.getState()?.workingState?.receipts ?? []).toHaveLength(0);
+  });
+
+  it('mints no receipt for an agent-derived callable', async () => {
+    const { agent: built, ai } = makeAgent(
+      {
+        distiller: [DISTILL],
+        executor: [
+          'await agents.delegate({question:"is it packed?"}); await inventory.pick({order:"42"})',
+          FINAL,
+        ],
+      },
+      receiptConfig()
+    );
+
+    await built.forward(ai, { task: 'delegate' } as never);
+    const receipts = built.getState()?.workingState?.receipts ?? [];
+    // The real tool in the same turn still mints, so the assertion is about
+    // eligibility rather than about receipts being broken.
+    expect(receipts.map((receipt) => receipt.qualifiedName)).toEqual([
+      'inventory.pick',
+    ]);
+  });
+
+  it('mints no receipt for a callable outside receiptSources', async () => {
+    const { agent: built, ai } = makeAgent(
+      {
+        distiller: [DISTILL],
+        executor: [
+          'await inventory.pick({order:"42"}); await inventory.note({text:"x"})',
+          FINAL,
+        ],
+      },
+      receiptConfig({ receiptSources: ['inventory.pick'] })
+    );
+
+    await built.forward(ai, { task: 'both' } as never);
+    const receipts = built.getState()?.workingState?.receipts ?? [];
+    expect(receipts.map((receipt) => receipt.qualifiedName)).toEqual([
+      'inventory.pick',
+    ]);
   });
 });

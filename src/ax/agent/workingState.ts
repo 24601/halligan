@@ -1183,6 +1183,11 @@ export class AxWorkingState<S = Record<string, unknown>> {
     return this.config.proposerMode;
   }
 
+  /** The injected clock's current time. No `Date.now()` anywhere downstream. */
+  public now(): number {
+    return this.config.clock.now();
+  }
+
   public maxObservationChars(): number {
     return this.config.maxObservationChars;
   }
