@@ -8,8 +8,8 @@
  * Gates 8 and 9 are the only ones that cost anything: each is one host call.
  * They are therefore passed in as THUNKS and invoked inside the ordered loop,
  * after every free gate has been decided, so an expensive host call is never
- * spent on a candidate that cannot land. A candidate rejected by gate 1 leaves
- * both thunks uninvoked and both gates reported `skipped` with the reason.
+ * spent on a candidate that cannot land. A candidate rejected by gate 1 never
+ * invokes either thunk, and both gates are reported `skipped` with the reason.
  *
  * Gates 1 and 2 have two variants, selected by the candidate's `kind`. A
  * removal cannot raise the current-task mean by `minCurrentGain` (default
