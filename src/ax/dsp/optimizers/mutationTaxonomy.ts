@@ -28,7 +28,7 @@ export type AxMutationDepth =
   | 'updateRule'
   | 'data';
 
-/** Fixed emission order, so a histogram is diffable across runs. */
+/** Fixed emission order, so two histograms compare byte for byte. */
 const MUTATION_DEPTHS: readonly AxMutationDepth[] = Object.freeze([
   'schedule',
   'hyperparameter',

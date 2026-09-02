@@ -25,7 +25,7 @@ const toolCapabilities: readonly AxProgramSourceCapability[] = [
 ];
 
 describe('axValidateCandidateEffectDeclaration', () => {
-  it('accepts a settleable declaration and freezes it', () => {
+  it('accepts a declaration that can be settled, and freezes it', () => {
     const validated = axValidateCandidateEffectDeclaration(
       declaration(),
       'record.effects[0]'

@@ -230,7 +230,7 @@ describe('axIsRejectedCandidateExpired', () => {
     // FAIL-OPEN. The context comes from the READER, and GEPA's own proposer
     // prior has no defined source for a task-set digest, so "unknown" must
     // resolve toward forgetting. The opposite rule made the guarantee
-    // defeatable by simply not passing a context.
+    // sidestepped by simply not passing a context.
     const built = entry({
       expiresWhen: [
         { kind: 'after_ms', ttlMs: 1_000_000 },

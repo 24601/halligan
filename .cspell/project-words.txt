@@ -32,6 +32,7 @@ AXFLOW
 axgen
 axir
 axllm
+axrejected
 backticked
 behaviour
 bootstrapper
@@ -43,6 +44,7 @@ chatcmpl
 checkpointable
 checkpointed
 checkpointing
+chongo
 chrono
 chunker
 Codellama
@@ -100,10 +102,13 @@ grault
 groq
 Groq
 guidel
+hajek
 Halligan
 Hono
+Horvitz
 huggingface
 hypervolume
+Hájek
 idxs
 Inspectable
 Instrs
@@ -126,6 +131,7 @@ logprobs
 Logprobs
 lookback
 Macbook
+Madow
 MCPHTTP
 MCPHTTPSSE
 MCPJSON
@@ -152,6 +158,7 @@ nanos
 Nemo
 nemo
 neumann
+Noll
 nonportable
 Northstar
 northstar
@@ -180,6 +187,7 @@ Qwen
 rankable
 RARO
 Readye
+reclassifiable
 recognises
 reentrancy
 reka
@@ -196,6 +204,7 @@ rollouts
 Rpbw
 runbook
 région
+Sampford
 sandboxed
 scriptable
 scalarize
@@ -218,6 +227,7 @@ sstate
 Stegun
 Stonebraker
 stopwords
+Straße
 Streamable
 Streamble
 strutil
@@ -250,6 +260,8 @@ unminified
 unranked
 unscored
 unstub
+unvalidated
+unwired
 uppercased
 upsert
 upserted

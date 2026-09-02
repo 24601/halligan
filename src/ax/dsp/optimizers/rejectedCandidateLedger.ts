@@ -639,7 +639,7 @@ export interface AxRejectedCandidateLedgerRef {
  * clamped.
  *
  * This is the ONLY thing an artifact-snapshot replacement unions. A causal
- * evidence history cannot be unioned and still verify — its records carry a
+ * evidence history cannot be merged and still verify — its records carry a
  * strict sequence and its receipts a strictly increasing count — so that side
  * keeps its divergent-history REFUSAL. The ledger ref is a pointer set, which
  * is why it can merge at all.

@@ -423,7 +423,7 @@ describe('axPairedAdmittedIndices', () => {
 
   it('deduplicates a repeated left index', () => {
     // A duplicated index would be double-counted in a paired sum, quietly
-    // reweighting one example.
+    // re-weighting one example.
     expect(axPairedAdmittedIndices([2, 2, 4, 4, 2], [2, 4])).toEqual([2, 4]);
   });
 

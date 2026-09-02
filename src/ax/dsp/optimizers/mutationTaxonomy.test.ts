@@ -462,7 +462,7 @@ describe('axDefaultMutationAnnotator', () => {
     expect(call(['instruction', 'fn-desc'])).toBeUndefined();
     expect(call(['fn-desc', 'fn-name'])).toBeUndefined();
     expect(call(['instruction', 'program-source'])).toBeUndefined();
-    // Same family, several components: annotatable.
+    // Same family, several components: one honest annotation covers them.
     expect(call(['instruction', 'description', 'actor-tpl'])).toEqual({
       depth: 'supervision',
       patch: { class: 'steering', type: 'prompt.rule_modify' },
@@ -509,7 +509,7 @@ describe('axBuildMutationDepthHistogram', () => {
 
   it('keeps histogram keys in a stable order', () => {
     // Two runs that annotated the same candidates in a different order must
-    // produce byte-identical histograms, or the artifact diffs for no reason.
+    // produce byte-identical histograms, or the artifact changes for no reason.
     const a = axBuildMutationDepthHistogram([
       annotation({ depth: 'data' }),
       undefined,

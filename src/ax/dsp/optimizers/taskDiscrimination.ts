@@ -35,7 +35,7 @@ export interface AxTaskStat {
 }
 
 export interface AxTaskDiscriminationOptions {
-  /** Binarization threshold for "solved". Default: 0.5. */
+  /** Score at or above which a task counts as solved. Default: 0.5. */
   readonly successThreshold?: number;
   /** Share of inclusion mass reserved for uniform exploration. Default: 0.2. Clamped to [0.05, 1]. */
   readonly explorationFloor?: number;
@@ -379,7 +379,8 @@ export function axComputeInclusionProbabilities(
  * Chosen over conditional-Poisson / Sampford πps — which give correct JOINT
  * inclusion probabilities — because those are rejection samplers with an
  * unbounded worst-case draw count, and GEPA's RNG is a single shared seeded
- * stream where a variable number of draws would make a run non-reproducible.
+ * stream where a variable number of draws would stop a seeded run from
+ * reproducing.
  * The price is that some pairs are never co-selected, which is exactly why the
  * standard error below is documented as an approximation and never gated on.
  */

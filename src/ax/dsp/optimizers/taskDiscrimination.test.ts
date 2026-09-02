@@ -42,7 +42,8 @@ const seeded = (seed: number) => {
  * total. Partitioning [0,1) at those breakpoints and taking one midpoint per
  * cell therefore enumerates the whole sampling design with exact
  * probabilities — no Monte Carlo, no tolerance for sampling noise. That is what
- * lets the tests below assert design-unbiasedness as an equality rather than as
+ * lets the tests below assert design-unbiased weighting as an equality rather
+ * than as
  * "close enough over N draws".
  */
 const enumerateDesign = (
@@ -105,7 +106,7 @@ describe('axResolveTaskDiscriminationOptions', () => {
     ).toBe(0.2);
   });
 
-  it('clamps and integralizes the reporting bounds', () => {
+  it('clamps the reporting bounds to whole numbers', () => {
     const resolved = axResolveTaskDiscriminationOptions({
       maxReportedTasks: 10_000.7,
       maxInclusionSnapshots: -4,
@@ -116,7 +117,7 @@ describe('axResolveTaskDiscriminationOptions', () => {
 });
 
 describe('AxTaskStatTable', () => {
-  it('binarizes on the success threshold and counts every admitted trial', () => {
+  it('applies the success threshold and counts every admitted trial', () => {
     const table = axCreateTaskStatTable(4, options);
     table.record(0, 1, 1);
     table.record(0, 0.2, 2);
@@ -243,7 +244,7 @@ describe('axComputeInclusionProbabilities', () => {
     );
     const floor = (options.explorationFloor * batchSize) / population;
     expect(inclusions[0]!.probability).toBeGreaterThanOrEqual(floor - 1e-12);
-    // The always-failed task is genuinely disfavoured (it is not
+    // The always-failed task is genuinely down-weighted (it is not
     // discriminating) but is still reachable.
     expect(inclusions[0]!.probability).toBeLessThan(inclusions[1]!.probability);
   });
@@ -388,7 +389,7 @@ describe('axSampleByInclusion', () => {
     const drawn = axSampleByInclusion(inclusions, 3, rand);
     // Exactly one draw: the shared xorshift stream is a fixed resource, and a
     // sampler with a variable draw count would make a seeded run
-    // irreproducible.
+    // stop reproducing.
     expect(rand).toHaveBeenCalledTimes(1);
     expect(drawn).toHaveLength(3);
     expect(new Set(drawn).size).toBe(3);
@@ -489,7 +490,7 @@ describe('axIpwScore', () => {
   });
 
   it('recovers the population total exactly under the sampling design', () => {
-    // Horvitz–Thompson: E[Σ_{i∈S} y_i / π_i] = Σ_i y_i, exactly, because the
+    // Horvitz-Thompson: E[Σ_{i∈S} y_i / π_i] = Σ_i y_i, exactly, because the
     // sampler realizes each π_i exactly. Computed over the enumerated design,
     // so this is an identity check on the weighting, not a Monte Carlo one.
     const inclusions = axComputeInclusionProbabilities(
