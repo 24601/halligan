@@ -1,7 +1,7 @@
 import { defineConfig } from 'tsup';
 
 export default defineConfig({
-  entry: ['index.ts', 'event/sqlite.ts'],
+  entry: ['index.ts', 'event/sqlite.ts', 'trajectory/jsonl.ts'],
   format: ['esm', 'cjs'],
   dts: true,
   splitting: true, // Enable code splitting for better tree-shaking
