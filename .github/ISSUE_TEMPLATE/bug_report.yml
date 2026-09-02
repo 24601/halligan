@@ -1,0 +1,67 @@
+name: Bug report
+description: Something in Halligan behaves incorrectly
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For a vulnerability, do not open an issue. Report it privately at
+        https://github.com/24601/halligan/security/advisories/new instead.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which area
+      description: Pick the closest match. If it is upstream Ax code, we may ask you to file it at ax-llm/ax.
+      options:
+        - "src/ax/trajectory (append-only trajectory)"
+        - "src/ax/mind (persistent agency runtime)"
+        - "src/ax/learn (learning surface)"
+        - "Playbook evolve evidence discipline"
+        - "GEPA evidence manifests"
+        - "Skill provenance / host authority"
+        - "Agent working state"
+        - "Maintainer skills (tools/*/skills)"
+        - "Pry playground (playground/)"
+        - "Build, CI, packaging, or docs"
+        - "Upstream Ax code (providers, dsp, agent, flow, mcp, AxIR, generated packages)"
+        - "Not sure"
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Published version, or the commit SHA you are running.
+      placeholder: "24.0.15, or ebf330c1"
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: The smallest code or command sequence that shows the problem. A failing test is best.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected versus actual
+      description: What you expected to happen, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evaluation or trace evidence
+      description: Test output, an evaluation run, a trajectory excerpt, or a stack trace. Redact credentials.
+      render: text
+    validations:
+      required: false
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Node version, operating system, provider if relevant.
+    validations:
+      required: false

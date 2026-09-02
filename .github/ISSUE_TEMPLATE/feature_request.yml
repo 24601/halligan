@@ -1,0 +1,51 @@
+name: Feature request
+description: Propose a change to Halligan
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Portable Ax behavior belongs upstream at https://github.com/ax-llm/ax.
+        See CONTRIBUTING.md for the routing table.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you unable to do today, and what did you try instead?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What should change. Include the API or behavior you have in mind if you have one.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which area
+      options:
+        - "src/ax/trajectory (append-only trajectory)"
+        - "src/ax/mind (persistent agency runtime)"
+        - "src/ax/learn (learning surface)"
+        - "Playbook evolve evidence discipline"
+        - "GEPA evidence manifests"
+        - "Skill provenance / host authority"
+        - "Agent working state"
+        - "Maintainer skills (tools/*/skills)"
+        - "Pry playground (playground/)"
+        - "Build, CI, packaging, or docs"
+        - "Upstream Ax code (providers, dsp, agent, flow, mcp, AxIR, generated packages)"
+        - "Not sure"
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: What evidence would show it works
+      description: >
+        Halligan requires an evaluation for behavioral change. What baseline would you compare
+        against, and what result would convince a reviewer the change helps?
+    validations:
+      required: true
