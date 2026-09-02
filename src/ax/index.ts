@@ -1742,6 +1742,20 @@ import {
   runAxLearningStoreConformance,
 } from './learn/conformance.js';
 import {
+  type AxHarnessCandidate,
+  type AxHarnessEvaluation,
+  type AxHarnessEvolveAgent,
+  type AxHarnessEvolveGateOptions,
+  type AxHarnessEvolveOptions,
+  type AxHarnessEvolveProgressEvent,
+  type AxHarnessEvolveResult,
+  type AxHarnessModelBindings,
+  type AxHarnessProposeArgs,
+  type AxHarnessProposer,
+  type AxHarnessSelector,
+  axHarnessEvolve,
+} from './learn/evolve.js';
+import {
   type AxHarnessFailureAdvance,
   type AxHarnessFailureEntry,
   type AxHarnessFailureManifest,
@@ -1816,6 +1830,7 @@ import {
   type AxHarnessEntry,
   type AxHarnessEntryInspection,
   type AxHarnessEntryKind,
+  AxHarnessEvolveConfigError,
   type AxHarnessGateDecision,
   type AxHarnessGateMetrics,
   type AxHarnessInstallation,
@@ -2476,6 +2491,7 @@ export { AxGen };
 export { AxGenerateError };
 export { AxHarnessAdmissionError };
 export { AxHarnessApplyError };
+export { AxHarnessEvolveConfigError };
 export { AxHarnessMutationError };
 export { AxHarnessRecipeError };
 export { AxHarnessRenderError };
@@ -2732,6 +2748,7 @@ export { axGetSupportedAIModels };
 export { axGlobals };
 export { axGoogleGeminiLiveAudioDefaults };
 export { axHarnessContentId };
+export { axHarnessEvolve };
 export { axHarnessFailureFingerprint };
 export { axHarnessLooksLikeCredential };
 export { axHarnessPortId };
@@ -3780,9 +3797,16 @@ export type { AxHarnessAdmissionReport };
 export type { AxHarnessApplyOptions };
 export type { AxHarnessAtom };
 export type { AxHarnessBulletConfig };
+export type { AxHarnessCandidate };
 export type { AxHarnessEntry };
 export type { AxHarnessEntryInspection };
 export type { AxHarnessEntryKind };
+export type { AxHarnessEvaluation };
+export type { AxHarnessEvolveAgent };
+export type { AxHarnessEvolveGateOptions };
+export type { AxHarnessEvolveOptions };
+export type { AxHarnessEvolveProgressEvent };
+export type { AxHarnessEvolveResult };
 export type { AxHarnessFailureAdvance };
 export type { AxHarnessFailureEntry };
 export type { AxHarnessFailureManifest };
@@ -3791,11 +3815,15 @@ export type { AxHarnessGateDecision };
 export type { AxHarnessGateMetrics };
 export type { AxHarnessInstallTarget };
 export type { AxHarnessInstallation };
+export type { AxHarnessModelBindings };
 export type { AxHarnessMutation };
 export type { AxHarnessPlaybookHandle };
 export type { AxHarnessPortId };
+export type { AxHarnessProposeArgs };
+export type { AxHarnessProposer };
 export type { AxHarnessRecipe };
 export type { AxHarnessRendering };
+export type { AxHarnessSelector };
 export type { AxHarnessStamp };
 export type { AxHarnessTree };
 export type { AxIField };

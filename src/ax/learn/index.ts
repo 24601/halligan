@@ -10,6 +10,20 @@ export type {
 } from './conformance.js';
 export { runAxLearningStoreConformance } from './conformance.js';
 export type {
+  AxHarnessCandidate,
+  AxHarnessEvaluation,
+  AxHarnessEvolveAgent,
+  AxHarnessEvolveGateOptions,
+  AxHarnessEvolveOptions,
+  AxHarnessEvolveProgressEvent,
+  AxHarnessEvolveResult,
+  AxHarnessModelBindings,
+  AxHarnessProposeArgs,
+  AxHarnessProposer,
+  AxHarnessSelector,
+} from './evolve.js';
+export { axHarnessEvolve } from './evolve.js';
+export type {
   AxHarnessFailureAdvance,
   AxHarnessFailureEntry,
   AxHarnessFailureManifest,
@@ -117,12 +131,14 @@ export type {
 export {
   AxHarnessAdmissionError,
   AxHarnessApplyError,
+  AxHarnessEvolveConfigError,
   AxHarnessMutationError,
   AxHarnessRenderError,
   AxLearningRecordConflictError,
   AxLearningRecordValidationError,
   AxLearningReleaseConflictError,
   AxLearningReportValidationError,
+  AxLearningSuppressedError,
   axIsHarnessAdmissionError,
   axIsHarnessApplyError,
   axIsLearningRecordConflictError,

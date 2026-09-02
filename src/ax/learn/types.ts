@@ -564,6 +564,24 @@ export class AxLearningSuppressedError extends Error {
   }
 }
 
+/**
+ * An evolve step was configured in a way that cannot produce a sound verdict:
+ * `requireHeldOut` with no validation split, a non-positive budget, an agent
+ * whose pre-step installation could not be restored.
+ *
+ * Always thrown before any model call.
+ */
+export class AxHarnessEvolveConfigError extends Error {
+  readonly code = 'harness_evolve_config_invalid';
+  readonly field: string;
+
+  constructor(field: string, message: string) {
+    super(message);
+    this.name = 'AxHarnessEvolveConfigError';
+    this.field = field;
+  }
+}
+
 /** One entry failed admission. Carries the FIRST denial plus the full report. */
 export class AxHarnessAdmissionError extends Error {
   readonly code = 'harness_admission_denied';
