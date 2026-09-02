@@ -9,6 +9,7 @@ import type {
   AxLearningRecord,
   AxLearningRelease,
   AxLearningStore,
+  AxLearningStorePage,
 } from './types.js';
 
 const NOW = 1_700_000_000_000;
@@ -100,6 +101,44 @@ describe('runAxLearningStoreConformance', () => {
         clock: new AxManualEventClock(NOW),
       })
     ).rejects.toThrow(/sequence is strictly increasing/);
+  });
+
+  it('fails a store that keeps a report over already-consumed references', async () => {
+    // "Accepted and ignored" is the whole reason a late grade for a trained
+    // exchange is harmless. A store that keeps it would re-train on it.
+    class KeepsConsumedReportsStore extends AxInMemoryLearningStore {
+      override async append(
+        record: AxLearningRecord,
+        signal?: AbortSignal
+      ): Promise<Readonly<AxLearningAppendResult>> {
+        const result = await super.append(record, signal);
+        return result.reason === 'references-consumed'
+          ? { record, inserted: true, sequence: 98 }
+          : result;
+      }
+    }
+    await expect(
+      runAxLearningStoreConformance(() => new KeepsConsumedReportsStore(), {
+        clock: new AxManualEventClock(NOW),
+      })
+    ).rejects.toThrow(/accepted and ignored/);
+  });
+
+  it('fails a store whose page ignores the cursor', async () => {
+    class IgnoresCursorStore extends AxInMemoryLearningStore {
+      override page(
+        scenario: string,
+        _options: Readonly<{ afterSequence?: number; limit?: number }>,
+        signal?: AbortSignal
+      ): Promise<Readonly<AxLearningStorePage>> {
+        return super.page(scenario, {}, signal);
+      }
+    }
+    await expect(
+      runAxLearningStoreConformance(() => new IgnoresCursorStore(), {
+        clock: new AxManualEventClock(NOW),
+      })
+    ).rejects.toThrow(/page returns only records after the cursor/);
   });
 
   it('runs both cross-instance halves against a shared multi-writer backing', async () => {
