@@ -214,9 +214,25 @@ evaluated.
 
 `axAttenuateAuthority` forwards the parent's `evidence` and `observeEvidence` to
 the child; without that, guards and delegation would be mutually exclusive.
-Contingency may only tighten: a child grant must carry every requirement its
-parent declared, compared by the same canonical key, and may add more. Dropping
-or relaxing one is rejected as an expansion of parent authority.
+
+Contingency may only tighten, and the rule is checked twice because the union
+semantic above means a grant's contingency is not only its own:
+
+1. **Per lineage.** A child grant must carry every requirement its parent grant
+   declared, compared by the same canonical key, and may add more. Dropping or
+   relaxing one is rejected as an expansion of parent authority.
+2. **Per operation and resource.** For every operation and resource a child
+   grant names, the union of the child's matching requirements must cover the
+   union the parent would have enforced for that same pair. Without this a
+   child delegating only an *unannotated sibling* of a guarded grant would
+   inherit no contingency at all and would out-authorize its own delegator.
+   The parent side of this comparison ignores `issuedAt` / `expiresAt` /
+   `revokedAt`, because attenuation has no clock and counting a possibly
+   inactive grant can only demand more of the child.
+
+Rule 2 is a union, not a blanket per-grant demand: an unannotated child grant is
+legal when a sibling child grant matching the same operation and resource
+carries the requirement, because that is exactly what `axAuthorize` evaluates.
 
 ### No behaviour change without requirements
 

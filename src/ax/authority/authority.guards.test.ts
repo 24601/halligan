@@ -511,6 +511,73 @@ describe('Ax evidence guards across attenuated authority', () => {
     ).toThrow(/expands parent authority/);
   });
 
+  it('rejects a child that delegates only an unannotated sibling of a guarded grant', async () => {
+    // Requirements are enforced as the union across matching grants, so the
+    // requirement on grant-guarded also constrains grant-plain in the parent.
+    // A child delegating only grant-plain would otherwise be strictly more
+    // authorized than its delegator for the same operation on the same
+    // resource, which is the one property attenuation exists to prevent.
+    const { authority } = harness({
+      grants: [
+        grant({ id: 'grant-guarded', requirements: [requirement()] }),
+        grant({ id: 'grant-plain' }),
+      ],
+    });
+    expect(
+      await denialCode(axAuthorize(authority, 'document.read', resource))
+    ).toBe('guard_predicate_failed');
+    expect(() =>
+      axAttenuateAuthority(
+        authority,
+        childOptions([
+          childGrant({ id: 'child-plain', parentGrantId: 'grant-plain' }),
+        ])
+      )
+    ).toThrow(/expands parent authority/);
+    // Carrying the union is what makes the delegation legal, and the
+    // inherited contingency is still enforced on the child.
+    const child = axAttenuateAuthority(
+      authority,
+      childOptions([
+        childGrant({
+          id: 'child-plain',
+          parentGrantId: 'grant-plain',
+          requirements: [requirement()],
+        }),
+      ])
+    );
+    expect(
+      await denialCode(axAuthorize(child, 'document.read', childResource))
+    ).toBe('guard_predicate_failed');
+  });
+
+  it('accepts a child whose union covers the parent across sibling grants', async () => {
+    // The check is a union, not a blanket per-grant demand: an unannotated
+    // child grant is legal when a sibling child grant matching the same
+    // operation and resource carries the requirement, because that is exactly
+    // what axAuthorize will evaluate.
+    const { authority } = harness({
+      grants: [
+        grant({ id: 'grant-guarded', requirements: [requirement()] }),
+        grant({ id: 'grant-plain' }),
+      ],
+      evidence: [observation()],
+    });
+    const child = axAttenuateAuthority(
+      authority,
+      childOptions([
+        childGrant({
+          id: 'child-guarded',
+          parentGrantId: 'grant-guarded',
+          requirements: [requirement()],
+        }),
+        childGrant({ id: 'child-plain', parentGrantId: 'grant-plain' }),
+      ])
+    );
+    const receipt = await axAuthorize(child, 'document.read', childResource);
+    expect(receipt?.decision).toBe('allow');
+  });
+
   it('axAttenuateAuthority accepts a child grant that adds a requirement', async () => {
     const { authority } = harness({
       grants: [grant({ requirements: [requirement()] })],

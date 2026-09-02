@@ -998,6 +998,86 @@ function retainsRequirements(
   );
 }
 
+/** The `matchingGrants` predicate minus its time window. See below for why. */
+function grantAppliesTo(
+  grant: Readonly<AxCapabilityGrant>,
+  principalId: string,
+  actor: Readonly<AxActor>,
+  leaseEpoch: number,
+  operation: string,
+  resource: Readonly<AxResourceScope>
+): boolean {
+  return (
+    grant.principalId === principalId &&
+    grant.leaseEpoch === leaseEpoch &&
+    grant.operations.includes(operation) &&
+    containsResource(grant, resource) &&
+    (grant.actor === undefined ||
+      (grant.actor.id === actor.id && grant.actor.kind === actor.kind))
+  );
+}
+
+/**
+ * Requirements are enforced as the union across every grant that matches an
+ * operation and resource, so a requirement declared on one grant also
+ * constrains a sibling that declared none. The per-grant lineage rule above
+ * cannot see that: a child delegating only the unannotated sibling would
+ * inherit no contingency at all and would out-authorize its own delegator.
+ * This check mirrors the evaluation semantic instead — for every operation and
+ * resource a child grant names, the child's union must cover the parent's.
+ *
+ * The parent side deliberately ignores `issuedAt` / `expiresAt` / `revokedAt`:
+ * attenuation has no clock, and counting a grant that may be inactive can only
+ * demand more of the child, which is the fail-closed direction.
+ */
+function retainsUnionRequirements(
+  parentSnapshot: Readonly<AxAuthorityContext>,
+  childPrincipalId: string,
+  childActor: Readonly<AxActor>,
+  childGrants: readonly Readonly<AxCapabilityGrant>[]
+): boolean {
+  const leaseEpoch = parentSnapshot.leaseEpoch;
+  for (const grant of childGrants) {
+    for (const operation of grant.operations) {
+      for (const resource of grant.resources) {
+        const required = axCollectGrantRequirements(
+          parentSnapshot.grants.filter((candidate) =>
+            grantAppliesTo(
+              candidate,
+              parentSnapshot.principal.id,
+              parentSnapshot.actor,
+              leaseEpoch,
+              operation,
+              resource
+            )
+          )
+        );
+        if (!required.length) continue;
+        const carried = new Set(
+          axCollectGrantRequirements(
+            childGrants.filter((candidate) =>
+              grantAppliesTo(
+                candidate,
+                childPrincipalId,
+                childActor,
+                leaseEpoch,
+                operation,
+                resource
+              )
+            )
+          ).map(evidenceRequirementKey)
+        );
+        if (
+          required.some((entry) => !carried.has(evidenceRequirementKey(entry)))
+        ) {
+          return false;
+        }
+      }
+    }
+  }
+  return true;
+}
+
 /** Validate and construct a child authority that cannot expand parent grants. */
 export function axAttenuateAuthority(
   parent: Readonly<AxAuthorityContext>,
@@ -1092,6 +1172,16 @@ export function axAttenuateAuthority(
     ) {
       throw new Error('Child capability grant expands parent authority');
     }
+  }
+  if (
+    !retainsUnionRequirements(
+      parentSnapshot,
+      childPrincipal.id,
+      childActor,
+      childGrants
+    )
+  ) {
+    throw new Error('Child capability grant expands parent authority');
   }
   return axSnapshotAuthority({
     principal: childPrincipal,
