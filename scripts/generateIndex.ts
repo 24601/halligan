@@ -116,6 +116,8 @@ const internalExportNames = new Set([
   'axCallTimeSkillRuntime',
   'axCallTimeSkillGuidance',
   'axCallTimeSkillCatalogResolver',
+  'AxCallTimeSkillAdmission',
+  'axCallTimeSkillCatalogAdmission',
   'axValidateCallTimeSkillBindings',
   // Bare lowercase pointer parser shared by statePatch.ts and workingState.ts.
   // Listed deliberately: it is module plumbing, not public API.

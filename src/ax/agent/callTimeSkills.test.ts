@@ -11,9 +11,13 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import type { AxAgentSkillResult } from './agentInternal/skillsTypes.js';
+import type {
+  AxAgentCatalogSkill,
+  AxAgentSkillResult,
+} from './agentInternal/skillsTypes.js';
 import {
   type AxCallTimeSkillBinding,
+  axCallTimeSkillCatalogAdmission,
   axCallTimeSkillRuntime,
   axIsCallTimeSkillNotExecuted,
   axValidateCallTimeSkillBindings,
@@ -138,6 +142,24 @@ describe('call-time skill binding validation', () => {
     }
   });
 
+  it('rejects a maxInjections above the hard ceiling', () => {
+    // Every injection appends a pending record, ingests a body and appends an
+    // untrimmed guidance entry. A mechanism whose safety argument is "budgeted"
+    // may not accept an unbounded budget from config.
+    expect(() =>
+      axValidateCallTimeSkillBindings(
+        [{ qualifiedName: ADJUST, skill: inlineSkill, maxInjections: 101 }],
+        { hasWorkingState: false }
+      )
+    ).toThrow(/invalid_max_injections: 101/);
+    expect(() =>
+      axValidateCallTimeSkillBindings(
+        [{ qualifiedName: ADJUST, skill: inlineSkill, maxInjections: 100 }],
+        { hasWorkingState: false }
+      )
+    ).not.toThrow();
+  });
+
   it('rejects a when predicate with no working state configured', () => {
     // The predicate reads the COMMITTED document; inventing an empty one would
     // answer the host's question about real state with a fabrication.
@@ -168,6 +190,92 @@ describe('call-time skill binding validation', () => {
     expect((caught as AxWorkingStateSchemaError).code).toBe(
       'working_state_schema_invalid'
     );
+    // The message names the option the host actually set. Call-time bindings
+    // need no working state unless a `when` predicate is declared, so
+    // "Working state configuration is invalid" would send a host to the wrong
+    // option entirely.
+    expect((caught as AxWorkingStateSchemaError).subsystem).toBe(
+      'Call-time skill'
+    );
+    expect((caught as Error).message).toContain(
+      'Call-time skill configuration is invalid'
+    );
+    expect((caught as Error).message).not.toContain('Working state');
+  });
+});
+
+describe('the catalog admission gate for a bound skill id', () => {
+  const gatedCatalog: readonly AxAgentCatalogSkill[] = [
+    {
+      id: 'stock-adjustment',
+      name: 'Stock adjustment',
+      content: inlineSkill.content,
+      requires: { bins: ['redis-cli'] },
+    },
+    { id: 'open-skill', name: 'Open', content: 'body' },
+  ];
+
+  it('reports ineligible, denied and admit for the same catalog', () => {
+    const withBin = axCallTimeSkillCatalogAdmission(gatedCatalog, {
+      environment: { bins: ['redis-cli'] },
+    });
+    const withoutBin = axCallTimeSkillCatalogAdmission(gatedCatalog, {
+      environment: { bins: [] },
+    });
+    // `requires` is resolved against the RUN's environment, not the binding.
+    expect(withoutBin('stock-adjustment')).toBe('ineligible');
+    expect(withBin('stock-adjustment')).toBe('admit');
+    // The authority half is orthogonal and time-varying: an eligible skill the
+    // retrieval re-check parked is still not injectable.
+    expect(
+      axCallTimeSkillCatalogAdmission(gatedCatalog, {
+        environment: { bins: ['redis-cli'] },
+        denied: new Set(['stock-adjustment']),
+      })('stock-adjustment')
+    ).toBe('denied');
+    // An id absent from the catalog is host-supplied literal text with nothing
+    // to be eligible for — the `presetSkills` posture, not a hole.
+    expect(withoutBin('not-in-catalog')).toBe('admit');
+  });
+
+  it('refuses the run when a bound id is ineligible or denied', () => {
+    const open = (admit: ReturnType<typeof axCallTimeSkillCatalogAdmission>) =>
+      axCallTimeSkillRuntime(
+        [{ qualifiedName: ADJUST, skill: 'stock-adjustment' }],
+        { resolveSkill, admitSkill: admit }
+      );
+    expect(() =>
+      open(
+        axCallTimeSkillCatalogAdmission(gatedCatalog, {
+          environment: { bins: [] },
+        })
+      )
+    ).toThrow(/ineligible_bound_skill: stock-adjustment/);
+    expect(() =>
+      open(
+        axCallTimeSkillCatalogAdmission(gatedCatalog, {
+          environment: { bins: ['redis-cli'] },
+          denied: new Set(['stock-adjustment']),
+        })
+      )
+    ).toThrow(/denied_bound_skill: stock-adjustment/);
+    // The positive control: the same binding opens when both gates admit.
+    expect(() =>
+      open(
+        axCallTimeSkillCatalogAdmission(gatedCatalog, {
+          environment: { bins: ['redis-cli'] },
+        })
+      )
+    ).not.toThrow();
+  });
+
+  it('does not gate an inline skill, which no catalog gate can hide', () => {
+    expect(() =>
+      axCallTimeSkillRuntime([{ qualifiedName: ADJUST, skill: inlineSkill }], {
+        resolveSkill,
+        admitSkill: () => 'denied',
+      })
+    ).not.toThrow();
   });
 });
 
@@ -248,6 +356,56 @@ describe('the binding table and the injection budget', () => {
     expect(runtime.injections(ADJUST)).toBe(1);
   });
 
+  it('falls through when the when predicate throws, without spending budget', () => {
+    // `intercept()` runs synchronously inside the actor's `await tool(...)`, so
+    // a propagated throw would become an `isError` turn, escalate the executor
+    // model, AND — because the budget is spent after the predicate — repeat on
+    // every re-draft with no bound at all.
+    const when = vi.fn((): boolean => {
+      throw new Error('host predicate exploded');
+    });
+    const runtime = openRuntime(
+      [{ qualifiedName: ADJUST, skill: inlineSkill, when }],
+      { workingState: () => document({}) }
+    );
+
+    expect(() => draft(runtime, ADJUST)).not.toThrow();
+    expect(draft(runtime, ADJUST)).toBeUndefined();
+    expect(when).toHaveBeenCalledTimes(2);
+    expect(runtime.injections(ADJUST)).toBe(0);
+    expect(runtime.drain()).toEqual([]);
+  });
+
+  it('falls through when the working-state read itself throws', () => {
+    const runtime = openRuntime(
+      [{ qualifiedName: ADJUST, skill: inlineSkill, when: () => true }],
+      {
+        workingState: () => {
+          throw new Error('store unavailable');
+        },
+      }
+    );
+    expect(draft(runtime, ADJUST)).toBeUndefined();
+    expect(runtime.injections(ADJUST)).toBe(0);
+  });
+
+  it('treats a non-boolean truthy predicate result as no interception', () => {
+    // `=== true` rather than truthiness: a predicate returning a Promise (an
+    // accidental `async when`) is always truthy and would intercept forever.
+    const runtime = openRuntime(
+      [
+        {
+          qualifiedName: ADJUST,
+          skill: inlineSkill,
+          when: (() => Promise.resolve(true)) as never,
+        },
+      ],
+      { workingState: () => document({}) }
+    );
+    expect(draft(runtime, ADJUST)).toBeUndefined();
+    expect(runtime.injections(ADJUST)).toBe(0);
+  });
+
   it('drains one injection record per interception and then nothing', () => {
     const runtime = openRuntime([
       { qualifiedName: ADJUST, skill: 'stock-adjustment', maxInjections: 2 },
@@ -267,7 +425,7 @@ describe('the binding table and the injection budget', () => {
     expect(runtime.drain()).toEqual([]);
   });
 
-  it('exposes exactly the bound names for the speculation exclusion', () => {
+  it('exposes exactly the bound names as an inspection view', () => {
     const runtime = openRuntime([
       { qualifiedName: ADJUST, skill: inlineSkill },
       { qualifiedName: 'inventory.ship', skill: inlineSkill },

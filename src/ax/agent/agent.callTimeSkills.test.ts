@@ -13,6 +13,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import type { AxAIService } from '../ai/types.js';
+import { axExtractSkillProvenance } from '../authority/skillProvenance.js';
 import type {
   AxAuthorityContext,
   AxAuthorizationReceipt,
@@ -263,6 +264,172 @@ describe('call-time skill injection: configuration at the agent boundary', () =>
         ],
       })
     ).toThrow(/when_requires_working_state/);
+  });
+});
+
+describe('call-time skill injection: the catalog gates', () => {
+  /**
+   * A binding is static host config; the two catalog gates are not. A bound
+   * catalog id must therefore be re-asked at run start against the run's
+   * declared environment and its authority snapshot — otherwise a call-time
+   * binding is the ONE path that renders a body `discover({ skills })`, the
+   * `### Available Skills` index, the relevance hint and the kernel tier all
+   * refuse to render.
+   */
+  const GATED_BODY = '# Gated procedure\n\nOnly valid where redis is present.';
+
+  const gatedCatalog = (
+    extra: Partial<AxAgentCatalogSkill>
+  ): readonly AxAgentCatalogSkill[] => [
+    {
+      id: 'gated-skill',
+      name: 'Gated skill',
+      description: 'A skill the host hid behind a gate',
+      content: GATED_BODY,
+      ...extra,
+    },
+  ];
+
+  const revokedProvenance = () =>
+    axExtractSkillProvenance({
+      receipts: [
+        {
+          version: 1,
+          receiptId: 'r-1',
+          requestId: 'q-1',
+          decision: 'allow',
+          operation: 'files.read',
+          resource: { type: 'file', id: 'f-1' },
+          principalId: 'p-1',
+          actor: { id: 'a-1', kind: 'agent' },
+          grantIds: ['grant:held'],
+          leaseEpoch: 1,
+          authorizedAt: 1,
+        },
+      ],
+      leaseEpoch: 1,
+      capturedAt: '2026-01-01T00:00:00.000Z',
+    });
+
+  it('refuses the run when the bound skill is ineligible here, and never renders it', async () => {
+    const {
+      agent: built,
+      ai,
+      executorPrompts,
+    } = makeAgent(
+      {
+        distiller: [DISTILL],
+        executor: ['await inventory.adjustStock({sku:"a1"})', FINAL],
+      },
+      {
+        skillsCatalog: gatedCatalog({ requires: { bins: ['redis-cli'] } }),
+        skillPolicy: { environment: { bins: [] } },
+        callTimeSkills: [{ qualifiedName: ADJUST, skill: 'gated-skill' }],
+      }
+    );
+
+    const error = await built
+      .forward(ai, { task: 'adjust' } as never)
+      .then(() => undefined)
+      .catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(AxWorkingStateSchemaError);
+    expect((error as AxWorkingStateSchemaError).detail).toBe(
+      'ineligible_bound_skill: gated-skill'
+    );
+    // Fail-closed AND silent about the body: the whole point of `requires` is
+    // that the procedure is wrong for this host.
+    expect(executorPrompts.join('\n')).not.toContain(GATED_BODY);
+  });
+
+  it('refuses the run when the retrieval re-check denied the bound skill', async () => {
+    // The authority half is time- and authority-varying: an expired grant or a
+    // revoked trajectory parks a skill mid-lifecycle, long after the binding
+    // was written. "The host named it by id" is not an answer.
+    const {
+      agent: built,
+      ai,
+      executorPrompts,
+    } = makeAgent(
+      {
+        distiller: [DISTILL],
+        executor: ['await inventory.adjustStock({sku:"a1"})', FINAL],
+      },
+      {
+        skillsCatalog: gatedCatalog({
+          authorityProvenance: revokedProvenance(),
+        }),
+        skillPolicy: {
+          authoritySnapshot: { grantIds: [], leaseEpoch: 1 },
+          precondition: { grant_revoked: 'drop' as const },
+          now: () => 0,
+        },
+        callTimeSkills: [{ qualifiedName: ADJUST, skill: 'gated-skill' }],
+      }
+    );
+
+    const error = await built
+      .forward(ai, { task: 'adjust' } as never)
+      .then(() => undefined)
+      .catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(AxWorkingStateSchemaError);
+    expect((error as AxWorkingStateSchemaError).detail).toBe(
+      'denied_bound_skill: gated-skill'
+    );
+    expect(executorPrompts.join('\n')).not.toContain(GATED_BODY);
+  });
+
+  it('injects the same skill when both gates admit it', async () => {
+    // The positive control for both negatives above: the binding, the catalog
+    // entry and the script are identical — only the run's environment differs.
+    const {
+      agent: built,
+      ai,
+      executorPrompts,
+      adjustCalls,
+    } = makeAgent(
+      {
+        distiller: [DISTILL],
+        executor: ['await inventory.adjustStock({sku:"a1"})', FINAL],
+      },
+      {
+        skillsCatalog: gatedCatalog({ requires: { bins: ['redis-cli'] } }),
+        skillPolicy: { environment: { bins: ['redis-cli'] } },
+        callTimeSkills: [{ qualifiedName: ADJUST, skill: 'gated-skill' }],
+      }
+    );
+
+    await built.forward(ai, { task: 'adjust' } as never);
+    expect(adjustCalls).toHaveLength(0);
+    expect(executorPrompts[1]).toContain(GATED_BODY);
+  });
+
+  it('leaves an INLINE bound skill alone — no catalog gate can hide it', async () => {
+    // Host-supplied literal text, the `presetSkills` posture. A denied catalog
+    // entry sharing its id must not reach through and refuse the run.
+    const {
+      agent: built,
+      ai,
+      executorPrompts,
+    } = makeAgent(
+      {
+        distiller: [DISTILL],
+        executor: ['await inventory.adjustStock({sku:"a1"})', FINAL],
+      },
+      {
+        skillsCatalog: gatedCatalog({ requires: { bins: ['redis-cli'] } }),
+        skillPolicy: { environment: { bins: [] } },
+        callTimeSkills: [
+          {
+            qualifiedName: ADJUST,
+            skill: { id: 'inline', name: 'Inline', content: 'INLINE BODY' },
+          },
+        ],
+      }
+    );
+
+    await built.forward(ai, { task: 'adjust' } as never);
+    expect(executorPrompts[1]).toContain('INLINE BODY');
+    expect(executorPrompts.join('\n')).not.toContain(GATED_BODY);
   });
 });
 

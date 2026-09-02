@@ -28,17 +28,41 @@
  * 3. **It is a nudge, not a gate.** Each binding carries a per-run injection
  *    budget (default 1). Once the budget is spent the tool executes normally,
  *    so an unhelpful skill can never trap the actor in a re-draft loop.
+ * 4. **A bound catalog id is not a bypass of the catalog gates.** A binding is
+ *    static host config; `requires` eligibility and the retrieval-time
+ *    authority re-check are not. The run-start open resolves a catalog id
+ *    through the same admission verdict `discover({ skills })`, the
+ *    `### Available Skills` index, the relevance hint and the kernel tier use,
+ *    and refuses the RUN when the gates hid the bound skill — a binding must
+ *    never be the one path that renders a hidden body into a prompt.
  */
 
 import type {
   AxAgentCatalogSkill,
   AxAgentSkillResult,
 } from './agentInternal/skillsTypes.js';
+import type { AxAgentSkillEnvironment } from './skillCatalog.js';
+import { axCheckSkillRequirements } from './skillCatalog.js';
 import type { AxWorkingStateDocument } from './workingState.js';
 import { AxWorkingStateSchemaError } from './workingState.js';
 
 /** Injections allowed for one callable in one run when the host names none. */
 const DEFAULT_MAX_INJECTIONS = 1;
+
+/**
+ * Ceiling on a host-configured `maxInjections`. Every injection appends a
+ * pending record, ingests a skill body and appends a guidance entry, and the
+ * guidance log is not trimmed — a mechanism whose entire safety argument is
+ * "budgeted" must bound its own budget rather than trust the number it was
+ * handed. Well above any plausible `maxTurns`, so it never binds in practice.
+ */
+const MAX_MAX_INJECTIONS = 100;
+
+/** The error subsystem stem, so a call-time misconfiguration names itself. */
+const CONFIG_SUBSYSTEM = 'Call-time skill';
+
+const configError = (detail: string): AxWorkingStateSchemaError =>
+  new AxWorkingStateSchemaError(detail, CONFIG_SUBSYSTEM);
 
 /**
  * Opt-in binding of one exact callable to one skill. Absent from the agent's
@@ -54,9 +78,9 @@ export type AxCallTimeSkillBinding = Readonly<{
   /** Skill id resolved from `skillsCatalog`, or an inline skill. */
   skill: string | AxAgentSkillResult;
   /**
-   * Injections allowed for this callable in one run. Default 1. The tool
-   * executes normally on every call past the budget — the interception is a
-   * one-shot nudge, never a gate.
+   * Injections allowed for this callable in one run. Default 1, hard ceiling
+   * 100. The tool executes normally on every call past the budget — the
+   * interception is a one-shot nudge, never a gate.
    */
   maxInjections?: number;
   /**
@@ -147,6 +171,12 @@ export type AxCallTimeSkillDeps = Readonly<{
   workingState?: () => Readonly<AxWorkingStateDocument<any>>;
   /** Resolves a catalog skill id to renderable text. */
   resolveSkill?: (id: string) => AxAgentSkillResult | undefined;
+  /**
+   * The run's catalog admission verdict for a bound id. Supplied only at run
+   * start, where the authority snapshot and the run clock exist; the
+   * constructor gate runs without it because neither does yet.
+   */
+  admitSkill?: (id: string) => AxCallTimeSkillAdmission;
 }>;
 
 const skillIdOf = (skill: AxAgentSkillResult): string =>
@@ -181,6 +211,50 @@ export const axCallTimeSkillCatalogResolver =
     return { id: found.id, name: found.name, content: found.content };
   };
 
+/**
+ * Why a bound catalog id may not be injectable. Only `'admit'` may reach a
+ * prompt.
+ *
+ * @internal
+ */
+export type AxCallTimeSkillAdmission = 'admit' | 'ineligible' | 'denied';
+
+/**
+ * The run-start admission verdict for a bound catalog id, over the SAME two
+ * catalog gates every other retrieval path runs.
+ *
+ * A binding is static host config; the gates are not. `requires` gating is
+ * resolved against the run's declared environment, and the authority re-check
+ * that produces `denied` is time- and authority-varying — an expired grant or
+ * a revoked trajectory parks a skill mid-lifecycle. "The host named it by id"
+ * is therefore not an answer: `discover({ skills })`, the `### Available
+ * Skills` index, the relevance hint and the kernel tier all refuse a skill
+ * these gates hid, and a call-time binding must not be the one path that
+ * renders its body anyway.
+ *
+ * An id absent from the catalog is admitted: an inline skill is host-supplied
+ * literal text with nothing to be eligible for, exactly as `presetSkills` is.
+ *
+ * @internal
+ */
+export const axCallTimeSkillCatalogAdmission =
+  (
+    catalog: readonly AxAgentCatalogSkill[] | undefined,
+    gates: Readonly<{
+      environment?: Readonly<AxAgentSkillEnvironment>;
+      denied?: ReadonlySet<string>;
+    }>
+  ) =>
+  (id: string): AxCallTimeSkillAdmission => {
+    const found = catalog?.find((entry) => entry?.id === id);
+    if (!found) return 'admit';
+    if (!axCheckSkillRequirements(found.requires, gates.environment).eligible) {
+      return 'ineligible';
+    }
+    if (gates.denied?.has(id)) return 'denied';
+    return 'admit';
+  };
+
 const isSkillResult = (value: unknown): value is AxAgentSkillResult => {
   if (!value || typeof value !== 'object') return false;
   const record = value as Record<string, unknown>;
@@ -212,57 +286,57 @@ export function axValidateCallTimeSkillBindings(
   }>
 ): void {
   if (!Array.isArray(bindings)) {
-    throw new AxWorkingStateSchemaError('call_time_skills_not_an_array');
+    throw configError('call_time_skills_not_an_array');
   }
   const seen = new Set<string>();
   for (const binding of bindings as readonly AxCallTimeSkillBinding[]) {
     if (!binding || typeof binding !== 'object') {
-      throw new AxWorkingStateSchemaError('invalid_call_time_skill_binding');
+      throw configError('invalid_call_time_skill_binding');
     }
     const name = binding.qualifiedName;
     if (typeof name !== 'string' || name.trim().length === 0) {
-      throw new AxWorkingStateSchemaError('invalid_bound_callable');
+      throw configError('invalid_bound_callable');
     }
     if (name.includes('*')) {
       // A glob would let one binding capture a callable registered later, and
       // interception changes a tool's contract. Exact names only.
-      throw new AxWorkingStateSchemaError(`bound_callable_glob: ${name}`);
+      throw configError(`bound_callable_glob: ${name}`);
     }
     if (seen.has(name)) {
-      throw new AxWorkingStateSchemaError(`duplicate_bound_callable: ${name}`);
+      throw configError(`duplicate_bound_callable: ${name}`);
     }
     seen.add(name);
     if (
       binding.maxInjections !== undefined &&
-      (!Number.isInteger(binding.maxInjections) || binding.maxInjections < 1)
+      (!Number.isInteger(binding.maxInjections) ||
+        binding.maxInjections < 1 ||
+        binding.maxInjections > MAX_MAX_INJECTIONS)
     ) {
-      throw new AxWorkingStateSchemaError(
+      throw configError(
         `invalid_max_injections: ${String(binding.maxInjections)}`
       );
     }
     if (binding.when !== undefined) {
       if (typeof binding.when !== 'function') {
-        throw new AxWorkingStateSchemaError(`invalid_when_predicate: ${name}`);
+        throw configError(`invalid_when_predicate: ${name}`);
       }
       if (!context.hasWorkingState) {
-        throw new AxWorkingStateSchemaError(
-          `when_requires_working_state: ${name}`
-        );
+        throw configError(`when_requires_working_state: ${name}`);
       }
     }
     if (typeof binding.skill === 'string') {
       const id = binding.skill.trim();
       if (!id) {
-        throw new AxWorkingStateSchemaError(`unknown_bound_skill: ${name}`);
+        throw configError(`unknown_bound_skill: ${name}`);
       }
       const resolved = context.resolveSkill?.(id);
       if (!isSkillResult(resolved)) {
-        throw new AxWorkingStateSchemaError(`unknown_bound_skill: ${id}`);
+        throw configError(`unknown_bound_skill: ${id}`);
       }
       continue;
     }
     if (!isSkillResult(binding.skill)) {
-      throw new AxWorkingStateSchemaError(`unresolvable_skill_spec: ${name}`);
+      throw configError(`unresolvable_skill_spec: ${name}`);
     }
   }
 }
@@ -307,6 +381,19 @@ export class AxCallTimeSkillRuntime {
         typeof binding.skill === 'string'
           ? (deps.resolveSkill!(binding.skill.trim()) as AxAgentSkillResult)
           : binding.skill;
+      if (typeof binding.skill === 'string' && deps.admitSkill) {
+        // Fail-closed and LOUD. Silently dropping the skill while still
+        // intercepting would leave the actor blocked on a call it may not make
+        // with no procedure to read, which is worse than either alternative;
+        // silently executing would make the two catalog gates advisory.
+        const admission = deps.admitSkill(binding.skill.trim());
+        if (admission === 'ineligible') {
+          throw configError(`ineligible_bound_skill: ${binding.skill.trim()}`);
+        }
+        if (admission === 'denied') {
+          throw configError(`denied_bound_skill: ${binding.skill.trim()}`);
+        }
+      }
       resolved.set(binding.qualifiedName, {
         qualifiedName: binding.qualifiedName,
         skill,
@@ -319,14 +406,20 @@ export class AxCallTimeSkillRuntime {
   }
 
   /**
-   * Every bound qualified name. A name in this set gets NO speculation
-   * adapter, so the runtime's speculation path cannot bypass the
-   * interception.
+   * Every bound qualified name — an inspection view for tests and for a host
+   * auditing what a run intercepted.
+   *
+   * NOT the speculation exclusion: that is driven per registration site by
+   * `register()` returning a hook, and `wrapFunction` installing no adapter
+   * when it did. Two mechanisms answering the same question could drift; one
+   * value carries both halves, and this accessor reads it rather than deciding
+   * anything.
    */
   public bound(): ReadonlySet<string> {
     return new Set(this.bindings.keys());
   }
 
+  /** @see bound — inspection only, never the dispatch decision. */
   public isBound(qualifiedName: string): boolean {
     return this.bindings.has(qualifiedName);
   }
@@ -351,7 +444,7 @@ export class AxCallTimeSkillRuntime {
   public finishRegistration(): void {
     for (const name of this.bindings.keys()) {
       if (!this.registered.has(name)) {
-        throw new AxWorkingStateSchemaError(`unknown_bound_callable: ${name}`);
+        throw configError(`unknown_bound_callable: ${name}`);
       }
     }
   }
@@ -369,12 +462,27 @@ export class AxCallTimeSkillRuntime {
     // Budget spent: the tool executes. One nudge, then normal operation.
     if (used >= binding.maxInjections) return undefined;
     if (binding.when) {
-      const state = this.deps.workingState?.();
-      // `when` without working state is refused at construction; falling
-      // through here rather than inventing an empty document keeps the
-      // unreachable case on the "behaves exactly as an unbound callable" side.
-      if (!state) return undefined;
-      if (!binding.when(state)) return undefined;
+      let allow: boolean;
+      try {
+        const state = this.deps.workingState?.();
+        // `when` without working state is refused at construction; falling
+        // through here rather than inventing an empty document keeps the
+        // unreachable case on the "behaves exactly as an unbound callable"
+        // side.
+        if (!state) return undefined;
+        allow = binding.when(state) === true;
+      } catch {
+        // A host predicate that throws is a HOST bug, not a tool failure.
+        // `intercept()` runs synchronously inside the actor's `await
+        // tool(...)`, so a propagated throw becomes an `isError` turn tagged
+        // `'error'`, feeds `noteActorTurnErrorState` and escalates the
+        // executor model — the exact outcome "return, don't throw" exists to
+        // prevent. Worse, the budget is spent AFTER this point, so an
+        // escalating turn would repeat unboundedly. Fall through to the normal
+        // call path: the callable behaves exactly as an unbound one.
+        return undefined;
+      }
+      if (!allow) return undefined;
     }
     this.counts.set(qualifiedName, used + 1);
     this.total += 1;

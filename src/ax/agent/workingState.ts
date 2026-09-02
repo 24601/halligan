@@ -603,11 +603,19 @@ export class AxWorkingStateStoreError extends AxWorkingStateError {
 export class AxWorkingStateSchemaError extends AxWorkingStateError {
   public override readonly code = 'working_state_schema_invalid';
   public readonly detail: string;
+  /**
+   * Which configuration block was invalid. Defaults to `'Working state'`;
+   * call-time skill bindings are a sibling option that reuses this error type
+   * and its `<key>: <value>` detail convention, and naming the wrong subsystem
+   * in the message sends a host to the wrong option.
+   */
+  public readonly subsystem: string;
 
-  constructor(detail: string) {
-    super(`Working state configuration is invalid: ${detail}`);
+  constructor(detail: string, subsystem = 'Working state') {
+    super(`${subsystem} configuration is invalid: ${detail}`);
     this.name = 'AxWorkingStateSchemaError';
     this.detail = detail;
+    this.subsystem = subsystem;
   }
 }
 
