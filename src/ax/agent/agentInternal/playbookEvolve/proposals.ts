@@ -7,7 +7,12 @@
  * `addActorInstruction()`, not here.)
  */
 
+import type { AxPlaybookSnapshot } from '../../../dsp/playbook.js';
 import { axPlaybookFailureSection } from '../failureReport.js';
+import type {
+  AxAgentPlaybookEviction,
+  AxAgentPlaybookPruneProposal,
+} from './playbookEvidenceTypes.js';
 import type {
   AxAgentPlaybookEvolveProposal,
   AxAgentPlaybookWeakness,
@@ -114,4 +119,71 @@ export async function applyProposal(args: {
     }
     throw applicationError;
   }
+}
+
+/**
+ * The legacy `AxAgentPlaybookEvolveProposal` fields for a prune outcome.
+ *
+ * `AxAgentPlaybookEvolveOutcome.proposal` keeps its exact shape for BOTH kinds,
+ * so every field a pre-evidence consumer reads is populated with something
+ * meaningful and the truth lives in the new `kind` / `prune` fields. Turning
+ * `proposal` into a discriminated union would have been cleaner and is rejected
+ * because it breaks `outcome.proposal.feedback` at the type level for every
+ * existing caller.
+ */
+export function buildPruneRationaleText(
+  prune: Readonly<AxAgentPlaybookPruneProposal>
+): AxAgentPlaybookEvolveProposal {
+  const saved = prune.renderedTokensBefore - prune.renderedTokensAfter;
+  return {
+    weaknessId: prune.pruneId,
+    clusterSignature: `prune:${prune.operation}`,
+    feedback: `A playbook removal was proposed from leave-one-out held-out evidence.
+
+Operation: ${prune.operation.toUpperCase()}
+Trigger: ${prune.trigger}
+Bullets: ${prune.bulletIds.join(', ')}
+Rationale: ${prune.reason}
+Rendered tokens: ${prune.renderedTokensBefore} -> ${prune.renderedTokensAfter} (${saved} freed)
+Judged by: maxCurrentLoss ${prune.appliedThresholds.maxCurrentLoss}, maxHeldOutLoss ${prune.appliedThresholds.maxHeldOutLoss}, minTokenReduction ${prune.appliedThresholds.minTokenReduction}`,
+  };
+}
+
+/**
+ * Bullets the ACE curator evicted while applying a CURATE proposal, recovered
+ * from the artifact-history delta the apply path already reads.
+ *
+ * This is the silent-loss channel: `pruneSectionForAddition` evicts the
+ * lowest-ranked unprotected bullet on section overflow with no receipt and no
+ * gate, so an accepted ADD can delete an existing bullet today. The eviction is
+ * detected structurally, by the `autoPruned` marker ACE stamps on the synthetic
+ * REMOVE it records — not by diffing bullet sets, which cannot tell an eviction
+ * apart from a curator-requested removal.
+ */
+export function collectEvictions(args: {
+  before: Readonly<AxPlaybookSnapshot>;
+  after: Readonly<AxPlaybookSnapshot>;
+  weaknessId: string;
+}): readonly AxAgentPlaybookEviction[] {
+  const priorLength = args.before.artifact?.history?.length ?? 0;
+  const added = (args.after.artifact?.history ?? []).slice(priorLength);
+  const evictions: AxAgentPlaybookEviction[] = [];
+  const seen = new Set<string>();
+  for (const entry of added) {
+    for (const operation of entry?.operations ?? []) {
+      if (operation?.type !== 'REMOVE') continue;
+      if ((operation.metadata as { autoPruned?: unknown })?.autoPruned !== true)
+        continue;
+      const bulletId = operation.bulletId;
+      if (typeof bulletId !== 'string' || seen.has(bulletId)) continue;
+      seen.add(bulletId);
+      evictions.push({
+        bulletId,
+        section: operation.section,
+        weaknessId: args.weaknessId,
+        cause: 'section_overflow',
+      });
+    }
+  }
+  return evictions;
 }

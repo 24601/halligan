@@ -14,6 +14,7 @@
  * `requireHeldOut` adds a fail-closed production promotion policy on top.
  */
 
+import type { AxAuthorizationReceipt } from '../../../authority/types.js';
 import {
   estimateTokenCount,
   renderPlaybook,
@@ -60,6 +61,7 @@ import {
 } from './evidenceReceipt.js';
 import { clusterFailures } from './failureClusters.js';
 import { evaluateAgentPromotionGate } from './gate.js';
+import type { AxGateChainInput } from './gates.js';
 import { evaluateGateChain, gateChainAccepts } from './gates.js';
 import type {
   AxAgentPlaybookComputeAccounting,
@@ -74,27 +76,60 @@ import type {
   AxAgentPlaybookNomination,
   AxAgentPlaybookOverheadReport,
   AxAgentPlaybookOverheadSplit,
+  AxAgentPlaybookPromotionDenialCode,
+  AxAgentPlaybookPromotionRecord,
+  AxAgentPlaybookPromotionVeto,
+  AxAgentPlaybookPruneOptions,
+  AxAgentPlaybookPruneProposal,
+  AxAgentPlaybookRedundancyEntry,
+  AxAgentPlaybookRedundancyReport,
   AxAgentPlaybookSplitName,
   AxAgentPlaybookVarianceBand,
   AxAgentPlaybookVarianceBandReport,
+  AxAgentPlaybookVetoResult,
 } from './playbookEvidenceTypes.js';
-import { AxAgentPlaybookEvolveError } from './playbookEvidenceTypes.js';
+import {
+  AxAgentPlaybookEvolveError,
+  axIsAgentPlaybookEvolveError,
+} from './playbookEvidenceTypes.js';
 import type {
   AxAgentPlaybookEvolveOptions,
   AxAgentPlaybookEvolveOutcome,
   AxAgentPlaybookEvolveProgressEvent,
+  AxAgentPlaybookEvolveProposal,
   AxAgentPlaybookEvolveResult,
   AxAgentPlaybookEvolveRunRecord,
   AxAgentPlaybookRetentionAnchor,
   AxAgentPlaybookRetentionReceipt,
   AxAgentPlaybookWeakness,
 } from './playbookEvolveTypes.js';
+import {
+  promotionRecordOf,
+  requestPromotionAuthority,
+  runPromotionVetoes,
+  validatePromotionAuthority,
+} from './promotion.js';
 import type { AxAppliedProposal } from './proposals.js';
 import {
   applyProposal,
   buildProposal,
+  buildPruneRationaleText,
+  collectEvictions,
   currentPlaybookText,
 } from './proposals.js';
+import {
+  applyPrune,
+  PRUNE_DEFAULT_MAX_ABLATIONS,
+  PRUNE_DEFAULT_MAX_CURRENT_LOSS,
+  PRUNE_DEFAULT_MIN_TOKEN_REDUCTION,
+  PRUNE_DEFAULT_OPERATION,
+  pruneCandidateRanking,
+  pruneOverflowSet,
+  redundancyVerdictOf,
+  renderedTokensOf,
+  selectPruneProposals,
+  transformPlaybookForPrune,
+} from './pruning.js';
 import { createReachCollector } from './reach.js';
 import {
   captureSnapshot,
@@ -290,6 +325,14 @@ const EVIDENCE_OPTION_KEYS = [
   'conditionsForTask',
   'classifyTermination',
   'maxDiscardRedraws',
+  'prune',
+  'promotionAuthority',
+  // A reject-only hook has nothing to reject on the trust-batch path: that
+  // path accepts every proposal with no evaluation, so no nomination is ever
+  // produced and the veto could never fire. An accepted-but-inert option is
+  // exactly the silent absence this machinery exists to remove, so it fails
+  // closed with the rest.
+  'promotionVeto',
 ] as const;
 
 const CONTROL_ARM_KINDS: ReadonlySet<AxAgentPlaybookControlArmKind> =
@@ -440,6 +483,36 @@ function validateEvidenceOptions(
       'gates.interval: require needs varianceBand; a required interval gate without a band silently degrades to "excludes zero".'
     );
   }
+  if (options?.prune && options.prune.enabled !== true) {
+    const configured = Object.keys(options.prune)
+      .filter((key) => key !== 'enabled')
+      .sort();
+    if (configured.length > 0) {
+      // The same rule `promotionVeto` gets: an option that is accepted, counted
+      // as an evidence option, and then does nothing is the silent absence this
+      // machinery exists to remove. `prune: { maxRenderedTokens: 400 }` reads
+      // like a configured ceiling and enforces nothing.
+      throw new AxAgentPlaybookEvolveError(
+        'evidence_incomplete',
+        'redundancy_ablation',
+        `prune was configured with ${configured.join(', ')} but prune.enabled is not true, so the sweep never runs and none of it takes effect. Set prune.enabled: true, or drop the prune option.`
+      );
+    }
+  }
+  if (options?.prune?.enabled && !hasHeldOut) {
+    // A leave-one-out verdict taken on the split the artifact was selected on
+    // measures selection, not redundancy, so there is no fallback to `current`
+    // here either.
+    // Not `prune_apply_failed`: nothing was applied. The evidence a prune gate
+    // needs cannot exist without a held-out split, which is what
+    // `evidence_incomplete` names.
+    throw new AxAgentPlaybookEvolveError(
+      'evidence_incomplete',
+      'redundancy_ablation',
+      'prune.enabled requires a non-empty validation set; a leave-one-out redundancy reading on the current split measures selection, not redundancy.'
+    );
+  }
+  validatePromotionAuthority(options?.promotionAuthority);
   validateIntervalOptions(options?.intervalOptions);
 }
 
@@ -528,6 +601,20 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
   const usesBuiltInJudge = options?.metric === undefined;
   const maxDiscardRedraws =
     options?.maxDiscardRedraws ?? (options?.classifyTermination ? 1 : 0);
+  const promotionVetoes: readonly AxAgentPlaybookPromotionVeto[] =
+    options?.promotionVeto === undefined
+      ? []
+      : Array.isArray(options.promotionVeto)
+        ? (options.promotionVeto as readonly AxAgentPlaybookPromotionVeto[])
+        : [options.promotionVeto as AxAgentPlaybookPromotionVeto];
+  /**
+   * Gates 8 and 9 are the only ones that cost a host call, so the chain is run
+   * twice ONLY when one of them is configured: once free, to produce the
+   * nomination the veto is shown, and once with the thunks. With neither
+   * configured the free report is the report and a legacy run pays nothing.
+   */
+  const hostGatesConfigured =
+    promotionVetoes.length > 0 || options?.promotionAuthority !== undefined;
   const retentionPolicy = options?.retentionPolicy
     ? cloneAndFreeze(options.retentionPolicy, 'retentionPolicy')
     : undefined;
@@ -1113,654 +1200,1169 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
   };
   let inFlight: AxAppliedProposal | undefined;
 
+  /**
+   * One evaluated candidate, whatever produced it. A curate proposal and a
+   * prune proposal differ in exactly four places — how the mutation is applied,
+   * which variant of gates 1/2 judges it, whether gate 7 has a rendered-size
+   * reading, and the wording of an accepted reason — so they share one
+   * evaluation, one retention receipt and one gate chain instead of two
+   * implementations free to drift.
+   */
+  type CandidateSpec = Readonly<{
+    kind: 'curate' | 'prune';
+    /** Progress phase for this candidate's own events. */
+    phase: AxAgentPlaybookEvolveProgressEvent['phase'];
+    label: string;
+    proposal: AxAgentPlaybookEvolveProposal;
+    /** Present iff `kind === 'prune'`; carries gate 7's reading. */
+    prune?: AxAgentPlaybookPruneProposal;
+    /** Applies the mutation and returns its exact rollback. */
+    apply: () => Promise<AxAppliedProposal>;
+    /**
+     * Gate 1 in `evaluateAgentPromotionGate`'s sign convention
+     * (`currentGain >= threshold`): the minimum gain for a curate, and
+     * `-maxCurrentLoss` for a prune — a removal is asked not to get worse, not
+     * to win.
+     */
+    legacyGainThreshold: number;
+    /** The same threshold in the gate chain's prune convention (`loss <= t`). */
+    chainGainThreshold: number;
+    /** Gate 2 tolerance: `epsilon` for a curate, `maxHeldOutLoss` for a prune. */
+    heldOutTolerance: number;
+  }>;
+
+  const evaluateCandidate = async (spec: CandidateSpec): Promise<void> => {
+    const { proposal } = spec;
+    const requiredCalls =
+      (trainTasks.length +
+        (validationTasks?.length ?? 0) +
+        retentionTaskCount) *
+      runsPerTask;
+    if (verify && budget.remaining < requiredCalls) {
+      outcomes.push({
+        proposal,
+        kind: spec.kind,
+        ...(spec.prune ? { prune: spec.prune } : {}),
+        status: 'rejected',
+        accepted: false,
+        reason: 'metric_budget exhausted before validation',
+        heldIn: { before: heldIn, after: heldIn },
+      });
+      progress(spec.phase, `${spec.label}: budget exhausted, skipped`);
+      return;
+    }
+
+    progress('proposal', `${spec.label}: applying playbook proposal`);
+    // Captured only when evidence is on: `getState()` clones the playbook,
+    // and a legacy run must not pay for a diff nothing will read.
+    const preApplySnapshot = evidenceEnabled
+      ? captureSnapshot(playbookHandle)
+      : undefined;
+    let applied: AxAppliedProposal;
+    try {
+      applied = await spec.apply();
+    } catch (err) {
+      if (
+        err &&
+        typeof err === 'object' &&
+        RESTORATION_FAILURE in err &&
+        (err as Record<symbol, unknown>)[RESTORATION_FAILURE] === true
+      ) {
+        throw err;
+      }
+      // A prune's apply failure is a typed AxAgentPlaybookEvolveError and is
+      // never swallowed into a rejection reason: `prune_apply_failed` means
+      // the snapshot transform or its validation refused, which is a caller
+      // or artifact defect, not a candidate that lost its gate.
+      if (
+        axIsAgentPlaybookEvolveError(err) &&
+        err.code === 'prune_apply_failed'
+      ) {
+        throw err;
+      }
+      outcomes.push({
+        proposal,
+        kind: spec.kind,
+        ...(spec.prune ? { prune: spec.prune } : {}),
+        status: 'rejected',
+        accepted: false,
+        reason: `apply failed: ${err instanceof Error ? err.message : String(err)}`,
+        heldIn: { before: heldIn, after: heldIn },
+      });
+      return;
+    }
+    inFlight = applied;
+    // The eviction channel: `pruneSectionForAddition` drops the lowest-ranked
+    // unprotected bullet on section overflow with no receipt and no gate, so
+    // an accepted ADD can delete an existing bullet. Recorded, not closed.
+    const evictions =
+      preApplySnapshot && evidenceEnabled
+        ? collectEvictions({
+            before: preApplySnapshot,
+            after: captureSnapshot(playbookHandle) ?? preApplySnapshot,
+            weaknessId: proposal.weaknessId,
+          })
+        : [];
+
+    // The reach collector observes every attempt of THIS candidate's
+    // evaluation. It is created after the apply so the rendered playbook it
+    // reads is the one the evaluation will actually see.
+    const reachCollector = evidenceEnabled
+      ? createReachCollector({
+          ...(options?.reachProbe ? { probe: options.reachProbe } : {}),
+          ...(options?.conditionsForTask
+            ? { conditionsForTask: options.conditionsForTask }
+            : {}),
+          candidateBulletIds: applied.bulletIds,
+          candidateBullets: bulletsById(applied.bulletIds),
+          renderedBulletIds: renderedBulletIdsNow(),
+          now: nowFn,
+          nowIso: nowIso(),
+          ...(options?.reachProbeBudgetMs !== undefined
+            ? { probeBudgetMs: options.reachProbeBudgetMs }
+            : {}),
+        })
+      : undefined;
+
+    // Trust-batch: keep the lesson without a gate.
+    if (!verify) {
+      accepted.push(applied);
+      inFlight = undefined;
+      outcomes.push({
+        proposal,
+        kind: spec.kind,
+        status: 'accepted',
+        accepted: true,
+        reason: 'applied without verification (verify: false)',
+        heldIn: { before: heldIn, after: heldIn },
+      });
+      progress('validation', `${spec.label}: applied (trust-batch)`);
+      return;
+    }
+
+    // Snapshot before this candidate's own evaluations so its receipt carries
+    // ITS cost, not the running total of every candidate before it.
+    const candidateSpendBefore = usedCalls();
+    const candidateStartedAt = nowFn();
+    const revalTrain = await runPhaseBatch(
+      'candidate_eval',
+      trainTasks,
+      'current',
+      undefined,
+      reachCollector
+    );
+    const candidateCurrentSequence = retentionPolicy
+      ? ++retentionSequence
+      : undefined;
+    let revalHeldOut: number | undefined;
+    let revalHeldOutBatch: AxAgentEvalBatchResult<IN, OUT> | undefined;
+    let candidateHeldOutSequence: number | undefined;
+    if (validationTasks?.length) {
+      revalHeldOutBatch = await runPhaseBatch(
+        'candidate_eval',
+        validationTasks,
+        'heldOut',
+        undefined,
+        reachCollector
+      );
+      revalHeldOut = revalHeldOutBatch.mean;
+      if (retentionPolicy) {
+        candidateHeldOutSequence = ++retentionSequence;
+      }
+    }
+    const candidateRetentionBatches: {
+      batch: AxAgentEvalBatchResult<IN, OUT>;
+      sequence: number;
+    }[] = [];
+    if (retentionPolicy) {
+      for (const slice of retentionPolicy.slices) {
+        const batch = await runPhaseBatch(
+          'retention_eval',
+          slice.tasks,
+          'slice',
+          slice.name
+        );
+        candidateRetentionBatches.push({
+          batch,
+          sequence: ++retentionSequence,
+        });
+      }
+    }
+
+    // A re-eval that exhausted mid-way produced a subset mean — comparing it
+    // to the full-set baseline is apples-to-oranges, so refuse the accept.
+    // Retention additionally rejects any evaluator error/non-finite score.
+    if (retentionPolicy) {
+      const failedResult = !revalTrain.validEvidence
+        ? revalTrain
+        : revalHeldOutBatch && !revalHeldOutBatch.validEvidence
+          ? revalHeldOutBatch
+          : candidateRetentionBatches.find(({ batch }) => !batch.validEvidence)
+              ?.batch;
+      if (failedResult) {
+        throw retentionEvidenceError(
+          'candidate retention evaluation',
+          failedResult
+        );
+      }
+    }
+    const gateBase = {
+      heldIn,
+      revalTrain,
+      heldOut,
+      revalHeldOut,
+      revalHeldOutBatch,
+      epsilon: spec.heldOutTolerance,
+      currentGainThreshold: spec.legacyGainThreshold,
+      requireHeldOut,
+      hasRetentionPolicy: retentionPolicy !== undefined,
+      retentionBatchesComplete: candidateRetentionBatches.every(
+        ({ batch }) => batch.complete
+      ),
+    } as const;
+    // `revalComplete`/`gainOk`/`heldOutOk` do not depend on retention, and
+    // the retention receipt needs all three before it can be assembled — so
+    // the pure gate runs once here and once again below with the measured
+    // retention verdict folded in.
+    const provisional = evaluateAgentPromotionGate({
+      ...gateBase,
+      retentionOk: true,
+    });
+    const { revalComplete, gainOk, heldOutOk, currentGain } = provisional;
+    let retentionReceipt: AxAgentPlaybookRetentionReceipt | undefined;
+    let retentionLoss: { worst: number; mean: number } | undefined;
+    let retentionOk = true;
+    if (retentionPolicy && revalComplete) {
+      const slices = retentionAnchors.map((anchor, index) => {
+        const candidate = candidateRetentionBatches[index]!;
+        return {
+          name: anchor.name,
+          version: anchor.version,
+          taskCount: anchor.taskCount,
+          taskSetDigest: anchor.taskSetDigest,
+          anchorSequence: anchor.sequence,
+          candidateSequence: candidate.sequence,
+          anchorScore: anchor.score,
+          candidateScore: candidate.batch.mean,
+          historicalLoss: anchor.score - candidate.batch.mean,
+          anchorEvidence: anchor.evidence,
+          candidateEvidence: {
+            executedRuns: candidate.batch.executedRuns,
+            expectedRuns: candidate.batch.expectedRuns,
+            complete: true as const,
+          },
+        };
+      });
+      const losses = slices.map((slice) => slice.historicalLoss);
+      const worstHistoricalLoss = Math.max(...losses);
+      const meanHistoricalLoss =
+        losses.reduce((sum, loss) => sum + loss, 0) / losses.length;
+      retentionLoss = {
+        worst: worstHistoricalLoss,
+        mean: meanHistoricalLoss,
+      };
+      retentionOk =
+        atMostWithFloatingPointTolerance(
+          worstHistoricalLoss,
+          retentionPolicy.maxWorstHistoricalLoss
+        ) &&
+        atMostWithFloatingPointTolerance(
+          meanHistoricalLoss,
+          retentionPolicy.maxMeanHistoricalLoss
+        );
+      const accepted = gainOk && heldOutOk && retentionOk;
+      retentionReceipt = deepFreeze({
+        policy: {
+          digest: retentionPolicyDigest!,
+          evaluatorId: retentionPolicy.evaluatorId,
+          currentTaskSetDigest: currentTaskSetDigest!,
+          ...(heldOutTaskSetDigest ? { heldOutTaskSetDigest } : {}),
+        },
+        sequence: ++retentionSequence,
+        currentTask: {
+          before: heldIn,
+          after: revalTrain.mean,
+          gain: currentGain,
+          taskSetDigest: currentTaskSetDigest!,
+          anchorSequence: currentTaskAnchorSequence!,
+          candidateSequence: candidateCurrentSequence!,
+          anchorEvidence: currentTaskAnchorEvidence!,
+          candidateEvidence: {
+            executedRuns: revalTrain.executedRuns,
+            expectedRuns: revalTrain.expectedRuns,
+            complete: true,
+          },
+        },
+        ...(heldOutTaskSetDigest && baselineHeldOutBatch && revalHeldOutBatch
+          ? {
+              heldOut: {
+                taskSetDigest: heldOutTaskSetDigest,
+                anchorSequence: heldOutAnchorSequence!,
+                candidateSequence: candidateHeldOutSequence!,
+                anchorEvidence: heldOutAnchorEvidence!,
+                candidateEvidence: {
+                  executedRuns: revalHeldOutBatch.executedRuns,
+                  expectedRuns: revalHeldOutBatch.expectedRuns,
+                  complete: true as const,
+                },
+              },
+            }
+          : {}),
+        slices,
+        worstHistoricalLoss,
+        meanHistoricalLoss,
+        thresholds: {
+          minCurrentGain: retentionPolicy.minCurrentGain,
+          maxWorstHistoricalLoss: retentionPolicy.maxWorstHistoricalLoss,
+          maxMeanHistoricalLoss: retentionPolicy.maxMeanHistoricalLoss,
+        },
+        accepted,
+      });
+    }
+    const verdict = evaluateAgentPromotionGate({
+      ...gateBase,
+      retentionOk,
+      ...(retentionLoss ? { retentionLoss } : {}),
+    });
+    const legacyAccept = verdict.accept;
+
+    // ---- Evidence conjuncts ----
+    let evidence: AxAgentPlaybookEvidenceReceipt | undefined;
+    let gateReport: AxAgentPlaybookGateReport | undefined;
+    let freeGateInput: AxGateChainInput | undefined;
+    let promotion: AxAgentPlaybookPromotionRecord | undefined;
+    if (evidenceEnabled) {
+      const terminationSplits = [revalTrain.termination];
+      if (revalHeldOutBatch) {
+        terminationSplits.push(revalHeldOutBatch.termination);
+      }
+      const termination = terminationReportOf(terminationSplits);
+
+      const validity = evaluateValidity({
+        inputs: [
+          { split: 'current', records: revalTrain.records },
+          ...(revalHeldOutBatch
+            ? ([
+                { split: 'heldOut', records: revalHeldOutBatch.records },
+              ] as const)
+            : []),
+        ],
+        ...(options?.validity ? { options: options.validity } : {}),
+        ...(registered ? { registered } : {}),
+      });
+
+      const currentInterval = intervalFor(
+        anchorTrainRecords,
+        revalTrain.records,
+        currentSeed()
+      );
+      const heldOutInterval = intervalFor(
+        anchorHeldOutRecords,
+        revalHeldOutBatch?.records,
+        heldOutSeed()
+      );
+      const bandSpread = varianceBands?.find(
+        (band) => band.split === 'current'
+      )?.spread;
+
+      const reach = reachCollector?.report({
+        delta: currentGain,
+      });
+
+      const overheadSplits: AxAgentPlaybookOverheadSplit[] = [];
+      const currentOverhead = overheadSplitFrom({
+        split: 'current',
+        anchor: anchorTrainRecords,
+        candidate: revalTrain.records,
+        seed: currentSeed(),
+        resamples: intervalSettings.resamples,
+        level: intervalSettings.level,
+      });
+      if (currentOverhead) overheadSplits.push(currentOverhead);
+      if (anchorHeldOutRecords && revalHeldOutBatch) {
+        const heldOutOverhead = overheadSplitFrom({
+          split: 'heldOut',
+          anchor: anchorHeldOutRecords,
+          candidate: revalHeldOutBatch.records,
+          seed: heldOutSeed(),
+          resamples: intervalSettings.resamples,
+          level: intervalSettings.level,
+        });
+        if (heldOutOverhead) overheadSplits.push(heldOutOverhead);
+      }
+      const overhead = overheadReportFrom(overheadSplits);
+
+      freeGateInput = {
+        kind: spec.kind,
+        gain: {
+          revalComplete,
+          currentGain,
+          threshold: spec.chainGainThreshold,
+          ...(termination.incompleteFromEnvironmentFailures
+            ? {
+                incompleteFromEnvironmentFailures: true,
+                tasksWithNoScoredAttempt: termination.splits.reduce(
+                  (sum, split) => sum + split.tasksWithNoScoredAttempt,
+                  0
+                ),
+              }
+            : {}),
+        },
+        ...(revalHeldOut !== undefined && heldOut !== undefined
+          ? {
+              heldOut: {
+                delta: revalHeldOut - heldOut,
+                tolerance: spec.heldOutTolerance,
+              },
+            }
+          : {}),
+        ...(retentionPolicy
+          ? {
+              retention: {
+                ok: retentionOk,
+                detail: retentionReceipt
+                  ? `worst ${retentionReceipt.worstHistoricalLoss.toFixed(3)}, mean ${retentionReceipt.meanHistoricalLoss.toFixed(3)}`
+                  : 'retention receipt unavailable',
+              },
+            }
+          : {}),
+        validity: {
+          mode: options?.gates?.validity ?? 'off',
+          report: validity,
+        },
+        interval: {
+          mode: options?.gates?.interval ?? 'off',
+          ...(currentInterval ? { current: currentInterval } : {}),
+          ...(heldOutInterval ? { heldOut: heldOutInterval } : {}),
+          ...(bandSpread !== undefined ? { bandSpread } : {}),
+        },
+        ...(reach
+          ? {
+              reach: {
+                mode: options?.gates?.reach ?? 'off',
+                report: reach.report,
+              },
+            }
+          : {}),
+        ...(spec.prune
+          ? {
+              pruneSize: {
+                tokensBefore: spec.prune.renderedTokensBefore,
+                tokensAfter: spec.prune.renderedTokensAfter,
+                minTokenReduction:
+                  spec.prune.appliedThresholds.minTokenReduction,
+              },
+            }
+          : {}),
+      };
+      // The FREE gates decide the nomination, and the nomination is what a
+      // veto is shown — so the free chain runs first and gates 8/9 are then
+      // invoked as thunks over the very nomination they are judging. When no
+      // host gate is configured the second pass is skipped entirely and this
+      // report IS the report, which is what keeps a legacy run identical.
+      gateReport = await evaluateGateChain(freeGateInput);
+
+      const warnings: AxAgentPlaybookEvidenceWarning[] = [
+        ...(reach?.warnings ?? []),
+      ];
+      if (currentInterval?.direction === 'unresolved') {
+        warnings.push({
+          code: 'interval_unresolved',
+          message: `the current-split interval [${currentInterval.lower.toFixed(3)}, ${currentInterval.upper.toFixed(3)}] contains zero; the delta is unresolved, not an effect`,
+          scope: 'current',
+        });
+      }
+      if (bandSpread !== undefined && Math.abs(currentGain) <= bandSpread) {
+        warnings.push({
+          code: 'delta_within_variance_band',
+          message: `delta ${currentGain.toFixed(3)} is within the unchanged-artifact band spread ${bandSpread.toFixed(3)}`,
+          scope: 'current',
+        });
+      }
+      if (evictions.length > 0) {
+        // The real silent-loss channel, and it exists on the ADD path: an
+        // accepted curate proposal deleted an existing bullet with no gate
+        // and no receipt. Recorded here, not closed — closing it means
+        // rejecting curator writes inside evolve(), which is a behaviour
+        // change to the curate path and out of scope.
+        warnings.push({
+          code: 'curate_eviction',
+          message: `applying ${proposal.weaknessId} evicted ${evictions.length} existing bullet(s) through section overflow (${evictions
+            .map((eviction) => `${eviction.bulletId}@${eviction.section}`)
+            .join(
+              ', '
+            )}); that deletion paid no gate and left no receipt of its own`,
+        });
+      }
+      if (termination.worstDiscardRate > maxEnvironmentDiscardRate) {
+        warnings.push({
+          code: 'high_environment_discard_rate',
+          message: `environment-failure discard rate ${termination.worstDiscardRate.toFixed(3)} exceeds ${maxEnvironmentDiscardRate}${runsPerTask === 1 ? ' at runsPerTask: 1, which has no redundancy at all' : ''}`,
+        });
+      }
+      if (termination.incompleteFromEnvironmentFailures) {
+        warnings.push({
+          code: 'evaluation_incomplete_environment',
+          message:
+            'a task ended with no scored attempt after re-draws were exhausted; the candidate cannot be promoted on incomplete evidence',
+        });
+      }
+      if (overhead?.worstRelativeDelta !== undefined) {
+        if (legacyAccept && overhead.worstRelativeDelta > overheadWarnRatio) {
+          warnings.push({
+            code: 'overhead_exceeds_gain',
+            message: `the accepted artifact costs ${(overhead.worstRelativeDelta * 100).toFixed(1)}% more turns/calls/tokens than the anchor; report it next to the gain`,
+          });
+        }
+      }
+      if (heldOut !== undefined) {
+        warnings.push({
+          code: 'held_out_reused_for_selection',
+          message: `heldOut has been re-anchored to an accepted candidate ${heldOutSelectionComparisons} time(s); this is a SELECTION split, not a sealed test, and the implied family-wise error rate at level ${intervalSettings.level} is ${(1 - intervalSettings.level ** heldOutSelectionComparisons).toFixed(3)}`,
+          scope: 'heldOut',
+        });
+      }
+
+      const nomination: AxAgentPlaybookNomination = (() => {
+        const candidateDigest = canonicalDigest({
+          proposal,
+          bulletIds: applied.bulletIds,
+        });
+        const splitDigests = {
+          current: splitDigestOf(trainTasks),
+          ...(validationTasks?.length
+            ? { heldOut: splitDigestOf(validationTasks) }
+            : {}),
+          slices: (retentionPolicy?.slices ?? []).map((slice, index) => ({
+            name: slice.name,
+            version: slice.version,
+            digest: sliceTaskSetDigests[index] ?? '',
+          })),
+        };
+        const judgeModel = revalTrain.usage.find(
+          (usage) => typeof usage?.ai === 'string'
+        );
+        const core = {
+          candidateDigest,
+          ...(retentionPolicy?.evaluatorId
+            ? { evaluatorId: retentionPolicy.evaluatorId }
+            : {}),
+          ...(judgeModel
+            ? { judgeModel: { ai: judgeModel.ai, model: judgeModel.model } }
+            : {}),
+          splitDigests,
+        };
+        const passed = (gateReport?.entries ?? [])
+          .filter((entry) => entry.status === 'pass')
+          .map((entry) => entry.id);
+        const failedGates = (gateReport?.entries ?? [])
+          .filter(
+            (entry) => entry.status === 'fail' || entry.status === 'unmeasured'
+          )
+          .map((entry) => entry.id);
+        return {
+          ...core,
+          splitDigestBasis,
+          // Receipt metadata and a post-hoc integrity value. NOT an
+          // authorization binding: a mid-run digest is a value no host could
+          // have pre-granted.
+          promotionDigest: canonicalDigest(core),
+          // The stable, host-grantable identity the grant binds to. Never
+          // derived: a derived id is one the host cannot have pre-granted,
+          // and `matchingGrants` filters by exact equality BEFORE the host
+          // authorizer ever runs.
+          resourceId: options?.promotionAuthority?.resourceId ?? '',
+          gatesPassed: passed,
+          gatesFailed: failedGates,
+          nominated: legacyAccept && gateChainAccepts(gateReport!),
+        };
+      })();
+
+      // Neither a veto nor an authorizer can CAUSE a promotion, so the
+      // record starts at the strongest thing the free gates alone can say.
+      promotion = hostGatesConfigured
+        ? { status: 'not_nominated', nomination }
+        : { status: 'not_required', nomination };
+
+      // ---- Gates 8 and 9: the only gates that cost a host call ----
+      if (hostGatesConfigured && freeGateInput) {
+        const vetoResults: AxAgentPlaybookVetoResult[] = [];
+        let authorityOutcome:
+          | Readonly<
+              | {
+                  status: 'promoted';
+                  receipt: Readonly<AxAuthorizationReceipt>;
+                }
+              | {
+                  status: 'denied';
+                  code: AxAgentPlaybookPromotionDenialCode;
+                  reason: string;
+                }
+            >
+          | undefined;
+        gateReport = await evaluateGateChain({
+          ...freeGateInput,
+          ...(promotionVetoes.length > 0
+            ? {
+                veto: async () => {
+                  const outcome = await runPromotionVetoes({
+                    vetoes: promotionVetoes,
+                    nomination,
+                    timeoutMs: options?.promotionVetoTimeoutMs,
+                    ...(options?.abortSignal
+                      ? { signal: options.abortSignal }
+                      : {}),
+                  });
+                  vetoResults.push(...outcome.results);
+                  return { vetoed: outcome.vetoed, detail: outcome.detail };
+                },
+              }
+            : {}),
+          ...(options?.promotionAuthority
+            ? {
+                authority: async () => {
+                  authorityOutcome = await requestPromotionAuthority({
+                    promotionAuthority: options.promotionAuthority!,
+                    nomination,
+                    ...(options?.abortSignal
+                      ? { signal: options.abortSignal }
+                      : {}),
+                  });
+                  return authorityOutcome.status === 'promoted'
+                    ? {
+                        allowed: true,
+                        detail: `promotion receipt ${authorityOutcome.receipt.receiptId} bound to resource '${nomination.resourceId}'`,
+                      }
+                    : {
+                        allowed: false,
+                        detail: `${authorityOutcome.code}: ${authorityOutcome.reason}`,
+                      };
+                },
+              }
+            : {}),
+        });
+        promotion = promotionRecordOf({
+          nomination,
+          vetoes: vetoResults,
+          ...(authorityOutcome ? { authority: authorityOutcome } : {}),
+          authorityConfigured: options?.promotionAuthority !== undefined,
+        });
+        // THE ONLY CHANNEL AN ABORTED RUN HAS. `outcomes[]` — and with it the
+        // evidence receipt carrying this record — is unreachable when the run
+        // rethrows `aborted` a few statements below, so a denial with code
+        // 'cancelled' would otherwise be recorded into an object no consumer
+        // could ever read. Emitted on every host-gated candidate, not only the
+        // aborted one, so the promotion decision reads the same way whether or
+        // not the run finishes.
+        progress(
+          'promotion',
+          `${spec.label}: ${promotion.status}${
+            promotion.status === 'denied'
+              ? ` (${promotion.code}: ${promotion.reason})`
+              : promotion.status === 'vetoed'
+                ? ` (${promotion.vetoes
+                    .filter((result) => result.vetoed)
+                    .map(
+                      (result) =>
+                        `${result.vetoId}${result.reason ? `: ${result.reason}` : ''}`
+                    )
+                    .join('; ')})`
+                : promotion.status === 'promoted'
+                  ? ` (receipt ${promotion.receipt.receiptId} bound to resource '${nomination.resourceId}')`
+                  : ''
+          }`
+        );
+      }
+
+      // Per-slice paired intervals, so a retention slice reports its own
+      // uncertainty instead of leaving the receipt's `slices` array empty
+      // whenever a retentionPolicy is configured.
+      const sliceIntervals = (retentionPolicy?.slices ?? []).flatMap(
+        (slice, index) => {
+          const interval = intervalFor(
+            sliceAnchorRecords[index],
+            candidateRetentionBatches[index]?.batch.records,
+            sliceSeed(slice.tasks as readonly AxAgentEvalTask<IN>[])
+          );
+          return interval
+            ? [{ name: slice.name, version: slice.version, interval }]
+            : [];
+        }
+      );
+
+      const chainAccepts = gateChainAccepts(gateReport);
+      if (legacyAccept && chainAccepts && overhead) finalOverhead = overhead;
+      evidence = buildEvidenceReceipt({
+        kind: spec.kind,
+        nomination,
+        intervals: {
+          current:
+            currentInterval ??
+            ({
+              point: currentGain,
+              lower: currentGain,
+              upper: currentGain,
+              level: intervalSettings.level,
+              resamples: 0,
+              unit: 'task',
+              clusters: 0,
+              seed: currentSeed(),
+              direction: 'unresolved',
+            } as AxAgentPlaybookInterval),
+          ...(heldOutInterval ? { heldOut: heldOutInterval } : {}),
+          ...(sliceIntervals.length > 0 ? { slices: sliceIntervals } : {}),
+        },
+        reach: reach?.report ?? {
+          basis: 'rendered_only',
+          counterfactual: true,
+          gateEligible: false,
+          splits: [],
+        },
+        validity,
+        termination,
+        ...(overhead ? { overhead } : {}),
+        gates: gateReport,
+        promotion,
+        accounting: candidateAccounting({
+          metricCalls: usedCalls() - candidateSpendBefore,
+          usage: [
+            ...revalTrain.usage,
+            ...(revalHeldOutBatch?.usage ?? []),
+            ...candidateRetentionBatches.flatMap(({ batch }) => batch.usage),
+          ],
+          wallClockMs: nowFn() - candidateStartedAt,
+          usesBuiltInJudge,
+        }),
+        selectionComparisons: heldOutSelectionComparisons,
+        level: intervalSettings.level,
+        warnings,
+        decision: legacyAccept && chainAccepts ? 'accepted' : 'rejected',
+      });
+      // The run-level list is a summary, not a concatenation: the same
+      // disclosure repeated once per candidate is noise a reader learns to
+      // skip, which is how a real warning gets missed.
+      for (const warning of warnings) {
+        const key = `${warning.code}|${warning.scope ?? ''}`;
+        if (seenRunWarnings.has(key)) continue;
+        seenRunWarnings.add(key);
+        runWarnings.push(warning);
+      }
+    }
+
+    const accept =
+      legacyAccept && (gateReport ? gateChainAccepts(gateReport) : true);
+    // A prune's legacy verdict wording ("held-in gain below ...") describes a
+    // rule it was not judged by, so a prune always names the gate that
+    // decided. A curate keeps its exact legacy reason whenever the legacy
+    // verdict is what rejected it.
+    const gateRejection =
+      gateReport?.failedGate && (spec.kind === 'prune' || legacyAccept)
+        ? `${gateReport.failedGate} gate failed: ${
+            gateReport.failedPredicate ??
+            gateReport.entries.find(
+              (entry) => entry.id === gateReport.failedGate
+            )?.detail ??
+            ''
+          }`
+        : undefined;
+    const reason =
+      gateRejection ??
+      (spec.kind === 'prune' && accept && spec.prune
+        ? `${spec.prune.operation} freed ${spec.prune.renderedTokensBefore - spec.prune.renderedTokensAfter} rendered token(s) with no measured current-task or held-out loss`
+        : verdict.reason);
+
+    outcomes.push({
+      proposal,
+      kind: spec.kind,
+      ...(spec.prune ? { prune: spec.prune } : {}),
+      ...(evictions.length > 0 ? { evictions } : {}),
+      ...(evidence ? { evidence } : {}),
+      ...(promotion && promotion.status !== 'not_required'
+        ? { promotion }
+        : {}),
+      status: accept ? 'accepted' : 'rejected',
+      accepted: accept,
+      reason,
+      heldIn: { before: heldIn, after: revalTrain.mean },
+      ...(revalHeldOut !== undefined && heldOut !== undefined
+        ? { heldOut: { before: heldOut, after: revalHeldOut } }
+        : {}),
+      ...(retentionReceipt ? { retention: retentionReceipt } : {}),
+    });
+
+    if (options?.abortSignal?.aborted) {
+      throw new Error('AxAgent.playbook().evolve(): aborted');
+    }
+    if (accept) {
+      playbookHandle?.recordEvidence?.(applied.bulletIds, {
+        source: 'agent-evolve',
+        sourceRunId: proposal.clusterSignature,
+        feedbackIds: [proposal.weaknessId],
+        verification: [
+          {
+            verifierId: 'agent.playbook.evolve',
+            testId: proposal.weaknessId,
+            result: 'passed',
+            summary: `held-in ${heldIn.toFixed(3)} -> ${revalTrain.mean.toFixed(3)}${
+              heldOut !== undefined && revalHeldOut !== undefined
+                ? `; held-out ${heldOut.toFixed(3)} -> ${revalHeldOut.toFixed(3)}`
+                : ''
+            }`,
+          },
+        ],
+      });
+      accepted.push(applied);
+      inFlight = undefined;
+      heldIn = revalTrain.mean;
+      // The next candidate is compared against THIS candidate's records, so
+      // pairing stays reference-aligned and the re-anchoring is explicit.
+      anchorTrainRecords = revalTrain.records;
+      if (retentionPolicy) {
+        currentTaskAnchorSequence = candidateCurrentSequence;
+        currentTaskAnchorEvidence = {
+          executedRuns: revalTrain.executedRuns,
+          expectedRuns: revalTrain.expectedRuns,
+          complete: true,
+        };
+      }
+      if (revalHeldOut !== undefined) {
+        heldOut = revalHeldOut;
+        anchorHeldOutRecords = revalHeldOutBatch?.records;
+        // Every accept re-anchors the held-out split to the accepted
+        // candidate, which is exactly what makes it a selection split.
+        heldOutSelectionComparisons++;
+        if (retentionPolicy) {
+          heldOutAnchorSequence = candidateHeldOutSequence;
+          heldOutAnchorEvidence = {
+            executedRuns: revalHeldOutBatch!.executedRuns,
+            expectedRuns: revalHeldOutBatch!.expectedRuns,
+            complete: true,
+          };
+        }
+      }
+      progress(spec.phase, `${spec.label}: ACCEPTED`);
+    } else {
+      inFlight = undefined;
+      applied.rollback();
+      progress(spec.phase, `${spec.label}: rejected, rolled back`);
+    }
+  };
+
+  /**
+   * Phase 6. Leave-one-out on the CURRENT artifact, then one gated proposal.
+   *
+   * The sweep is a real cost — one held-out evaluation per ablated bullet — so
+   * it is opt-in, bounded by `maxAblations`, and stops as soon as the remaining
+   * budget cannot pay for a whole split. A partial sweep reports `partial`
+   * rather than pretending it read every bullet.
+   */
+  const runPrunePhase = async (
+    pruneOptions: Readonly<AxAgentPlaybookPruneOptions>
+  ): Promise<AxAgentPlaybookRedundancyReport> => {
+    const sweepAccounting = () =>
+      accountingForPhases(
+        ledger.assemble({ evolveOnlyMetricCalls: usedCalls() }),
+        ['redundancy_ablation']
+      );
+    const state = captureSnapshot(playbookHandle);
+    if (!state?.playbook) {
+      return {
+        status: 'not_run',
+        reason:
+          'the playbook handle produced no state, so no bullet could be ablated',
+      };
+    }
+    const nowIsoValue = nowIso();
+    const renderedTokens = renderedTokensOf(state.playbook, nowIsoValue);
+    const maxRenderedTokens = pruneOptions.maxRenderedTokens;
+    const onOverflow = pruneOptions.onOverflow ?? 'propose';
+    const overBudget =
+      maxRenderedTokens !== undefined && renderedTokens > maxRenderedTokens;
+    const operation = pruneOptions.operation ?? PRUNE_DEFAULT_OPERATION;
+    // The disclosure is DEFERRED until the phase knows what the overflow
+    // actually cost. `renderPlaybook` truncates nothing — it emits every
+    // applicable bullet — so the ceiling is a trigger, never a silent cut; but a
+    // warning emitted before the prune it triggered goes on saying the playbook
+    // is over budget even when the prune brought it back under, which is the
+    // stale-disclosure failure this subsystem exists to remove.
+    let disclosed = false;
+    const discloseOverBudget = (settlement: string): void => {
+      if (!overBudget || disclosed) return;
+      disclosed = true;
+      runWarnings.push({
+        code: 'rendered_size_over_budget',
+        message: `the rendered playbook is ${renderedTokens} estimated tokens against a ceiling of ${maxRenderedTokens}; ${settlement}. Nothing is ever truncated: renderPlaybook emits every applicable bullet.`,
+      });
+    };
+    // `validateEvidenceOptions` already refuses `prune.enabled` without a
+    // validation split, so the first clause is a type narrowing. The held-out
+    // anchor is the part that can still go missing mid-run: every accept
+    // re-anchors it, and a re-anchor batch that produced no records leaves the
+    // sweep with nothing to compare an ablation against.
+    const heldOutAnchorMean = heldOut;
+    if (
+      !validationTasks?.length ||
+      !anchorHeldOutRecords ||
+      heldOutAnchorMean === undefined
+    ) {
+      discloseOverBudget(
+        'the leave-one-out sweep did not run, so nothing was pruned'
+      );
+      return {
+        status: 'not_run',
+        reason:
+          'the leave-one-out sweep needs a non-empty validation set with a readable held-out anchor: a redundancy reading taken on the split the artifact was selected on measures selection, not redundancy',
+      };
+    }
+    const ranking = pruneCandidateRanking(state.playbook, nowIsoValue);
+    if (ranking.length === 0) {
+      discloseOverBudget(
+        'the rendered playbook has no removable bullet, so nothing was pruned'
+      );
+      return {
+        status: 'not_run',
+        reason: 'the rendered playbook has no removable bullet',
+      };
+    }
+    const maxAblations = Math.max(
+      1,
+      Math.floor(pruneOptions.maxAblations ?? PRUNE_DEFAULT_MAX_ABLATIONS)
+    );
+    const bandSpread = varianceBands?.find(
+      (band) => band.split === 'heldOut'
+    )?.spread;
+    const perAblation = validationTasks.length * runsPerTask;
+    const entries: AxAgentPlaybookRedundancyEntry[] = [];
+    let partial = false;
+    for (const ref of ranking.slice(0, maxAblations)) {
+      if (options?.abortSignal?.aborted) {
+        throw new Error('AxAgent.playbook().evolve(): aborted');
+      }
+      if (budget.remaining < perAblation) {
+        partial = true;
+        break;
+      }
+      let measured:
+        | Readonly<{
+            batch: AxAgentEvalBatchResult<IN, OUT>;
+            renderedTokensWithout: number;
+          }>
+        | undefined;
+      let ablationError: unknown;
+      try {
+        const view = transformPlaybookForPrune({
+          playbook: state.playbook,
+          bulletIds: [ref.bullet.id],
+          operation: 'remove',
+          reason: 'leave-one-out ablation',
+          nowIso: nowIsoValue,
+        });
+        const renderedTokensWithout = renderedTokensOf(
+          view.playbook,
+          nowIsoValue
+        );
+        playbookHandle?.load?.({
+          playbook: view.playbook,
+          artifact: state.artifact,
+        });
+        measured = {
+          batch: await runPhaseBatch(
+            'redundancy_ablation',
+            validationTasks,
+            'heldOut'
+          ),
+          renderedTokensWithout,
+        };
+      } catch (error) {
+        ablationError = error;
+      }
+      // The ablated view is a playbook with a bullet deleted that NOBODY asked
+      // to delete, so a failed restore is not a bookkeeping problem: it leaves
+      // that view live. It gets the same one bounded retry §6 gives the
+      // control-arm restore, and a second failure is a typed, named failure
+      // rather than a raw ACE `load` error escaping from a `finally` and
+      // replacing whatever was in flight.
+      try {
+        playbookHandle?.load?.(state);
+      } catch (firstRestoreError) {
+        try {
+          playbookHandle?.load?.(state);
+        } catch (secondRestoreError) {
+          throw new AxAgentPlaybookEvolveError(
+            'prune_apply_failed',
+            'redundancy_ablation',
+            `the leave-one-out ablation of bullet '${ref.bullet.id}' could not be undone after two attempts; the live playbook is still the ABLATED view and the artifact is indeterminate.`,
+            {
+              cause: new AggregateError(
+                [
+                  ...(ablationError === undefined ? [] : [ablationError]),
+                  firstRestoreError,
+                  secondRestoreError,
+                ],
+                `AxAgent.playbook().evolve(): the leave-one-out ablation of bullet '${ref.bullet.id}' could not be undone.`
+              ),
+            }
+          );
+        }
+      }
+      if (ablationError !== undefined) {
+        if (options?.abortSignal?.aborted) throw ablationError;
+        // An ablation that threw measured nothing. The sweep continues — a
+        // single unreadable bullet must not silence every other verdict — and
+        // the report says `partial` so no reader mistakes it for a full read.
+        partial = true;
+      }
+      if (!measured) continue;
+      const ablated = measured.batch;
+      const interval = intervalFor(
+        anchorHeldOutRecords,
+        ablated.records,
+        heldOutSeed()
+      );
+      if (!interval || !ablated.complete) {
+        partial = true;
+        if (!interval) continue;
+      }
+      const heldOutDelta = ablated.mean - heldOutAnchorMean;
+      entries.push({
+        bulletId: ref.bullet.id,
+        section: ref.section,
+        heldOutDelta,
+        interval,
+        verdict: redundancyVerdictOf({
+          heldOutDelta,
+          interval,
+          ...(bandSpread !== undefined ? { bandSpread } : {}),
+        }),
+        // The bullet's RENDERED contribution, measured as the exact difference
+        // between the full render and the render without it — not
+        // `estimateTokenCount(content)`, which misses the per-bullet prefix and
+        // the section framing `renderPlaybook` emits and therefore reads
+        // systematically low in both the ordering key and the report.
+        renderedTokens: Math.max(
+          0,
+          renderedTokens - measured.renderedTokensWithout
+        ),
+      });
+    }
+    if (entries.length === 0) {
+      discloseOverBudget(
+        'no leave-one-out ablation produced a reading, so nothing was pruned'
+      );
+      return {
+        status: 'not_run',
+        reason: partial
+          ? 'no leave-one-out ablation could be read within the remaining budget'
+          : 'no leave-one-out ablation produced a comparable held-out reading',
+      };
+    }
+    const report: AxAgentPlaybookRedundancyReport = {
+      status: partial ? 'partial' : 'completed',
+      entries,
+      accounting: sweepAccounting(),
+    };
+    if (onOverflow === 'warn' && overBudget) {
+      discloseOverBudget(
+        'onOverflow is "warn", so this is reported and nothing was pruned'
+      );
+      return report;
+    }
+    const thresholds = {
+      maxCurrentLoss:
+        pruneOptions.maxCurrentLoss ?? PRUNE_DEFAULT_MAX_CURRENT_LOSS,
+      maxHeldOutLoss: pruneOptions.maxHeldOutLoss ?? epsilon,
+      minTokenReduction:
+        pruneOptions.minTokenReduction ?? PRUNE_DEFAULT_MIN_TOKEN_REDUCTION,
+    };
+    const proposals = selectPruneProposals({
+      entries,
+      playbook: state.playbook,
+      operation,
+      trigger: overBudget ? 'rendered_size_budget' : 'redundancy_sweep',
+      thresholds,
+      nowIso: nowIsoValue,
+      // A size budget asks for the bytes back, not for every bullet the sweep
+      // was able to call prunable. The overflow set is the smallest prefix of
+      // the ranking that actually reaches the ceiling, so a playbook a few
+      // tokens over its budget does not lose every redundant bullet it has.
+      ...(overBudget && maxRenderedTokens !== undefined
+        ? {
+            restrictTo: pruneOverflowSet({
+              entries,
+              playbook: state.playbook,
+              operation,
+              maxRenderedTokens,
+              nowIso: nowIsoValue,
+            }),
+          }
+        : {}),
+    });
+    for (const prune of proposals) {
+      const legacyProposal = buildPruneRationaleText(prune);
+      await evaluateCandidate({
+        kind: 'prune',
+        phase: 'prune',
+        label: prune.pruneId,
+        proposal: legacyProposal,
+        prune,
+        apply: async () =>
+          applyPrune({
+            handle: playbookHandle,
+            proposal: prune,
+            legacyProposal,
+            nowIso: nowIso(),
+          }),
+        // A removal cannot raise the current-task mean by `minCurrentGain`, so
+        // gate 1 runs as a loss tolerance. Without this the prune gate ships
+        // inert: every prune would be rejected before gate 7 was ever read.
+        legacyGainThreshold: -thresholds.maxCurrentLoss,
+        chainGainThreshold: thresholds.maxCurrentLoss,
+        heldOutTolerance: thresholds.maxHeldOutLoss,
+      });
+    }
+    // Now — and only now — the overflow disclosure can say what the overflow
+    // cost, including whether the prune it triggered actually brought the render
+    // back under the ceiling.
+    const settledTokens = (() => {
+      const settled = captureSnapshot(playbookHandle);
+      return settled?.playbook
+        ? renderedTokensOf(settled.playbook, nowIsoValue)
+        : undefined;
+    })();
+    discloseOverBudget(
+      proposals.length === 0
+        ? 'no bullet was prunable, so nothing was proposed and the render is unchanged'
+        : `${proposals.length} prune proposal(s) were emitted and the rendered playbook is now ${settledTokens ?? renderedTokens} estimated tokens, ${
+            (settledTokens ?? renderedTokens) <= (maxRenderedTokens ?? 0)
+              ? 'within the ceiling'
+              : 'still over the ceiling'
+          }`
+    );
+    return report;
+  };
+
+  let redundancy: AxAgentPlaybookRedundancyReport | undefined;
+
   try {
     for (const weakness of weaknesses) {
       if (options?.abortSignal?.aborted) {
         throw new Error('AxAgent.playbook().evolve(): aborted');
       }
       const proposal = buildProposal(weakness);
-      const requiredCalls =
-        (trainTasks.length +
-          (validationTasks?.length ?? 0) +
-          retentionTaskCount) *
-        runsPerTask;
-      if (verify && budget.remaining < requiredCalls) {
-        outcomes.push({
-          proposal,
-          kind: 'curate',
-          status: 'rejected',
-          accepted: false,
-          reason: 'metric_budget exhausted before validation',
-          heldIn: { before: heldIn, after: heldIn },
-        });
-        progress('validation', `${weakness.id}: budget exhausted, skipped`);
-        continue;
-      }
-
-      progress('proposal', `${weakness.id}: applying playbook proposal`);
-      let applied: AxAppliedProposal;
-      try {
-        applied = await applyProposal({ proposal, playbookHandle });
-      } catch (err) {
-        if (
-          err &&
-          typeof err === 'object' &&
-          RESTORATION_FAILURE in err &&
-          (err as Record<symbol, unknown>)[RESTORATION_FAILURE] === true
-        ) {
-          throw err;
-        }
-        outcomes.push({
-          proposal,
-          kind: 'curate',
-          status: 'rejected',
-          accepted: false,
-          reason: `apply failed: ${err instanceof Error ? err.message : String(err)}`,
-          heldIn: { before: heldIn, after: heldIn },
-        });
-        continue;
-      }
-      inFlight = applied;
-
-      // The reach collector observes every attempt of THIS candidate's
-      // evaluation. It is created after the apply so the rendered playbook it
-      // reads is the one the evaluation will actually see.
-      const reachCollector = evidenceEnabled
-        ? createReachCollector({
-            ...(options?.reachProbe ? { probe: options.reachProbe } : {}),
-            ...(options?.conditionsForTask
-              ? { conditionsForTask: options.conditionsForTask }
-              : {}),
-            candidateBulletIds: applied.bulletIds,
-            candidateBullets: bulletsById(applied.bulletIds),
-            renderedBulletIds: renderedBulletIdsNow(),
-            now: nowFn,
-            nowIso: nowIso(),
-            ...(options?.reachProbeBudgetMs !== undefined
-              ? { probeBudgetMs: options.reachProbeBudgetMs }
-              : {}),
-          })
-        : undefined;
-
-      // Trust-batch: keep the lesson without a gate.
-      if (!verify) {
-        accepted.push(applied);
-        inFlight = undefined;
-        outcomes.push({
-          proposal,
-          kind: 'curate',
-          status: 'accepted',
-          accepted: true,
-          reason: 'applied without verification (verify: false)',
-          heldIn: { before: heldIn, after: heldIn },
-        });
-        progress('validation', `${weakness.id}: applied (trust-batch)`);
-        continue;
-      }
-
-      // Snapshot before this candidate's own evaluations so its receipt carries
-      // ITS cost, not the running total of every candidate before it.
-      const candidateSpendBefore = usedCalls();
-      const candidateStartedAt = nowFn();
-      const revalTrain = await runPhaseBatch(
-        'candidate_eval',
-        trainTasks,
-        'current',
-        undefined,
-        reachCollector
-      );
-      const candidateCurrentSequence = retentionPolicy
-        ? ++retentionSequence
-        : undefined;
-      let revalHeldOut: number | undefined;
-      let revalHeldOutBatch: AxAgentEvalBatchResult<IN, OUT> | undefined;
-      let candidateHeldOutSequence: number | undefined;
-      if (validationTasks?.length) {
-        revalHeldOutBatch = await runPhaseBatch(
-          'candidate_eval',
-          validationTasks,
-          'heldOut',
-          undefined,
-          reachCollector
-        );
-        revalHeldOut = revalHeldOutBatch.mean;
-        if (retentionPolicy) {
-          candidateHeldOutSequence = ++retentionSequence;
-        }
-      }
-      const candidateRetentionBatches: {
-        batch: AxAgentEvalBatchResult<IN, OUT>;
-        sequence: number;
-      }[] = [];
-      if (retentionPolicy) {
-        for (const slice of retentionPolicy.slices) {
-          const batch = await runPhaseBatch(
-            'retention_eval',
-            slice.tasks,
-            'slice',
-            slice.name
-          );
-          candidateRetentionBatches.push({
-            batch,
-            sequence: ++retentionSequence,
-          });
-        }
-      }
-
-      // A re-eval that exhausted mid-way produced a subset mean — comparing it
-      // to the full-set baseline is apples-to-oranges, so refuse the accept.
-      // Retention additionally rejects any evaluator error/non-finite score.
-      if (retentionPolicy) {
-        const failedResult = !revalTrain.validEvidence
-          ? revalTrain
-          : revalHeldOutBatch && !revalHeldOutBatch.validEvidence
-            ? revalHeldOutBatch
-            : candidateRetentionBatches.find(
-                ({ batch }) => !batch.validEvidence
-              )?.batch;
-        if (failedResult) {
-          throw retentionEvidenceError(
-            'candidate retention evaluation',
-            failedResult
-          );
-        }
-      }
-      const gateBase = {
-        heldIn,
-        revalTrain,
-        heldOut,
-        revalHeldOut,
-        revalHeldOutBatch,
-        epsilon,
-        currentGainThreshold,
-        requireHeldOut,
-        hasRetentionPolicy: retentionPolicy !== undefined,
-        retentionBatchesComplete: candidateRetentionBatches.every(
-          ({ batch }) => batch.complete
-        ),
-      } as const;
-      // `revalComplete`/`gainOk`/`heldOutOk` do not depend on retention, and
-      // the retention receipt needs all three before it can be assembled — so
-      // the pure gate runs once here and once again below with the measured
-      // retention verdict folded in.
-      const provisional = evaluateAgentPromotionGate({
-        ...gateBase,
-        retentionOk: true,
-      });
-      const { revalComplete, gainOk, heldOutOk, currentGain } = provisional;
-      let retentionReceipt: AxAgentPlaybookRetentionReceipt | undefined;
-      let retentionLoss: { worst: number; mean: number } | undefined;
-      let retentionOk = true;
-      if (retentionPolicy && revalComplete) {
-        const slices = retentionAnchors.map((anchor, index) => {
-          const candidate = candidateRetentionBatches[index]!;
-          return {
-            name: anchor.name,
-            version: anchor.version,
-            taskCount: anchor.taskCount,
-            taskSetDigest: anchor.taskSetDigest,
-            anchorSequence: anchor.sequence,
-            candidateSequence: candidate.sequence,
-            anchorScore: anchor.score,
-            candidateScore: candidate.batch.mean,
-            historicalLoss: anchor.score - candidate.batch.mean,
-            anchorEvidence: anchor.evidence,
-            candidateEvidence: {
-              executedRuns: candidate.batch.executedRuns,
-              expectedRuns: candidate.batch.expectedRuns,
-              complete: true as const,
-            },
-          };
-        });
-        const losses = slices.map((slice) => slice.historicalLoss);
-        const worstHistoricalLoss = Math.max(...losses);
-        const meanHistoricalLoss =
-          losses.reduce((sum, loss) => sum + loss, 0) / losses.length;
-        retentionLoss = {
-          worst: worstHistoricalLoss,
-          mean: meanHistoricalLoss,
-        };
-        retentionOk =
-          atMostWithFloatingPointTolerance(
-            worstHistoricalLoss,
-            retentionPolicy.maxWorstHistoricalLoss
-          ) &&
-          atMostWithFloatingPointTolerance(
-            meanHistoricalLoss,
-            retentionPolicy.maxMeanHistoricalLoss
-          );
-        const accepted = gainOk && heldOutOk && retentionOk;
-        retentionReceipt = deepFreeze({
-          policy: {
-            digest: retentionPolicyDigest!,
-            evaluatorId: retentionPolicy.evaluatorId,
-            currentTaskSetDigest: currentTaskSetDigest!,
-            ...(heldOutTaskSetDigest ? { heldOutTaskSetDigest } : {}),
-          },
-          sequence: ++retentionSequence,
-          currentTask: {
-            before: heldIn,
-            after: revalTrain.mean,
-            gain: currentGain,
-            taskSetDigest: currentTaskSetDigest!,
-            anchorSequence: currentTaskAnchorSequence!,
-            candidateSequence: candidateCurrentSequence!,
-            anchorEvidence: currentTaskAnchorEvidence!,
-            candidateEvidence: {
-              executedRuns: revalTrain.executedRuns,
-              expectedRuns: revalTrain.expectedRuns,
-              complete: true,
-            },
-          },
-          ...(heldOutTaskSetDigest && baselineHeldOutBatch && revalHeldOutBatch
-            ? {
-                heldOut: {
-                  taskSetDigest: heldOutTaskSetDigest,
-                  anchorSequence: heldOutAnchorSequence!,
-                  candidateSequence: candidateHeldOutSequence!,
-                  anchorEvidence: heldOutAnchorEvidence!,
-                  candidateEvidence: {
-                    executedRuns: revalHeldOutBatch.executedRuns,
-                    expectedRuns: revalHeldOutBatch.expectedRuns,
-                    complete: true as const,
-                  },
-                },
-              }
-            : {}),
-          slices,
-          worstHistoricalLoss,
-          meanHistoricalLoss,
-          thresholds: {
-            minCurrentGain: retentionPolicy.minCurrentGain,
-            maxWorstHistoricalLoss: retentionPolicy.maxWorstHistoricalLoss,
-            maxMeanHistoricalLoss: retentionPolicy.maxMeanHistoricalLoss,
-          },
-          accepted,
-        });
-      }
-      const verdict = evaluateAgentPromotionGate({
-        ...gateBase,
-        retentionOk,
-        ...(retentionLoss ? { retentionLoss } : {}),
-      });
-      const legacyAccept = verdict.accept;
-
-      // ---- Evidence conjuncts ----
-      let evidence: AxAgentPlaybookEvidenceReceipt | undefined;
-      let gateReport: AxAgentPlaybookGateReport | undefined;
-      if (evidenceEnabled) {
-        const terminationSplits = [revalTrain.termination];
-        if (revalHeldOutBatch) {
-          terminationSplits.push(revalHeldOutBatch.termination);
-        }
-        const termination = terminationReportOf(terminationSplits);
-
-        const validity = evaluateValidity({
-          inputs: [
-            { split: 'current', records: revalTrain.records },
-            ...(revalHeldOutBatch
-              ? ([
-                  { split: 'heldOut', records: revalHeldOutBatch.records },
-                ] as const)
-              : []),
-          ],
-          ...(options?.validity ? { options: options.validity } : {}),
-          ...(registered ? { registered } : {}),
-        });
-
-        const currentInterval = intervalFor(
-          anchorTrainRecords,
-          revalTrain.records,
-          currentSeed()
-        );
-        const heldOutInterval = intervalFor(
-          anchorHeldOutRecords,
-          revalHeldOutBatch?.records,
-          heldOutSeed()
-        );
-        const bandSpread = varianceBands?.find(
-          (band) => band.split === 'current'
-        )?.spread;
-
-        const reach = reachCollector?.report({
-          delta: currentGain,
-        });
-
-        const overheadSplits: AxAgentPlaybookOverheadSplit[] = [];
-        const currentOverhead = overheadSplitFrom({
-          split: 'current',
-          anchor: anchorTrainRecords,
-          candidate: revalTrain.records,
-          seed: currentSeed(),
-          resamples: intervalSettings.resamples,
-          level: intervalSettings.level,
-        });
-        if (currentOverhead) overheadSplits.push(currentOverhead);
-        if (anchorHeldOutRecords && revalHeldOutBatch) {
-          const heldOutOverhead = overheadSplitFrom({
-            split: 'heldOut',
-            anchor: anchorHeldOutRecords,
-            candidate: revalHeldOutBatch.records,
-            seed: heldOutSeed(),
-            resamples: intervalSettings.resamples,
-            level: intervalSettings.level,
-          });
-          if (heldOutOverhead) overheadSplits.push(heldOutOverhead);
-        }
-        const overhead = overheadReportFrom(overheadSplits);
-
-        gateReport = await evaluateGateChain({
-          kind: 'curate',
-          gain: {
-            revalComplete,
-            currentGain,
-            threshold: currentGainThreshold,
-            ...(termination.incompleteFromEnvironmentFailures
-              ? {
-                  incompleteFromEnvironmentFailures: true,
-                  tasksWithNoScoredAttempt: termination.splits.reduce(
-                    (sum, split) => sum + split.tasksWithNoScoredAttempt,
-                    0
-                  ),
-                }
-              : {}),
-          },
-          ...(revalHeldOut !== undefined && heldOut !== undefined
-            ? {
-                heldOut: {
-                  delta: revalHeldOut - heldOut,
-                  tolerance: epsilon,
-                },
-              }
-            : {}),
-          ...(retentionPolicy
-            ? {
-                retention: {
-                  ok: retentionOk,
-                  detail: retentionReceipt
-                    ? `worst ${retentionReceipt.worstHistoricalLoss.toFixed(3)}, mean ${retentionReceipt.meanHistoricalLoss.toFixed(3)}`
-                    : 'retention receipt unavailable',
-                },
-              }
-            : {}),
-          validity: {
-            mode: options?.gates?.validity ?? 'off',
-            report: validity,
-          },
-          interval: {
-            mode: options?.gates?.interval ?? 'off',
-            ...(currentInterval ? { current: currentInterval } : {}),
-            ...(heldOutInterval ? { heldOut: heldOutInterval } : {}),
-            ...(bandSpread !== undefined ? { bandSpread } : {}),
-          },
-          ...(reach
-            ? {
-                reach: {
-                  mode: options?.gates?.reach ?? 'off',
-                  report: reach.report,
-                },
-              }
-            : {}),
-        });
-
-        const warnings: AxAgentPlaybookEvidenceWarning[] = [
-          ...(reach?.warnings ?? []),
-        ];
-        if (currentInterval?.direction === 'unresolved') {
-          warnings.push({
-            code: 'interval_unresolved',
-            message: `the current-split interval [${currentInterval.lower.toFixed(3)}, ${currentInterval.upper.toFixed(3)}] contains zero; the delta is unresolved, not an effect`,
-            scope: 'current',
-          });
-        }
-        if (bandSpread !== undefined && Math.abs(currentGain) <= bandSpread) {
-          warnings.push({
-            code: 'delta_within_variance_band',
-            message: `delta ${currentGain.toFixed(3)} is within the unchanged-artifact band spread ${bandSpread.toFixed(3)}`,
-            scope: 'current',
-          });
-        }
-        if (termination.worstDiscardRate > maxEnvironmentDiscardRate) {
-          warnings.push({
-            code: 'high_environment_discard_rate',
-            message: `environment-failure discard rate ${termination.worstDiscardRate.toFixed(3)} exceeds ${maxEnvironmentDiscardRate}${runsPerTask === 1 ? ' at runsPerTask: 1, which has no redundancy at all' : ''}`,
-          });
-        }
-        if (termination.incompleteFromEnvironmentFailures) {
-          warnings.push({
-            code: 'evaluation_incomplete_environment',
-            message:
-              'a task ended with no scored attempt after re-draws were exhausted; the candidate cannot be promoted on incomplete evidence',
-          });
-        }
-        if (overhead?.worstRelativeDelta !== undefined) {
-          if (legacyAccept && overhead.worstRelativeDelta > overheadWarnRatio) {
-            warnings.push({
-              code: 'overhead_exceeds_gain',
-              message: `the accepted artifact costs ${(overhead.worstRelativeDelta * 100).toFixed(1)}% more turns/calls/tokens than the anchor; report it next to the gain`,
-            });
-          }
-        }
-        if (heldOut !== undefined) {
-          warnings.push({
-            code: 'held_out_reused_for_selection',
-            message: `heldOut has been re-anchored to an accepted candidate ${heldOutSelectionComparisons} time(s); this is a SELECTION split, not a sealed test, and the implied family-wise error rate at level ${intervalSettings.level} is ${(1 - intervalSettings.level ** heldOutSelectionComparisons).toFixed(3)}`,
-            scope: 'heldOut',
-          });
-        }
-
-        const nomination: AxAgentPlaybookNomination = (() => {
-          const candidateDigest = canonicalDigest({
-            proposal,
-            bulletIds: applied.bulletIds,
-          });
-          const splitDigests = {
-            current: splitDigestOf(trainTasks),
-            ...(validationTasks?.length
-              ? { heldOut: splitDigestOf(validationTasks) }
-              : {}),
-            slices: (retentionPolicy?.slices ?? []).map((slice, index) => ({
-              name: slice.name,
-              version: slice.version,
-              digest: sliceTaskSetDigests[index] ?? '',
-            })),
-          };
-          const judgeModel = revalTrain.usage.find(
-            (usage) => typeof usage?.ai === 'string'
-          );
-          const core = {
-            candidateDigest,
-            ...(retentionPolicy?.evaluatorId
-              ? { evaluatorId: retentionPolicy.evaluatorId }
-              : {}),
-            ...(judgeModel
-              ? { judgeModel: { ai: judgeModel.ai, model: judgeModel.model } }
-              : {}),
-            splitDigests,
-          };
-          const passed = (gateReport?.entries ?? [])
-            .filter((entry) => entry.status === 'pass')
-            .map((entry) => entry.id);
-          const failedGates = (gateReport?.entries ?? [])
-            .filter(
-              (entry) =>
-                entry.status === 'fail' || entry.status === 'unmeasured'
-            )
-            .map((entry) => entry.id);
-          return {
-            ...core,
-            splitDigestBasis,
-            // Receipt metadata and a post-hoc integrity value. NOT an
-            // authorization binding: a mid-run digest is a value no host could
-            // have pre-granted.
-            promotionDigest: canonicalDigest(core),
-            // Empty until a promotionAuthority names one. Ax never derives a
-            // resource id, because a derived id is one the host cannot grant.
-            resourceId: '',
-            gatesPassed: passed,
-            gatesFailed: failedGates,
-            nominated: legacyAccept && gateChainAccepts(gateReport!),
-          };
-        })();
-
-        // Per-slice paired intervals, so a retention slice reports its own
-        // uncertainty instead of leaving the receipt's `slices` array empty
-        // whenever a retentionPolicy is configured.
-        const sliceIntervals = (retentionPolicy?.slices ?? []).flatMap(
-          (slice, index) => {
-            const interval = intervalFor(
-              sliceAnchorRecords[index],
-              candidateRetentionBatches[index]?.batch.records,
-              sliceSeed(slice.tasks as readonly AxAgentEvalTask<IN>[])
-            );
-            return interval
-              ? [{ name: slice.name, version: slice.version, interval }]
-              : [];
-          }
-        );
-
-        const chainAccepts = gateChainAccepts(gateReport);
-        if (legacyAccept && chainAccepts && overhead) finalOverhead = overhead;
-        evidence = buildEvidenceReceipt({
-          kind: 'curate',
-          nomination,
-          intervals: {
-            current:
-              currentInterval ??
-              ({
-                point: currentGain,
-                lower: currentGain,
-                upper: currentGain,
-                level: intervalSettings.level,
-                resamples: 0,
-                unit: 'task',
-                clusters: 0,
-                seed: currentSeed(),
-                direction: 'unresolved',
-              } as AxAgentPlaybookInterval),
-            ...(heldOutInterval ? { heldOut: heldOutInterval } : {}),
-            ...(sliceIntervals.length > 0 ? { slices: sliceIntervals } : {}),
-          },
-          reach: reach?.report ?? {
-            basis: 'rendered_only',
-            counterfactual: true,
-            gateEligible: false,
-            splits: [],
-          },
-          validity,
-          termination,
-          ...(overhead ? { overhead } : {}),
-          gates: gateReport,
-          promotion: { status: 'not_required', nomination },
-          accounting: candidateAccounting({
-            metricCalls: usedCalls() - candidateSpendBefore,
-            usage: [
-              ...revalTrain.usage,
-              ...(revalHeldOutBatch?.usage ?? []),
-              ...candidateRetentionBatches.flatMap(({ batch }) => batch.usage),
-            ],
-            wallClockMs: nowFn() - candidateStartedAt,
-            usesBuiltInJudge,
-          }),
-          selectionComparisons: heldOutSelectionComparisons,
-          level: intervalSettings.level,
-          warnings,
-          decision: legacyAccept && chainAccepts ? 'accepted' : 'rejected',
-        });
-        // The run-level list is a summary, not a concatenation: the same
-        // disclosure repeated once per candidate is noise a reader learns to
-        // skip, which is how a real warning gets missed.
-        for (const warning of warnings) {
-          const key = `${warning.code}|${warning.scope ?? ''}`;
-          if (seenRunWarnings.has(key)) continue;
-          seenRunWarnings.add(key);
-          runWarnings.push(warning);
-        }
-      }
-
-      const accept =
-        legacyAccept && (gateReport ? gateChainAccepts(gateReport) : true);
-      const gateRejection =
-        legacyAccept && gateReport?.failedGate
-          ? `${gateReport.failedGate} gate failed: ${
-              gateReport.failedPredicate ??
-              gateReport.entries.find(
-                (entry) => entry.id === gateReport.failedGate
-              )?.detail ??
-              ''
-            }`
-          : undefined;
-
-      outcomes.push({
-        proposal,
+      await evaluateCandidate({
         kind: 'curate',
-        ...(evidence ? { evidence } : {}),
-        status: accept ? 'accepted' : 'rejected',
-        accepted: accept,
-        reason: gateRejection ?? verdict.reason,
-        heldIn: { before: heldIn, after: revalTrain.mean },
-        ...(revalHeldOut !== undefined && heldOut !== undefined
-          ? { heldOut: { before: heldOut, after: revalHeldOut } }
-          : {}),
-        ...(retentionReceipt ? { retention: retentionReceipt } : {}),
+        phase: 'validation',
+        label: weakness.id,
+        proposal,
+        apply: () => applyProposal({ proposal, playbookHandle }),
+        legacyGainThreshold: currentGainThreshold,
+        chainGainThreshold: currentGainThreshold,
+        heldOutTolerance: epsilon,
       });
-
-      if (options?.abortSignal?.aborted) {
-        throw new Error('AxAgent.playbook().evolve(): aborted');
-      }
-      if (accept) {
-        playbookHandle?.recordEvidence?.(applied.bulletIds, {
-          source: 'agent-evolve',
-          sourceRunId: proposal.clusterSignature,
-          feedbackIds: [proposal.weaknessId],
-          verification: [
-            {
-              verifierId: 'agent.playbook.evolve',
-              testId: proposal.weaknessId,
-              result: 'passed',
-              summary: `held-in ${heldIn.toFixed(3)} -> ${revalTrain.mean.toFixed(3)}${
-                heldOut !== undefined && revalHeldOut !== undefined
-                  ? `; held-out ${heldOut.toFixed(3)} -> ${revalHeldOut.toFixed(3)}`
-                  : ''
-              }`,
-            },
-          ],
-        });
-        accepted.push(applied);
-        inFlight = undefined;
-        heldIn = revalTrain.mean;
-        // The next candidate is compared against THIS candidate's records, so
-        // pairing stays reference-aligned and the re-anchoring is explicit.
-        anchorTrainRecords = revalTrain.records;
-        if (retentionPolicy) {
-          currentTaskAnchorSequence = candidateCurrentSequence;
-          currentTaskAnchorEvidence = {
-            executedRuns: revalTrain.executedRuns,
-            expectedRuns: revalTrain.expectedRuns,
-            complete: true,
-          };
-        }
-        if (revalHeldOut !== undefined) {
-          heldOut = revalHeldOut;
-          anchorHeldOutRecords = revalHeldOutBatch?.records;
-          // Every accept re-anchors the held-out split to the accepted
-          // candidate, which is exactly what makes it a selection split.
-          heldOutSelectionComparisons++;
-          if (retentionPolicy) {
-            heldOutAnchorSequence = candidateHeldOutSequence;
-            heldOutAnchorEvidence = {
-              executedRuns: revalHeldOutBatch!.executedRuns,
-              expectedRuns: revalHeldOutBatch!.expectedRuns,
-              complete: true,
-            };
-          }
-        }
-        progress('validation', `${weakness.id}: ACCEPTED`);
-      } else {
-        inFlight = undefined;
-        applied.rollback();
-        progress('validation', `${weakness.id}: rejected, rolled back`);
-      }
+    }
+    // ---- Phase 6: prune ----
+    if (options?.prune?.enabled) {
+      redundancy = await runPrunePhase(options.prune);
     }
   } catch (err) {
     const rollbackErrors: unknown[] = [];
@@ -2152,6 +2754,16 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
       message:
         'no sealed test was configured; every held-out number here is a selection number',
     });
+    if (!options?.promotionAuthority && accepted.length > 0) {
+      // The default stays permissive — a promotion without a grant is allowed —
+      // but it is never silent. Restricted to accepts for the same reason
+      // `cost_unknown` is: a warning that fires on every run is one a reviewer
+      // learns to skip.
+      runWarnings.push({
+        code: 'promotion_without_receipt',
+        message: `${accepted.length} candidate(s) were promoted into the playbook with no promotionAuthority configured, so no AxAuthorizationReceipt exists for any of them`,
+      });
+    }
     if (accounting.costBasis === 'unknown' && accepted.length > 0) {
       // Restricted to accepts on purpose: firing on every run is how "no
       // winner is reported without its cost" decays into ignorable noise.
@@ -2205,6 +2817,7 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
     accounting,
     applied,
     ...(varianceBand ? { varianceBand } : {}),
+    ...(redundancy ? { redundancy } : {}),
     ...(finalOverhead ? { overhead: finalOverhead } : {}),
     ...(rolledBackReason ? { rolledBackReason } : {}),
     ...(runWarnings.length > 0 ? { warnings: runWarnings } : {}),

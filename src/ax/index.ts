@@ -109,6 +109,11 @@ import type {
   AxAgentEvalBatchResult,
   AxAgentEvalBudget,
 } from './agent/agentInternal/playbookEvolve/evalHarness.js';
+import {
+  axPlaybookEvidenceConformanceOperation,
+  axPlaybookEvidenceConformanceResource,
+  runAxAgentPlaybookEvidenceConformance,
+} from './agent/agentInternal/playbookEvolve/evidenceConformance.js';
 import type { AxAgentFailureCluster } from './agent/agentInternal/playbookEvolve/failureClusters.js';
 import type {
   AxGateAuthorityOutcome,
@@ -2929,6 +2934,8 @@ export { axOpenAIChatAudioDefaults };
 export { axOptimizableValidators };
 export { axPairedAdmittedIndices };
 export { axPatchClassOfType };
+export { axPlaybookEvidenceConformanceOperation };
+export { axPlaybookEvidenceConformanceResource };
 export { axPlaybookFailureSection };
 export { axPlaybookRequiresVisibilitySupport };
 export { axPreferenceEvidenceLimits };
@@ -3071,6 +3078,7 @@ export { playbook };
 export { programSource };
 export { react };
 export { refine };
+export { runAxAgentPlaybookEvidenceConformance };
 export { runAxEventStoreConformance };
 export { runAxLearningStoreConformance };
 export { runAxTrajectoryStoreConformance };

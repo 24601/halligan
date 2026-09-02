@@ -14,10 +14,13 @@ import type {
   AxAgentPlaybookInterval,
   AxAgentPlaybookPromotionDenialCode,
   AxAgentPlaybookPromotionRecord,
+  AxAgentPlaybookPromotionVeto,
+  AxAgentPlaybookPruneProposal,
   AxAgentPlaybookReachReport,
   AxAgentPlaybookSealedTestReport,
   AxAgentPlaybookTransferReport,
   AxAgentPlaybookValidityPredicateId,
+  AxAgentPlaybookVetoResult,
   AxAgentTrajectoryClassifier,
   AxAgentTrajectoryTermination,
 } from './playbookEvidenceTypes.js';
@@ -93,13 +96,17 @@ switch (promotion.status) {
     break;
 }
 
-// The denial-code union mirrors all five members of the authority error's code.
+// The denial-code union mirrors EVERY member of the authority error's code,
+// including `guard_predicate_failed` — an evidence guard on the matching grant
+// refused before the host authorizer was ever called, which is not a host
+// decision and must not be reported as one.
 const denialCodes: readonly AxAgentPlaybookPromotionDenialCode[] = [
   'host_denied',
   'no_matching_grant',
   'invalid_receipt',
   'cancelled',
   'timeout',
+  'guard_predicate_failed',
 ];
 void denialCodes;
 
@@ -206,3 +213,60 @@ if (rescinded.status === 'promoted_then_rolled_back') {
   void rescinded.receipt;
   void rescinded.rolledBackReason;
 }
+
+// A promotion is unreachable without a receipt, at the type level. Every other
+// member of the union is an explicit refusal, so there is no inhabitant of
+// `AxAgentPlaybookPromotionRecord` that says "promoted" with nothing to show
+// for it — which is what "the judge nominates, the host promotes" means when
+// a consumer reads it back off a stored outcome.
+declare const promotionUnion: AxAgentPlaybookPromotionRecord;
+switch (promotionUnion.status) {
+  case 'not_required':
+  case 'not_nominated':
+    // @ts-expect-error - nothing was granted, so there is no receipt to read.
+    void promotionUnion.receipt;
+    void promotionUnion.nomination;
+    break;
+  case 'vetoed':
+    // @ts-expect-error - a veto can only reject; it never yields a receipt.
+    void promotionUnion.receipt;
+    void promotionUnion.vetoes;
+    break;
+  case 'denied': {
+    const code: AxAgentPlaybookPromotionDenialCode = promotionUnion.code;
+    // @ts-expect-error - a denial carries a code and a reason, never a receipt.
+    void promotionUnion.receipt;
+    void code;
+    break;
+  }
+  default: {
+    const receipt = promotionUnion.receipt;
+    // The grant binds a host-grantable identity. A digest is receipt metadata.
+    const boundTo: string = promotionUnion.nomination.resourceId;
+    void receipt;
+    void boundTo;
+  }
+}
+
+// A veto's return type has no `undefined` inhabitant: a host that forgets a
+// `return` fails to compile before it discovers, at runtime, that Ax read its
+// silence as a veto.
+declare const veto: AxAgentPlaybookPromotionVeto;
+const vetoAnswer: boolean | AxAgentPlaybookVetoResult = await veto(
+  promotionUnion.nomination
+);
+void vetoAnswer;
+// @ts-expect-error - a veto that forgets its `return` does not type-check. This
+// is the probe that actually pins `undefined` out of the union: an assignment
+// to `false` would keep erroring even if `undefined` were added to it.
+const forgetfulVeto: AxAgentPlaybookPromotionVeto = () => undefined;
+void forgetfulVeto;
+
+// A prune records the thresholds it was judged by, separately from the
+// retention policy's own. Reading one as the other is what the two fields
+// exist to prevent.
+declare const prune: AxAgentPlaybookPruneProposal;
+const pruneLossTolerance: number = prune.appliedThresholds.maxCurrentLoss;
+// @ts-expect-error - a prune is never judged by a minimum GAIN.
+void prune.appliedThresholds.minCurrentGain;
+void pruneLossTolerance;

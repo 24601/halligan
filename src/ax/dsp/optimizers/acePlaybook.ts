@@ -1290,7 +1290,17 @@ export function dedupePlaybookByContent(
   recomputePlaybookStats(playbook);
 }
 
-function recomputePlaybookStats(playbook: AxACEPlaybook): void {
+/**
+ * Recompute the aggregate counters after a structural mutation.
+ *
+ * Exported (deliberately un-prefixed, so it stays out of the generated
+ * barrel) because `agent.playbook().evolve()`'s prune primitive transforms a
+ * snapshot by hand instead of going through `applyCuratorOperations`, and the
+ * stats recompute is one of the things that path would otherwise have done
+ * for it. Replicating it there would be a second implementation of the same
+ * arithmetic, free to drift.
+ */
+export function recomputePlaybookStats(playbook: AxACEPlaybook): void {
   let bulletCount = 0;
   let helpfulCount = 0;
   let harmfulCount = 0;

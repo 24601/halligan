@@ -893,13 +893,19 @@ export type AxAgentPlaybookPromotionAuthority = Readonly<{
   tenantId?: string;
 }>;
 
-/** Mirrors all FIVE members of `AxAuthorizationDeniedError.code`. */
+/**
+ * Mirrors every member of `AxAuthorizationDeniedError.code`, including
+ * `'guard_predicate_failed'` — an evidence guard on the matching grant refused
+ * before the host authorizer was ever called. Folding it into `'host_denied'`
+ * would report a host decision that never happened.
+ */
 export type AxAgentPlaybookPromotionDenialCode =
   | 'host_denied'
   | 'no_matching_grant'
   | 'invalid_receipt'
   | 'cancelled'
-  | 'timeout';
+  | 'timeout'
+  | 'guard_predicate_failed';
 
 export type AxAgentPlaybookPromotionRecord =
   | Readonly<{ status: 'not_required'; nomination: AxAgentPlaybookNomination }>
