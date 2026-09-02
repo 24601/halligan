@@ -65,12 +65,13 @@ export interface ActorLoopSetupHelpers {
     summarizedActorLog?: string,
     contextPressure?: string
   ) => Record<string, unknown>;
-  measureActorPromptChars: (
-    actionLog: string,
-    guidanceLog?: string,
-    liveRuntimeState?: string,
-    summarizedActorLog?: string
-  ) => Promise<any>;
+  /**
+   * Measure the prompt from the SAME value record the turn will send, so
+   * measured characters are the sent characters by construction. The one
+   * structural exclusion is `contextPressure`: the pressure hint is derived
+   * FROM this measurement, so it cannot be inside it.
+   */
+  measureActorPromptChars: (values: Record<string, unknown>) => Promise<any>;
   renderActionLogWithReplayMode: (
     actionReplay: AxResolvedContextPolicy['actionReplay'],
     checkpointSummary?: string,
@@ -130,6 +131,14 @@ export function buildActorLoopSetup(
     return instruction;
   };
 
+  /** Does the CURRENT actor signature declare this input field? */
+  const actorSignatureDeclares = (name: string): boolean => {
+    const fields = s.actorProgram?.getSignature?.().getInputFields?.() as
+      | readonly { name: string }[]
+      | undefined;
+    return fields?.some((field) => field.name === name) ?? false;
+  };
+
   const buildActorPromptValues = (
     actionLog: string,
     guidanceLog: string | undefined,
@@ -154,8 +163,14 @@ export function buildActorLoopSetup(
     const values: Record<string, unknown> = {
       ...nonContextValues,
       ...inputState.getActorInlineContextValues(),
-      actionLog,
     };
+    // `actionLog` is a REQUIRED input in the transcript signature and is
+    // omitted entirely under `actorMemoryMode: 'skillState'`. Assign it only
+    // when the built signature actually declares it, so the value record and
+    // the signature can never disagree.
+    if (actorSignatureDeclares('actionLog')) {
+      values.actionLog = actionLog;
+    }
     if (s.stagePolicy?.seesContextMap && s.contextMapText) {
       values.contextMap = s.contextMapText;
     }
@@ -221,21 +236,11 @@ export function buildActorLoopSetup(
     return values;
   };
 
-  const measureActorPromptChars = (
-    actionLog: string,
-    guidanceLog?: string,
-    liveRuntimeState?: string,
-    summarizedActorLog?: string
-  ) => {
+  const measureActorPromptChars = (values: Record<string, unknown>) => {
     refreshActorInstruction();
     return s.actorProgram._measurePromptCharsForInternalUse(
       ai,
-      buildActorPromptValues(
-        actionLog,
-        guidanceLog,
-        liveRuntimeState,
-        summarizedActorLog
-      ),
+      values,
       actorMergedOptions
     );
   };
@@ -369,9 +374,11 @@ export function buildActorLoopSetup(
       defaultHygieneMode
     );
     const thresholdMetrics = await measureActorPromptChars(
-      thresholdActionLogText,
-      renderGuidanceLog(guidanceState.entries),
-      getRuntimeStateSummary()
+      buildActorPromptValues(
+        thresholdActionLogText,
+        renderGuidanceLog(guidanceState.entries),
+        getRuntimeStateSummary()
+      )
     );
     const thresholdFixedOverhead =
       thresholdMetrics.systemPromptCharacters +
@@ -393,9 +400,11 @@ export function buildActorLoopSetup(
         pressureHygieneMode
       );
       const pressureMetrics = await measureActorPromptChars(
-        pressureActionLogText,
-        renderGuidanceLog(guidanceState.entries),
-        getRuntimeStateSummary()
+        buildActorPromptValues(
+          pressureActionLogText,
+          renderGuidanceLog(guidanceState.entries),
+          getRuntimeStateSummary()
+        )
       );
       const pressureFixedOverhead =
         pressureMetrics.systemPromptCharacters +

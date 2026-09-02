@@ -291,12 +291,16 @@ export async function runActorTurn<_IN extends AxGenIn>(
   let summarizedActorLogText = actionLogParts.summary || undefined;
   let actionLogText = actionLogParts.history || '(no actions yet)';
   const guidanceLogText = renderGuidanceLog(guidanceState.entries);
-  let inspectMetrics = await measureActorPromptChars(
+  // Build the value record ONCE and measure that exact record, so the measured
+  // characters are the sent characters by construction. `contextPressure` is
+  // the one field that cannot be inside the measurement: it is derived from it.
+  let promptValues = buildActorPromptValues(
     actionLogText,
     guidanceLogText,
     mutableState.runtimeStateSummary,
     summarizedActorLogText
   );
+  let inspectMetrics = await measureActorPromptChars(promptValues);
   let inspectFixedOverhead =
     inspectMetrics.systemPromptCharacters +
     inspectMetrics.exampleChatContextCharacters;
@@ -328,12 +332,13 @@ export async function runActorTurn<_IN extends AxGenIn>(
     );
     const pressureActionLogText = pressureParts.history || '(no actions yet)';
     const pressureSummarizedActorLogText = pressureParts.summary || undefined;
-    const pressureMetrics = await measureActorPromptChars(
+    const pressureValues = buildActorPromptValues(
       pressureActionLogText,
       guidanceLogText,
       mutableState.runtimeStateSummary,
       pressureSummarizedActorLogText
     );
+    const pressureMetrics = await measureActorPromptChars(pressureValues);
     if (
       pressureMetrics.mutableChatContextCharacters <
       inspectMetrics.mutableChatContextCharacters
@@ -341,6 +346,7 @@ export async function runActorTurn<_IN extends AxGenIn>(
       actionLogParts = pressureParts;
       actionLogText = pressureActionLogText;
       summarizedActorLogText = pressureSummarizedActorLogText;
+      promptValues = pressureValues;
       inspectMetrics = pressureMetrics;
       inspectFixedOverhead =
         inspectMetrics.systemPromptCharacters +
@@ -391,6 +397,11 @@ export async function runActorTurn<_IN extends AxGenIn>(
   ) {
     actionLogText +=
       '\n\n[HINT: Actor prompt is large. Call `const state = await inspectRuntime()` for a compact snapshot of current variables instead of re-reading old outputs.]';
+    // Deliberately AFTER the measurement: the hint exists because the prompt is
+    // already over budget, so counting it would move the budget it reacts to.
+    if ('actionLog' in promptValues) {
+      promptValues = { ...promptValues, actionLog: actionLogText };
+    }
   }
 
   let actorCallOptions = actorMergedOptions;
@@ -424,13 +435,9 @@ export async function runActorTurn<_IN extends AxGenIn>(
 
   const executorResult = await s.actorProgram.forward(
     ai,
-    buildActorPromptValues(
-      actionLogText,
-      guidanceLogText,
-      mutableState.runtimeStateSummary,
-      summarizedActorLogText,
-      contextPressureText
-    ),
+    contextPressureText
+      ? { ...promptValues, contextPressure: contextPressureText }
+      : promptValues,
     actorCallOptions
   );
   if (!debugHideSystemPrompt) {
