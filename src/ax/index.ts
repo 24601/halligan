@@ -1601,6 +1601,12 @@ import {
   axWorkerRuntime,
 } from './funcs/worker.runtime.js';
 import {
+  type AxLearningStoreConformanceFactory,
+  type AxLearningStoreConformanceFactoryOptions,
+  type AxLearningStoreConformanceReport,
+  runAxLearningStoreConformance,
+} from './learn/conformance.js';
+import {
   AxInMemoryLearningStore,
   type AxInMemoryLearningStoreOptions,
   axInMemoryLearningStore,
@@ -2512,6 +2518,7 @@ export { programSource };
 export { react };
 export { refine };
 export { runAxEventStoreConformance };
+export { runAxLearningStoreConformance };
 export { runAxTrajectoryStoreConformance };
 export { s };
 
@@ -3295,6 +3302,9 @@ export type { AxLearningReportRecordInput };
 export type { AxLearningScalar };
 export type { AxLearningStore };
 export type { AxLearningStoreCapabilities };
+export type { AxLearningStoreConformanceFactory };
+export type { AxLearningStoreConformanceFactoryOptions };
+export type { AxLearningStoreConformanceReport };
 export type { AxLearningStorePage };
 export type { AxLearningStorePageEntry };
 export type { AxLearningTreeDelivery };
