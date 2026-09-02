@@ -1296,18 +1296,28 @@ export class AxWorkingState<S = Record<string, unknown>> {
     return this.runIdValue;
   }
 
-  /** Committed document. Never a proposal. */
+  /**
+   * Committed document. Never a proposal. A CLONE: `Readonly<>` is a
+   * compile-time claim only, and a host that mutated the returned document
+   * would silently corrupt the kernel's believed state.
+   */
   public current(): Readonly<AxWorkingStateDocument<S>> {
-    return this.document;
+    return structuredClone(this.document) as AxWorkingStateDocument<S>;
   }
 
   public currentRevision(): number {
     return this.revision ?? 0;
   }
 
-  /** Every receipt minted this run, oldest first. */
+  /**
+   * Every receipt minted this run, oldest first. A copy, for the same reason
+   * `current()` clones. The ledger grows with each distinct eligible dispatch
+   * and is bounded only by the run's own call budget (`maxTurns` x the calls
+   * per turn); the ROSTER rendered into the prompt is bounded separately by
+   * `maxRosterEntries`.
+   */
   public receipts(): readonly AxWorkingStateReceipt[] {
-    return this.receiptList;
+    return this.receiptList.slice();
   }
 
   /** How many interlock conversions this run has spent. */
@@ -1884,10 +1894,16 @@ export class AxWorkingState<S = Record<string, unknown>> {
 
     const startedAt = this.config.clock.now();
     const context: AxWorkingStateCheckContext<S> = {
-      believedState: partial.believedState,
-      proposedState: partial.proposedState,
+      // Clones: a host checker that mutated what it was handed would otherwise
+      // rewrite the kernel's believed state from inside the gate.
+      believedState: structuredClone(
+        partial.believedState
+      ) as AxWorkingStateDocument<S>,
+      proposedState: structuredClone(
+        partial.proposedState
+      ) as AxWorkingStateDocument<S>,
       deltas: partial.deltas,
-      receipts: this.receiptList,
+      receipts: this.receiptList.slice(),
       action: partial.action,
       observation: partial.observation,
       turn: partial.turn,
@@ -2195,7 +2211,8 @@ export class AxWorkingState<S = Record<string, unknown>> {
     }
 
     return {
-      state: this.document,
+      // A clone, like `current()`: the outcome travels to hosts.
+      state: structuredClone(this.document) as AxWorkingStateDocument<S>,
       revision: this.currentRevision(),
       committed: args.classified,
       parked,

@@ -1,6 +1,7 @@
 import { getEventListeners } from 'node:events';
 
 import { describe, expect, it, vi } from 'vitest';
+import { AxMockAIService } from '../ai/mock/api.js';
 import { AxInMemoryProgramStateStore } from '../event/memoryStore.js';
 import {
   type AxEventVerifierResult,
@@ -13,6 +14,7 @@ import {
   type AxWorkingStateCheckerPolicy,
   type AxWorkingStateConfig,
   AxWorkingStateConflictError,
+  type AxWorkingStateDocument,
   AxWorkingStateForbiddenPathError,
   type AxWorkingStateGoal,
   AxWorkingStateParkBudgetError,
@@ -1329,6 +1331,48 @@ describe('AxWorkingState rendering', () => {
   });
 });
 
+describe('AxWorkingState ownership of the believed document', () => {
+  it('hands out clones, so a host mutation cannot rewrite the believed state', async () => {
+    const state = await makeState({ initial: { goals: { g: goal('g') } } });
+    const seen = state.current() as AxWorkingStateDocument<Facts>;
+    (seen.goals as Record<string, AxWorkingStateGoal>).g!.status = 'done';
+    expect(state.current().goals.g!.status).toBe('pending');
+
+    const outcome = await state.commit(
+      patch([{ op: 'add', path: '/facts/itemsPacked', value: 1 }]),
+      TURN
+    );
+    (outcome.state.facts as { itemsPacked?: number }).itemsPacked = 99;
+    expect(state.current().facts.itemsPacked).toBe(1);
+  });
+
+  it('hands the checker clones of both documents', async () => {
+    const state = await makeState({
+      initial: { goals: { g: goal('g') } },
+      checker: {
+        id: 'mutating',
+        check: async (context): Promise<AxEventVerifierResult> => {
+          // A hostile or careless host checker must not be able to rewrite the
+          // kernel's state from inside the gate.
+          (context.believedState.goals as Record<string, AxWorkingStateGoal>)
+            .g!.status = 'done';
+          (
+            context.proposedState.facts as { itemsPacked?: number }
+          ).itemsPacked = 42;
+          return { status: 'pass' };
+        },
+      },
+    });
+
+    await state.commit(
+      patch([{ op: 'add', path: '/facts/itemsPacked', value: 1 }]),
+      TURN
+    );
+    expect(state.current().goals.g!.status).toBe('pending');
+    expect(state.current().facts.itemsPacked).toBe(1);
+  });
+});
+
 describe('AxWorkingState proposer', () => {
   it('proposeWith replaces the built-in program entirely', async () => {
     const proposeWith = vi.fn(async () => ({
@@ -1352,6 +1396,95 @@ describe('AxWorkingState proposer', () => {
     expect(proposal.statePatch).toEqual([
       { op: 'add', path: '/facts/itemsPacked', value: 3 },
     ]);
+  });
+
+  /** A working state whose built-in proposer runs against a mock model. */
+  const makeProposerState = async (
+    chatResponse: (
+      req: unknown,
+      options?: { abortSignal?: AbortSignal }
+    ) => Promise<any>
+  ) => {
+    const ai = new AxMockAIService({
+      features: { functions: false, streaming: false },
+      chatResponse: chatResponse as never,
+    });
+    return axWorkingState<Facts>(
+      {
+        stateSignature: STATE_SIGNATURE,
+        clock: new AxManualEventClock(0),
+        store: new AxInMemoryProgramStateStore(),
+      },
+      {
+        runId: 'ws:test:1',
+        stage: 'executor',
+        ai: ai as never,
+      }
+    );
+  };
+
+  const proposerInput = {
+    stateContract: 'contract',
+    workingState: 'state',
+    receiptRoster: 'roster',
+    action: TURN.action,
+    observation: TURN.observation,
+    isError: false,
+    turn: TURN.turn,
+  };
+
+  it('the built-in proposer removes its composed abort listener on settle', async () => {
+    const state = await makeProposerState(async () => ({
+      results: [
+        {
+          index: 0,
+          content:
+            'State Patch: [{"op":"add","path":"/facts/itemsPacked","value":3}]\nRationale: because',
+          finishReason: 'stop',
+        },
+      ],
+    }));
+    const controller = new AbortController();
+
+    for (let i = 0; i < 25; i++) {
+      const proposal = await state.propose(proposerInput, controller.signal);
+      expect(proposal.statePatch).toEqual([
+        { op: 'add', path: '/facts/itemsPacked', value: 3 },
+      ]);
+    }
+
+    // 25 settles must not accumulate 25 listeners on the run's signal.
+    expect(getEventListeners(controller.signal, 'abort').length).toBe(0);
+  });
+
+  it('the built-in proposer removes its abort listener when the run aborts', async () => {
+    let proposerStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      proposerStarted = resolve;
+    });
+    const state = await makeProposerState(
+      (_req, options) =>
+        new Promise((_resolve, reject) => {
+          options?.abortSignal?.addEventListener(
+            'abort',
+            () => reject(new Error('aborted')),
+            { once: true }
+          );
+          proposerStarted();
+        })
+    );
+    const controller = new AbortController();
+
+    const pending = state.propose(proposerInput, controller.signal);
+    await started;
+    // The composed signal reaches the model call, so aborting the RUN aborts
+    // the proposer.
+    expect(
+      getEventListeners(controller.signal, 'abort').length
+    ).toBeGreaterThan(0);
+    controller.abort(new Error('run aborted'));
+    await expect(pending).rejects.toBeTruthy();
+    expect(getEventListeners(controller.signal, 'abort').length).toBe(0);
   });
 
   it('the built-in proposer requires an AI service', async () => {
