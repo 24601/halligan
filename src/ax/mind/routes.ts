@@ -73,6 +73,40 @@ export function axMindPendingClass(
 }
 
 /**
+ * May a step of this type wake a SIBLING thinker of the mind that wrote it?
+ *
+ * Three DECLARED registry facts, one rule -- never an inference from
+ * `spillFields`/`visibleWork`/`conversational`, which are a storage, a pacing
+ * and a UI concern and would silently sweep a host's short-payload type into
+ * the inert class. (a) `wakeSignal: true` machinery (`mind-wake`, `mind-idle`,
+ * `manual-trigger`) is a pure signal. (b) `siblingInert: true` (`idle`) says
+ * so in the descriptor. (c) A `neverRetriggersSelf` type (`error`) is one the
+ * registry already forbids feeding back to its own writer.
+ *
+ * Feeding any of them to the writer's SIBLING is the same loop with one more
+ * actor in it, and it is unbounded in TOKENS: two thinkers on the default
+ * subscription each answer the other's `idle` with an `idle` of their own
+ * forever. Payload-carrying types (`message`, `action`, `observation`,
+ * `merge`, `thought`) say something a sibling has to read and are untouched.
+ *
+ * Vocabulary note: RFC 7.4's pending-policy table uses "payload-carrying" for
+ * `wakeSignal: false` and so counts `idle` and `error` inside it. That is the
+ * QUEUE-VS-COALESCE axis; this is the has-a-reader axis, and the two disagree
+ * on exactly those two rows by design.
+ */
+export function axMindSiblingWakeSuppressed(
+  stepType: string,
+  registry: AxTrajectoryTypeRegistry
+): boolean {
+  const descriptor = registry.describe(stepType);
+  return (
+    descriptor.wakeSignal === true ||
+    descriptor.siblingInert === true ||
+    descriptor.neverRetriggersSelf === true
+  );
+}
+
+/**
  * The step types one subscription actually wakes on. An absent `types` and an
  * absent `classes` mean every wakeable NARRATIVE type: machinery is opt-in, so
  * a thinker is never woken by the mind's own bookkeeping by default.
@@ -117,6 +151,12 @@ export interface AxMindWakeRouteOptions {
    * route each -- `axMindEventRoutes` builds both.
    */
   readonly pending?: 'queue' | 'coalesce';
+  /**
+   * The OTHER thinkers of the same mind. Absent means "this thinker has no
+   * siblings", which is exactly a single-thinker mind: the rule then never
+   * fires and dispatch is unchanged.
+   */
+  readonly siblings?: readonly string[];
   readonly routeId?: string;
   readonly onDiagnostic?: (diagnostic: Readonly<AxMindDiagnostic>) => void;
   /** Injected, never `Date.now()`: the diagnostic timestamps the mind's clock. */
@@ -132,6 +172,7 @@ export interface AxMindWakeRouteOptions {
 function suppression(
   thinker: Readonly<AxMindThinker>,
   registry: AxTrajectoryTypeRegistry,
+  siblings: readonly string[],
   onDiagnostic?: (diagnostic: Readonly<AxMindDiagnostic>) => void,
   now?: () => number
 ): (ingress: Readonly<AxEventIngress>) => boolean {
@@ -139,8 +180,31 @@ function suppression(
     const source = extension(ingress, 'stepsource');
     const launchedBy = extension(ingress, 'stepthinker');
     const mine = source === thinker.name || launchedBy === thinker.name;
-    if (!mine) return true;
     const type = extension(ingress, 'steptype') ?? ingress.event.subject ?? '';
+    if (!mine) {
+      // Self-suppression alone is per THINKER, so two thinkers of one mind
+      // answer each other's contentless steps forever. The writer identity is
+      // right here on the envelope, and the mind knows every thinker's name,
+      // so the loop is refused where the self-loop already is: no delivery,
+      // no run, no tokens.
+      const writer = source ?? launchedBy;
+      const sibling =
+        writer !== undefined &&
+        siblings.includes(writer) &&
+        // The supervisor's opt-in, consulted BEFORE the class: a thinker that
+        // declares it watches a sibling's `error` steps is built, not refused.
+        thinker.subscription.siblingSignals?.includes(type) !== true &&
+        axMindSiblingWakeSuppressed(type, registry);
+      if (sibling) {
+        onDiagnostic?.({
+          code: 'wake-suppressed-sibling',
+          thinker: thinker.name,
+          at: now?.() ?? 0,
+          message: `${writer} wrote ${type || 'a step'}, which carries nothing for a sibling; ${thinker.name}'s wake is suppressed`,
+        });
+      }
+      return !sibling;
+    }
     // M3: a thinker never re-triggers on its own error step, even under
     // triggerSelf. The registry owns that flag and the builder cannot override
     // it, which is what stops the error loop.
@@ -205,6 +269,7 @@ export function axMindWakeRoute(
     authorize: suppression(
       thinker,
       options.registry,
+      options.siblings ?? [],
       options.onDiagnostic,
       options.now
     ),
@@ -233,7 +298,9 @@ export function axMindEventRoutes(
   options: Readonly<AxMindEventRoutesOptions>
 ): readonly AxEventRoute[] {
   const routes: AxEventRoute[] = [];
+  const names = options.thinkers.map((thinker) => thinker.name);
   for (const thinker of options.thinkers) {
+    const siblings = names.filter((name) => name !== thinker.name);
     const target = options.targets[thinker.name];
     if (!target) {
       // A configuration failure carries a `reason` from the closed union
@@ -247,6 +314,7 @@ export function axMindEventRoutes(
     for (const pending of ['queue', 'coalesce'] as const) {
       const route = axMindWakeRoute(thinker, target, {
         registry: options.registry,
+        siblings,
         sourceId: options.sourceId,
         tickMs: options.tickMs,
         ...(options.onDiagnostic ? { onDiagnostic: options.onDiagnostic } : {}),

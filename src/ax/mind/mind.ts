@@ -255,6 +255,14 @@ export class AxMind {
   private artifacts: Readonly<AxMindArtifacts>;
   private started = false;
   private closed = false;
+  /**
+   * Aborted by `close()`, and the ONLY signal a settle takes. The probe read
+   * and the outcome/pace appends a closing mind is still holding stop at the
+   * store boundary instead of racing the shutdown; a cancelled or claim-lapsed
+   * delivery still records its outcome, because losing the run is not a reason
+   * to lose the audit trail of it.
+   */
+  private readonly lifetime = new AbortController();
   private toolDepth = 0;
   private ownershipRevision?: number;
   /**
@@ -972,6 +980,11 @@ export class AxMind {
     if (error === undefined && output !== undefined && thinker.sinks?.length) {
       return output;
     }
+    // The settle takes NEITHER the step deadline (aborted in the `finally`
+    // above) NOR the delivery's own signal: the runtime aborts a delivery on a
+    // cancelled run and on a lapsed claim heartbeat while the mind is still
+    // open, and settling under it would drop the outcome step, the pace step
+    // and the ladder's arm for exactly the wakes worth recording.
     await this.settleDelivery(deliveryId);
     if (error !== undefined) throw error;
     return output;
@@ -989,7 +1002,14 @@ export class AxMind {
     this.pending.delete(deliveryId);
     if (this.closed) return;
     try {
-      await this.settleStep(step, step.output, step.error);
+      // The MIND's lifetime signal, and nothing else. It is the one condition
+      // under which the appends below must not land.
+      await this.settleStep(
+        step,
+        step.output,
+        step.error,
+        this.lifetime.signal
+      );
     } catch (thrown) {
       // The settle is the arming path, so it has to survive its own failure:
       // an append that throws here would otherwise end the ladder silently.
@@ -1083,14 +1103,16 @@ export class AxMind {
   private async settleStep(
     step: PendingStep,
     output: unknown,
-    error: unknown
+    error: unknown,
+    signal?: AbortSignal
   ): Promise<AxMindWakeOutcome> {
     const runtime = step.runtime;
     const { thinker } = runtime;
     const after = await axMindWorkProbe(
       this.options.store,
       this.options.trajectoryId,
-      this.registry
+      this.registry,
+      signal
     );
     const result = {
       ...(output !== undefined ? { output } : {}),
@@ -1107,30 +1129,36 @@ export class AxMind {
       runtime.consecutiveErrors++;
       this.lastErrorAt = this.clock.now();
       this.lastError = String(error);
-      await this.appendInternal({
-        type: 'error',
-        source: thinker.name,
-        launchedBy: thinker.name,
-        triggerStep: step.trigger.stepId,
-        data: {
-          reason: 'run-failed',
-          content: String(error),
-          revision: this.artifacts.revision,
-        },
-      });
-    } else {
-      runtime.consecutiveErrors = 0;
-      if (outcome === 'empty') {
-        await this.appendInternal({
-          type: 'idle',
+      await this.appendInternal(
+        {
+          type: 'error',
           source: thinker.name,
           launchedBy: thinker.name,
           triggerStep: step.trigger.stepId,
           data: {
-            wakeClass: step.wakeClass,
+            reason: 'run-failed',
+            content: String(error),
             revision: this.artifacts.revision,
           },
-        });
+        },
+        signal
+      );
+    } else {
+      runtime.consecutiveErrors = 0;
+      if (outcome === 'empty') {
+        await this.appendInternal(
+          {
+            type: 'idle',
+            source: thinker.name,
+            launchedBy: thinker.name,
+            triggerStep: step.trigger.stepId,
+            data: {
+              wakeClass: step.wakeClass,
+              revision: this.artifacts.revision,
+            },
+          },
+          signal
+        );
       }
     }
     runtime.wakesSinceShare =
@@ -1146,25 +1174,31 @@ export class AxMind {
     // `unchanged` means LEAVE THE RUNNING TIMER ALONE. Re-arming on a no-op
     // silently resets the backoff on every outgoing reply.
     if (decision.kind === 'arm') runtime.nextWakeAt = decision.state.wakeAt;
-    await this.appendInternal({
-      type: axMindPaceStepType,
-      launchedBy: thinker.name,
-      triggerStep: step.trigger.stepId,
-      data: axMindPaceStepData({
-        wakeClass: step.wakeClass,
-        outcome,
-        decision,
-      }),
-    });
-    if (decision.state.parked === 'rate_fuse') {
-      await this.appendInternal({
-        type: 'mind-error',
+    await this.appendInternal(
+      {
+        type: axMindPaceStepType,
         launchedBy: thinker.name,
-        data: {
-          reason: `spontaneity parked by the rate fuse until ${decision.state.parkedUntil}`,
-          parkedUntil: decision.state.parkedUntil ?? 0,
+        triggerStep: step.trigger.stepId,
+        data: axMindPaceStepData({
+          wakeClass: step.wakeClass,
+          outcome,
+          decision,
+        }),
+      },
+      signal
+    );
+    if (decision.state.parked === 'rate_fuse') {
+      await this.appendInternal(
+        {
+          type: 'mind-error',
+          launchedBy: thinker.name,
+          data: {
+            reason: `spontaneity parked by the rate fuse until ${decision.state.parkedUntil}`,
+            parkedUntil: decision.state.parkedUntil ?? 0,
+          },
         },
-      });
+        signal
+      );
       this.diagnose(
         'pacer-rate-fuse',
         `${thinker.name} exceeded its spontaneous wake ceiling; reactive wakes continue and spontaneity resumes once the trailing hour drains`,
@@ -1177,12 +1211,13 @@ export class AxMind {
   }
 
   private async appendInternal(
-    request: Omit<AxTrajectoryAppendRequest, 'trajectoryId'>
+    request: Omit<AxTrajectoryAppendRequest, 'trajectoryId'>,
+    signal?: AbortSignal
   ): Promise<void> {
-    const receipt = await this.options.store.append({
-      ...request,
-      trajectoryId: this.options.trajectoryId,
-    });
+    const receipt = await this.options.store.append(
+      { ...request, trajectoryId: this.options.trajectoryId },
+      signal
+    );
     this.newestStep = { seq: receipt.seq, ts: receipt.ts };
   }
 
@@ -1320,6 +1355,10 @@ export class AxMind {
           trajectoryId: this.options.trajectoryId,
           store: this.options.store,
           clock: this.clock,
+          // The FALLBACK only. Each settled effect carries the thinker that
+          // composed it, so a rebuilt message step is attributed to its own
+          // writer; this identity is used only for an effect written before
+          // that was recorded, or naming a thinker this mind does not have.
           sender: this.options.thinkers[0]?.name ?? 'mind',
           selfSources: [...this.thinkers.keys(), 'mind'],
           ...(this.options.transport
@@ -1414,6 +1453,14 @@ export class AxMind {
     }
     if (this.closed) return;
     this.closed = true;
+    // Aborted BEFORE the runtime drains: a settle already inside a store read
+    // stops there rather than appending into a mind that is going away.
+    // `closing`, NOT `close_from_inside`: a host shutting the mind down and a
+    // thinker trying to close its own mind are different events, and a host
+    // that inspects `reason` on an aborted store call has to tell them apart.
+    this.lifetime.abort(
+      new AxMindLivenessError(`AxMind ${this.id} is closing`, 'closing')
+    );
     await this.runtime.close(options ?? { drain: true });
     // Nothing can settle after this, so the records are released rather than
     // held for the lifetime of the object.

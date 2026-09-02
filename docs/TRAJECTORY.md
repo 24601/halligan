@@ -83,6 +83,12 @@ wakeable, never projected, still appendable and still readable, with
 `onUnknownStepType` firing once per distinct type so the open world is visible
 rather than silent.
 
+`siblingInert` is declared the same way: it marks a wakeable type that carries
+nothing a SIBLING writer's reader has to act on (`idle` alone, of the shipped
+rows), and `src/ax/mind` refuses that wake rather than inferring the class from
+`spillFields`, `visibleWork` or `conversational` — a storage, a pacing and a UI
+concern that would sweep a host's short-payload type in silently.
+
 Two edits are refused with `AxTrajectoryRegistryError`: setting
 `carriesSource` on a machinery type (`protected_flag`), and clearing
 `neverRetriggersSelf` on a type that ships with it.
@@ -289,6 +295,14 @@ Four things account for the difference, none of them added scope:
   their regression tests. Each is a few lines of code and a paragraph saying
   what it defends against, which is the ratio this directory has had from the
   start: 3,785 → 3,927.
+- **`AxTrajectoryReader` (Track A follow-up)** raises `types.ts` from 480 to
+  490 and nothing else. It is the read-only view `AxMindContextRequest` hands a
+  thinker — `capabilities`, `clock`, `getTrajectory`, `read`, `tailBackward`,
+  `getStep`, `getSteps`, `stats` — so "a thinker reads the trajectory and never
+  writes it" holds by construction. `append`, `create`, `fork`, `merge`,
+  `saveCursor` and `blobs` (whose `put` is a write) are simply not on the type.
+  An `AxTrajectoryStore` is structurally assignable to it, so the runtime hands
+  its own store over with no wrapper. The DIRECTORY ceiling stays at 3,990.
 
 ## Store capability matrix
 

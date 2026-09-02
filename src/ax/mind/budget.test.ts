@@ -83,15 +83,53 @@ import { describe, expect, it } from 'vitest';
  * - `subruns.ts` 140 -> 150: the bound on an unsummarized merge content, and
  *   the poll ceiling reported in milliseconds like every other `wallClock`.
  *
- * Measured at this raise: types 596, pacer 284, health 138, routes 254,
- * sources 594, chat 768, salience 163, skills 134, context 138, step 166,
- * subruns 140, thinkers 518, mind 1_415, index 164 -- 5_472 in total.
+ * The Track A follow-up pass (the sibling-idle runaway) raises two more, and
+ * the reasons are in docs/MIND.md's "Line budgets" section:
+ *
+ * - `routes.ts` 270 -> 320: `axMindSiblingWakeSuppressed` (the derived
+ *   sibling-inert step class) and the sibling branch of the route predicate,
+ *   with the comment naming the unbounded token runaway they close. Two
+ *   thinkers on the default subscription answered each other's `idle` steps
+ *   forever; the fix is a dispatch rule, so it belongs on this page.
+ * - `types.ts` 600 -> 615: the `wake-suppressed-sibling` diagnostic code and
+ *   the doc comment that says which loop its absence hides.
+ * - `mind.ts` 1_450 -> 1_490: the lifetime `AbortController` that `close()`
+ *   aborts, and the signal threaded from `settleDelivery` through
+ *   `settleStep` into the work probe and all four outcome appends. Every one
+ *   of those calls already took a trailing `signal?`; the settle was the one
+ *   path that passed none, so a closing mind kept appending.
+ * - `chat.ts` 768 -> 800 was already the cap; the per-effect sender is inside
+ *   it. `index.ts` 175 likewise absorbs the two new exports.
+ * - The DIRECTORY ceiling 5_650 -> 5_700. The previous raise measured 5_472,
+ *   but that figure predates two commits that landed on main afterwards, so
+ *   the shipped total on main was already 5_516 before this pass touched
+ *   anything.
+ *
+ * The adversarial review of PR #103 raises two of those again. `mind.ts` stays
+ * at 1_490: `settleDelivery` lost its signal parameter, and the comment saying
+ * which two signals the settle must NOT take costs back what the parameter
+ * saved:
+ *
+ * - `types.ts` 615 -> 630: the `closing` member of `AxMindLivenessError`'s
+ *   closed union with the comment that says why an ordinary host shutdown
+ *   cannot share `close_from_inside`'s label (review M3), and the
+ *   `siblingSignals` opt-in that keeps the supervisor pattern buildable after
+ *   the sibling rule (review minor 2). Both are contract surface, so both
+ *   carry the doc comment the convention asks for.
+ * - `routes.ts` 320 -> 330: the sibling-inert class became DECLARED rather
+ *   than inferred from `spillFields`/`visibleWork`/`conversational` (review
+ *   minor 1), and the doc now reconciles its vocabulary with RFC 7.4's
+ *   different use of "payload-carrying" (review minor 3).
+ *
+ * Measured at this raise: types 623, pacer 284, health 138, routes 321,
+ * sources 594, chat 785, salience 163, skills 134, context 138, step 168,
+ * subruns 140, thinkers 540, mind 1_473, index 174 -- 5_675 in total.
  */
 const CAPS: readonly (readonly [string, number])[] = [
-  ['src/ax/mind/types.ts', 600], // raised from 430, then 480
+  ['src/ax/mind/types.ts', 630], // raised from 430, 480, 600, then 615
   ['src/ax/mind/pacer.ts', 300], // raised from 200, then 270
   ['src/ax/mind/health.ts', 150], // raised from 130
-  ['src/ax/mind/routes.ts', 270], // raised from 250
+  ['src/ax/mind/routes.ts', 330], // raised from 250, 270, then 320
   ['src/ax/mind/sources.ts', 610], // raised from 330, then 560
   ['src/ax/mind/chat.ts', 800], // raised from 280, then 680
   ['src/ax/mind/salience.ts', 180], // raised from 130
@@ -100,7 +138,7 @@ const CAPS: readonly (readonly [string, number])[] = [
   ['src/ax/mind/step.ts', 180], // new: not in RFC 5.1, then raised from 160
   ['src/ax/mind/subruns.ts', 150], // new: not in RFC 5.1, then raised from 140
   ['src/ax/mind/thinkers.ts', 560], // raised from 380
-  ['src/ax/mind/mind.ts', 1_450], // raised from 600, then 1_300
+  ['src/ax/mind/mind.ts', 1_490], // raised from 600, 1_300, then 1_450
   ['src/ax/mind/index.ts', 175], // raised from 90, then 120, then 130
 ];
 
@@ -112,7 +150,7 @@ const CAPS: readonly (readonly [string, number])[] = [
  * rather than letting the estimate stand. Raising it again needs the same
  * treatment: a reason per file, here and in docs/MIND.md.
  */
-const MIND_DIRECTORY_CAP = 5_650;
+const MIND_DIRECTORY_CAP = 5_700;
 
 // vitest runs this workspace with cwd = src/ax, so the repo root is derived
 // from this file rather than from the process.

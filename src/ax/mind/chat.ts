@@ -540,6 +540,12 @@ export const axMindChat = (
         to: message.to,
         trajectoryId,
         content,
+        // The WRITER, carried on the effect itself: a reconcile long after
+        // this process died has no other way to know whose effect it was,
+        // and attributing it to the first thinker in the table writes a step
+        // that says the wrong thinker spoke (an append-only log has no
+        // correction path).
+        sender,
         ...(message.replyTo ? { replyTo: message.replyTo } : {}),
       },
     });
@@ -748,6 +754,17 @@ export async function axMindReconcileChatSends(
       text(effect.metadata?.content as AxTrajectoryFieldValue | undefined) ??
       '';
     if (!to) continue;
+    // Fails CLOSED on a writer this mind does not know. The ledger is host storage, so
+    // the recorded sender is checked against the mind's own thinker table
+    // before it becomes a `source` field; anything else falls back to the
+    // caller's identity rather than minting a writer nobody declared.
+    const recorded = text(
+      effect.metadata?.sender as AxTrajectoryFieldValue | undefined
+    );
+    const sender =
+      recorded !== undefined && selfSources.includes(recorded)
+        ? recorded
+        : options.sender;
     const present = tail.steps.some(
       (step) =>
         step.source !== undefined &&
@@ -763,7 +780,7 @@ export async function axMindReconcileChatSends(
       {
         trajectoryId: options.trajectoryId,
         type: 'message',
-        source: options.sender,
+        source: sender,
         ...(replyTo ? { triggerStep: replyTo } : {}),
         data: {
           from: selfName,
@@ -777,7 +794,7 @@ export async function axMindReconcileChatSends(
     );
     options.onDiagnostic?.({
       code: 'effect-step-reconciled',
-      thinker: options.sender,
+      thinker: sender,
       at: options.clock.now(),
       stepId: receipt.stepId,
       message: `appended the message step for settled effect ${effect.id}`,

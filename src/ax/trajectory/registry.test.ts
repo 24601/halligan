@@ -268,6 +268,22 @@ describe('axDefaultTrajectoryTypes', () => {
     }
   });
 
+  it('declares the sibling-inert class instead of leaving it inferable', () => {
+    // Pinned as a SET, alongside the row table rather than inside it.
+    // `siblingInert` decides which wakes a multi-thinker mind refuses, so a
+    // row joining or leaving this class is a dispatch change and fails here.
+    expect(
+      axDefaultTrajectoryTypes
+        .filter((one) => one.siblingInert === true)
+        .map((one) => one.type)
+    ).toEqual(['idle']);
+    // And it is not silently true anywhere else: every other row leaves it
+    // undefined rather than declaring `false`.
+    expect(
+      axDefaultTrajectoryTypes.filter((one) => one.siblingInert === false)
+    ).toEqual([]);
+  });
+
   it('ships no dropped-step type, because nothing is ever dropped', () => {
     expect(
       axDefaultTrajectoryTypes.some((d) => d.type.includes('dropped'))

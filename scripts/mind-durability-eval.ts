@@ -3,6 +3,7 @@ import { pathToFileURL } from 'node:url';
 
 import {
   type AxEventEffect,
+  type AxEventIngress,
   type AxEventStore,
   AxInMemoryEventStore,
   AxInMemoryTrajectoryRollupStore,
@@ -10,8 +11,10 @@ import {
   AxManualEventClock,
   type AxMindChatMessage,
   type AxMindChatTransport,
+  type AxMindDiagnostic,
   type AxMindEffectLedger,
   type AxMindSendReceipt,
+  type AxMindThinker,
   type AxProgrammable,
   AxSignature,
   type AxTrajectoryAppendReceipt,
@@ -27,12 +30,16 @@ import {
   axMindChat,
   axMindChatIdempotencyKey,
   axMindChatOperation,
+  axMindEventRoutes,
+  axMindEventSource,
   axMindPaceStepData,
   axMindPaceStepType,
   axMindReconcileChatSends,
   axMindStaticArtifacts,
+  axMindStepEventExtensions,
   axNextMindPace,
   axRecoverMindPacerState,
+  axTrajectoryTypeRegistry,
   mind,
 } from '../src/ax/index.js';
 
@@ -118,6 +125,45 @@ export interface AxMindDurabilityReport {
   readonly watchdogBaseline: Readonly<{
     withWatchdogWakes: number;
     withoutWatchdogWakes: number;
+  }>;
+  readonly siblingSuppression: Readonly<AxMindSiblingSuppressionReport>;
+}
+
+/**
+ * Two thinkers of one mind used to answer each other's `idle` steps forever.
+ * The metric is the bound; the COUNTER-METRIC beside it is that an external
+ * step still wakes both, because a mind that woke on nothing would also be
+ * bounded and would be useless.
+ */
+export interface AxMindSiblingSuppressionReport {
+  /**
+   * A fixed point over the SHIPPED route predicate. Each admitted wake writes
+   * one `idle` step, which is one more ingress; the loop runs until nothing is
+   * admitted (quiesced) or the ceiling stops it. The declared baseline is the
+   * same predicate with no siblings named -- i.e. dispatch before this fix.
+   */
+  readonly routeFixedPoint: Readonly<{
+    thinkers: number;
+    ceiling: number;
+    withRuleAdmittedWakes: number;
+    withRuleQuiesced: boolean;
+    withoutRuleAdmittedWakes: number;
+    withoutRuleQuiesced: boolean;
+  }>;
+  /**
+   * The same pair inside a REAL `AxMind` over a step-ceiling store. The
+   * runaway starves the event loop synchronously, so the bound cannot live in
+   * a timeout: it lives in the store the runaway writes to.
+   */
+  readonly endToEnd: Readonly<{
+    thinkers: number;
+    stepCeiling: number;
+    ceilingHit: boolean;
+    idleSteps: number;
+    totalSteps: number;
+    siblingWakesSuppressed: number;
+    /** The counter-metric: an external `observation` must still wake BOTH. */
+    thinkersWokenByExternalStep: number;
   }>;
 }
 
@@ -1090,6 +1136,245 @@ async function watchdogBaseline(): Promise<
   };
 }
 
+const SIBLING_THINKERS = ['alpha', 'beta'] as const;
+const SIBLING_ROUTE_CEILING = 2_000;
+const SIBLING_STEP_CEILING = 120;
+
+/** A model-free program that records its wake and produces nothing durable. */
+function emptyProgram(onWake: () => void): AxProgrammable<any, any> {
+  const signature = new AxSignature('context:string -> reply?:string');
+  return {
+    getId: () => 'empty',
+    setId: () => undefined,
+    getSignature: () => signature,
+    getTraces: () => [],
+    setDemos: () => undefined,
+    applyOptimization: () => undefined,
+    getOptimizableComponents: () => [],
+    applyOptimizedComponents: () => undefined,
+    getUsage: () => [],
+    getChatLog: () => [],
+    resetUsage: () => undefined,
+    forward: async () => {
+      onWake();
+      // Nothing durable, so the settle appends an `idle` step: the exact
+      // shape the pair used to answer forever.
+      return {};
+    },
+    streamingForward: async function* () {},
+  } as unknown as AxProgrammable<any, any>;
+}
+
+function siblingThinker(name: string, program: AxProgrammable<any, any>) {
+  return {
+    name,
+    kind: 'monolith',
+    // The DEFAULT subscription -- every wakeable narrative type -- which is
+    // the configuration the runaway needs.
+    subscription: { triggerSelf: false, watchdogMs: 0, maxInFlight: 4 },
+    ai: {} as never,
+    program,
+    context: (request: any) => ({ context: request.projection.render }),
+  } as unknown as AxMindThinker<any, any>;
+}
+
+/**
+ * Replays the ping-pong over the SHIPPED `authorize` predicates: one admitted
+ * wake writes one `idle` step, which is one more ingress. `siblings: false`
+ * builds the same routes with no siblings named, which is dispatch before this
+ * fix and is the declared baseline.
+ */
+function siblingRouteFixedPoint(
+  withRule: boolean
+): Readonly<{ admitted: number; quiesced: boolean }> {
+  const mindId = 'sibling-eval';
+  const sourceId = axMindEventSource(mindId);
+  const thinkers = SIBLING_THINKERS.map((name) =>
+    siblingThinker(
+      name,
+      emptyProgram(() => undefined)
+    )
+  );
+  const targets = Object.fromEntries(
+    thinkers.map((one) => [
+      one.name,
+      { id: one.name, ai: {} as never, mapInput: () => ({}) },
+    ])
+  );
+  const registry = axTrajectoryTypeRegistry();
+  const build = (group: readonly AxMindThinker<any, any>[]) =>
+    axMindEventRoutes({
+      mindId,
+      thinkers: group,
+      targets,
+      registry,
+      sourceId,
+      tickMs: 1_000,
+    });
+  // With the rule OFF the table is built one thinker at a time, so no thinker
+  // is ever told it has a sibling. That IS dispatch before this fix.
+  const table = (
+    withRule ? build(thinkers) : thinkers.flatMap((one) => build([one]))
+  ).filter((route) => !route.id.endsWith('.signals'));
+  const ingressFor = (writer: string, seq: number): AxEventIngress => {
+    const step: AxTrajectoryStep = {
+      stepId: `idle-${writer}-${seq}`,
+      trajectoryId: TRAJECTORY,
+      seq,
+      ts: seq,
+      type: 'idle',
+      source: writer,
+      launchedBy: writer,
+      data: {},
+    };
+    return {
+      event: {
+        specversion: '1.0',
+        id: step.stepId,
+        source: sourceId,
+        type: 'ax.trajectory.step',
+        subject: step.type,
+        data: { stepId: step.stepId, seq: step.seq, type: step.type },
+        extensions: axMindStepEventExtensions(step),
+      },
+      trust: 'trusted',
+    };
+  };
+  let admitted = 0;
+  let seq = 1;
+  const work: AxEventIngress[] = [ingressFor(SIBLING_THINKERS[0], seq)];
+  while (work.length > 0 && admitted < SIBLING_ROUTE_CEILING) {
+    const ingress = work.shift()!;
+    for (const route of table) {
+      const authorize = route.authorize as
+        | ((one: Readonly<AxEventIngress>) => boolean)
+        | undefined;
+      if (!authorize?.(ingress)) continue;
+      admitted += 1;
+      seq += 1;
+      // The wake ran and produced nothing, so the settle writes one `idle`.
+      work.push(ingressFor(String(route.instanceKey?.(ingress)), seq));
+      if (admitted >= SIBLING_ROUTE_CEILING) break;
+    }
+  }
+  return Object.freeze({
+    admitted,
+    quiesced: work.length === 0 && admitted < SIBLING_ROUTE_CEILING,
+  });
+}
+
+/** A store that refuses to grow past a ceiling. See the report comment. */
+function ceilingStore(
+  store: AxTrajectoryStore,
+  ceiling: number
+): Readonly<{ store: AxTrajectoryStore; hit: () => boolean }> {
+  let appends = 0;
+  let hit = false;
+  const append: AxTrajectoryStore['append'] = async (request, signal) => {
+    appends += 1;
+    if (appends > ceiling) {
+      hit = true;
+      throw new Error(`the trajectory passed its ${ceiling}-append ceiling`);
+    }
+    return store.append(request, signal);
+  };
+  const capped = new Proxy(store, {
+    get(target, property) {
+      if (property === 'append') return append;
+      const value = Reflect.get(target, property, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  return Object.freeze({ store: capped, hit: () => hit });
+}
+
+async function siblingSuppression(): Promise<
+  Readonly<AxMindSiblingSuppressionReport>
+> {
+  const clock = new AxManualEventClock(1_000);
+  const inner = new AxInMemoryTrajectoryStore({ clock });
+  await inner.create({ trajectoryId: TRAJECTORY });
+  const capped = ceilingStore(inner, SIBLING_STEP_CEILING);
+  const wakes = new Map<string, number>();
+  const diagnostics: AxMindDiagnostic[] = [];
+  const thinkers = SIBLING_THINKERS.map((name) =>
+    siblingThinker(
+      name,
+      emptyProgram(() => wakes.set(name, (wakes.get(name) ?? 0) + 1))
+    )
+  );
+  const instance = mind({
+    id: 'sibling-eval',
+    trajectoryId: TRAJECTORY,
+    store: capped.store,
+    clock,
+    artifacts: axMindStaticArtifacts({
+      revision: 'sibling',
+      persona: 'two thinkers with nothing to say',
+      thinkerPrompts: {},
+      goals: [],
+      skills: [],
+    }),
+    thinkers,
+    budget: { contextWindowTokens: 8_000 },
+    allowVolatileTrajectory: true,
+    tickMs: 5,
+    sourcePollMs: 5,
+    onDiagnostic: (one) => diagnostics.push(one),
+  });
+  await instance.start();
+  const pump = async (rounds: number) => {
+    for (let round = 0; round < rounds; round++) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      clock.advanceBy(5);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  };
+  await pump(120);
+  const bootstrapWakes = new Map(wakes);
+  // The counter-metric: an EXTERNAL writer of a payload type must still wake
+  // BOTH thinkers. Boundedness bought by deafening the mind is not the fix.
+  await instance.append({
+    trajectoryId: '',
+    type: 'observation',
+    source: 'chat',
+    data: { content: 'a person said something out loud' },
+  });
+  await pump(120);
+  const woken = SIBLING_THINKERS.filter(
+    (name) => (wakes.get(name) ?? 0) > (bootstrapWakes.get(name) ?? 0)
+  ).length;
+  const tail = await capped.store.tailBackward({
+    trajectoryId: TRAJECTORY,
+    limit: 500,
+    maxScan: 5_000,
+  });
+  await instance.close({ drain: false, timeoutMs: 200 });
+  const withRule = siblingRouteFixedPoint(true);
+  const withoutRule = siblingRouteFixedPoint(false);
+  return Object.freeze({
+    routeFixedPoint: Object.freeze({
+      thinkers: SIBLING_THINKERS.length,
+      ceiling: SIBLING_ROUTE_CEILING,
+      withRuleAdmittedWakes: withRule.admitted,
+      withRuleQuiesced: withRule.quiesced,
+      withoutRuleAdmittedWakes: withoutRule.admitted,
+      withoutRuleQuiesced: withoutRule.quiesced,
+    }),
+    endToEnd: Object.freeze({
+      thinkers: SIBLING_THINKERS.length,
+      stepCeiling: SIBLING_STEP_CEILING,
+      ceilingHit: capped.hit(),
+      idleSteps: tail.steps.filter((step) => step.type === 'idle').length,
+      totalSteps: tail.steps.length,
+      siblingWakesSuppressed: diagnostics.filter(
+        (one) => one.code === 'wake-suppressed-sibling'
+      ).length,
+      thinkersWokenByExternalStep: woken,
+    }),
+  });
+}
+
 export async function runMindDurabilityEvaluation(): Promise<
   Readonly<AxMindDurabilityReport>
 > {
@@ -1130,6 +1415,7 @@ export async function runMindDurabilityEvaluation(): Promise<
     concurrency: await concurrency(),
     naiveGuardBaseline: await naiveGuardBaseline(),
     watchdogBaseline: await watchdogBaseline(),
+    siblingSuppression: await siblingSuppression(),
   });
 }
 
@@ -1255,6 +1541,42 @@ export function assertMindDurabilityEvaluation(
   }
   if (report.watchdogBaseline.withWatchdogWakes <= 0) {
     fail('the watchdog baseline never wakes');
+  }
+  const sibling = report.siblingSuppression;
+  if (!sibling.routeFixedPoint.withRuleQuiesced) {
+    fail(
+      `the two-thinker route fixed point never quiesced with the sibling rule: ${sibling.routeFixedPoint.withRuleAdmittedWakes} wakes admitted`
+    );
+  }
+  // The baseline must actually run away, or the comparison means nothing.
+  if (sibling.routeFixedPoint.withoutRuleQuiesced) {
+    fail(
+      'the no-sibling-rule baseline quiesced on its own, so it is not the runaway it claims to be'
+    );
+  }
+  if (
+    sibling.routeFixedPoint.withoutRuleAdmittedWakes <
+    sibling.routeFixedPoint.ceiling
+  ) {
+    fail(
+      `the no-sibling-rule baseline admitted ${sibling.routeFixedPoint.withoutRuleAdmittedWakes} wakes without reaching its ${sibling.routeFixedPoint.ceiling} ceiling`
+    );
+  }
+  if (sibling.endToEnd.ceilingHit) {
+    fail(
+      `the two-thinker mind passed its ${sibling.endToEnd.stepCeiling}-append ceiling`
+    );
+  }
+  if (sibling.endToEnd.siblingWakesSuppressed <= 0) {
+    fail('no sibling wake was suppressed, so the bound proves nothing');
+  }
+  // The COUNTER-METRIC. A mind that woke on nothing would be bounded too.
+  if (
+    sibling.endToEnd.thinkersWokenByExternalStep !== sibling.endToEnd.thinkers
+  ) {
+    fail(
+      `an external observation woke ${sibling.endToEnd.thinkersWokenByExternalStep} of ${sibling.endToEnd.thinkers} thinkers; the bound must not come from deafness`
+    );
   }
 }
 

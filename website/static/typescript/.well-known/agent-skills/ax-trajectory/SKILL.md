@@ -126,6 +126,10 @@ Only `narrative` steps reach a projection.
 | `manual-trigger` | machinery | yes (signal) | no | — |
 | `mind-error` | machinery | no | no | `reason` |
 
+`idle` also ships `siblingInert: true`: it is the one narrative row carrying
+nothing a SIBLING thinker has to read, and `src/ax/mind` refuses that wake.
+Declare it on your own type rather than letting a mind infer it.
+
 Add your own:
 
 ```ts

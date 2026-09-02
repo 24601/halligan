@@ -45,7 +45,13 @@ import { describe, expect, it } from 'vitest';
  * and a paragraph saying what it is defending against, which is the ratio this
  * directory has had from the start.
  *
- * Measured at this cap raise: types 465, util 151, registry 171, spill 158,
+ * The Track A follow-up pass adds ONE type here: `AxTrajectoryReader`, the
+ * read-only view a thinker is handed in `AxMindContextRequest` so RFC 6.5's
+ * "a thinker reads the trajectory and never writes it" holds by construction
+ * instead of by convention. `types.ts` 480 -> 490 for it; the DIRECTORY
+ * ceiling is unchanged.
+ *
+ * Measured before that raise: types 465, util 151, registry 171, spill 158,
  * log 483, memoryStore 507, conformance 676, index 138, projection 577,
  * rollups 601 -- 3,927 in total. conformance.ts remains the biggest single
  * overrun of the RFC's estimate (470): it is seventeen named cases, and the
@@ -53,7 +59,7 @@ import { describe, expect, it } from 'vitest';
  * kit could not previously make.
  */
 const CAPS: readonly (readonly [string, number])[] = [
-  ['src/ax/trajectory/types.ts', 480],
+  ['src/ax/trajectory/types.ts', 490], // raised from 480 by AxTrajectoryReader
   ['src/ax/trajectory/util.ts', 160], // raised from 150 by the shared knob guard
   ['src/ax/trajectory/registry.ts', 190],
   ['src/ax/trajectory/spill.ts', 175], // raised from 170

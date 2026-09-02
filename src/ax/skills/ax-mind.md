@@ -109,6 +109,9 @@ const auxiliary: AxMindThinker = {
 };
 ```
 
+- `request.store` is an `AxTrajectoryReader`, not the full store: the read
+  primitives only. A thinker reads the trajectory; the runtime writes it, so
+  `append` / `fork` / `merge` / `saveCursor` do not compile from a thinker.
 - `subscription.types` absent means every wakeable NARRATIVE type. Machinery is
   opt-in, so a thinker is never woken by the mind's own bookkeeping by default.
 - `triggerSelf` is decided by the STEP'S `source` FIELD, not by process
@@ -122,10 +125,21 @@ const auxiliary: AxMindThinker = {
   timer. At most one thinker may declare it.
 - `createProgram` receives the mind itself, which is how a thinker's tools
   reach a runtime that did not exist when the thinker record was built.
-- Give a SECOND thinker an explicit `subscription.types`. Suppression is per
-  thinker, so two thinkers on the default subscription wake each other on their
-  own `idle` steps forever. The shipped pair is safe because `axMindResponder`
-  listens for `message` only.
+- A thinker never wakes on a SIBLING thinker's contentless step either. The
+  suppressed class is read off DECLARED registry facts by
+  `axMindSiblingWakeSuppressed` — `wakeSignal` types (`mind-wake`, `mind-idle`,
+  `manual-trigger`), `siblingInert` types (`idle`), and `neverRetriggersSelf`
+  types (`error`). Never inferred from `spillFields` / `visibleWork` /
+  `conversational`: those are storage, pacing and UI concerns, so declare
+  `siblingInert` on your own type instead of hoping it is guessed. Payload types
+  (`message`, `action`, `observation`, `merge`, `thought`) wake a sibling
+  normally, and so does an EXTERNAL writer of a suppressed type. Without this,
+  two thinkers on the default subscription answer each other's `idle` steps
+  forever. The refusal is reported as `wake-suppressed-sibling`.
+- A supervisor opts back in with `subscription.siblingSignals: ['error']`.
+  Suppression happens above the subscription, so without this a thinker that
+  watches a sibling fail cannot be built at all; declaring it re-opens the loop,
+  so the supervisor owns bounding its own answer.
 
 ## Pacing
 

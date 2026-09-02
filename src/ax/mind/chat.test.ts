@@ -1077,4 +1077,107 @@ describe('the ledger boundary', () => {
     expect(outcome.again).toHaveLength(0);
     expect(transport.sent).toHaveLength(0);
   });
+
+  it('attributes a reconciled step to the thinker whose effect it was', async () => {
+    const { store, clock } = await seed();
+    const transport = transportFor();
+    const thinkers = ['monolith', 'responder', 'mind'];
+    const diagnostics: { code: string; thinker?: string }[] = [];
+    const outcome = await withLedger(async (effects) => {
+      // Two thinkers of one mind each sent, and both processes died before
+      // the message step landed. `options.thinkers[0]` is the monolith, so
+      // the responder's send is the one a positional attribution gets wrong.
+      const send = async (sender: string, to: string, content: string) => {
+        const chat = axMindChat({
+          trajectoryId: TRAJECTORY,
+          store,
+          clock,
+          sender,
+          selfSources: thinkers,
+          transport,
+          effects: () => effects,
+        });
+        await chat.send({ to, content });
+      };
+      await send('monolith', 'ada', 'a thought from the monolith');
+      await send('responder', 'bo', 'an answer from the responder');
+      // Both message steps are removed from the log, which is C10's shape.
+      const rebuilt = new AxInMemoryTrajectoryStore({ clock });
+      await rebuilt.create({ trajectoryId: TRAJECTORY });
+      return axMindReconcileChatSends({
+        trajectoryId: TRAJECTORY,
+        store: rebuilt,
+        clock,
+        sender: 'monolith',
+        selfSources: thinkers,
+        transport,
+        effects: () => effects,
+        onDiagnostic: (diagnostic) =>
+          diagnostics.push({
+            code: diagnostic.code,
+            ...(diagnostic.thinker ? { thinker: diagnostic.thinker } : {}),
+          }),
+      });
+    });
+    expect(outcome).toHaveLength(2);
+    const byRecipient = new Map(
+      outcome.map((step) => [String(step.data.to), step])
+    );
+    expect(byRecipient.get('ada')?.source).toBe('monolith');
+    // THE row: without per-effect attribution this is `monolith`, and an
+    // append-only log then says forever that the wrong thinker spoke.
+    expect(byRecipient.get('bo')?.source).toBe('responder');
+    // ORDER-INDEPENDENT on purpose. `listEffects()` sorts by `createdAt` and
+    // breaks ties on a random UUID, and two sends inside one delivery land in
+    // the same millisecond routinely -- so asserting a fixed order here would
+    // be asserting a coin flip, not a contract. What IS the contract is that
+    // each settled effect produces exactly one diagnostic naming its own
+    // composer.
+    expect(
+      [...diagnostics].sort((a, b) =>
+        (a.thinker ?? '').localeCompare(b.thinker ?? '')
+      )
+    ).toEqual([
+      { code: 'effect-step-reconciled', thinker: 'monolith' },
+      { code: 'effect-step-reconciled', thinker: 'responder' },
+    ]);
+  });
+
+  it('fails closed on a recorded sender the mind never declared', async () => {
+    const { store, clock } = await seed();
+    const outcome = await withLedger(async (effects) => {
+      // The ledger is HOST storage. A `sender` it hands back that is not in
+      // this mind's thinker table cannot become a `source` field.
+      const declared = await effects.declareEffect({
+        operation: axMindChatOperation,
+        idempotencyKey: 'ax.mind.chat:forged',
+        replaySafety: 'unknown',
+        metadata: {
+          to: 'ada',
+          trajectoryId: TRAJECTORY,
+          content: 'who wrote this?',
+          sender: 'not-a-thinker',
+        },
+      });
+      const dispatched = await effects.markEffectDispatched(
+        declared.id,
+        declared.version
+      );
+      await effects.settleEffect(dispatched.id, dispatched.version, {
+        status: 'succeeded',
+        receipt: { at: 1_200 },
+      });
+      return axMindReconcileChatSends({
+        trajectoryId: TRAJECTORY,
+        store,
+        clock,
+        sender: 'monolith',
+        selfSources: ['monolith', 'responder', 'mind'],
+        transport: transportFor(),
+        effects: () => effects,
+      });
+    });
+    expect(outcome).toHaveLength(1);
+    expect(outcome[0]!.source).toBe('monolith');
+  });
 });

@@ -151,6 +151,25 @@
       }
     },
     {
+      "row": 9,
+      "name": "an inbound message reaching a busy thinker is offered as salience",
+      "harness": "mind",
+      "append": {
+        "type": "message",
+        "source": "chat"
+      },
+      "subscription": {
+        "types": ["message"]
+      },
+      "expected": {
+        "action": "publish",
+        "diagnostic": "salience-injected",
+        "salienceOffers": 1,
+        "feedbackSteps": 1,
+        "reason": "the wake is queued behind the running one (instanceKey = thinker), so the message ALSO enters the salience buffer and is recorded as a wakeable:false feedback step that can never re-dispatch"
+      }
+    },
+    {
       "row": 10,
       "name": "backpressure is a deferral, not a loss",
       "append": {

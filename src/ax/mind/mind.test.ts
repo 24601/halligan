@@ -1,3 +1,5 @@
+import { getEventListeners } from 'node:events';
+
 import { describe, expect, it } from 'vitest';
 
 import { AxAgentSessionHost } from '../agent/retainedSessions.js';
@@ -18,6 +20,7 @@ import {
   type AxTrajectoryStore,
 } from '../trajectory/types.js';
 import { AxMind, type AxMindOptions, mind } from './mind.js';
+import { axMindPaceStepType } from './pacer.js';
 import { axMindMonolith, axMindResponder } from './thinkers.js';
 import {
   AxInMemoryMindOwnershipStore,
@@ -1128,6 +1131,267 @@ describe('AxMind step settlement', () => {
   });
 });
 
+/**
+ * `AxEventClock.sleep` adds an abort listener and removes it only when the
+ * signal fires -- it never removes the one it adds on the RESOLVE path. Every
+ * thinker step arms one of those against its own wall-clock deadline, so the
+ * mind's obligation is that each step's deadline is aborted and each sleeper
+ * cancelled once the step settles, whatever the step did.
+ */
+class RecordingClock extends AxManualEventClock {
+  readonly sleeps: Array<{
+    ms: number;
+    signal?: AbortSignal;
+    settled: boolean;
+  }> = [];
+
+  override sleep(ms: number, signal?: AbortSignal): Promise<void> {
+    const record = { ms, ...(signal ? { signal } : {}), settled: false };
+    this.sleeps.push(record);
+    return super.sleep(ms, signal).then(
+      () => {
+        record.settled = true;
+      },
+      (reason) => {
+        record.settled = true;
+        throw reason;
+      }
+    );
+  }
+}
+
+describe('AxMind step deadline hygiene', () => {
+  it('leaves no abort listener and no live sleeper behind on a settled step', async () => {
+    const DEADLINE_MS = 987_654;
+    const clock = new RecordingClock(1_000);
+    const store = new AxInMemoryTrajectoryStore({ clock });
+    await store.create({ trajectoryId: TRAJECTORY });
+    let release: (() => void) | undefined;
+    const parked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered = 0;
+    const program = probeProgram(async () => {
+      entered += 1;
+      if (entered === 1) await parked;
+      return { reply: 'ok' };
+    });
+    const instance = mind(
+      baseOptions(
+        store,
+        [
+          thinkerWith('worker', program, {
+            budget: {
+              maxWallClockMs: DEADLINE_MS,
+              maxTokens: 120_000,
+              maxSubRuns: 8,
+              maxDepth: 2,
+            },
+          }),
+        ],
+        { clock }
+      )
+    );
+    // The deadline is identified by its own distinctive window, so the tick's
+    // and the runtime's own sleeps on the same clock cannot be mistaken for
+    // it -- and a mind that armed no deadline at all would record none.
+    const deadlines = () =>
+      clock.sleeps.filter((one) => one.ms === DEADLINE_MS);
+    await instance.start();
+    await pumpUntil(clock, () => entered > 0);
+    expect(deadlines()).toHaveLength(1);
+    // ARMED while the step runs: one live sleeper, one listener. Without this
+    // an implementation that never sleeps would pass every assertion below.
+    expect(deadlines()[0]!.settled).toBe(false);
+    expect(getEventListeners(deadlines()[0]!.signal!, 'abort')).toHaveLength(1);
+
+    release?.();
+    await pumpUntil(clock, () => deadlines()[0]?.settled ?? false);
+    for (let round = 0; round < 4; round++) {
+      await instance.append({
+        trajectoryId: '',
+        type: 'observation',
+        source: 'chat',
+        data: { content: `round ${round}` },
+      });
+      await pumpUntil(clock, () => entered > round + 1);
+    }
+    // Five steps in, every deadline is settled and every signal is clean: the
+    // listeners do not accumulate one per wake for the life of the mind.
+    expect(deadlines().length).toBeGreaterThanOrEqual(5);
+    for (const record of deadlines()) {
+      expect(record.settled).toBe(true);
+      expect(getEventListeners(record.signal!, 'abort')).toHaveLength(0);
+    }
+    await instance.close({ drain: false, timeoutMs: 200 });
+  });
+
+  it('is inert on a second close, and a delivery that arrives afterwards appends nothing', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const store = await seed(clock);
+    const program = probeProgram();
+    const instance = mind(baseOptions(store, [thinkerWith('worker', program)]));
+    await instance.start();
+    await pumpUntil(clock, () => program.calls.length > 0);
+    await instance.close({ drain: false, timeoutMs: 200 });
+    const settledAt = (await typesIn(store)).length;
+    // This one is satisfied by `settleDelivery`'s own `closed` guard, which is
+    // why the two tests below exist: they are the ones that reach the signal.
+    await instance.close({ drain: false, timeoutMs: 200 });
+    await settle(clock, 5, 10);
+    expect((await typesIn(store)).length).toBe(settledAt);
+  });
+});
+
+/**
+ * The settle takes the MIND's lifetime signal and nothing else. Both halves of
+ * that sentence are load-bearing and each has a test here: a closing mind must
+ * stop mid-settle, and a delivery the runtime cancelled must still record its
+ * outcome. Mutating the signal argument to `undefined` fails the first; passing
+ * the delivery's signal into it fails the second.
+ */
+describe('AxMind settle signal discipline', () => {
+  /** Parks the FIRST work probe issued after the thinker's program has run. */
+  function gatedProbeStore(
+    store: AxTrajectoryStore,
+    ready: () => boolean
+  ): Readonly<{
+    store: AxTrajectoryStore;
+    parked: () => boolean;
+    release: () => void;
+  }> {
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let parked = false;
+    const tailBackward: AxTrajectoryStore['tailBackward'] = async (
+      request,
+      signal
+    ) => {
+      // `axMindWorkProbe` is the settle's first `await`, and it is the only
+      // limit-1 tail the mind issues; parking it puts the settle INSIDE the
+      // store when `close()` lands, which is the state the signal exists for.
+      if (!parked && ready() && request.limit === 1) {
+        parked = true;
+        await gate;
+      }
+      return store.tailBackward(request, signal);
+    };
+    const gated = new Proxy(store, {
+      get(target, property, _receiver) {
+        if (property === 'tailBackward') return tailBackward;
+        const value = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    return Object.freeze({
+      store: gated,
+      parked: () => parked,
+      release: () => release?.(),
+    });
+  }
+
+  it('stops a settle that is already inside the store when the mind closes', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const base = await seed(clock);
+    let ran = false;
+    const program = probeProgram(async () => {
+      ran = true;
+      return {};
+    });
+    const gate = gatedProbeStore(base, () => ran);
+    const diagnostics: AxMindDiagnostic[] = [];
+    const instance = mind(
+      baseOptions(gate.store, [thinkerWith('worker', program)], {
+        onDiagnostic: (one) => diagnostics.push(one),
+      })
+    );
+    await instance.start();
+    await pumpUntil(clock, () => gate.parked());
+    expect(gate.parked()).toBe(true);
+    const before = await typesIn(base);
+    // `close()` aborts the lifetime SYNCHRONOUSLY, before it awaits the
+    // runtime drain, so the parked settle is released into an aborted signal.
+    const closing = instance.close({ drain: false, timeoutMs: 200 });
+    gate.release();
+    await closing;
+    await settle(clock, 5, 10);
+    const after = await typesIn(base);
+    // THE assertion: none of the settle's four outcome appends land. Without
+    // the signal the probe resolves and `idle` + `mind-wake` are written into
+    // a mind that is already gone.
+    expect(after.length).toBe(before.length);
+    expect(after.some((step) => step.type === axMindPaceStepType)).toBe(false);
+    // And the failure is CLASSIFIED, not swallowed: the fallback names the
+    // shutdown reason, distinct from the `close_from_inside` refusal.
+    const armed = diagnostics.filter(
+      (one) => one.code === 'liveness-fallback-armed'
+    );
+    expect(armed.length).toBeGreaterThan(0);
+    expect(armed.some((one) => /is closing/.test(one.message))).toBe(true);
+  });
+
+  it('still records the outcome of a delivery whose own signal was cancelled', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const store = await seed(clock);
+    let release: (() => void) | undefined;
+    const parked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let captured: Readonly<{ deliveryId?: string }> | undefined;
+    const signature = new AxSignature('context:string -> reply?:string');
+    const base = probeProgram();
+    const holding = {
+      ...base,
+      getSignature: () => signature,
+      forward: async (_ai: unknown, _values: unknown, options: any) => {
+        captured ??= options?.eventContext;
+        await parked;
+        return {};
+      },
+    } as unknown as AxProgrammable<any, any>;
+    const worker = thinkerWith('worker', holding);
+    const instance = mind(baseOptions(store, [worker]));
+    await instance.start();
+    await pumpUntil(clock, () => captured !== undefined);
+    expect(captured?.deliveryId).toBeTruthy();
+    const before = await typesIn(store);
+    // The runtime aborts a delivery's controller on `cancelRun` and on a
+    // lapsed claim heartbeat WHILE THE MIND IS OPEN. Settling under it would
+    // make the outcome step, the pace step and the ladder's arm conditional on
+    // the run surviving -- exactly the wakes most worth recording.
+    const cancelled = new AbortController();
+    cancelled.abort(new Error('the runtime cancelled this run'));
+    // A THROWING step, because the `error` branch is the one worth recording:
+    // a wake that was cancelled and left no `error` step is a broken mind that
+    // reads as a healthy one.
+    const failing = probeProgram(async () => {
+      throw new Error('the step itself failed');
+    });
+    await expect(
+      instance.runThinkerStep(worker, failing, ai, { context: 'x' }, {
+        eventContext: captured,
+        abortSignal: cancelled.signal,
+      } as never)
+    ).rejects.toThrow('the step itself failed');
+    const seen = new Set(before.map((step) => step.stepId));
+    const fresh = (await typesIn(store)).filter(
+      (step) => !seen.has(step.stepId)
+    );
+    // Both halves of RFC 7.5 step 8 land: the outcome step and its pace step.
+    const errors = fresh.filter((step) => step.type === 'error');
+    expect(errors).toHaveLength(1);
+    expect(String(errors[0]?.data.content)).toContain('the step itself failed');
+    expect(errors[0]?.source).toBe('worker');
+    expect(
+      fresh.filter((step) => step.type === axMindPaceStepType)
+    ).toHaveLength(1);
+    release?.();
+    await instance.close({ drain: false, timeoutMs: 200 });
+  });
+});
+
 describe('AxMind rate fuse recovery', () => {
   it('un-parks with exactly one re-evaluation, with no watchdog to help', async () => {
     const clock = new AxManualEventClock(1_000);
@@ -1690,6 +1954,132 @@ describe('AxMind self-suppression', () => {
   });
 });
 
+/**
+ * A trajectory store that refuses to grow past a ceiling. A mind whose
+ * thinkers wake each other on their own contentless steps starves the event
+ * loop SYNCHRONOUSLY -- vitest's own timeout never gets a turn -- so the bound
+ * cannot live in the test runner. It lives in the store the runaway writes to:
+ * the ceiling turns an unbounded hang into one fast, loud assertion.
+ */
+function cappedStore(
+  store: AxTrajectoryStore,
+  ceiling: number
+): Readonly<{ store: AxTrajectoryStore; exceeded: () => boolean }> {
+  let appends = 0;
+  let exceeded = false;
+  const append: AxTrajectoryStore['append'] = async (request, signal) => {
+    appends += 1;
+    if (appends > ceiling) {
+      exceeded = true;
+      throw new Error(`the trajectory passed its ${ceiling}-append ceiling`);
+    }
+    return store.append(request, signal);
+  };
+  const capped = new Proxy(store, {
+    get(target, property, _receiver) {
+      if (property === 'append') return append;
+      const value = Reflect.get(target, property, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  return Object.freeze({ store: capped, exceeded: () => exceeded });
+}
+
+describe('AxMind sibling suppression', () => {
+  it('never wakes a sibling on a contentless step, and still wakes both on an external one', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const capped = cappedStore(await seed(clock), 120);
+    const diagnostics: AxMindDiagnostic[] = [];
+    // Returns nothing durable, so every settle appends an `idle` step: the
+    // exact shape two default-subscribed thinkers answered forever.
+    const alpha = probeProgram(async () => ({}));
+    const beta = probeProgram(async () => ({}));
+    const instance = mind(
+      baseOptions(
+        capped.store,
+        [thinkerWith('alpha', alpha), thinkerWith('beta', beta)],
+        { onDiagnostic: (one) => diagnostics.push(one) }
+      )
+    );
+    await instance.start();
+    await pumpUntil(
+      clock,
+      () =>
+        capped.exceeded() || (alpha.calls.length > 0 && beta.calls.length > 0)
+    );
+    // THE ceiling assertion. Without the rule this is `true` and every other
+    // expectation below is meaningless, so it is asserted first.
+    expect(capped.exceeded()).toBe(false);
+    const bounced = diagnostics.filter(
+      (one) => one.code === 'wake-suppressed-sibling'
+    );
+    // The decision is visible: a suppressed wake creates no delivery and no
+    // step, so the diagnostic is the only place a host can read it.
+    expect(bounced.length).toBeGreaterThan(0);
+    expect(new Set(bounced.map((one) => one.thinker))).toEqual(
+      new Set(['alpha', 'beta'])
+    );
+    expect(
+      bounced.every((one) => /carries nothing for a sibling/.test(one.message))
+    ).toBe(true);
+    const settled = await typesIn(capped.store);
+    // Two bootstrap wakes, each an `idle` plus its `mind-wake` pace step.
+    expect(settled.length).toBeLessThanOrEqual(8);
+    expect(settled.filter((step) => step.type === 'idle')).toHaveLength(2);
+    const before = [alpha.calls.length, beta.calls.length];
+    // The negative that matters: boundedness bought by deafening the mind
+    // would pass every assertion above. An EXTERNAL writer of a payload type
+    // still wakes both thinkers.
+    await instance.append({
+      trajectoryId: '',
+      type: 'observation',
+      source: 'chat',
+      data: { content: 'a person said something out loud' },
+    });
+    await pumpUntil(
+      clock,
+      () =>
+        capped.exceeded() ||
+        (alpha.calls.length > before[0]! && beta.calls.length > before[1]!)
+    );
+    expect(capped.exceeded()).toBe(false);
+    expect(alpha.calls.length).toBeGreaterThan(before[0]!);
+    expect(beta.calls.length).toBeGreaterThan(before[1]!);
+    await instance.close({ drain: false, timeoutMs: 200 });
+  });
+
+  it('bounds the error ping-pong too: neverRetriggersSelf holds for a sibling', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const capped = cappedStore(await seed(clock), 120);
+    // `error` never re-triggers its own writer (M3). A sibling answering it
+    // with an error of its own is the same loop with one more actor in it.
+    const boom = () =>
+      probeProgram(async () => {
+        throw new Error('this thinker always fails');
+      });
+    const alpha = boom();
+    const beta = boom();
+    const instance = mind(
+      baseOptions(capped.store, [
+        thinkerWith('alpha', alpha),
+        thinkerWith('beta', beta),
+      ])
+    );
+    await instance.start();
+    await pumpUntil(
+      clock,
+      async () =>
+        capped.exceeded() || (await errorSteps(capped.store)).length >= 2
+    );
+    expect(capped.exceeded()).toBe(false);
+    // One bootstrap wake each and nothing after it.
+    expect(alpha.calls).toHaveLength(1);
+    expect(beta.calls).toHaveLength(1);
+    expect(await errorSteps(capped.store)).toHaveLength(2);
+    await instance.close({ drain: false, timeoutMs: 200 });
+  });
+});
+
 describe('the shipped pair, in one mind', () => {
   it('runs a monolith beside a responder without waking each other forever', async () => {
     const clock = new AxManualEventClock(1_000);
@@ -1743,11 +2133,10 @@ describe('the shipped pair, in one mind', () => {
     const steps = await typesIn(store);
     const monolithWakes = await wakesOf('monolith');
     const responderWakes = await wakesOf('responder');
-    // The shipped pair is safe because the responder listens for `message`
-    // ONLY. Two thinkers that both take the default (every narrative type)
-    // subscription wake each other on their own `idle` steps forever, which
-    // is a live token-burning runaway -- docs/MIND.md says so, and this is
-    // the assertion that would catch the shipped pair growing into it. The
+    // The shipped pair is doubly safe: the responder listens for `message`
+    // ONLY, and the sibling rule refuses a wake on the monolith's `idle` and
+    // `error` steps even for a thinker that did subscribe to them. This is
+    // still the assertion that catches the pair growing into a runaway. The
     // paced monolith advances; the responder wakes ONCE, for its bootstrap,
     // and the log grows with the pacer rather than with the pair.
     expect(monolithWakes).toBeGreaterThanOrEqual(3);

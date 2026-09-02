@@ -5,9 +5,9 @@ import type { AxProgramForwardOptions, AxProgrammable } from '../dsp/types.js';
 import type { AxEventContext, AxEventSink } from '../event/types.js';
 import type { AxTrajectoryProjection } from '../trajectory/projection.js';
 import type {
+  AxTrajectoryReader,
   AxTrajectoryStep,
   AxTrajectoryStepClass,
-  AxTrajectoryStore,
 } from '../trajectory/types.js';
 import type { AxMind } from './mind.js';
 
@@ -26,6 +26,15 @@ export interface AxMindSubscription {
    * advancing THIS consumer's cursor; nothing is dropped. Default 4.
    */
   readonly maxInFlight?: number;
+  /**
+   * Opt back IN to a sibling's wake-signal-class steps, by type. The supervisor
+   * pattern -- one thinker watching another's `error` steps -- is otherwise
+   * unbuildable, because the sibling rule refuses those wakes above the
+   * subscription. Declaring a type here re-opens the loop it closes, so the
+   * thinker that asks for it owns bounding its own answer (an `error` answered
+   * with an `error` is unbounded again). Absent means the rule applies.
+   */
+  readonly siblingSignals?: readonly string[];
 }
 
 /** The conservative subscription: reacts to others, never to itself. */
@@ -48,7 +57,12 @@ export interface AxMindContextRequest {
    * pretending some unrelated newest step was the trigger.
    */
   readonly trigger: Readonly<AxTrajectoryStep>;
-  readonly store: AxTrajectoryStore;
+  /**
+   * READ-ONLY by construction (RFC 6.5 item 1). A thinker reads the
+   * trajectory; the runtime is the only writer, so `append`, `fork` and
+   * `merge` are not on this type at all -- the rule cannot be forgotten.
+   */
+  readonly store: AxTrajectoryReader;
   readonly projection: Readonly<AxTrajectoryProjection>;
   readonly artifacts: Readonly<AxMindArtifacts>;
   /** Deterministic routing signals. Hints, never rules. */
@@ -563,11 +577,18 @@ export class AxMindLivenessError extends Error {
   readonly code = 'mind_liveness';
   constructor(
     message: string,
+    /**
+     * `close_from_inside` is an AUTHORITY REFUSAL -- a thinker tried to close
+     * its own mind -- and `closing` is an ordinary host shutdown. Sharing one
+     * label between them would make the discriminant unable to tell the two
+     * apart, which is the only reason the union is closed.
+     */
     readonly reason:
       | 'stalled'
       | 'pacer_parked'
       | 'source_failed'
-      | 'close_from_inside',
+      | 'close_from_inside'
+      | 'closing',
     options?: ErrorOptions
   ) {
     super(message, options);
@@ -612,6 +633,12 @@ export function axIsMindConfigurationError(
 
 export type AxMindDiagnosticCode =
   | 'wake-suppressed-self'
+  /**
+   * A SIBLING thinker of this mind wrote a step that carries nothing for a
+   * reader, so this thinker's wake was refused. Without it two thinkers on the
+   * default subscription answer each other's `idle` steps forever.
+   */
+  | 'wake-suppressed-sibling'
   | 'wake-coalesced'
   | 'wake-deferred-backpressure'
   | 'watchdog-fired'

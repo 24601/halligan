@@ -15,6 +15,7 @@ import {
   axMindEventSource,
   axMindEventTypes,
   axMindPendingClass,
+  axMindSiblingWakeSuppressed,
   axMindStepEventExtensions,
   axMindSubscribedStepTypes,
   axMindThinkerSubject,
@@ -189,6 +190,181 @@ describe('axMindPendingClass', () => {
     expect(axMindPendingClass('manual-trigger', registry)).toBe('coalesce');
     // An unregistered type is not a wake signal, so it queues.
     expect(axMindPendingClass('host.custom', registry)).toBe('queue');
+  });
+});
+
+describe('axMindSiblingWakeSuppressed', () => {
+  it('is exactly the contentless and never-retriggering types of the shipped registry', () => {
+    const suppressed = registry.types
+      .map((descriptor) => descriptor.type)
+      .filter((type) => axMindSiblingWakeSuppressed(type, registry))
+      .sort();
+    // Pinned as a SET, not a spot check: a registry row that quietly joins or
+    // leaves this class changes which wakes a mind refuses.
+    expect(suppressed).toEqual([
+      'error',
+      'idle',
+      'manual-trigger',
+      'mind-idle',
+      'mind-wake',
+    ]);
+  });
+
+  it('leaves every payload-carrying type outside the class', () => {
+    for (const type of [
+      'message',
+      'action',
+      'observation',
+      'merge',
+      'thought',
+    ]) {
+      expect(axMindSiblingWakeSuppressed(type, registry)).toBe(false);
+    }
+    // Derived from DECLARED registry facts, not from a literal list and not
+    // from storage/pacing/UI flags: a host type that carries content is
+    // outside the class, and a host wake signal is inside.
+    const hosted = axTrajectoryTypeRegistry([
+      {
+        type: 'host.note',
+        stepClass: 'narrative',
+        wakeable: true,
+        carriesSource: true,
+        spillFields: ['content'],
+      },
+      {
+        type: 'host.ping',
+        stepClass: 'machinery',
+        wakeable: true,
+        carriesSource: false,
+        wakeSignal: true,
+      },
+      {
+        // A short enum payload: too small to be worth spilling, not "work",
+        // not a conversation -- and it still says something a sibling reads.
+        // Inferring the class from those three flags swept it in silently.
+        type: 'host.vote',
+        stepClass: 'narrative',
+        wakeable: true,
+        carriesSource: true,
+      },
+      {
+        type: 'host.quiet',
+        stepClass: 'narrative',
+        wakeable: true,
+        carriesSource: true,
+        siblingInert: true,
+      },
+    ]);
+    expect(axMindSiblingWakeSuppressed('host.note', hosted)).toBe(false);
+    expect(axMindSiblingWakeSuppressed('host.ping', hosted)).toBe(true);
+    // THE minor-1 row: declared, so a host opts in rather than discovering it.
+    expect(axMindSiblingWakeSuppressed('host.vote', hosted)).toBe(false);
+    expect(axMindSiblingWakeSuppressed('host.quiet', hosted)).toBe(true);
+    // An unregistered type is not wakeable at all, so it never reaches here.
+    expect(axMindSiblingWakeSuppressed('host.unknown', registry)).toBe(false);
+  });
+});
+
+describe('the sibling rule inside the route predicate', () => {
+  const authorizeFor = (
+    name: string,
+    siblings: readonly string[]
+  ): ((ingress: Readonly<AxEventIngress>) => boolean) =>
+    axMindWakeRoute(thinker(name), target('t').target, {
+      registry,
+      sourceId: SOURCE,
+      tickMs: 100,
+      siblings,
+    }).authorize as (ingress: Readonly<AxEventIngress>) => boolean;
+
+  it('refuses a sibling idle and a sibling error, and admits a sibling thought', () => {
+    const authorize = authorizeFor('beta', ['alpha']);
+    expect(authorize(stepEvent({ type: 'idle', source: 'alpha' }))).toBe(false);
+    expect(authorize(stepEvent({ type: 'error', source: 'alpha' }))).toBe(
+      false
+    );
+    // A payload type from the same sibling still wakes: the rule is about
+    // what the step CARRIES, never about who wrote it alone.
+    expect(authorize(stepEvent({ type: 'thought', source: 'alpha' }))).toBe(
+      true
+    );
+    expect(authorize(stepEvent({ type: 'message', source: 'alpha' }))).toBe(
+      true
+    );
+  });
+
+  it('still admits an EXTERNAL idle, and a single-thinker mind is unchanged', () => {
+    const authorize = authorizeFor('beta', ['alpha']);
+    // Suppression is by WRITER IDENTITY: an outside writer of the very same
+    // type is not a sibling and still wakes the thinker.
+    expect(authorize(stepEvent({ type: 'idle', source: 'chat' }))).toBe(true);
+    expect(authorize(stepEvent({ type: 'idle' }))).toBe(true);
+    // No siblings declared: the rule never fires, which is exactly the
+    // legacy single-thinker mind.
+    const alone = authorizeFor('beta', []);
+    expect(alone(stepEvent({ type: 'idle', source: 'alpha' }))).toBe(true);
+    // And a thinker's OWN idle is still refused by the self rule.
+    expect(alone(stepEvent({ type: 'idle', source: 'beta' }))).toBe(false);
+  });
+
+  it('lets a declared supervisor opt back in to a sibling signal', () => {
+    // The supervisor pattern: suppression happens in `authorize`, ABOVE the
+    // subscription, so without this opt-in a thinker that watches a sibling
+    // fail cannot be built at all.
+    const supervisor = axMindWakeRoute(
+      thinker('beta', { siblingSignals: ['error'] }),
+      target('t').target,
+      { registry, sourceId: SOURCE, tickMs: 100, siblings: ['alpha'] }
+    ).authorize as (ingress: Readonly<AxEventIngress>) => boolean;
+    expect(supervisor(stepEvent({ type: 'error', source: 'alpha' }))).toBe(
+      true
+    );
+    // Narrow, not a blanket disable: the type it did NOT declare is still
+    // refused, and its own error still never re-triggers it.
+    expect(supervisor(stepEvent({ type: 'idle', source: 'alpha' }))).toBe(
+      false
+    );
+    expect(supervisor(stepEvent({ type: 'error', source: 'beta' }))).toBe(
+      false
+    );
+  });
+
+  it('reads the launchedBy identity when the type carries no source', () => {
+    const authorize = authorizeFor('beta', ['alpha']);
+    // Machinery types may not carry `source` (registry `carriesSource`), so
+    // the pace step a sibling wrote is identified by `launchedBy` alone.
+    expect(
+      authorize(stepEvent({ type: 'mind-wake', launchedBy: 'alpha' }))
+    ).toBe(false);
+    expect(
+      authorize(stepEvent({ type: 'mind-wake', launchedBy: 'gamma' }))
+    ).toBe(true);
+  });
+
+  it('names both thinkers in the built table and reports the refusal', () => {
+    const diagnostics: { code: string; thinker?: string }[] = [];
+    const table = axMindEventRoutes({
+      mindId: MIND,
+      thinkers: [thinker('alpha'), thinker('beta')],
+      targets: { alpha: target('a').target, beta: target('b').target },
+      registry,
+      sourceId: SOURCE,
+      tickMs: 100,
+      onDiagnostic: (one) => diagnostics.push(one),
+      now: () => 4_242,
+    });
+    const betaQueue = table.find((route) => route.id === `${MIND}.wake.beta`)!;
+    const authorize = betaQueue.authorize as (
+      ingress: Readonly<AxEventIngress>
+    ) => boolean;
+    expect(authorize(stepEvent({ type: 'idle', source: 'alpha' }))).toBe(false);
+    expect(diagnostics).toEqual([
+      expect.objectContaining({
+        code: 'wake-suppressed-sibling',
+        thinker: 'beta',
+        at: 4_242,
+      }),
+    ]);
   });
 });
 

@@ -101,6 +101,7 @@ export type {
   AxTrajectoryForkResult,
   AxTrajectoryHeader,
   AxTrajectoryMergeRequest,
+  AxTrajectoryReader,
   AxTrajectoryReadQuery,
   AxTrajectoryStats,
   AxTrajectoryStep,
