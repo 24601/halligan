@@ -516,6 +516,38 @@ export function candidateAccounting(args: {
   wallClockMs: number;
   usesBuiltInJudge: boolean;
 }): AxAgentPlaybookComputeAccounting {
+  return phaseAccounting({
+    phase: 'candidate_eval',
+    metricCalls: args.metricCalls,
+    usage: args.usage,
+    wallClockMs: args.wallClockMs,
+    usesBuiltInJudge: args.usesBuiltInJudge,
+    // A candidate block's own evolve-only counter IS its own metric calls: the
+    // legacy counter is evolve-only by definition and this block is scoped to
+    // one candidate's evaluation, so restating it here is the honest value.
+    evolveOnlyMetricCalls: args.metricCalls,
+  });
+}
+
+/**
+ * Accounting for ONE named phase's own spend, so a report that must carry its
+ * own cost (a candidate receipt, a control arm) does not restate the running
+ * total of everything before it.
+ *
+ * `evolveOnlyMetricCalls` is a caller decision because it is not derivable from
+ * the phase: a candidate evaluation's own metric calls ARE evolve-only, while a
+ * control arm's are not (invariant I6 — no new phase moves the legacy counter),
+ * and inferring it from the phase name would bury that rule where nobody reads
+ * it.
+ */
+export function phaseAccounting(args: {
+  phase: AxAgentPlaybookComputePhaseName;
+  metricCalls: number;
+  usage: readonly AxProgramUsage[];
+  wallClockMs: number;
+  usesBuiltInJudge: boolean;
+  evolveOnlyMetricCalls: number;
+}): AxAgentPlaybookComputeAccounting {
   const observed = args.usage.filter((entry) => tokensOf(entry) !== undefined);
   const totalTokens =
     observed.length > 0
@@ -534,12 +566,12 @@ export function candidateAccounting(args: {
   }
   const phases: AxAgentPlaybookComputePhase[] = [
     {
-      name: 'candidate_eval',
+      name: args.phase,
       metricCalls: args.metricCalls,
       modelCalls: 0,
       ...(models.length > 0 ? { models } : {}),
       ...(totalTokens !== undefined ? { totalTokens } : {}),
-      // `candidate_eval` reads usage straight off the predictions, so it is
+      // An evaluation phase reads usage straight off the predictions, so it is
       // observable by construction: nothing reported means 'unreported'.
       tokensBasis:
         args.metricCalls === 0
@@ -563,10 +595,7 @@ export function candidateAccounting(args: {
   }
   return {
     metricCalls: args.metricCalls,
-    // A candidate block's own evolve-only counter IS its own metric calls: the
-    // legacy counter is evolve-only by definition and this block is scoped to
-    // one candidate's evaluation, so restating it here is the honest value.
-    evolveOnlyMetricCalls: args.metricCalls,
+    evolveOnlyMetricCalls: args.evolveOnlyMetricCalls,
     modelCalls: args.usesBuiltInJudge ? args.metricCalls : 0,
     ...(totalTokens !== undefined ? { totalTokens } : {}),
     tokensBasis: rollUpBasis(phases),

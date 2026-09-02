@@ -143,6 +143,13 @@ export async function runAgentEvalBatch<
   /** Injected clock. Defaults to `Date.now`. */
   now?: () => number;
   onAttempt?: AxAgentEvalAttemptObserver<IN, OUT>;
+  /**
+   * Maps the task handed to the AGENT onto the task handed to the METRIC.
+   * Identity unless supplied. Exists for the self-refinement control arm, which
+   * re-invokes the program with its own previous output while the metric must
+   * keep scoring the original example.
+   */
+  metricTaskOf?: (task: AxAgentEvalTask<IN>) => AxAgentEvalTask<IN>;
 }): Promise<AxAgentEvalBatchResult<IN, OUT>> {
   const records: AxAgentPlaybookEvolveRunRecord<IN, OUT>[] = [];
   const runsPerTask = args.runsPerTask ?? 1;
@@ -209,7 +216,15 @@ export async function runAgentEvalBatch<
         }
       );
       throwIfAborted(args.abortSignal);
-      const metricTask = args.isolateTaskInputs ? structuredClone(task) : task;
+      // The self-refinement control arm hands the AGENT a task whose input
+      // carries the previous answer plus a critique instruction, and must hand
+      // the METRIC the original task — otherwise a metric that reads
+      // `example.input` would score a different example on every refinement
+      // round. Identity for every other caller.
+      const scoredTask = args.metricTaskOf ? args.metricTaskOf(task) : task;
+      const metricTask = args.isolateTaskInputs
+        ? structuredClone(scoredTask)
+        : scoredTask;
       const metricResult = await args.metric({
         prediction: prediction as Record<string, unknown>,
         example: metricTask as unknown as Parameters<AxMetricFn>[0]['example'],

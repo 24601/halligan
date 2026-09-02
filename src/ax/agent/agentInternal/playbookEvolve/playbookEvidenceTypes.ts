@@ -276,6 +276,18 @@ export type AxAgentPlaybookControlArmResult = Readonly<{
   /** Reported for completeness only. Never the comparison basis. */
   current?: AxAgentPlaybookSplitScore;
   accounting: AxAgentPlaybookComputeAccounting;
+  /**
+   * `harness_term` only: the digest of the content-free artifact that occupied
+   * the playbook slot. Recorded so the ablation is reproducible — an arm whose
+   * neutral text is unknown proves nothing about the artifact it replaced.
+   */
+  neutralArtifactDigest?: string;
+  /**
+   * `harness_term` only: what the neutral artifact actually rendered to. The
+   * size match is what makes the ablation an ablation, so the number is on the
+   * receipt rather than asserted in prose.
+   */
+  neutralArtifactTokens?: number;
 }>;
 
 /** REQUIRED on the result. `not_run` is the default so its absence is visible. */
@@ -964,6 +976,13 @@ export type AxAgentPlaybookEvidenceWarningCode =
   | 'interval_unresolved'
   | 'delta_within_variance_band'
   | 'control_arm_not_run'
+  /**
+   * A matched-budget arm reproduced (or beat) the evolved run's held-out score
+   * while `gates.controlArm` was only `'warn'`. Without it a warn-mode gate
+   * would produce no observable output at all, which is the silent absence this
+   * machinery exists to remove.
+   */
+  | 'control_arm_not_beaten'
   | 'harness_term_not_run'
   | 'transfer_not_run'
   | 'cost_unknown'

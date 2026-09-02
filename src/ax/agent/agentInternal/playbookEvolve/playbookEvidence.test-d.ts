@@ -168,3 +168,41 @@ const missingPredicate: AxAgentPlaybookValidityPredicateId =
   'output_schema_compliance';
 void predicateIds;
 void missingPredicate;
+
+// The control-arm report is a closed union: a `not_run` or `failed` arm has no
+// comparison to read, so a consumer cannot reach `evolvedAdvantage` without
+// first proving the arm actually ran. That is the type-level half of the
+// gate's fail-closed rule.
+declare const armReport: AxAgentPlaybookControlArmReport;
+switch (armReport.status) {
+  case 'not_run':
+    // @ts-expect-error - there is no advantage to read when no arm ran.
+    void armReport.evolvedAdvantage;
+    void armReport.reason;
+    break;
+  case 'failed':
+    // @ts-expect-error - a failed arm carries a reason, never a comparison.
+    void armReport.best;
+    void armReport.accounting;
+    break;
+  default: {
+    const advantage: number = armReport.evolvedAdvantage;
+    // The deciding split is always held-out, at the type level: there is no
+    // configuration in which a control comparison falls back to `current`.
+    const decidingSplit: 'heldOut' = armReport.best.split;
+    const basis: 'evolve_total' | 'caller_supplied' = armReport.budgetBasis;
+    void advantage;
+    void decidingSplit;
+    void basis;
+  }
+}
+
+// A rescinded promotion is structurally distinguishable from a live one, which
+// is the whole point of moving authority off the judge.
+declare const rescinded: AxAgentPlaybookPromotionRecord;
+if (rescinded.status === 'promoted_then_rolled_back') {
+  const gate: AxAgentPlaybookGateId = rescinded.rolledBackByGate;
+  void gate;
+  void rescinded.receipt;
+  void rescinded.rolledBackReason;
+}

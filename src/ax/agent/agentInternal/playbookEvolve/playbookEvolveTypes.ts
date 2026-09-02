@@ -18,6 +18,7 @@ import type {
 import type {
   AxAgentPlaybookAttemptRecord,
   AxAgentPlaybookComputeAccounting,
+  AxAgentPlaybookControlArmOptions,
   AxAgentPlaybookControlArmReport,
   AxAgentPlaybookCostFn,
   AxAgentPlaybookEviction,
@@ -338,6 +339,13 @@ export type AxAgentPlaybookEvolveOptions<IN extends AxGenIn = AxGenIn> = {
 
   /** Gate modes for the evidence conjuncts. Every gate defaults to 'off'. */
   gates?: AxAgentPlaybookEvidenceGates;
+  /**
+   * Matched-budget control arm on the UNEVOLVED program, at the evolution run's
+   * own accounted budget. REQUIRES a non-empty `validation` set: gate 1 already
+   * selects the artifact on `current`, so a control comparison there measures
+   * selection, not capability, and there is no fallback to it.
+   */
+  controlArm?: AxAgentPlaybookControlArmOptions;
   varianceBand?: AxAgentPlaybookVarianceBandOptions;
   intervalOptions?: AxAgentPlaybookIntervalOptions;
   validity?: AxAgentPlaybookValidityOptions;
