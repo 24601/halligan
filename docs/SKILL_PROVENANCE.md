@@ -10,8 +10,8 @@ authorization boundary itself. This document owns what happens to an artifact
 
 ## The problem
 
-Every learned artifact Ax produces — an ACE bullet, an executable skill
-artifact, a catalog skill — is a distillation of a trajectory that ran under a
+Every learned artifact Ax produces (an ACE bullet, an executable skill
+artifact, a catalog skill) is a distillation of a trajectory that ran under a
 specific authority. Without a record, that authority is dropped at distillation
 time. The artifact then outlives the permission context that made it safe, is
 re-retrieved into a fresh session holding different grants, and is rendered to
@@ -37,7 +37,7 @@ authorization receipts to non-secret identity facts:
 | `digest` | `fnv1a64:` identity checksum over the canonical facts. |
 
 It is deterministic: identical inputs in any order produce byte-identical
-output, including the digest. It is synchronous and model-free — the function
+output, including the digest. It is synchronous and model-free: the function
 takes no `AxAIService` parameter and never will.
 
 **Non-guarantees, stated plainly.**
@@ -48,19 +48,19 @@ takes no `AxAIService` parameter and never will.
    did.
 2. **Provenance records what the host authorized; it cannot prove the artifact
    is safe.** Re-checking it cannot detect an unsafe procedure that never needed
-   an effect. Misevolution's central case — "I was in a sandbox, so I skipped
-   the precautions" — leaves no effect and no receipt precisely because the
+   an effect. Misevolution's central case, "I was in a sandbox, so I skipped
+   the precautions", leaves no effect and no receipt precisely because the
    unsafe shortcut *avoided* an authorized action. The `environment` map is the
    only axis that can carry "I was in a sandbox", and a host that cares must put
    the fact there. **This paragraph is load-bearing and must not be softened.**
 3. **`verifierDecisions` are caller-supplied, not derived.**
    `AxAuthorizationReceipt` carries `receiptId`, `operation`, `resource`,
-   `grantIds` and `leaseEpoch` — and no guard result. Ax can derive *which grants
+   `grantIds` and `leaseEpoch`, and no guard result. Ax can derive *which grants
    paid for a trajectory*, never *which evidence requirements it satisfied*.
 4. **The re-check runs on every static-catalog retrieval path and on the
    executable-artifact path.** On the catalog side that means all four: the
    kernel tier, the `### Available Skills` index, `discover({ skills })` and the
-   advisory relevance hint — one `axSkillRetrievalGate` computed per run and
+   advisory relevance hint, one `axSkillRetrievalGate` computed per run and
    consulted by each, so they cannot disagree about whether a skill is
    retrievable. A host that supplies `onSkillsSearch` owns retrieval and
    therefore owns its own re-check; it may set `advisory` on its own results.
@@ -137,8 +137,8 @@ supplies none. A mismatch is never an error.
 Note what the clock does *not* do: **no `axRecheckSkillProvenance` axis is
 time-dependent.** Every one of the eight failure kinds is a set comparison, so
 the re-check's outcome is a pure function of the provenance and the snapshot.
-The clock is load-bearing on the paths that own expiry — `expiresAt` on an
-executable artifact, `applicability` windows on a playbook bullet — and the
+The clock is load-bearing on the paths that own expiry (`expiresAt` on an
+executable artifact, `applicability` windows on a playbook bullet), and the
 `now` argument on the re-check exists for signature symmetry with those paths.
 It is threaded so a future time-dependent axis has one place to read, not
 because one exists today.
@@ -146,7 +146,7 @@ because one exists today.
 ## Optimizer-only visibility
 
 `AxACEBullet.visibility` is `'actor' | 'optimizer'`, absent meaning `'actor'`.
-Legacy playbooks therefore render byte-identically — a golden hash test pins it.
+Legacy playbooks therefore render byte-identically. A golden hash test pins it.
 
 - `renderPlaybook` is **unchanged** and remains the FULL renderer. The reflector
   and the curator both use it, and filtering there would blind them.
@@ -189,7 +189,7 @@ host-only field is added.
 carrying `visibility`. `AX_ACE_MAX_SUPPORTED_PLAYBOOK_VERSION` (currently `2`) is
 the read gate: `renderPlaybook`, `axProjectActorPlaybook` and
 `assertPlaybookMutable` all refuse a playbook above it. It is a module constant,
-not a package export — compare against the literal `2`, or call
+not a package export: compare against the literal `2`, or call
 `axPlaybookRequiresVisibilitySupport`, which IS exported.
 
 Two residuals are accepted and documented rather than fixed:
@@ -199,8 +199,8 @@ Two residuals are accepted and documented rather than fixed:
   into the actor prompt. The gate makes the *next* incompatibility fail closed,
   not this one. A version-2 playbook must not be loaded by an older ax.
 - **R2.** An older ax encountering a `'rejected-retained'` verification result
-  hard-fails the optimizer run — `isEvidenceStructurallyValid` rejects the value
-  and `assertPlaybookMutable` throws — rather than merely dropping a bullet. Same
+  hard-fails the optimizer run (`isEvidenceStructurallyValid` rejects the value
+  and `assertPlaybookMutable` throws) rather than merely dropping a bullet. Same
   version boundary, same rule.
 
 ## Rejected-retained verification
@@ -213,7 +213,7 @@ result attached, then restores the prior content and tier of every bullet that
 already existed. Its `now` is required and is threaded through the apply path.
 
 The dedupe key includes `result`, and a retained rejection is never replaced by
-another result — without that, a later `passed` from the same verifier, test and
+another result. Without that, a later `passed` from the same verifier, test and
 timestamp silently overwrote the record and the asymmetric rollback became
 symmetric again.
 
@@ -235,7 +235,7 @@ ranking exactly. With no profile the score is a positive constant multiple of th
 similarity, so rank order is provably unchanged.
 
 **Verification budget.** One terminal status, absorbing once exceeded. It is
-counted by the runtime and is **never expressed as a prompt instruction** — the
+counted by the runtime and is **never expressed as a prompt instruction**. The
 executor prompt is byte-identical with and without a budget set. A host
 discriminates by handling the `verification_budget` context event. Mapping a
 breach to a parked *effect* is a host responsibility this document specifies and
@@ -256,7 +256,7 @@ Only novel diagnostic signatures are surfaced, and three bounds hold whether or
 not the host configured a budget, because an always-on lifecycle hook needs a
 ceiling even when nobody named one:
 
-- dedupe against the run's seen set — this is the load-bearing half, not the
+- dedupe against the run's seen set: this is the load-bearing half, not the
   injection: without it an always-on rail repeats the same fact every tool call;
 - **32 distinct diagnostics per run**, which is what bounds a rail whose
   *signature* changes every call and which dedupe therefore cannot catch;
@@ -282,8 +282,8 @@ through the index.
 never probes the environment, because `src/ax` is browser-compatible.
 `axCheckSkillRequirements` names the exact missing tokens rather than only
 refusing. An empty `requires` object is eligible: an absent declaration must
-never become an accidental deny. `os` matches exactly and case-sensitively —
-normalization is the host's job.
+never become an accidental deny. `os` matches exactly and case-sensitively.
+Normalization is the host's job.
 
 `axEligibleCatalogSkills` is the single gate consumed by the kernel, by the
 `### Available Skills` signature index, and by `discover({ skills })`, so an

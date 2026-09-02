@@ -10,16 +10,16 @@ user explicitly asks for explanation.
 
 ## Use These Defaults
 
-- `agent(sig, { ai, learning: { scenario, store, surface } })` — learning is
+- `agent(sig, { ai, learning: { scenario, store, surface } })`: learning is
   opt-in. Absent, nothing records and nothing costs.
 - `axInMemoryLearningStore()` for tests and local development.
   `capabilities.durability` is `'volatile'`; a durable host store is the
   caller's to supply, and it must pass `runAxLearningStoreConformance`.
-- `const { output, receipt } = await a.learn().run(ai, values)` — the only path
+- `const { output, receipt } = await a.learn().run(ai, values)`: the only path
   that records.
-- `await a.learn().report({ references: [receipt.recordId], score })` — one
+- `await a.learn().report({ references: [receipt.recordId], score })`: one
   report per receipt.
-- `axScoreWindowProcessor()` — window `(-Infinity, 0]`, so only failures batch.
+- `axScoreWindowProcessor()`: window `(-Infinity, 0]`, so only failures batch.
 - `selection: 'axPlaybookGate'` and `gate.requireHeldOut` default **true**.
 - Current models from the provider enums, never a dated preview when a stable
   newer one exists.
@@ -36,7 +36,7 @@ user explicitly asks for explanation.
   only the literal `false` opts out.
 - **The `artifactRef` names the tree the agent was serving.** It comes from the
   live installation, never from the store head. No installation means no ref at
-  all — "this exchange is not attributable to any release" is a true statement
+  all. "This exchange is not attributable to any release" is a true statement
   and is recorded as one. When the chain has moved past what the agent serves,
   the record says `stale: true` and carries the head's `contentId` beside its
   own. When no head has ever been observed, `headContentId` is absent and
@@ -118,16 +118,16 @@ if (step.status === 'nominated' && step.release) {
 
 Two categories, and only one of them is versioned.
 
-- **Versioned artifact** — this surface owns it: agent instruction text,
+- **Versioned artifact**. This surface owns it: agent instruction text,
   playbook bullets, skill definitions. Anything that answers *"which version
   produced this response?"*.
-- **Run state** — the caller owns it and it is never committed: session memory,
+- **Run state**. The caller owns it and it is never committed: session memory,
   `contextMap` entries, one conversation's history, tool scratch state, **and
   the bullets the construction-time `playbook` option accumulates at runtime**.
 
 The litmus is the direction of data flow: **code whose input is a request and
 whose output is the next request is the harness; code whose input is the record
-store and whose output is a nomination on the release chain is this surface** —
+store and whose output is a nomination on the release chain is this surface**,
 even when it calls an LLM, because it never answers a user request.
 
 Corollary: *learned state is runtime output, never committed into the evolved
@@ -149,7 +149,7 @@ failure?, model?, usage?, tags? }`.
 - An append failure rethrows by default. `onRecordError` is an explicit opt-out
   the caller writes; even then `run()` rejects rather than handing back a
   receipt with nothing behind it.
-- `onInteraction` is awaited before `run()` resolves — deliberately unlike the
+- `onInteraction` is awaited before `run()` resolves, deliberately unlike the
   fire-and-forget `onUsedMemories` / `onUsedSkills`.
 - An absent `artifactRef` means no tree was installed. `stale: true` means the
   agent served something the chain has moved past. Neither is an error; both
@@ -218,7 +218,7 @@ and every delivered copy:
 1. a key whose **name** ends in a credential word (`apiKey`, `api_key`,
    `API_KEY_ENV`, `token`, `secrets`, `passwords`, `credentials`, …) holding a
    string, or an array containing one;
-2. a **value** matching a known credential literal — `sk-…`, `ghp_…`,
+2. a **value** matching a known credential literal: `sk-…`, `ghp_…`,
    `xox?-…`, `AKIA…`, a PEM private-key header, a JWT, or a 40-plus-character
    opaque run within 32 characters of a credential word.
 
@@ -232,13 +232,13 @@ caught. Do not describe it as a guarantee.
 
 `axHarnessEvolve` reuses the promotion gate `agent.playbook().evolve()` uses:
 held-in gain at or above `minHeldInGain` (0.05) **and** held-out within
-`epsilon` (0.01). There is no retention-anchor option here — that receipt's
+`epsilon` (0.01). There is no retention-anchor option here: that receipt's
 digests cannot be produced outside `playbookEvolve.ts`.
 
 `gate.requireHeldOut` defaults **true**, unlike `evolve()`. A flat task array
 throws `AxHarnessEvolveConfigError` before any model call. Setting it `false`
-runs held-in-only, omits the held-out metrics, and says so in `gate.reason` —
-that is the same permissive regime this repository measures at a **66.7%
+runs held-in-only, omits the held-out metrics, and says so in `gate.reason`.
+That is the same permissive regime this repository measures at a **66.7%
 false-promotion rate** on six fixed candidates
 (`src/ax/agent/benchmarks/playbook-promotion-policy.test.ts`).
 
@@ -249,7 +249,7 @@ candidates; read its output rather than assuming a gap.
 
 Episodes are **interleaved** and alternate first position, so provider drift
 hits both sides equally. Model cost is unchanged (`2 × tasks × runsPerTask`);
-the added cost is one install swap per episode — three setter calls and one
+the added cost is one install swap per episode, three setter calls and one
 `AxPlaybook.load`, in process, no IO. On an agent with a very large catalog the
 catalog rebuild is the dominant term.
 
@@ -258,7 +258,7 @@ A crashed episode scores `null`, ranks below every real score, and is stored as
 crashing is a tie and nominates nothing.
 
 `axHarnessEvolve` must not run concurrently with `forward()` on the same agent
-instance — it swaps installations per episode, and no type or runtime check
+instance: it swaps installations per episode, and no type or runtime check
 enforces the rule.
 
 ## Release chain, nomination, and delivery
@@ -294,7 +294,7 @@ held-out set and not a live-model improvement claim.
 ## Do Not Generate
 
 - No HTTP routes, install scripts, or sidecar machinery. Delivery is in-process.
-- No second canonicalizer and no second digest register — reuse
+- No second canonicalizer and no second digest register. Reuse
   `axEventCanonicalJson` / `axEventCanonicalDigest`.
 - No `Date.now()` in library code. Every timestamp comes from an injected clock.
 - Do not look for `sampleFields` / `maxSampleBytes` on the agent's `learning`

@@ -1,4 +1,4 @@
-# AxTrajectory — the append-only agent life log
+# AxTrajectory: the append-only agent life log
 
 `src/ax/trajectory/` is the record of what an agent did, and the projection
 that turns an unbounded life into a bounded context window. This document is
@@ -86,8 +86,8 @@ rather than silent.
 `siblingInert` is declared the same way: it marks a wakeable type that carries
 nothing a SIBLING writer's reader has to act on (`idle` alone, of the shipped
 rows), and `src/ax/mind` refuses that wake rather than inferring the class from
-`spillFields`, `visibleWork` or `conversational` — a storage, a pacing and a UI
-concern that would sweep a host's short-payload type in silently.
+`spillFields`, `visibleWork` or `conversational`, which are a storage, a pacing
+and a UI concern that would sweep a host's short-payload type in silently.
 
 Two edits are refused with `AxTrajectoryRegistryError`: setting
 `carriesSource` on a machinery type (`protected_flag`), and clearing
@@ -95,14 +95,14 @@ Two edits are refused with `AxTrajectoryRegistryError`: setting
 
 ## Spill and rehydration
 
-Spill is generic and size-based — any string field at or above `spillBytes`
+Spill is generic and size-based: any string field at or above `spillBytes`
 (default 4096), not an allowlist of the two fields someone remembered. The
 step keeps a UTF-8-safe inline head that never splits a code point, plus a ref
 carrying the **full** byte count and the SHA-256 digest.
 
 The read side is the load-bearing half. `axResolveTrajectorySteps` runs a
-pre-pass keyed on **ref and digest** — two refs sharing a ref string with
-different digests are different content commitments — fetches each distinct
+pre-pass keyed on **ref and digest** (two refs sharing a ref string with
+different digests are different content commitments), fetches each distinct
 commitment once, verifies the digest, and throws
 `AxTrajectoryBlobError('digest_mismatch' | 'missing')` rather than returning a
 truncated head. Resolved refs are dropped from `blobs`, so a second resolve is
@@ -112,9 +112,9 @@ a no-op rather than a second fetch.
 
 | primitive | bound | reports |
 |---|---|---|
-| `read` | `limit`, or both `fromSeq` and `toSeq` | — |
+| `read` | `limit`, or both `fromSeq` and `toSeq` | n/a |
 | `tailBackward` | `maxScan`, default `max(200, 20 * limit)` | `scanned` **and** `exhausted`, so "no more matches" is distinguishable from "budget spent" |
-| `getStep` / `getSteps` | 256 ids | — |
+| `getStep` / `getSteps` | 256 ids | n/a |
 | `readFrom` | `{ maxSteps, maxBytes }` | `caughtUp`, `corrupt` |
 | `stats` | O(1) | `newestByClass` |
 
@@ -122,7 +122,7 @@ a no-op rather than a second fetch.
 
 Cursors are per consumer and durable. `seq` is the portable position; a
 `token` is a store-private fast path, and **when a token is present it decides
-where the drain resumes** — `seq` alone cannot survive a tolerant parse that
+where the drain resumes**. `seq` alone cannot survive a tolerant parse that
 dropped an interior frame, which silently skipped a committed step before this
 was fixed. Validation order is `identity_changed` → `not_a_frame_boundary` →
 token identity → `shrank` → `beyond_end`. An unusable cursor throws; it never
@@ -154,9 +154,9 @@ Per segment:
 
 | state | action |
 |---|---|
-| segment entirely `< M` | **prune before descent** — otherwise the descent forks once per node over the whole empty tree on every call |
+| segment entirely `< M` | **prune before descent**, otherwise the descent forks once per node over the whole empty tree on every call |
 | descent budget spent | emit `{ kind: 'gap' }`, reason `missing`, without probing further |
-| block exists at tier `k` | emit `{ kind: 'summary', block }` — only when its `tier`, `start` *and* `end` all match the segment |
+| block exists at tier `k` | emit `{ kind: 'summary', block }`, only when its `tier`, `start` *and* `end` all match the segment |
 | block missing at tier `k > 1` | **descend into the `F` children at tier `k-1`** and apply this table to each |
 | block missing at tier 1 | emit `{ kind: 'gap' }`, reason `pre-enable` below `M`, else `missing` |
 
@@ -177,8 +177,8 @@ Two bugs are fixed by construction rather than by care:
 unbuildable, which is a coverage hole exactly at the enable point. Backfill
 below it is an explicit `backfill: true` offline call.
 
-Rollup blocks are sealed and immutable — a second `putBlock` on a key throws
-`AxTrajectoryRollupError('block_already_sealed')` — and each is stamped with
+Rollup blocks are sealed and immutable (a second `putBlock` on a key throws
+`AxTrajectoryRollupError('block_already_sealed')`), and each is stamped with
 `(summarizerId, promptVersion)`, because a cache that cannot say what produced
 it is a guess, not a cache. A summarizer error skips that block, counts it,
 and never fails the build; the sealing checkpoint does not advance past it, so
@@ -191,7 +191,7 @@ load-bearing core; tiers are an optimization.
 
 **Degrading cleanly is not the same as degrading cheaply.** A missing coarse
 block forks into `F` children, so an empty or not-yet-sealed subtree costs
-`O(N / F)` store round-trips — measured at 1,104 `getBlock` calls to emit a
+`O(N / F)` store round-trips, measured at 1,104 `getBlock` calls to emit a
 single gap section over a 10k-step log, and ~111,000 at a million steps, paid
 on *every* wake and over whatever port the host backs rollups with.
 `axTrajectoryDescentBudget(cut0, F) = F² · (ceil(log_F cut0) + 1)` bounds the
@@ -207,7 +207,7 @@ long as one poisoned block keeps failing.
 
 **Bounded writes.** `maxBlocks` (default 8) bounds summarizer *attempts* per
 build, not successes: a summarizer that is failing never increments `sealed`,
-so a guard on successes is a no-op exactly when a provider is down — one wake
+so a guard on successes is a no-op exactly when a provider is down. One wake
 would then make one provider request per `F` steps for the whole log.
 Summaries and themes are clipped at seal time
 (`axTrajectoryMaxSummaryBytes`, `axTrajectoryMaxThemes`), because a summarizer
@@ -216,14 +216,14 @@ whose output grows with its input keeps the staircase logarithmic in
 
 **The rendered frames are structural.** `render` is newline-delimited, and its
 headers and `[seq type]` frames are the only thing separating a summary from
-verbatim testimony. Every interpolated value — a block summary, a theme, and
-each field of a step body — is one-lined (a real newline becomes the two
+verbatim testimony. Every interpolated value (a block summary, a theme, and
+each field of a step body) is one-lined (a real newline becomes the two
 characters `\n`) before it is written, so neither model output nor a
 user-authored step can open a section or a frame of its own.
 
 **The checkpoint is checked against the log.** A rollup meta sealed past the
-end of the trajectory it is loaded for — a fork, a restore from backup, or a
-rebuilt log under a reused id — throws
+end of the trajectory it is loaded for (a fork, a restore from backup, or a
+rebuilt log under a reused id) throws
 `AxTrajectoryRollupError('meta_conflict')` in both the projection and the
 build. Trusting it makes the projection report a life that was never lived,
 because `N` comes straight from `sealedIndex` when the scan has nothing to do.
@@ -297,8 +297,8 @@ Four things account for the difference, none of them added scope:
   start: 3,785 → 3,927.
 - **`AxTrajectoryReader` (Track A follow-up)** raises `types.ts` from 480 to
   490 and nothing else. It is the read-only view `AxMindContextRequest` hands a
-  thinker — `capabilities`, `clock`, `getTrajectory`, `read`, `tailBackward`,
-  `getStep`, `getSteps`, `stats` — so "a thinker reads the trajectory and never
+  thinker: `capabilities`, `clock`, `getTrajectory`, `read`, `tailBackward`,
+  `getStep`, `getSteps`, `stats`, so "a thinker reads the trajectory and never
   writes it" holds by construction. `append`, `create`, `fork`, `merge`,
   `saveCursor` and `blobs` (whose `put` is a write) are simply not on the type.
   An `AxTrajectoryStore` is structurally assignable to it, so the runtime hands
@@ -323,13 +323,13 @@ Four things account for the difference, none of them added scope:
 |---|---|
 | C1 kill before `append()` returns | The step is either fully visible or not visible at all. Never partial. |
 | C2 kill after the blob is durable, before the step line | Orphan blob, **never a dangling reference**. A host GC sweeps unreferenced blobs older than the head step's `ts`. |
-| C3 power loss mid-line | The torn trailing frame is dropped and counted in `DrainResult.corrupt`. Deliberately **dropped, never glued** — the next append writes a leading newline so a fragment stays its own frame. |
+| C3 power loss mid-line | The torn trailing frame is dropped and counted in `DrainResult.corrupt`. Deliberately **dropped, never glued**: the next append writes a leading newline so a fragment stays its own frame. |
 | C14 unusable durable cursor | Rejected loudly with a typed `reason`, or resumed at the right record via the token. Never a silent skip. |
 
 The containing directory is **not** fsynced after a create or a rename, so
 against a real power cut a just-created blob or cursor file can be absent even
 though its data was flushed. That degrades to C2 or to a cursor that reads as
-absent — never to a dangling reference.
+absent, never to a dangling reference.
 
 ## Conformance
 
@@ -361,7 +361,7 @@ store round-trips a fully degraded projection spends
 scores coverage 1.0, and only the paired metrics catch it. `providerCalls` is
 an instrumented count of outbound fetches made while the rows were measured,
 not a literal. Below `R` the
-projection is pure overhead — at 10 filtered steps it renders *more* characters
+projection is pure overhead: at 10 filtered steps it renders *more* characters
 than a raw replay, because the headers cost more than the log does. That is
 reported rather than hidden.
 

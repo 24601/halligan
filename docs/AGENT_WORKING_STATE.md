@@ -40,7 +40,7 @@ dependency, no `node:fs`/`path`/`os` in `src/ax`.
 | Concern | Owner | Rationale |
 |---|---|---|
 | The receipt set | Harness | Minted at the dispatch site, only from a receipt-eligible call site, only when the call returned without throwing, only when the qualified name matches `receiptSources`. The model can neither add to it nor rename a `ref`. |
-| Receipt eligibility | Harness, explicit flag, never inferred | Set at each registration site: `true` for MCP bindings, UCP bindings and user tools; `false` for agent-derived callables. `_kind: 'internal'` is stamped inside `getFunction()` itself, so every agent-derived callable carries it BY CONSTRUCTION whatever route it takes into `functions: [...]` — `functions: [child.getFunction()]` and an `AxFunctionProvider` wrapping one included. A child agent's return value is its own `final()` payload — model self-report — and promoting that to environment evidence would make the mechanism circular. |
+| Receipt eligibility | Harness, explicit flag, never inferred | Set at each registration site: `true` for MCP bindings, UCP bindings and user tools; `false` for agent-derived callables. `_kind: 'internal'` is stamped inside `getFunction()` itself, so every agent-derived callable carries it BY CONSTRUCTION whatever route it takes into `functions: [...]`. `functions: [child.getFunction()]` and an `AxFunctionProvider` wrapping one included. A child agent's return value is its own `final()` payload, a model self-report, and promoting that to environment evidence would make the mechanism circular. |
 | `llmQuery` | Never a receipt | It does not reach the function-call recorder and is never given a receipt-eligible dispatch site. Stated so a later refactor does not silently make an LLM sub-query into environment evidence. |
 | Receipt `at` | Harness, at the dispatch site | Captured from the injected clock when the call returned, not at turn-hook time. |
 | The checker | Host | Host-declared, deterministic limits, fail-closed. |
@@ -81,7 +81,7 @@ Path shapes are JSON Pointers into the document. `<id>` matches
 | `/goals/<id>` | `add` | `goal_add` | `park` (`model_goals_disabled`) | `allowModelAuthoredGoals !== true` (the default). |
 | `/goals/<id>` | `add` | `goal_add` | `park` (`expects_not_allowed`) | `expects` empty, or not a subset of `expectsAllowlist`. |
 | `/goals/<id>` | `add` | `goal_add` | `admissible` | Otherwise. |
-| `/goals/<id>` | `remove` | `goal_remove` | `forbidden` | The goal is `done` — it is part of the audit record. |
+| `/goals/<id>` | `remove` | `goal_remove` | `forbidden` | The goal is `done`, and it is part of the audit record. |
 | `/goals/<id>` | `remove` | `goal_remove` | `admissible` | Otherwise. |
 | `/goals/<id>/status` → `'done'` | `replace` | `goal_complete` | `admissible` | Every cited `ref` is in the receipt set, and when `goal.expects` is non-empty at least one cited receipt's `qualifiedName` is in it. Citations may come from `evidence` already on the goal or from an `evidence_append` appearing LATER in the same patch. |
 | `/goals/<id>/status` → `'done'` | `replace` | `goal_complete` | `park` (`no_supporting_receipt`) | No ref cited at all, OR the goal is in neither the committed ledger nor an admissible `goal_add` in the same patch. |
@@ -120,7 +120,7 @@ demotes an admissible op to a park.
 |---|---|
 | The patch document is not a valid patch | Whole patch rejected, state unchanged, trace `proposal: 'invalid'`, guidance `patch_invalid`. NOT an error turn. |
 | A `test` guard fails | Whole patch rejected, guidance `guard_failed`, state unchanged. Guards are never parked and never removed, so this outcome is stable under parking. |
-| A forbidden path, or a path no row classifies | Whole patch rejected, guidance `forbidden_path`. `AxWorkingStateForbiddenPathError` is recorded on `AxWorkingStateCommitOutcome.error` and as the trace step's `error`, not thrown into the actor turn — throwing would poison the error-escalation policy. |
+| A forbidden path, or a path no row classifies | Whole patch rejected, guidance `forbidden_path`. `AxWorkingStateForbiddenPathError` is recorded on `AxWorkingStateCommitOutcome.error` and as the trace step's `error`, not thrown into the actor turn. Throwing would poison the error-escalation policy. |
 | The checker throws | Every admissible non-guard delta parks `checker_error`. |
 | The checker exceeds `timeoutMs` | Every admissible non-guard delta parks `checker_timeout`; the pending check is aborted and its listener removed. |
 | The checker exceeds `maxChecksPerRun`, `maxTokens`, `maxWallTimeMs` or `maxCostUSD` | Every admissible non-guard delta parks `checker_error`. |
@@ -132,11 +132,11 @@ demotes an admissible op to a park.
 ## Parks
 
 A parked delta is **recorded, visible, not applied, retryable,
-budget-bounded** — exactly the contract `AxEventEffect.status: 'parked'`
+budget-bounded**: exactly the contract `AxEventEffect.status: 'parked'`
 carries in the event runtime. Three channels:
 
 1. `AxWorkingStateDocument.parked`, rendered into the read-only prompt region.
-   The retained record is the op KIND and the harness-owned canonical path —
+   The retained record is the op KIND and the harness-owned canonical path,
    never the model's own pointer text, never its `value`.
 2. One guidance entry in the trusted guidance log, built exclusively from
    harness enum codes, the op kind, the canonical path, the goal id and the
@@ -165,7 +165,7 @@ vocabulary the harness owns:
 |---|---|
 | goal-scoped | `/goals/<id>` plus one of `status`, `goal`, `blocker`, `evidence/-`; `<id>` has already passed `^[A-Za-z0-9_.:-]{1,64}$` |
 | `fact_write`, admissible | `/facts/<root>`, where `<root>` is a field the HOST declared in `stateSignature` |
-| `fact_write`, parked | `/facts/<undeclared>` — never the segment the model wrote |
+| `fact_write`, parked | `/facts/<undeclared>`, never the segment the model wrote |
 | `guard` | `/<guard>` |
 | anything else | `/<reserved>`, or `/goals/<id>/<reserved>` when the goal id is known |
 
@@ -181,20 +181,20 @@ pointer, because the host's audit trail is not a prompt.
 
 | Region | Field | Cached | Contents | Model may patch |
 |---|---|---|---|---|
-| State contract | `stateContract` | yes — constant for the run | Declared fact fields with types; the goal statuses; the legal path shapes | no |
+| State contract | `stateContract` | yes, constant for the run | Declared fact fields with types; the goal statuses; the legal path shapes | no |
 | Writable state | `workingState` | no | Goals (id, text, status, evidence refs, blocker, expects) and facts, bounded by `maxRenderChars`, ordered by `createdTurn` then id | **yes** |
 | Read-only harness region | `receiptRoster` | no | The receipt roster (`ref`, `qualifiedName`, `turn`, newest first, bounded by `maxRosterEntries`) and the parked ledger | no |
 
 The roster line format is exactly `r7  inventory.pick  turn 4`. The
 fingerprint is NOT rendered: it is an audit value, and the citable handle is
 the `ref`. The protection is **set membership in a harness-owned append-only
-list**, not secrecy of a hash — the actor authors the arguments and holds the
+list**, not secrecy of a hash: the actor authors the arguments and holds the
 result, so it sees every input to the digest.
 
 `renderWritable()` drops goal text before it drops goals: it re-renders every
 goal as id + status when the full rendering exceeds `maxRenderChars`. That
 compact form is itself truncated at the limit, so the guarantee is "text is
-sacrificed before goals are", not an absolute one — size `maxRenderChars` for
+sacrificed before goals are", not an absolute one. Size `maxRenderChars` for
 the goal count you expect (roughly 24 chars per goal in the compact form).
 
 ## The `skillState` memory mode
@@ -256,8 +256,8 @@ decided by the error's typed `code` through `axIsWorkingStateError`, not by
 `authority` or `fence` rejection to "nothing was refused".
 
 `AxSkillStateStep.state` is the STORED envelope, and its `revision` always
-equals the kernel's `currentRevision()` — including after the bounded rebase a
-losing compare-and-set performs — so a host can use it as the expected revision
+equals the kernel's `currentRevision()` (including after the bounded rebase a
+losing compare-and-set performs), so a host can use it as the expected revision
 for its own `compareAndSet`. It is not the same view as the kernel's
 `current()`: a parks-only turn appends to the model-visible parked ledger
 without a store write, so `current().parked` can carry entries
@@ -266,7 +266,7 @@ without a store write, so `current().parked` can carry entries
 ### Measured equals sent
 
 The budget meter measures the SAME value record the turn sends. `buildActorPromptValues`
-builds it once, `measureActorPromptChars` takes it, and the turn sends it —
+builds it once, `measureActorPromptChars` takes it, and the turn sends it,
 rather than two call sites agreeing to re-derive the same thing. Two fields are
 structurally outside the measured window and are documented here rather than
 papered over:
@@ -288,7 +288,7 @@ The mode trades a long-context error for a state-projection error. Two things
 keep that honest: every transition passes the same verifier gate as the
 transcript path, and the store is never absent, so prior revisions are
 recoverable. With only the default in-memory store, though, the discard **is**
-irreversible once the process exits — supply a durable `store` if that matters.
+irreversible once the process exits. Supply a durable `store` if that matters.
 
 The dynamic tail is bounded by `maxRenderChars`, `maxRosterEntries` and
 `maxObservationChars`, so it does not grow with the TURN count. It does grow
@@ -297,7 +297,7 @@ removes nor claims to.
 
 The transcript leaves the PROMPT, not the process. `actionLogEntries` still
 grows for the whole run, `manageContext` still walks every entry each turn, and
-each entry's `output` and `chatLogMessages` stay resident — so the loop's
+each entry's `output` and `chatLogMessages` stay resident, so the loop's
 per-turn context bookkeeping is still quadratic in the turn count even though
 the prompt is not. A host that enables `tombstoning` will additionally pay for
 MODEL-BACKED tombstones over text this mode never renders; leave it off under
@@ -315,7 +315,7 @@ benchmark asserts only the park, never a claim about the run's answer.
 
 `completionPolicy: 'interlock'` converts a `final` payload raised while goals
 are pending into a `guide_agent` payload through the actor loop's existing
-guidance handling — no completion shape is invented — bounded by
+guidance handling, with no completion shape invented, bounded by
 `maxCompletionInterlocks` (default 2). After the budget is exhausted the
 `final` stands and the trace records `exhausted`, so an over-strict checker
 cannot produce an infinite re-drafting loop.
@@ -330,7 +330,7 @@ evidence-free by construction. Both stages would otherwise resolve the same
 store key and conflict.
 
 The pipeline mints ONE run id per `forward()` (shape `ws:<programId>:<n>`),
-which is what the default store key `ax.workingState:<runId>` is built from —
+which is what the default store key `ax.workingState:<runId>` is built from,
 so two runs never conflict. `runIdFactory` overrides it for deterministic
 tests. `getWorkingState()` returns `undefined` after a direct-respond run that
 ended at the distiller.
@@ -340,9 +340,9 @@ ended at the distiller.
 One record per actor turn under `trace: true`. Bounded and fingerprinted like
 causal candidate evidence: digests only, never raw payloads, never PII.
 
-`axWorkingStateTraceDigest(step)` hashes every deterministic field — that is,
+`axWorkingStateTraceDigest(step)` hashes every deterministic field, that is,
 everything except `runId`, `at` and `summary`, which are not reproducible by
-construction — so two runs of the same scripted turns compare equal **under an
+construction, so two runs of the same scripted turns compare equal **under an
 injected clock**. `believedStateDigest` and `committedStateDigest` hash the
 document, and a parked delta records its `parkedAt` from the clock; under the
 default `AxSystemEventClock` two runs that park anything therefore differ.
@@ -380,7 +380,7 @@ callTimeSkills: [
 
 ### The two hooks
 
-**Hook 1 — the logical path.** `runLogicalCall` (`runtimeGlobals.ts`) consults
+**Hook 1, the logical path.** `runLogicalCall` (`runtimeGlobals.ts`) consults
 the binding **before** `authorizeCall`, before `onFunctionCall` and before
 `observeResult`. An intercepted call therefore:
 
@@ -401,7 +401,7 @@ and tagged `'error'` on the action log, which feeds `noteActorTurnErrorState`
 and can escalate the executor model. An interception is not a failure and must
 not look like one.
 
-**Hook 2 — the speculation path.** `runLogicalCall` is not the only way into a
+**Hook 2, the speculation path.** `runLogicalCall` is not the only way into a
 wrapped function. For a `kind === 'external'` callable,
 `setJSRuntimeHostFunctionSpeculationAdapter` installs a `launch` closure that
 calls `authorizeCall` and the function **directly**, and `commitSpeculativeCall`
@@ -413,7 +413,7 @@ prevent execution, *would* request authorization, *would* fire
 The fix is one guard at the **installation** site: a bound callable gets **no
 speculation adapter at all**, so there is no second entry point to guard. This
 is preferred over a construction-time refusal against the runtime's frozen
-speculation table, which `src/` exposes no accessor for — a refusal built on a
+speculation table, which `src/` exposes no accessor for: a refusal built on a
 table this repo cannot read would be unimplementable today and would silently
 no-op if the accessor changed shape. A construction-time diagnostic may be
 added later as a *secondary* signal.
@@ -425,13 +425,13 @@ deliberate cost of having exactly one entry point.
 ### Budgets, predicates and validation
 
 `maxInjections` (default 1) bounds injections per callable per run. Past the
-budget the tool executes normally — the interception is a one-shot nudge, never
-a gate — so an unhelpful skill cannot trap the actor in a re-draft loop. A
+budget the tool executes normally. The interception is a one-shot nudge, never
+a gate, so an unhelpful skill cannot trap the actor in a re-draft loop. A
 `when` predicate that returns `false` falls through **without** spending
 budget, so an early "not yet" does not disable the binding for the rest of the
 run.
 
-A `when` predicate that **throws** — or a working-state read that does — falls
+A `when` predicate that **throws**, or a working-state read that does, falls
 through to the normal call path and the callable behaves exactly as an unbound
 one. `intercept()` runs synchronously inside the actor's `await tool(...)`, so a
 propagated throw would become an `isError` turn and escalate the executor model;
@@ -450,7 +450,7 @@ Refused at **run start**, not at construction:
 - a binding naming a callable this run does not register
   (`unknown_bound_callable`). MCP and UCP callables only exist once the run's
   execution context does, so a constructor-time check would reject every
-  legitimate `mcp.*` binding. Every registration site — executing or stubbed —
+  legitimate `mcp.*` binding. Every registration site, executing or stubbed,
   registers its name, so the check sees the full surface;
 - a binding naming a catalog skill the run's two catalog gates hid
   (`ineligible_bound_skill`, `denied_bound_skill`). See below.
@@ -464,7 +464,7 @@ pair above.
 A binding is static host configuration; the two catalog gates are not.
 `requires` eligibility is resolved against the run's declared
 `skillPolicy.environment`, and the retrieval-time authority re-check
-(`axSkillRetrievalGate`) is time- and authority-varying — an expired grant or a
+(`axSkillRetrievalGate`) is time- and authority-varying: an expired grant or a
 revoked trajectory parks a skill mid-lifecycle, long after the binding was
 written.
 
@@ -474,7 +474,7 @@ hint and the kernel tier use, and the run is **refused** when either gate hid
 it. Refusing is deliberate over the two alternatives: silently dropping the
 skill while still intercepting would leave the actor blocked on a call it may
 not make with no procedure to read, and silently executing would make both
-gates advisory. "The host named it by id" is not an answer — that is exactly
+gates advisory. "The host named it by id" is not an answer, and that is exactly
 the argument the gates exist to overrule.
 
 An **inline** skill is not gated: it is host-supplied literal text with nothing
@@ -495,8 +495,8 @@ does on the ordinary load path: a host auditing which skill bodies reached the
 model must see call-time injections too.
 
 Gamma records the intercepted turn with `action.executed: false`. That flag
-reports the turn's **weakest** guarantee — at least one drafted call did not
-run — so a mixed turn is `{ executed: false, calls: ['inventory.pick'] }`.
+reports the turn's **weakest** guarantee, that at least one drafted call did not
+run, so a mixed turn is `{ executed: false, calls: ['inventory.pick'] }`.
 `action.calls` stays the exact record: forcing it empty would hide a real call
 made alongside an intercepted one.
 
@@ -520,7 +520,7 @@ dependency-free module rather than adding `fast-json-patch` or `rfc6902`.
 ## Relationship to the event runtime
 
 Shared: `AxEventVerifierResult` is imported verbatim as the checker's verdict
-type — one verdict vocabulary across the repo — and the parked vocabulary
+type, one verdict vocabulary across the repo, and the parked vocabulary
 (`op`, `reason`, `parkedAt`, `attempt`) is copied from the effect ledger so
 "parked" means the same thing in both. `AxProgramStateStore`,
 `AxProgramStateEnvelope`, `AxEventClock` and `axEventCanonicalDigest` are
@@ -564,7 +564,7 @@ Two costs are reported rather than hidden. Working state **alone** adds prompt
 characters: the state document and the receipt roster ride beside the action
 log, and only `skillState` removes the action-log growth term. And the
 `skill-state` arm still grows (1.44x), because the scenario seeds one goal per
-order — the goal ledger is a task-size term the mode does not remove. With a
+order, and the goal ledger is a task-size term the mode does not remove. With a
 fixed goal set the per-turn characters are flat, which is what the unit-scale
 assertion in `agent.skillState.test.ts` measures.
 
@@ -586,8 +586,8 @@ same way by `scripts/fixtures/skill-state-transition.json` and
 
 That fixture deliberately does **not** live under `ir/conformance/`. Every
 directory there is enumerated by machinery that assumes the generated language
-packages can execute it — `conformanceSuitePaths` runs the listed suites
-against every target, and the perturbation gate samples every subdirectory —
+packages can execute it. `conformanceSuitePaths` runs the listed suites
+against every target, and the perturbation gate samples every subdirectory,
 so a fixture for an unported behaviour placed there either fails all five
 targets or invites reshaping it until a target can "pass" without implementing
 the behaviour. When working state is migrated into AxIR, the fixture moves
@@ -598,7 +598,7 @@ to pass it.
 
 - **Receipt laundering.** Nothing forbids two goals that both name the same
   callable citing the same receipt. A per-goal receipt-consumption rule was
-  considered and rejected as premature — it breaks legitimate cases such as
+  considered and rejected as premature: it breaks legitimate cases such as
   one batch call completing three picks. A host wanting single-use receipts
   enforces it in its checker, which has the full receipt set in its context.
 - **Checker as rubber stamp.** A host that writes `check: () => ({status:'pass'})`
@@ -607,7 +607,7 @@ to pass it.
 - **Model-authored goals.** A host that enables `allowModelAuthoredGoals` with
   a broad `expectsAllowlist` can still be farmed inside that allowlist. A goal
   created and closed in ONE patch is held to the `expects` it declares in that
-  same patch, and a completion of a goal the kernel never admitted parks — but
+  same patch, and a completion of a goal the kernel never admitted parks, but
   neither rule can make a permissive allowlist strict.
 - **Receipt ledger growth.** `receipts()` grows with each distinct eligible
   dispatch for the life of the run and `snapshot()` serialises all of it into
@@ -617,7 +617,7 @@ to pass it.
 - **Call-time injection costs a bound callable its speculation.** The adapter
   is not installed for a bound name, so binding a hot tool that the host had
   allowlisted for speculation removes that optimisation for the whole run. This
-  is deliberate — it is what leaves exactly one entry point to guard — but it is
+  is deliberate, and it is what leaves exactly one entry point to guard, but it is
   a real cost, and it is why binding is per exact name rather than per
   namespace.
 - **Call-time injection is not an authorization or safety gate.** It is one

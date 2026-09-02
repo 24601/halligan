@@ -3,7 +3,7 @@
 Normative contract for the opt-in learning surface: serve → observe → grow →
 nominate. Browser-safe; nothing under `src/ax/learn/` imports `node:*`.
 
-Ax could already *decide* whether a candidate change is good —
+Ax could already *decide* whether a candidate change is good:
 `agent.playbook().evolve()` holds the repository's strongest promotion gate.
 What it could not do was **remember what it served**, **accept late feedback
 that names one served exchange**, or **record the accepted result as a
@@ -79,7 +79,7 @@ appended, rather than being silently coerced later.
 
 | # | Invariant |
 |---|---|
-| I1 | `artifactRef` names what the agent was **serving** — read from the live installation, never from the store head. No installation ⇒ **no ref**. |
+| I1 | `artifactRef` names what the agent was **serving**, read from the live installation, never from the store head. No installation ⇒ **no ref**. |
 | I1b | A serve under a tree the chain has moved past records `stale: true` with the head's `contentId` beside its own. When no head has ever been observed, `headContentId` is absent and `stale` is `false`: nothing is *known* to supersede the installed tree. |
 | I2 | `run()` does not resolve until the record is durable. No receipt without a record. |
 | I2b | Recording lives outside the agent runtime scope, so a bookkeeping failure can never report a successful agent run as errored. |
@@ -120,7 +120,7 @@ error and throws. Late and out-of-order feedback is a legal ordering, not a
 fault.
 
 Schema validation happens at ingress, in `report()`. A schema-invalid report
-never becomes a record and therefore never reaches the reducer — which is why
+never becomes a record and therefore never reaches the reducer, which is why
 `'schema-invalid'` is not a never-reason.
 
 ## Harness tree admission
@@ -136,11 +136,11 @@ proposal, and whenever persisted state loads.
 | `kind` is one of the three | `unknown-kind` |
 | `config` carries exactly the declared keys for its kind | `unknown-config-key` |
 | `instruction.text`, `skill.content`, `playbookBullet.content`, `playbookBullet.section`, `skill.name` non-empty after trim | `empty-text` |
-| `skill.skillId` and `playbookBullet.id` match `/^[A-Za-z0-9][A-Za-z0-9._-]*$/` — the rule lands on the **id**, the dedup key, not on the human title | `invalid-name-segment` |
-| a bullet carrying `helpfulCount`, `harmfulCount`, `createdAt`, `updatedAt`, `revision`, `lineage` or `evidence` — **rejected, never stripped** | `forbidden-bullet-field` |
+| `skill.skillId` and `playbookBullet.id` match `/^[A-Za-z0-9][A-Za-z0-9._-]*$/`. The rule lands on the **id**, the dedup key, not on the human title | `invalid-name-segment` |
+| a bullet carrying `helpfulCount`, `harmfulCount`, `createdAt`, `updatedAt`, `revision`, `lineage` or `evidence`: **rejected, never stripped** | `forbidden-bullet-field` |
 | every `config` value JSON-persistable | `non-json-config` |
-| credential tripwire rule 1: a key whose NAME ends in a credential word holding a string, or an array containing one — anywhere in any entry | `inline-credential` |
-| credential tripwire rule 2: a VALUE matching a known credential literal — anywhere in any entry, including model-authored free text | `credential-shaped-literal` |
+| credential tripwire rule 1: a key whose NAME ends in a credential word holding a string, or an array containing one, anywhere in any entry | `inline-credential` |
+| credential tripwire rule 2: a VALUE matching a known credential literal, anywhere in any entry, including model-authored free text | `credential-shaped-literal` |
 | two entries rendering onto one target | `duplicate-render-target` |
 | entry > 64 KiB, or tree > 1 MiB, canonical JSON | `oversized-entry` / `oversized-tree` |
 
@@ -149,18 +149,18 @@ entry is excluded from render but still validated and still persisted.
 
 ## Installation
 
-`axRenderHarnessTree(tree, { now })` is pure — `AxACEPlaybook` cannot be
+`axRenderHarnessTree(tree, { now })` is pure: `AxACEPlaybook` cannot be
 produced without a timestamp, so the caller supplies one from its injected
 clock. `now` is not part of `contentId`.
 
 `axApplyHarnessTree(tree, target, options, signal?)` writes through the
 structural `AxHarnessInstallTarget` port and returns an exact, idempotent
 `dispose()`. It refuses a target that already carries an installation, so "what
-is installed" stays single-valued — which is what makes a record's
+is installed" stays single-valued, which is what makes a record's
 `artifactRef` honest.
 
 **The install is a function of the target, not of the tree.** Whenever the
-target has a playbook handle, the install replaces the playbook — including
+target has a playbook handle, the install replaces the playbook, including
 with the empty rendering of a tree that carries no bullets, because a tree with
 no bullets is a tree that says "serve no bullets". Leaving prior bullets in
 place would make the agent serve release X plus content that is in no release,
@@ -170,7 +170,7 @@ alone, so an instruction-only tree does not inherit the setter's refusal of a
 host `onSkillsSearch`.
 
 A target with continuous playbook learning is refused unless
-`acknowledgeContinuousPlaybookReset: true` — on **every** install, not only on
+`acknowledgeContinuousPlaybookReset: true`, on **every** install, not only on
 one carrying bullets, because the reset is what the guard exists for. The
 resulting `discardedBulletCount` is reported, never silent.
 
@@ -215,7 +215,7 @@ Three independent mechanisms, because one of them is a policy and the model is
 the adversary:
 
 1. **Structural.** Evaluation runs `forwardPipelineForEvaluation`, a separate
-   walk that never enters `forwardPipeline` — and recording is not in
+   walk that never enters `forwardPipeline`, and recording is not in
    `forwardPipeline` at all, but in `AxAgentLearning.run()`, which evaluation
    never calls.
 2. **Refcounted suppression.** `axHarnessEvolve` holds
@@ -223,7 +223,7 @@ the adversary:
    nothing, increments `suppressedRecords`, and throws
    `AxLearningSuppressedError` **before** issuing the forward. The count is
    returned on the result.
-3. **Binding.** The proposer receives a teacher and whatever the host names —
+3. **Binding.** The proposer receives a teacher and whatever the host names,
    never the served provider, and never the agent, store or surface. Its calls
    are bounded by `maxProposerCalls` and `proposeTimeoutMs`.
 
@@ -241,7 +241,7 @@ The event-runtime seam is specified here and **not built**:
 
 | Mechanism | Seam |
 |---|---|
-| a report ingress route | an `observe` route whose target appends the report record. **Requires moving `axReportSchema` validation into the reducer**, since that path bypasses `report()` — which is exactly why `'schema-invalid'` is not a never-reason today. |
+| a report ingress route | an `observe` route whose target appends the report record. **Requires moving `axReportSchema` validation into the reducer**, since that path bypasses `report()`, which is exactly why `'schema-invalid'` is not a never-reason today. |
 | a background trainer | a batch-triggered event target with `retrySafety: 'effect-aware'` |
 | a commit log | the effect ledger's `intent → dispatched → succeeded \| failed \| parked` |
 | compaction after commit | `markConsumed` after the nomination append succeeds. There is no compaction. |
@@ -251,5 +251,5 @@ The event-runtime seam is specified here and **not built**:
 `npm run learn:eval` writes `artifacts/learning-surface-eval.json`;
 `npm run test:learning-eval` asserts its invariants and is wired into the root
 `npm test` chain. It is a deterministic mechanism evaluation with a stub
-provider, fixed metrics and fixed task sets — not an independent model held-out
+provider, fixed metrics and fixed task sets, not an independent model held-out
 set and not a live-model improvement claim.

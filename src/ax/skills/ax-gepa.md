@@ -575,7 +575,7 @@ program.applyOptimization(loaded);
 - Tree-wide runs rely on `componentMap`, keyed by full component key.
 - Pareto points expose candidate configs under `point.configuration.componentMap`.
 - With any version-2 lineage mechanism enabled, `candidateLineage.bestChain`
-  names the DEPLOYABLE candidate and its root-first ancestry — the candidate
+  names the DEPLOYABLE candidate and its root-first ancestry: the candidate
   whose `cfg` actually became `componentMap`. **No archive-best or per-task
   oracle composite is produced**: GEPA computes no oracle number, and inventing
   one purely so it could be labelled non-deployable would add Goodhart surface
@@ -644,9 +644,9 @@ const manifest = result.optimizedProgram?.candidateLineage;
 Omit `candidateLineage` or set it to `false` to disable all lineage collection
 and publication work. Opted-in values and messages remain bounded by
 `maxComponentValueChars` and `maxFailureMessageChars`. Finite numeric limits are
-clamped as follows: records 1–10,000; final artifact bytes 4,096–10,000,000;
-components per record 1–1,024; component value characters 1–10,000; failure
-message characters 1–2,000.
+clamped as follows: records 1-10,000; final artifact bytes 4,096-10,000,000;
+components per record 1-1,024; component value characters 1-10,000; failure
+message characters 1-2,000.
 Published manifests and their nested records are cloned and recursively frozen.
 The final manifest is available in both the artifact and the existing
 `OptimizationComplete.bestConfiguration.candidateLineage` logger callback; these
@@ -731,7 +731,7 @@ const result = await optimize(program, train, metric, {
   divide it by the batch size.
 - **This is a cost claim at parity, not a quality gain.** Nothing here makes the
   resulting program better at anything, and the shipped evaluation does not
-  reproduce even the cost claim on its fixture — see
+  reproduce even the cost claim on its fixture. See
   `npm run evaluate:gepa-search`, which reports the call ratio, the gate error
   rate and the seeds where discriminative used MORE calls.
 - **The Madow standard error is reported, never gated on.** No promotion gate is
@@ -870,8 +870,8 @@ are default-`'off'`.
   Its `metricCalls` is a **host self-report**: Ax ships no ablation runner, so it
   validates the shape and cannot cross-check the number.
 - **`effectPolicy: 'required'`** keys on the record's own
-  `affectedComponents` — `componentKind: 'program-source'` plus a declared
-  `tool:*` capability — never on the free-text `surface` field and never on the
+  `affectedComponents` (`componentKind: 'program-source'` plus a declared
+  `tool:*` capability), never on the free-text `surface` field and never on the
   OPTIONAL `mutation` annotation. A promoted record whose affected components
   declare a `tool:*` capability is refused without an effect declaration
   (`effects_missing`); a promoted record touching a `program-source` component
@@ -879,7 +879,7 @@ are default-`'off'`.
   effect attached to a steering patch, or to a record naming no program-source
   surface at all, is refused outright (`effects_on_steering_surface`) because
   description text cannot carry an effect. Keying any of these on `mutation`
-  would make the gate — and a reader's `requirePolicyAtLeast` floor — something
+  would make the gate, and a reader's `requirePolicyAtLeast` floor, something
   the record's own author switches off by omitting one field.
 - **The manifest-level `policy` is covered by the authority receipt**, and a
   reader may demand a stricter floor regardless of what the artifact says about
@@ -889,12 +889,12 @@ are default-`'off'`.
   are optional and travel together: a candidate aborted for
   `insufficient_admitted_rows` carries neither and no `observedDeltas` row,
   because nothing was compared. An `'ipw_hajek'` reading carries
-  `differenceEstimate` — a paired difference — instead of a score pair.
+  `differenceEstimate`, a paired difference, instead of a score pair.
 - **Reflection categories split at `perfectScore ?? 1`.** `fixed` / `regressed`
   / `still_failing` / `still_passing` reuse the threshold `skipPerfectScore`
   already means rather than adding a second knob, so a metric that is not
   normalised to `[0, 1]` puts every row in `still_passing` or `still_failing`.
-- **`includeReflectionOutcomes` gates all three no-host-input annotations** —
+- **`includeReflectionOutcomes` gates all three no-host-input annotations**:
   the reflection outcomes, the deployable `bestChain`, and
   `causalEvidenceRecordId`. The other version-2 fields each have their own
   compile option (`harnessRecipe`, `mutationAnnotation`,
@@ -906,7 +906,7 @@ are default-`'off'`.
   words, and nothing downstream refuses a candidate for being in the ledger.
 - **`diagnosis` is UNTRUSTED.** In the GEPA path it quotes the model's own
   proposed text back, so it is bounded, JSON-quoted, and rendered inside
-  `BEGIN UNTRUSTED REJECTED-CANDIDATE PRIOR` markers on its own prompt field —
+  `BEGIN UNTRUSTED REJECTED-CANDIDATE PRIOR` markers on its own prompt field,
   never inside the trusted optimization-reference channel.
 - **Every entry must carry an `after_ms` clause.** Permanent negative memory is
   refused by construction, before the first metric call. A `model_changed` or

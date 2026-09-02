@@ -10,7 +10,7 @@ Use this skill when an agent needs a persistent context map, task-relevant memor
 
 ## Use These Defaults
 
-- Use a static `skillsCatalog` / `memoriesCatalog` when the skill guides or memories fit in a plain array — Ax then backs `discover({ skills })` / `recall(...)` with a built-in deterministic local search and no host search code is needed.
+- Use a static `skillsCatalog` / `memoriesCatalog` when the skill guides or memories fit in a plain array: Ax then backs `discover({ skills })` / `recall(...)` with a built-in deterministic local search and no host search code is needed.
 - Use `onSkillsSearch` / `onMemoriesSearch` when retrieval needs a real backend (vector DB, BM25 service, KV). A host callback always takes precedence over the catalog's built-in search.
 - Use `contextMap` when repeated runs inspect the same long external context and should accumulate a small orientation cache automatically.
 - `recall(...)` is available to distiller and executor stages when `onMemoriesSearch` or a non-empty `memoriesCatalog` is set.
@@ -115,7 +115,7 @@ type AxAgentMemoryResult = {
 
 ### Static catalog (no callback)
 
-If the memory set fits in a plain array, skip the callback entirely: pass `memoriesCatalog` and Ax backs `recall(...)` with a built-in deterministic local search (idf-weighted token overlap over `id` + content; not regex, not embeddings). The `alreadyLoaded` contract is preserved — entries already on `inputs.memories` are excluded before ranking.
+If the memory set fits in a plain array, skip the callback entirely: pass `memoriesCatalog` and Ax backs `recall(...)` with a built-in deterministic local search (idf-weighted token overlap over `id` + content; not regex, not embeddings). The `alreadyLoaded` contract is preserved: entries already on `inputs.memories` are excluded before ranking.
 
 ```typescript
 const myAgent = agent('task:string -> answer:string', {
@@ -496,7 +496,7 @@ Rules:
 ### Skill tiers and eligibility gating
 
 `skillsCatalog` entries can declare a tier and host-checked requirements. Absent
-means `'indexed'` and eligible — exactly today's behaviour.
+means `'indexed'` and eligible, exactly today's behaviour.
 
 ```ts
 const a = agent('question:string -> answer:string', {
@@ -570,7 +570,7 @@ Two non-guarantees:
 > profiles stay empty and ranking is similarity-only.
 
 `verificationBudget` has one terminal status and is absorbing once exceeded. It
-is counted by the runtime and is **never stated in a prompt** — the executor
+is counted by the runtime and is **never stated in a prompt**. The executor
 prompt is byte-identical with and without one set. Handle the
 `verification_budget` context event to escalate.
 
@@ -864,11 +864,11 @@ Three non-guarantees:
 > the artifact is safe, and re-checking it cannot detect an unsafe procedure that
 > never needed an effect.
 
-> `verifierDecisions` are caller-supplied, not derived — `AxAuthorizationReceipt`
+> `verifierDecisions` are caller-supplied, not derived. `AxAuthorizationReceipt`
 > carries no guard result.
 
-> The re-check runs on every static-catalog retrieval path — kernel tier,
-> `### Available Skills` index, `discover({ skills })` and the relevance hint —
+> The re-check runs on every static-catalog retrieval path (kernel tier,
+> `### Available Skills` index, `discover({ skills })` and the relevance hint)
 > and on the executable-artifact path. A host that supplies `onSkillsSearch` owns
 > retrieval and owns the re-check.
 
@@ -876,9 +876,9 @@ Full contract: `docs/SKILL_PROVENANCE.md`.
 
 ## Advisory Relevance Hints (`relevanceRanking`)
 
-`relevanceRanking` is ON by default — leave it unset; set `relevanceRanking: false` to opt out. The default was flipped after its A/B gate passed (substance-judged, 49 runs per variant per model: small-model first-lookup precision 24%→90% and answer accuracy 14%→29%; frontier-model control accuracy 63%→88% with fewer turns). The generated language ports implement the same advisory hint contract through AxIR Core.
+`relevanceRanking` is ON by default. Leave it unset; set `relevanceRanking: false` to opt out. The default was flipped after its A/B gate passed (substance-judged, 49 runs per variant per model: small-model first-lookup precision 24%→90% and answer accuracy 14%→29%; frontier-model control accuracy 63%→88% with fewer turns). The generated language ports implement the same advisory hint contract through AxIR Core.
 
-When enabled, a deterministic local ranker scores the agent's discoverable capabilities against the task once per `forward(...)` and injects a short advisory `### Likely Relevant` shortlist into the executor turn — modules (needs `functionDiscovery`), catalog skills (needs `skillsCatalog`), and catalog memories (needs `memoriesCatalog`). The hint is non-authoritative: the full lists still apply and the actor may `discover`/`recall` anything else.
+When enabled, a deterministic local ranker scores the agent's discoverable capabilities against the task once per `forward(...)` and injects a short advisory `### Likely Relevant` shortlist into the executor turn: modules (needs `functionDiscovery`), catalog skills (needs `skillsCatalog`), and catalog memories (needs `memoriesCatalog`). The hint is non-authoritative: the full lists still apply and the actor may `discover`/`recall` anything else.
 
 ```typescript
 const myAgent = agent('task:string -> answer:string', {
@@ -974,5 +974,5 @@ Fetch this for full working code:
 - Do not assume `inputs.memories` persists across `.forward()` calls.
 - Do not use `onLoadedMemories` / `onLoadedSkills` as proof that the actor relied on an item; use `onUsedMemories` / `onUsedSkills` for actual-use tracking.
 - Do not write an `onSkillsSearch` / `onMemoriesSearch` callback that just scans a static array; pass the array as `skillsCatalog` / `memoriesCatalog` instead.
-- Do not rely on the built-in catalog search for semantic matching over large stores; it is lexical token overlap — supply a host callback for embeddings/vector search.
+- Do not rely on the built-in catalog search for semantic matching over large stores; it is lexical token overlap, so supply a host callback for embeddings/vector search.
 - Do not confuse `skills` (always preloaded into the prompt) with `skillsCatalog` (searchable, loaded on demand).

@@ -107,23 +107,23 @@ Only `narrative` steps reach a projection.
 
 | type | class | wakeable | carries `source` | spill fields |
 |---|---|---|---|---|
-| `trajectory` | structural | no | no | — |
-| `fork` | structural | no | no | — |
+| `trajectory` | structural | no | no | n/a |
+| `fork` | structural | no | no | n/a |
 | `merge` | structural | yes | no | `content` |
 | `thought` | narrative | yes | yes | `content` |
 | `action` | narrative | yes | yes | `content` |
 | `observation` | narrative | yes | yes | `content` |
-| `idle` | narrative | yes | yes | — |
+| `idle` | narrative | yes | yes | n/a |
 | `message` | narrative | yes | yes | `content` |
 | `error` | narrative | yes | yes | `content` |
 | `run` | machinery | no | no | `command` |
 | `run-summary` | machinery | no | no | `fullSummary` |
 | `runtime-output` | machinery | no | no | `stdout`, `stderr` |
 | `feedback` | machinery | no | no | `content` |
-| `reply-claim` | machinery | no | no | — |
-| `mind-wake` | machinery | yes (signal) | no | — |
-| `mind-idle` | machinery | yes (signal) | no | — |
-| `manual-trigger` | machinery | yes (signal) | no | — |
+| `reply-claim` | machinery | no | no | n/a |
+| `mind-wake` | machinery | yes (signal) | no | n/a |
+| `mind-idle` | machinery | yes (signal) | no | n/a |
+| `manual-trigger` | machinery | yes (signal) | no | n/a |
 | `mind-error` | machinery | no | no | `reason` |
 
 `idle` also ships `siblingInert: true`: it is the one narrative row carrying
@@ -173,7 +173,7 @@ drain.corrupt; // frames the tolerant parser skipped on THIS drain
 When a cursor carries a `token`, the token decides where the drain resumes;
 `seq` alone cannot survive a tolerant parse that dropped an interior frame.
 An unusable cursor throws `AxTrajectoryCursorError` with a `reason` of
-`identity_changed`, `not_a_frame_boundary`, `shrank` or `beyond_end` — it
+`identity_changed`, `not_a_frame_boundary`, `shrank` or `beyond_end`. It
 never silently skips a committed step.
 
 ## Fork And Merge
@@ -192,8 +192,8 @@ await store.merge({
 ```
 
 Both directions are written before either is observable, so neither side ever
-needs a search. A sub-run always merges something back — `'(max turns
-reached)'` on failure — or it is invisible in the parent's life.
+needs a search. A sub-run always merges something back (`'(max turns
+reached)'` on failure) or it is invisible in the parent's life.
 
 ## Projection And Budget
 
@@ -216,7 +216,7 @@ every finer summary that exists. Only a tier-1 miss becomes a
 
 Rollups are an optimization, not a dependency: with no rollup store, or with
 every block deleted, `axProjectTrajectory` still returns the raw tail and
-reports the rest as a gap — for a bounded number of store round-trips
+reports the rest as a gap, for a bounded number of store round-trips
 (`axTrajectoryDescentBudget`), after which the remainder is reported as one
 `missing` gap instead of being probed node by node.
 
@@ -235,7 +235,7 @@ A rollup meta sealed past the end of the log it is loaded for throws
 `AxTrajectoryRollupError('meta_conflict')` rather than reporting a life that
 was never lived.
 
-A mind's context assembler is the primary consumer of this API — see
+A mind's context assembler is the primary consumer of this API. See
 `ax-mind.md`, which links back here.
 
 ## Node-Only JSONL Store
@@ -286,7 +286,7 @@ are deterministic and make zero provider calls.
 
 ## Examples
 
-- `docs/TRAJECTORY.md` — the normative contract, the crash behaviour, and the
+- `docs/TRAJECTORY.md`: the normative contract, the crash behaviour, and the
   full conformance case list.
 
 ## Do Not Generate
@@ -294,7 +294,7 @@ are deterministic and make zero provider calls.
 - No unbounded read. `store.read({ trajectoryId })` with neither `limit` nor a
   full range throws `AxTrajectoryQueryError('unbounded_read')`.
 - No update, delete, rewrite or compaction of a step.
-- No grouping a run by file position or by `seq` ranges — use `runId`.
+- No grouping a run by file position or by `seq` ranges. Use `runId`.
 - No string timestamps.
 - No reading a field named in `spillFields` without resolving it first.
 - No second recursive value type: step fields are `AxTrajectoryFieldValue`,

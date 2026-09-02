@@ -71,7 +71,7 @@ const inventoryAgent = agent('task:string -> answer:string', {
   be written into the state document.
 - Call-time skill injection is opt-in per EXACT callable and budgeted. An
   intercepted call does not execute, requests no authorization, fires no
-  `onFunctionCall`, records no function call and mints NO receipt — so it can
+  `onFunctionCall`, records no function call and mints NO receipt, so it can
   never support a goal completion.
 
 ## Canonical Pattern
@@ -139,7 +139,7 @@ classified against one goal and applied to another.
   ever needed.
 - Statuses are `pending`, `done`, `blocked`.
 - `done` requires a receipt. `blocked` requires a non-empty `blocker` set in
-  the same patch. `pending` (retraction) always commits — retraction must
+  the same patch. `pending` (retraction) always commits: retraction must
   never be harder than assertion.
 - `id`, `createdTurn`, `updatedTurn` and `expects` are immutable after
   creation. Removing a `done` goal is refused: it is part of the audit record.
@@ -158,7 +158,7 @@ receipt-eligible callable returns without throwing. The model sees
   rendered.
 - Nothing mints for: a call that threw; a call that completed the run; an
   agent-derived callable (a child agent's return value is its own `final()`
-  payload — model self-report); `llmQuery`; a callable outside
+  payload, a model self-report); `llmQuery`; a callable outside
   `receiptSources`.
 - A void-returning tool DOES mint. Success is "no error thrown", never "a
   result was returned".
@@ -171,7 +171,7 @@ receipt-eligible callable returns without throwing. The model sees
 
 `AxWorkingStateCheckerPolicy.check(context)` returns the same
 `AxEventVerifierResult` the event runtime's verifier returns. Only the VERDICT
-TYPE is shared — the `AxEventVerifierPolicy.verify` body is not portable here,
+TYPE is shared: the `AxEventVerifierPolicy.verify` body is not portable here,
 because `check` is arity-1 over an agent-turn context.
 
 ```ts
@@ -196,7 +196,7 @@ parks `checker_timeout`; exceeding `maxChecksPerRun`, `maxTokens`,
 ## Parks
 
 A parked delta is **recorded, visible, not applied, retryable,
-budget-bounded** — the same contract `AxEventEffect.status: 'parked'` carries.
+budget-bounded**: the same contract `AxEventEffect.status: 'parked'` carries.
 
 - It lands in `document.parked` (rendered into the read-only prompt region)
   and on the trace, and it produces one harness-authored guidance entry.
@@ -214,7 +214,7 @@ budget-bounded** — the same contract `AxEventEffect.status: 'parked'` carries.
 
 The OUTPUT fields of `stateSignature` are the declared roots. A write under a
 declared root is admissible up to `factDepthLimit` (default 4) further
-segments. The SHAPE below the root is NOT validated by the kernel — a host
+segments. The SHAPE below the root is NOT validated by the kernel. A host
 that needs a tighter fact contract enforces it in its checker. That is exactly
 the boundary the checker exists to hold.
 
@@ -248,7 +248,7 @@ const agentWithSkillState = agent('task:string -> answer:string', {
   `rationaleDigest` undefined; an empty one still digests.
 - Only ACCEPTED transitions enter `transitions()`. Use `onTransition` to
   observe refusals; it is fail-soft, like `onTrace`.
-- Rejections are `schema` (unparseable — the store is never touched),
+- Rejections are `schema` (unparseable, and the store is never touched),
   `authority` (a harness-owned path), `fence` (the compare-and-set lost) and
   `invariant` (the kernel or checker refused every delta).
   `committedRevision` is always defined.
@@ -259,7 +259,7 @@ const agentWithSkillState = agent('task:string -> answer:string', {
   irreversible.
 - The transcript leaves the PROMPT, not the process: the loop still keeps and
   walks every action-log entry, so per-turn context bookkeeping stays quadratic
-  in the turn count. Leave `tombstoning` off under `skillState` — it spends
+  in the turn count. Leave `tombstoning` off under `skillState`: it spends
   model calls summarizing text this mode never renders.
 - `onTransition` is awaited with no timeout: a sink that can block should bound
   itself.
@@ -310,11 +310,11 @@ const shipper = agent('task:string -> answer:string', {
 - **A bound catalog id still goes through both catalog gates.** At run start the
   id is re-asked against `skillPolicy.environment` (`requires`) and the
   retrieval-time authority re-check. If either hid the skill the RUN is refused
-  (`ineligible_bound_skill`, `denied_bound_skill`) — a binding never renders a
+  (`ineligible_bound_skill`, `denied_bound_skill`). A binding never renders a
   body `discover({ skills })` would not. An inline skill is not gated.
 - A `when` predicate that throws falls through to the normal call path; it never
   becomes an error turn, and it never spends budget.
-- Gamma records the intercepted turn with `action.executed: false` — the turn's
+- Gamma records the intercepted turn with `action.executed: false`, the turn's
   weakest guarantee. A mixed turn is `{ executed: false, calls: [<the real
   one>] }`; `action.calls` stays exact. `onLoadedSkills` fires for an injected
   skill.
@@ -325,7 +325,7 @@ const shipper = agent('task:string -> answer:string', {
 
 ## Trace (Gamma)
 
-One record per actor turn under `trace: true`. Digests only — never raw
+One record per actor turn under `trace: true`. Digests only, never raw
 payloads, never PII. `axWorkingStateTraceDigest(step)` hashes the
 deterministic fields (everything except `runId`, `at` and `summary`), so two
 runs of the same scripted turns compare equal. Join to `ActionLogEntry.turn`
@@ -376,7 +376,7 @@ expect(outcome.parked[0]?.reason).toBe('no_supporting_receipt');
   `facts`.
 - Do NOT read a goal's `done` as proof of a world state the receipts do not
   support.
-- Do NOT assume a `pending` goal blocks `final()` — it does not, unless
+- Do NOT assume a `pending` goal blocks `final()`. It does not, unless
   `completionPolicy` is `'interlock'`.
 - Do NOT set `actorMemoryMode: 'skillState'` without BOTH `workingState` and
   `skillState.skill`; construction throws.
