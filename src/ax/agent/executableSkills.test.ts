@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AxAgentFunction } from './agentInternal/agentStateTypes.js';
 import type {
   AxExecutableSkillArtifact,
@@ -115,6 +115,13 @@ function receipt(
 }
 
 describe('axSelectExecutableSkills', () => {
+  // `originalHandler` is shared module state: the registry snapshot test below
+  // invokes the frozen snapshot of it, so under `--sequence.shuffle` this
+  // suite's "never executed" assertion saw a call recorded by a sibling test.
+  beforeEach(() => {
+    originalHandler.mockClear();
+  });
+
   it('selects an admitted compatible receiptless artifact without executing it', () => {
     const target = artifact();
     const result = axSelectExecutableSkills([target], context(target), {

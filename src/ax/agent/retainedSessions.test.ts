@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { AxMockAIService } from '../ai/mock/api.js';
 import type { AxAIService } from '../ai/types.js';
 import { AxSignature } from '../dsp/sig.js';
@@ -32,7 +32,65 @@ type WorkInput = {
   delayMs?: number;
   tokens?: number;
   spawnNested?: boolean;
+  /**
+   * Name of a {@link gates} barrier the attempt blocks on instead of sleeping.
+   * A gated attempt stays in flight until the test releases it, so "still
+   * running while X happens" is an ordering fact rather than a bet that a real
+   * `delayMs` timer outlives the rest of the test on a loaded host.
+   */
+  gate?: string;
 };
+
+/** Named barriers that hold an agent attempt in flight until released. */
+class WorkGates {
+  private readonly open = new Map<string, () => void>();
+  private readonly waits = new Map<string, Promise<void>>();
+
+  wait(key: string, signal?: AbortSignal): Promise<void> {
+    let waiting = this.waits.get(key);
+    if (!waiting) {
+      waiting = new Promise<void>((resolve) => {
+        this.open.set(key, resolve);
+      });
+      this.waits.set(key, waiting);
+    }
+    if (!signal) return waiting;
+    return Promise.race([
+      waiting,
+      new Promise<void>((_resolve, reject) => {
+        if (signal.aborted) {
+          reject(new DOMException('Aborted', 'AbortError'));
+          return;
+        }
+        signal.addEventListener(
+          'abort',
+          () => reject(new DOMException('Aborted', 'AbortError')),
+          { once: true }
+        );
+      }),
+    ]);
+  }
+
+  release(key: string): void {
+    this.open.get(key)?.();
+    // A later wait() on the same key must not block again.
+    this.waits.set(key, Promise.resolve());
+    this.open.delete(key);
+  }
+
+  reset(): void {
+    for (const resolve of this.open.values()) resolve();
+    this.open.clear();
+    this.waits.clear();
+  }
+}
+
+const gates = new WorkGates();
+
+// A gate left closed by a failing assertion must not hang the next test.
+afterEach(() => {
+  gates.reset();
+});
 
 type WorkOutput = {
   value: string;
@@ -122,7 +180,8 @@ class DeterministicAgent implements AxRetainedAgent<WorkInput, WorkOutput> {
       DeterministicAgent.active
     );
     try {
-      await delay(input.delayMs ?? 0, options?.abortSignal);
+      if (input.gate) await gates.wait(input.gate, options?.abortSignal);
+      else await delay(input.delayMs ?? 0, options?.abortSignal);
       this.history.push(input.value);
       this.usage = {
         actor: [
@@ -687,12 +746,21 @@ describe('retained child agent sessions', () => {
     const root = await sessions.createRoot({
       authorizedChildren: ['worker'],
     });
-    const started = Date.now();
-    const first = await root.spawn('worker', { value: 'one', delayMs: 80 });
-    const second = await root.spawn('worker', { value: 'two', delayMs: 80 });
+    const first = await root.spawn('worker', { value: 'one', gate: 'admit' });
+    const second = await root.spawn('worker', { value: 'two', gate: 'admit' });
 
-    expect(Date.now() - started).toBeLessThan(60);
+    // Both spawns resolved while both children are still blocked on the gate.
+    // A spawn that waited for its child's result could never reach this line,
+    // so admission is proven by ordering rather than by an elapsed-time bound.
     expect(first.id).not.toBe(second.id);
+    await waitFor(
+      async () => DeterministicAgent.active,
+      (active) => active === 2
+    );
+    expect(await root.inspect(first)).toMatchObject({ status: 'running' });
+    expect(await root.inspect(second)).toMatchObject({ status: 'running' });
+
+    gates.release('admit');
     await Promise.all([completed(root, first), completed(root, second)]);
     expect(DeterministicAgent.maxActive).toBe(2);
     expect(await root.result(first)).toMatchObject({ value: 'one' });
@@ -780,9 +848,11 @@ describe('retained child agent sessions', () => {
     const root = await sessions.createRoot({
       authorizedChildren: ['worker'],
     });
+    // `first` is held open by a gate, not a real timer: every bound asserted
+    // below is only observable while its attempt is still in flight.
     const first = await root.spawn('worker', {
       value: 'slow',
-      delayMs: 100,
+      gate: 'bounds',
       tokens: 2,
     });
     const second = await root.spawn('worker', { value: 'second', tokens: 2 });
@@ -798,6 +868,7 @@ describe('retained child agent sessions', () => {
       root.send(first, { value: 'too-many' }, 'follow-up')
     ).rejects.toMatchObject({ limit: 'maxPendingMessages' });
 
+    gates.release('bounds');
     await completed(root, second);
     expect(DeterministicAgent.maxActive).toBe(1);
     await waitFor(
@@ -2744,9 +2815,13 @@ describe('retained session crash recovery adapters', () => {
     const root = await firstHost.createRoot({
       authorizedChildren: ['worker'],
     });
+    // The first attempt must still be in flight when the second host recovers,
+    // otherwise there is nothing to fence as outcome_unknown. A gate makes that
+    // an ordering fact; a real 100ms delay was a bet the recovery path would
+    // finish first, which it did not on a loaded host.
     const handle = await root.spawn('worker', {
       value: 'uncertain',
-      delayMs: 100,
+      gate: 'outcome-unknown',
       tokens: 1,
     });
     const inFlight = firstScheduler.runOne();
@@ -2779,6 +2854,7 @@ describe('retained session crash recovery adapters', () => {
       outcomeUnknownTokens: 4,
     });
 
+    gates.release('outcome-unknown');
     await secondScheduler.runAll();
     await completed(recoveredRoot, recoveredHandle);
     expect(await recoveredRoot.inspectRoot()).toMatchObject({

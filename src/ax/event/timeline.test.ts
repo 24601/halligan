@@ -1105,8 +1105,15 @@ describe('AxInteractionTimeline', () => {
     );
 
     const serialized = revised.timeline.serialize();
+    // Derived floors rather than a magic byte count: the fixture is sized to
+    // land just under the default byte cap, and the snapshot must carry every
+    // byte the timeline accounts for (JSON escaping of the NUL-filled ids can
+    // only add to that).
+    expect(revised.timeline.retainedBytes).toBeGreaterThan(
+      AxInteractionTimelineDefaults.maxBytes - 20_000
+    );
     expect(new TextEncoder().encode(serialized).byteLength).toBeGreaterThan(
-      1_349_632
+      revised.timeline.retainedBytes
     );
     expect(AxInteractionTimeline.deserialize(serialized).serialize()).toBe(
       serialized
@@ -1114,12 +1121,18 @@ describe('AxInteractionTimeline', () => {
   });
 
   it('accounts for projection bytes with one serialization per event', () => {
-    let timeline = AxInteractionTimeline.create({ sessionId: 'session-1' });
-    for (
-      let index = 0;
-      index < AxInteractionTimelineDefaults.maxEvents;
-      index++
-    ) {
+    // The invariant under test is a property of project(): exactly one
+    // JSON.stringify per retained event, whatever the retained count. The
+    // fixture size is therefore free, and it must stay small: append() is
+    // superlinear in the retained count (a 1024-event fixture takes ~8.7s to
+    // build against a 15s test budget, which is what made this test fail on a
+    // loaded host), while project() itself costs ~2ms at any of these sizes.
+    const retainedEvents = 128;
+    let timeline = AxInteractionTimeline.create({
+      sessionId: 'session-1',
+      maxEvents: retainedEvents,
+    });
+    for (let index = 0; index < retainedEvents; index++) {
       timeline = timeline.append(
         envelope({
           eventId: `event-${index}`,
@@ -1142,12 +1155,10 @@ describe('AxInteractionTimeline', () => {
       JSON.stringify = stringify;
     }
 
-    expect(projection.events).toHaveLength(
-      AxInteractionTimelineDefaults.maxEvents
-    );
-    expect(stringifyCalls).toBe(AxInteractionTimelineDefaults.maxEvents);
+    expect(projection.events).toHaveLength(retainedEvents);
+    expect(stringifyCalls).toBe(retainedEvents);
     expect(projection.bytes).toBe(
       new TextEncoder().encode(JSON.stringify(projection.events)).byteLength
     );
-  }, 15_000);
+  });
 });

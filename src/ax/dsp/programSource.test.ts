@@ -1073,8 +1073,20 @@ describe('AxProgramSource', () => {
     const started = new Promise<void>((resolve) => {
       markStarted = resolve;
     });
+    // The host tool is held open by a barrier the test releases, not by a real
+    // timer racing the session timeout: "the tool was still running when the
+    // session expired" then holds by construction on any host.
+    let releaseTool!: () => void;
+    const toolReleased = new Promise<void>((resolve) => {
+      releaseTool = resolve;
+    });
+    let markFinished!: () => void;
+    const toolFinished = new Promise<void>((resolve) => {
+      markFinished = resolve;
+    });
     let observedSignal: AbortSignal | undefined;
-    let externalEffectAt = 0;
+    let externalEffectOrder = 0;
+    let observedOrder = 0;
     const delayedTool: AxFunction = {
       name: 'delayed',
       description: 'Completes after the program-source session times out.',
@@ -1083,8 +1095,9 @@ describe('AxProgramSource', () => {
       func: async (_args, extra) => {
         observedSignal = extra?.abortSignal;
         markStarted();
-        await new Promise((resolve) => setTimeout(resolve, 400));
-        externalEffectAt = Date.now();
+        await toolReleased;
+        externalEffectOrder = ++observedOrder;
+        markFinished();
         return { answer: 'late' };
       },
     };
@@ -1106,20 +1119,30 @@ describe('AxProgramSource', () => {
       timeoutMs: 250,
     });
     const pending = program.forward({} as never, { question: 'q' });
-    await Promise.race([
-      started,
-      new Promise<never>((_resolve, reject) =>
-        setTimeout(() => reject(new Error('tool did not start')), 1_000)
-      ),
-    ]);
+    await started;
     await expect(pending).rejects.toBeInstanceOf(
       AxProgramSourceSessionExpiredError
     );
-    const timeoutObservedAt = Date.now();
+    const timeoutObservedOrder = ++observedOrder;
     expect(observedSignal?.aborted).toBe(true);
+    // The tool had not completed yet, so the late completion below is genuinely
+    // late rather than a completion the timeout happened to outrun.
+    expect(externalEffectOrder).toBe(0);
 
-    await new Promise((resolve) => setTimeout(resolve, 450));
-    expect(externalEffectAt).toBeGreaterThanOrEqual(timeoutObservedAt);
+    releaseTool();
+    await toolFinished;
+    expect(externalEffectOrder).toBeGreaterThan(timeoutObservedOrder);
+
+    // Yield until the revoked bridge has recorded the completion. This polls on
+    // the observable state rather than sleeping for a guessed duration; a bridge
+    // that never records it fails on vitest's own test timeout.
+    for (
+      let turn = 0;
+      turn < 1_000 && program.getLateBridgeEvents().length === 0;
+      turn++
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
     expect(program.getLateBridgeEvents()).toMatchObject([
       {
         kind: 'tool',
