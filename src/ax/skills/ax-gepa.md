@@ -869,18 +869,38 @@ are default-`'off'`.
   must be distinct, and each row's metric set must equal the candidate outcome's.
   Its `metricCalls` is a **host self-report**: Ax ships no ablation runner, so it
   validates the shape and cannot cross-check the number.
-- **`effectPolicy: 'required'`** keys on **declared program-source tool
-  capabilities**, never on the free-text `surface` field. A promoted
-  capability-class patch whose affected components declare a `tool:*` capability
-  is refused without an effect declaration (`effects_missing`); a promoted
-  `program.source_replace` is refused without `runtimeRequirements`
-  (`runtime_requirements_missing`); an effect attached to a steering patch is
-  refused outright (`effects_on_steering_surface`) because description text
-  cannot carry an effect.
+- **`effectPolicy: 'required'`** keys on the record's own
+  `affectedComponents` — `componentKind: 'program-source'` plus a declared
+  `tool:*` capability — never on the free-text `surface` field and never on the
+  OPTIONAL `mutation` annotation. A promoted record whose affected components
+  declare a `tool:*` capability is refused without an effect declaration
+  (`effects_missing`); a promoted record touching a `program-source` component
+  is refused without `runtimeRequirements` (`runtime_requirements_missing`); an
+  effect attached to a steering patch, or to a record naming no program-source
+  surface at all, is refused outright (`effects_on_steering_surface`) because
+  description text cannot carry an effect. Keying any of these on `mutation`
+  would make the gate — and a reader's `requirePolicyAtLeast` floor — something
+  the record's own author switches off by omitting one field.
 - **The manifest-level `policy` is covered by the authority receipt**, and a
   reader may demand a stricter floor regardless of what the artifact says about
   itself:
   `axCloneCausalCandidateEvidenceManifest(manifest, verify, { requirePolicyAtLeast: { attribution: 'required', effects: 'required' } })`.
+- **A `gateReading` never invents a comparison.** `parentScore` and `childScore`
+  are optional and travel together: a candidate aborted for
+  `insufficient_admitted_rows` carries neither and no `observedDeltas` row,
+  because nothing was compared. An `'ipw_hajek'` reading carries
+  `differenceEstimate` — a paired difference — instead of a score pair.
+- **Reflection categories split at `perfectScore ?? 1`.** `fixed` / `regressed`
+  / `still_failing` / `still_passing` reuse the threshold `skipPerfectScore`
+  already means rather than adding a second knob, so a metric that is not
+  normalised to `[0, 1]` puts every row in `still_passing` or `still_failing`.
+- **`includeReflectionOutcomes` gates all three no-host-input annotations** —
+  the reflection outcomes, the deployable `bestChain`, and
+  `causalEvidenceRecordId`. The other version-2 fields each have their own
+  compile option (`harnessRecipe`, `mutationAnnotation`,
+  `trajectoryTermination`, `minibatchStrategy`); these three do not, and
+  keeping them behind one switch is what lets a plain `candidateLineage: true`
+  run still emit a byte-identical version-1 manifest (INV-L1).
 - **`rejectedCandidateLedger`** records each rejection in a host store and feeds
   it back as a PRIOR, never a prohibition. The rendered block says so in as many
   words, and nothing downstream refuses a candidate for being in the ledger.

@@ -65,11 +65,11 @@ before.
 | A duplicate `removedComponentId` across rows | throws |
 | A leave-one-out row whose metric set differs from the candidate outcome | throws |
 | A leave-one-out matrix with no `ablation.metricCalls` | throws |
-| `effectPolicy: 'required'`, promoted, `mutation.patch.class === 'capability'`, an affected component declaring a `tool:*` capability, `effects` absent or empty | `effects_missing` |
-| `effects` present on a promoted steering patch | `effects_on_steering_surface` |
+| `effectPolicy: 'required'`, promoted, an affected component declaring a `tool:*` capability, `effects` absent or empty | `effects_missing` (independent of `mutation`, which is optional and host-authored) |
+| `effects` present on a promoted steering patch, or on a record whose affected components include no `program-source` surface | `effects_on_steering_surface` |
 | `replaySafety: 'unknown'` with `resolver: 'none'` | `unsafe_replay_without_resolver` |
 | `replaySafety: 'idempotent'` with `idempotencyKeySource: 'none'` | `idempotent_without_key` |
-| `effectPolicy: 'required'`, promoted `program.source_replace`, no `runtimeRequirements` | `runtime_requirements_missing` |
+| `effectPolicy: 'required'`, promoted, an affected component with `componentKind: 'program-source'` (or a `program.source_replace` annotation), no `runtimeRequirements` | `runtime_requirements_missing` |
 | A version-3 manifest carrying version-4 record fields | throws |
 | A version-3 manifest declaring a `policy` | throws |
 | `requirePolicyAtLeast` stricter than the records satisfy | throws |
@@ -119,6 +119,21 @@ no reader can mistake which instrument decided.
 **The Madow standard error is reported and never gated on.** Under systematic
 πps sampling some joint inclusion probabilities are zero, so
 `AxIpwEstimate.stderr` is an approximation. No promotion gate is built on it.
+
+**A ledger `gateReading` records what the gate actually compared, or says it
+compared nothing.** `parentScore` and `childScore` are optional and travel
+together: a candidate aborted for `insufficient_admitted_rows` never computed a
+comparison, so both are absent and `observedDeltas` is empty — `0` and `0`
+would be a measured tie that never happened. Under `'ipw_hajek'` the instrument
+estimates a paired *difference*, so the reading carries `differenceEstimate`
+and no score pair. Half a pair is refused (`invalid_gate_reading`).
+
+**Reflection categories use `perfectScore` as the pass threshold.** `fixed`,
+`regressed`, `still_failing` and `still_passing` split paired rows at
+`perfectScore ?? 1`, reusing the threshold `skipPerfectScore` already means
+rather than inventing a second knob. For a metric that is not normalised to
+`[0, 1]` every row therefore lands in `still_passing` or `still_failing`; there
+is no separate `successThreshold` compile option.
 
 ## Artifact byte budget
 

@@ -47,6 +47,13 @@ export interface AxGEPACandidateLineageOptions {
    * (INV-L1) — the other version-2 fields each have their own compile option
    * (`harnessRecipe`, `mutationAnnotation`, `trajectoryTermination`,
    * `minibatchStrategy`) and these three do not.
+   *
+   * NAMING: the flag gates all THREE of those annotations, not only the
+   * reflection outcomes it is named for. Splitting it into three switches, or
+   * renaming it, would widen the public option surface for a distinction no
+   * caller has asked for — one switch for "the annotations Ax computes on its
+   * own" is the smaller contract. Documented here and in `ax-gepa.md` rather
+   * than left for a reader to discover from the implementation (§12/M4-minor).
    */
   includeReflectionOutcomes?: boolean;
   /** Include bounded per-category example indices in reflection outcomes. Default: false. */
