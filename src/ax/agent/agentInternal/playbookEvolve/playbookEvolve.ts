@@ -1172,7 +1172,6 @@ export async function evolveAgentPlaybook<
       // ---- Evidence conjuncts ----
       let evidence: AxAgentPlaybookEvidenceReceipt | undefined;
       let gateReport: AxAgentPlaybookGateReport | undefined;
-      let candidateWarnings: readonly AxAgentPlaybookEvidenceWarning[] = [];
       if (evidenceEnabled) {
         const terminationSplits = [revalTrain.termination];
         if (revalHeldOutBatch) {
@@ -1210,7 +1209,6 @@ export async function evolveAgentPlaybook<
         const reach = reachCollector?.report({
           delta: currentGain,
         });
-        candidateWarnings = reach?.warnings ?? [];
 
         const overheadSplits: AxAgentPlaybookOverheadSplit[] = [];
         const currentOverhead = overheadSplitFrom({
@@ -1290,7 +1288,7 @@ export async function evolveAgentPlaybook<
         });
 
         const warnings: AxAgentPlaybookEvidenceWarning[] = [
-          ...candidateWarnings,
+          ...(reach?.warnings ?? []),
         ];
         if (currentInterval?.direction === 'unresolved') {
           warnings.push({
@@ -1435,7 +1433,6 @@ export async function evolveAgentPlaybook<
           warnings,
           decision: legacyAccept && chainAccepts ? 'accepted' : 'rejected',
         });
-        candidateWarnings = warnings;
         // The run-level list is a summary, not a concatenation: the same
         // disclosure repeated once per candidate is noise a reader learns to
         // skip, which is how a real warning gets missed.
