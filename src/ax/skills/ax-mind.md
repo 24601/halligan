@@ -127,7 +127,7 @@ const auxiliary: AxMindThinker = {
   reach a runtime that did not exist when the thinker record was built.
 - A thinker never wakes on a SIBLING thinker's contentless step either. The
   suppressed class is read off DECLARED registry facts by
-  `axMindSiblingWakeSuppressed` — `wakeSignal` types (`mind-wake`, `mind-idle`,
+  `axMindSiblingWakeSuppressed`: `wakeSignal` types (`mind-wake`, `mind-idle`,
   `manual-trigger`), `siblingInert` types (`idle`), and `neverRetriggersSelf`
   types (`error`). Never inferred from `spillFields` / `visibleWork` /
   `conversational`: those are storage, pacing and UI concerns, so declare
