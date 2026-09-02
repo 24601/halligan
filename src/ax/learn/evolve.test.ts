@@ -1,3 +1,4 @@
+import { getEventListeners } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
 import type { AxAgentEvalTask } from '../agent/agentInternal/agentOptimizeTypes.js';
 import { agent } from '../agent/index.js';
@@ -556,6 +557,33 @@ describe('axHarnessEvolve — evaluation', { timeout: SLOW }, () => {
     );
   });
 
+  it('both sides failing is a tie and nominates nothing', async () => {
+    // §7.4's null/null row. Neither side produced evidence, so there is no
+    // comparison to win: wins and losses are both zero, nothing is appended,
+    // and the reason must not read as a completed comparison.
+    const h = await harness();
+    const result = await evolve(h, {
+      metric: () => {
+        throw new Error('the metric is broken on both sides');
+      },
+    });
+
+    expect(result.status).toBe('rejected');
+    expect(result.decision?.metrics.wins).toBe(0);
+    expect(result.decision?.metrics.losses).toBe(0);
+    expect(result.decision?.metrics.candidateScore).toBeNull();
+    expect(result.decision?.metrics.currentScore).toBeNull();
+    // `meanOf` collapses null to 0 for the gate's arithmetic, so the reason
+    // has to say the evidence was incomplete rather than quote a 0 -> 0 gain.
+    expect(result.decision?.reason).toBe(
+      'held-in evaluation incomplete or errored'
+    );
+    expect(await h.surface.releases()).toHaveLength(1);
+    // Only the candidate's failures are charged to the manifest, but they ARE
+    // charged: both sides broke, and the candidate's half is real evidence.
+    expect(result.manifest.entries.length).toBeGreaterThan(0);
+  });
+
   it('never attributes a CURRENT-side failure to the candidate', async () => {
     // The mirror of the test above, and the direction that matters most: the
     // manifest is the only thing the proposer is told about its own previous
@@ -796,3 +824,49 @@ describe(
     });
   }
 );
+
+describe('axHarnessEvolve — abort hygiene', { timeout: SLOW }, () => {
+  it('leaves no listener on the caller signal across settled and aborted steps', async () => {
+    // ax-conventions §8: a long-lived wait must prove it does not accumulate
+    // listeners. One controller reused across three steps mirrors a worker
+    // loop; the proposer deadline composes with this signal on every call.
+    //
+    // `mergeAbortSignals` falls back to a manual merge on a runtime with no
+    // `AbortSignal.any`, and that fallback removes its listeners only when the
+    // signal actually aborts — so the fallback is forced here, which is the
+    // path that can actually leak.
+    const originalAny = AbortSignal.any;
+    (AbortSignal as unknown as { any?: unknown }).any = undefined;
+    const controller = new AbortController();
+    const { signal } = controller;
+    try {
+      for (let step = 0; step < 3; step += 1) {
+        const h = await harness();
+        await evolve(h, { propose: () => null, abortSignal: signal });
+      }
+      expect(getEventListeners(signal, 'abort').length).toBe(0);
+
+      // …and the aborting path leaves nothing behind either, while still
+      // restoring the agent it was evaluating.
+      const h = await harness();
+      const target = h.a as unknown as AxHarnessInstallTarget;
+      const aborting = new AbortController();
+      let calls = 0;
+      await expect(
+        evolve(h, {
+          abortSignal: aborting.signal,
+          metric: () => {
+            calls += 1;
+            if (calls >= 2) aborting.abort(new Error('caller stopped'));
+            return 0.5;
+          },
+        })
+      ).rejects.toThrow();
+      expect(getEventListeners(aborting.signal, 'abort').length).toBe(0);
+      expect(axCurrentHarnessInstallation(target)).toBeUndefined();
+      expect(await h.surface.releases()).toHaveLength(1);
+    } finally {
+      (AbortSignal as unknown as { any?: unknown }).any = originalAny;
+    }
+  });
+});

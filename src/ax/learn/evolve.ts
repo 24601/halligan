@@ -40,7 +40,6 @@ import type { AxMetricFn } from '../dsp/common_types.js';
 import type { AxGenIn, AxGenOut } from '../dsp/types.js';
 import { type AxEventClock, AxSystemEventClock } from '../event/types.js';
 import { axEventCanonicalDigest } from '../event/util.js';
-import { mergeAbortSignals } from '../util/abort.js';
 
 import { axApplyHarnessTree, axCurrentHarnessInstallation } from './apply.js';
 import {
@@ -313,20 +312,37 @@ function toNodes(tree: AxHarnessTree) {
     );
 }
 
+/**
+ * Run the proposer under a deadline composed with the caller's signal, and
+ * leave NO listener behind on that signal.
+ *
+ * The composition is explicit rather than `mergeAbortSignals(...)` because
+ * that helper has no disposer: on the manual-merge fallback (a runtime with no
+ * `AbortSignal.any`) its listeners come off only if the signal actually
+ * aborts, so every settled proposer call would leak one listener onto a signal
+ * a worker loop reuses for its whole lifetime. `ax-conventions §8` requires a
+ * long-lived wait to prove it does not; this is the shape
+ * `runtimeExecutionLlmQuery.ts:221-228` already uses.
+ */
 async function withTimeout<T>(
   run: (signal: AbortSignal | undefined) => Promise<T>,
   timeoutMs: number,
   outer?: AbortSignal
 ): Promise<T> {
   const controller = new AbortController();
-  const signal = mergeAbortSignals(outer, controller.signal);
+  if (outer?.aborted) controller.abort(outer.reason);
+  const onOuterAbort = (): void => {
+    controller.abort(outer?.reason);
+  };
+  outer?.addEventListener('abort', onOuterAbort, { once: true });
   const timer = setTimeout(() => {
     controller.abort(new Error('axHarnessEvolve: propose timed out'));
   }, timeoutMs);
   try {
-    return await run(signal);
+    return await run(controller.signal);
   } finally {
     clearTimeout(timer);
+    outer?.removeEventListener('abort', onOuterAbort);
   }
 }
 
