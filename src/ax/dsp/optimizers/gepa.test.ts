@@ -6,6 +6,7 @@ import {
 } from '../optimizer.js';
 import { ax } from '../template.js';
 import { AxGEPA } from './gepa.js';
+import type { AxTrajectoryTerminationClassifier } from './trajectoryTermination.js';
 
 const createSingleRootProgram = (
   baseInstruction: string,
@@ -660,7 +661,7 @@ describe('AxGEPA Optimizer', () => {
       });
     });
 
-    it('does not read candidate-lineage or abort accessors at the opt-in boundary', async () => {
+    it('does not read candidate-lineage, abort, trajectory-termination or sampler accessors at the opt-in boundary', async () => {
       let reads = 0;
       const inheritedOptions = Object.create({
         get candidateLineage() {
@@ -670,6 +671,18 @@ describe('AxGEPA Optimizer', () => {
         get abortSignal() {
           reads += 1;
           throw new Error('inherited abortSignal was read');
+        },
+        get trajectoryTermination() {
+          reads += 1;
+          throw new Error('inherited trajectoryTermination was read');
+        },
+        get minibatchStrategy() {
+          reads += 1;
+          throw new Error('inherited minibatchStrategy was read');
+        },
+        get taskDiscrimination() {
+          reads += 1;
+          throw new Error('inherited taskDiscrimination was read');
         },
       });
       Object.defineProperty(inheritedOptions, 'maxMetricCalls', {
@@ -690,6 +703,27 @@ describe('AxGEPA Optimizer', () => {
           get() {
             reads += 1;
             throw new Error('abortSignal accessor was read');
+          },
+        },
+        trajectoryTermination: {
+          enumerable: true,
+          get() {
+            reads += 1;
+            throw new Error('trajectoryTermination accessor was read');
+          },
+        },
+        minibatchStrategy: {
+          enumerable: true,
+          get() {
+            reads += 1;
+            throw new Error('minibatchStrategy accessor was read');
+          },
+        },
+        taskDiscrimination: {
+          enumerable: true,
+          get() {
+            reads += 1;
+            throw new Error('taskDiscrimination accessor was read');
           },
         },
         maxMetricCalls: { enumerable: true, value: 2 },
@@ -768,7 +802,15 @@ describe('AxGEPA Optimizer', () => {
         compileOptions
       );
 
-      expect(descriptorCalls).toBe(2);
+      // One own-descriptor read per opt-in option reached on the default path:
+      // candidateLineage, abortSignal, trajectoryTermination,
+      // minibatchStrategy and taskDiscrimination. The last is read even on the
+      // uniform path so that supplying it without the strategy that consumes it
+      // can be REPORTED rather than silently ignored; reading an own data
+      // property is not observable in any artifact, event or draw sequence.
+      // This count is the tripwire that a new option was added without being
+      // routed through `ownDataOption`.
+      expect(descriptorCalls).toBe(5);
       expect(result.optimizedProgram?.candidateLineage).toBeUndefined();
     });
 
@@ -1248,5 +1290,1324 @@ describe('AxGEPA Optimizer', () => {
       );
       expect(capturedPrompt).not.toContain('[object Object]');
     });
+  });
+});
+
+describe('AxGEPA trajectory admission', () => {
+  /**
+   * A classifier that calls every rollout failure an environment failure. It is
+   * the most permissive host possible, which is exactly what makes it a useful
+   * test instrument: anything Ax still refuses to discard, it refuses on its
+   * own authority.
+   */
+  const discardEveryFailure: AxTrajectoryTerminationClassifier = (input) =>
+    input.error === undefined
+      ? { kind: 'completed' }
+      : { kind: 'environment_failure', cause: 'transport' };
+
+  const runOptimizer = async (args: {
+    forward: (instruction: string, example: any) => any;
+    examples: readonly Record<string, unknown>[];
+    optimizer?: Record<string, unknown>;
+    compile?: Record<string, unknown>;
+  }) => {
+    const events: any[] = [];
+    const checkpoints: any[] = [];
+    const optimizer = new AxGEPA({
+      studentAI: {} as AxAIService,
+      teacherAI: {} as AxAIService,
+      numTrials: 1,
+      minibatch: false,
+      minImprovementThreshold: 0,
+      debugOptimizer: true,
+      optimizerLogger: (event: any) => events.push(event),
+      checkpointSave: async (checkpoint: any) => {
+        checkpoints.push(checkpoint);
+        return `cp${checkpoints.length}`;
+      },
+      ...args.optimizer,
+    } as any);
+    (optimizer as any).reflectTargetInstruction = async () => 'better';
+    const program = createSingleRootProgram('base', args.forward);
+    const result = await optimizer.compile(
+      program as any,
+      args.examples as any,
+      async ({ prediction }: any) => prediction.score,
+      {
+        maxMetricCalls: 60,
+        candidateLineage: true,
+        ...args.compile,
+      } as any
+    );
+    return { result, events, checkpoints };
+  };
+
+  const lineageRecords = (result: any) =>
+    (result.optimizedProgram?.candidateLineage?.records ?? []) as any[];
+
+  /**
+   * A program whose optimizable components are exactly `kinds`. Used to pin
+   * what a declared `program-source` component does to admission for the WHOLE
+   * program, mutated or not.
+   */
+  const createProgramWithKinds = (
+    kinds: readonly string[],
+    forwardImpl: (example: any) => any
+  ) => {
+    const id = 'root';
+    const values: Record<string, string> = Object.fromEntries(
+      kinds.map((kind) => [`${id}::${kind}`, 'base'])
+    );
+    const program = {
+      getId: () => id,
+      setId: () => {},
+      getInstruction: () => values[`${id}::instruction`] ?? 'base',
+      setInstruction: (next: string) => {
+        values[`${id}::instruction`] = next;
+      },
+      getSignature: () => ({
+        getDescription: () => 'base',
+        toString: () => '"base" question:string -> answer:string',
+      }),
+      namedProgramInstances: () => [{ id, program }],
+      getOptimizableComponents: () =>
+        kinds.map((kind) => ({
+          key: `${id}::${kind}`,
+          kind,
+          current: values[`${id}::${kind}`]!,
+        })),
+      applyOptimizedComponents: (updates: Readonly<Record<string, string>>) => {
+        for (const key of Object.keys(values)) {
+          if (typeof updates[key] === 'string') values[key] = updates[key]!;
+        }
+      },
+      forward: async (_ai: AxAIService, example: any) => forwardImpl(example),
+      getTraces: () => [],
+      setDemos: () => {},
+      applyOptimization: () => {},
+      getUsage: () => [],
+      resetUsage: () => {},
+    };
+    return program;
+  };
+
+  const runWithKinds = async (kinds: readonly string[]) => {
+    const events: any[] = [];
+    const logs: string[] = [];
+    const optimizer = new AxGEPA({
+      studentAI: {} as AxAIService,
+      teacherAI: {} as AxAIService,
+      numTrials: 1,
+      minibatch: false,
+      minImprovementThreshold: 0,
+      debugOptimizer: true,
+      optimizerLogger: (event: any) => events.push(event),
+    } as any);
+    (optimizer as any).reflectTargetInstruction = async () => 'better';
+    const spy = console.log;
+    console.log = (message?: unknown) => {
+      logs.push(String(message));
+    };
+    try {
+      await optimizer.compile(
+        createProgramWithKinds(kinds, () => {
+          throw new Error('provider 429');
+        }) as any,
+        [{ i: 0 }, { i: 1 }, { i: 2 }, { i: 3 }] as any,
+        async ({ prediction }: any) => prediction.score,
+        {
+          maxMetricCalls: 60,
+          verbose: true,
+          candidateLineage: true,
+          trajectoryTermination: {
+            classifier: discardEveryFailure,
+            minAdmittedFraction: 0,
+            maxRunDiscardRate: 1,
+          },
+        } as any
+      );
+    } finally {
+      console.log = spy;
+    }
+    return {
+      admission: events.find((e) => e.name === 'OptimizationComplete')?.value
+        .admission,
+      inertWarning: logs.some((line) =>
+        line.includes('trajectoryTermination is inert for this program')
+      ),
+    };
+  };
+
+  it('admits nothing and says so when the program declares a program-source component', async () => {
+    // Every candidate config is a COMPLETE map, so `affectedKinds` is the whole
+    // program's kind set on every candidate — a declared program-source
+    // component makes every row of the run non-reclassifiable, including the
+    // seed evaluation, which mutated nothing at all. Conservative, but silent
+    // is worse than refusing, so it is stated in the log too.
+    const withSource = await runWithKinds(['instruction', 'program-source']);
+    expect(withSource.admission.discardedRows).toBe(0);
+    expect(withSource.admission.overriddenRows).toBeGreaterThan(0);
+    expect(withSource.admission.overriddenRows).toBe(
+      withSource.admission.evaluatedRows
+    );
+    expect(withSource.inertWarning).toBe(true);
+  });
+
+  it('admits the same rows when the program declares no program-source component', async () => {
+    // The control that makes the test above mean something: identical fixture,
+    // identical classifier, program-source component removed. Now the host's
+    // environment failures stand.
+    const withoutSource = await runWithKinds(['instruction', 'description']);
+    expect(withoutSource.admission.overriddenRows).toBe(0);
+    expect(withoutSource.admission.discardedRows).toBeGreaterThan(0);
+    expect(withoutSource.admission.discardedRows).toBe(
+      withoutSource.admission.evaluatedRows
+    );
+    expect(withoutSource.inertWarning).toBe(false);
+  });
+
+  it('reports the run discard rate without changing what avg, scalars or sum mean', async () => {
+    const { result, events } = await runOptimizer({
+      examples: [{ i: 0 }, { i: 1 }, { i: 2 }, { i: 3 }],
+      forward: (_instruction, example) => {
+        if (example.i === 3) throw new Error('provider 429');
+        return { score: 1 };
+      },
+      compile: { trajectoryTermination: { classifier: discardEveryFailure } },
+    });
+
+    const complete = events.find((e) => e.name === 'OptimizationComplete');
+    expect(complete.value.admission).toMatchObject({
+      discardedRows: expect.any(Number),
+      causes: { transport: expect.any(Number) },
+    });
+    expect(complete.value.admission.discardedRows).toBeGreaterThan(0);
+    expect(complete.value.admission.evaluatedRows).toBe(
+      complete.value.admission.admittedRows +
+        complete.value.admission.discardedRows
+    );
+    // The seed evaluation still averages the discarded zero: admission is a
+    // separate report, never a recomputation of the score.
+    const seed = lineageRecords(result).find((r) => r.strategy === 'seed');
+    expect(seed.evaluations[0].scalarScore).toBe(0.75);
+    expect(seed.evaluations[0].evaluatedExamples).toBe(4);
+  });
+
+  it('emits no admission report when the option is omitted', async () => {
+    const { events } = await runOptimizer({
+      examples: [{ i: 0 }, { i: 1 }],
+      forward: (_instruction, example) => {
+        if (example.i === 1) throw new Error('provider 429');
+        return { score: 1 };
+      },
+    });
+    const complete = events.find((e) => e.name === 'OptimizationComplete');
+    expect(complete.value.admission).toBeUndefined();
+    expect(Object.keys(complete.value)).not.toContain('admission');
+    const progress = events.find((e) => e.name === 'RoundProgress');
+    expect(Object.keys(progress.value)).toEqual([
+      'round',
+      'totalRounds',
+      'currentScore',
+      'bestScore',
+      'configuration',
+    ]);
+  });
+
+  it('keeps skipPerfectScore reading all rows so an environment failure does not skip the round', async () => {
+    const { result } = await runOptimizer({
+      examples: [{ i: 0 }, { i: 1 }],
+      forward: (_instruction, example) => {
+        if (example.i === 1) throw new Error('provider 429');
+        return { score: 1 };
+      },
+      compile: {
+        skipPerfectScore: true,
+        perfectScore: 1,
+        trajectoryTermination: { classifier: discardEveryFailure },
+      },
+    });
+
+    // Every ADMITTED parent row scored a perfect 1. If `scalars` were narrowed
+    // to admitted rows, `scalars.every(s => s >= perfect)` would be true and
+    // the round would be skipped, producing no mutation candidate at all.
+    expect(
+      lineageRecords(result).some((r) => r.strategy === 'reflective_mutation')
+    ).toBe(true);
+  });
+
+  it('aborts a candidate instead of rejecting it when too few child rows were admitted', async () => {
+    const { result, events } = await runOptimizer({
+      examples: [{ i: 0 }, { i: 1 }, { i: 2 }, { i: 3 }],
+      forward: (instruction) => {
+        if (instruction === 'better') throw new Error('provider 429');
+        return { score: 0.5 };
+      },
+      compile: { trajectoryTermination: { classifier: discardEveryFailure } },
+    });
+
+    const mutation = lineageRecords(result).find(
+      (r) => r.strategy === 'reflective_mutation'
+    );
+    expect(mutation).toMatchObject({
+      decision: 'aborted',
+      reason: 'insufficient_admitted_rows',
+      disposition: 'aborted',
+    });
+
+    // An aborted round is the common case under a flaky provider, and lineage
+    // is opt-in — so if the abort path skipped the publisher, the cumulative
+    // discard rate would be invisible in the event stream for exactly the
+    // rounds in which it is climbing.
+    const rounds = events.filter((e) => e.name === 'RoundProgress');
+    expect(rounds).toHaveLength(1);
+    expect(rounds[0].value.configuration.decision).toBe('aborted');
+    expect(rounds[0].value.round).toBe(1);
+    expect(rounds[0].value.admission.discardedRows).toBeGreaterThan(0);
+
+    // The per-batch verdict is not republished under its own name at run
+    // level: this run HAS an inconclusive batch, but "the run is
+    // inconclusive" is a different and unsupported claim.
+    const complete = events.find((e) => e.name === 'OptimizationComplete');
+    expect(complete.value.admission.anyBatchInconclusive).toBe(true);
+    expect('inconclusive' in complete.value.admission).toBe(false);
+    expect('inconclusive' in rounds[0].value.admission).toBe(false);
+  });
+
+  it('reports no inconclusive batch when every batch cleared the floor', async () => {
+    const { events } = await runOptimizer({
+      examples: [{ i: 0 }, { i: 1 }, { i: 2 }, { i: 3 }],
+      forward: (_instruction, example) => {
+        if (example.i === 3) throw new Error('provider 429');
+        return { score: 0.5 };
+      },
+      compile: { trajectoryTermination: { classifier: discardEveryFailure } },
+    });
+
+    const complete = events.find((e) => e.name === 'OptimizationComplete');
+    expect(complete.value.admission.discardedRows).toBeGreaterThan(0);
+    expect(complete.value.admission.anyBatchInconclusive).toBe(false);
+  });
+
+  it('ends the run when the host classifier throws, rather than admitting the row', async () => {
+    // The classifier is called outside the per-row try/catch that turns a
+    // failing rollout into a zero row, so it fails closed: a run whose
+    // admission verdicts are unreliable must not silently fall back to
+    // admitting everything, which is the lax direction.
+    await expect(
+      runOptimizer({
+        examples: [{ i: 0 }, { i: 1 }, { i: 2 }, { i: 3 }],
+        forward: () => ({ score: 0.5 }),
+        compile: {
+          trajectoryTermination: {
+            classifier: () => {
+              throw new Error('host classifier is broken');
+            },
+          },
+        },
+      })
+    ).rejects.toThrow('host classifier is broken');
+  });
+
+  it('ends the run and publishes no best score above the run discard ceiling', async () => {
+    const { result, events, checkpoints } = await runOptimizer({
+      examples: [{ i: 0 }, { i: 1 }, { i: 2 }, { i: 3 }, { i: 4 }, { i: 5 }],
+      forward: () => {
+        throw new Error('provider 429');
+      },
+      compile: {
+        trajectoryTermination: {
+          classifier: discardEveryFailure,
+          maxRunDiscardRate: 0.4,
+          minRunRowsForCeiling: 4,
+        },
+      },
+    });
+
+    expect(result.bestScore).toBe(0);
+    expect(result.optimizedProgram).toBeUndefined();
+    const complete = events.find((e) => e.name === 'OptimizationComplete');
+    expect(complete.value.bestScore).toBe(0);
+    expect(complete.value.bestConfiguration).toEqual({});
+    expect(complete.value.admission.discardRate).toBeGreaterThan(0.4);
+
+    // The terminal state has to be READABLE, not merely reached. The ceiling
+    // suppresses `bestCandidateIdx` by design, so a manifest that keys
+    // `in_progress` on "no candidate selected" erases the only reason a reader
+    // has for an empty artifact and labels the terminated run a periodic
+    // snapshot.
+    const finalCheckpoint = checkpoints.at(-1);
+    expect(finalCheckpoint.optimizerState.final).toBe(true);
+    const manifest = finalCheckpoint.optimizerState.candidateLineage;
+    expect(manifest.stoppedReason).toBe('excessive_environment_failures');
+    expect(manifest.termination.phase).not.toBe('checkpoint_snapshot');
+    expect(manifest.selectedCandidateId).toBeUndefined();
+  });
+
+  it('reports the ceiling as terminal even when it fires on the last round', async () => {
+    // The ceiling is raised inside `evalBatch`, so it can cross during a phase
+    // no loop checkpoint follows. Two trials with a classifier that only starts
+    // discarding once the second round's own evaluation runs: the loop then
+    // ends by exhausting its trials, and only a stop reason recorded where the
+    // ceiling was raised survives that path.
+    let evaluatedBatches = 0;
+    const { result, checkpoints } = await runOptimizer({
+      examples: [{ i: 0 }, { i: 1 }, { i: 2 }, { i: 3 }],
+      optimizer: { numTrials: 2, earlyStoppingTrials: 100 },
+      forward: () => ({ score: 0.5 }),
+      compile: {
+        trajectoryTermination: {
+          classifier: () => {
+            evaluatedBatches += 1;
+            return evaluatedBatches > 8
+              ? { kind: 'environment_failure' as const, cause: 'transport' }
+              : { kind: 'completed' as const };
+          },
+          minAdmittedFraction: 0,
+          maxRunDiscardRate: 0.3,
+          minRunRowsForCeiling: 12,
+        },
+      },
+    });
+
+    expect(result.optimizedProgram).toBeUndefined();
+    const manifest = checkpoints.at(-1).optimizerState.candidateLineage;
+    expect(manifest.stoppedReason).toBe('excessive_environment_failures');
+    expect(manifest.termination.phase).not.toBe('checkpoint_snapshot');
+  });
+
+  it('fires the discard ceiling only from the accumulated run, not from any one batch', async () => {
+    // The whole reason the ceiling is run-level: a classifier that discards a
+    // steady fraction of EVERY batch is invisible to a per-batch floor. Here
+    // `minAdmittedFraction: 0` disables the per-batch floor entirely, every
+    // batch is 4 rows against a `minRunRowsForCeiling` of 12, and exactly half
+    // of each batch is discarded. No single batch can reach the row floor, so
+    // the ceiling can only fire from the accumulated fold — an implementation
+    // that keeps only the latest batch's report never fires it.
+    const discardEveryOtherRow: AxTrajectoryTerminationClassifier = (input) =>
+      input.exampleIndex % 2 === 1
+        ? { kind: 'environment_failure', cause: 'transport' }
+        : { kind: 'completed' };
+    const { result, events, checkpoints } = await runOptimizer({
+      examples: [{ i: 0 }, { i: 1 }, { i: 2 }, { i: 3 }],
+      optimizer: { numTrials: 4, earlyStoppingTrials: 100 },
+      forward: () => ({ score: 0.5 }),
+      compile: {
+        trajectoryTermination: {
+          classifier: discardEveryOtherRow,
+          minAdmittedFraction: 0,
+          maxRunDiscardRate: 0.4,
+          minRunRowsForCeiling: 12,
+        },
+      },
+    });
+
+    const complete = events.find((e) => e.name === 'OptimizationComplete');
+    expect(complete.value.admission.evaluatedRows).toBeGreaterThanOrEqual(12);
+    expect(complete.value.admission.discardRate).toBeCloseTo(0.5, 10);
+    expect(result.bestScore).toBe(0);
+    expect(result.optimizedProgram).toBeUndefined();
+    expect(
+      checkpoints.at(-1).optimizerState.candidateLineage.stoppedReason
+    ).toBe('excessive_environment_failures');
+  });
+
+  it('does not fire the ceiling before the run has accumulated enough rows', async () => {
+    // The negative control for the test above: the same 50% steady discard
+    // under a row floor no run of this length can reach must NOT end the run.
+    const discardEveryOtherRow: AxTrajectoryTerminationClassifier = (input) =>
+      input.exampleIndex % 2 === 1
+        ? { kind: 'environment_failure', cause: 'transport' }
+        : { kind: 'completed' };
+    const { result, events } = await runOptimizer({
+      examples: [{ i: 0 }, { i: 1 }, { i: 2 }, { i: 3 }],
+      optimizer: { numTrials: 4, earlyStoppingTrials: 100 },
+      forward: () => ({ score: 0.5 }),
+      compile: {
+        trajectoryTermination: {
+          classifier: discardEveryOtherRow,
+          minAdmittedFraction: 0,
+          maxRunDiscardRate: 0.4,
+          minRunRowsForCeiling: 10_000,
+        },
+      },
+    });
+
+    const complete = events.find((e) => e.name === 'OptimizationComplete');
+    expect(complete.value.admission.discardRate).toBeCloseTo(0.5, 10);
+    expect(result.optimizedProgram).toBeDefined();
+  });
+
+  it('keeps running below the ceiling on the same fixture', async () => {
+    const { result } = await runOptimizer({
+      examples: [{ i: 0 }, { i: 1 }, { i: 2 }, { i: 3 }, { i: 4 }, { i: 5 }],
+      forward: () => {
+        throw new Error('provider 429');
+      },
+      compile: {
+        trajectoryTermination: {
+          classifier: discardEveryFailure,
+          maxRunDiscardRate: 1,
+          minRunRowsForCeiling: 4,
+          minAdmittedFraction: 0,
+        },
+      },
+    });
+
+    expect(result.optimizedProgram).toBeDefined();
+  });
+
+  it('refuses a host reclassification on a config-error row', async () => {
+    const events: any[] = [];
+    const optimizer = new AxGEPA({
+      studentAI: {} as AxAIService,
+      teacherAI: {} as AxAIService,
+      numTrials: 0,
+      minibatch: false,
+      debugOptimizer: true,
+      optimizerLogger: (event: any) => events.push(event),
+    } as any);
+    let forwardCalls = 0;
+    const program = createSingleRootProgram('base', () => {
+      forwardCalls += 1;
+      return { score: 1 };
+    });
+    (program as any).getOptimizableComponents = () => [
+      {
+        key: 'root::program-source',
+        kind: 'program-source',
+        current: 'source',
+        validate: () => 'always invalid',
+      },
+    ];
+    (program as any).applyOptimizedComponents = () => {};
+
+    const result = await optimizer.compile(
+      program as any,
+      [{ i: 0 }, { i: 1 }] as any,
+      async ({ prediction }: any) => prediction?.score ?? 0,
+      {
+        maxMetricCalls: 20,
+        candidateLineage: true,
+        trajectoryTermination: {
+          classifier: () => ({
+            kind: 'environment_failure',
+            cause: 'sandbox',
+          }),
+        },
+      } as any
+    );
+
+    expect(forwardCalls).toBe(0);
+    expect(result.optimizedProgram).toBeDefined();
+    const complete = events.find((e) => e.name === 'OptimizationComplete');
+    expect(complete.value.admission).toMatchObject({
+      discardedRows: 0,
+      overriddenRows: 2,
+      admittedRows: 2,
+    });
+  });
+});
+
+describe('AxGEPA paired admitted promotion gates', () => {
+  /**
+   * Gate 1 (`reflective_mutation`). The child wins comfortably on the raw
+   * all-rows sum and loses on the rows BOTH evaluations admitted. Only a paired
+   * denominator can tell those apart.
+   */
+  const parentScores = [0.1, 0.1, 0.5, 0.5, 0.5, 0.5, 0.5, 0.1];
+  const childScores = [0.9, 0.9, 0.4, 0.4, 0.4, 0.4, 0.4, 0.9];
+  const examples = Array.from({ length: 8 }, (_, index) => ({ index }));
+
+  const runMutationGate = async (
+    trajectoryTermination?: Record<string, unknown>
+  ) => {
+    const optimizer = new AxGEPA({
+      studentAI: {} as AxAIService,
+      teacherAI: {} as AxAIService,
+      numTrials: 1,
+      minibatch: false,
+      minImprovementThreshold: 0,
+      mergeMax: 0,
+    } as any);
+    (optimizer as any).reflectTargetInstruction = async () => 'better';
+    const program = createSingleRootProgram(
+      'base',
+      (instruction, example: any) => ({
+        score:
+          instruction === 'better'
+            ? childScores[example.index]!
+            : parentScores[example.index]!,
+        index: example.index,
+      })
+    );
+    const result = await optimizer.compile(
+      program as any,
+      examples as any,
+      async ({ prediction }: any) => prediction.score,
+      {
+        maxMetricCalls: 200,
+        skipPerfectScore: false,
+        candidateLineage: true,
+        ...(trajectoryTermination ? { trajectoryTermination } : {}),
+      } as any
+    );
+    const records = (result.optimizedProgram?.candidateLineage?.records ??
+      []) as any[];
+    return records.find((r) => r.strategy === 'reflective_mutation');
+  };
+
+  const discardBy = (
+    rows: Readonly<Record<string, readonly number[]>>
+  ): AxTrajectoryTerminationClassifier => {
+    return (input) => {
+      const index = (input.prediction as any)?.index;
+      return (rows[input.phase] ?? []).includes(index)
+        ? { kind: 'environment_failure', cause: 'transport' }
+        : { kind: 'completed' };
+    };
+  };
+
+  it('promotes the child on the raw all-rows sum when nothing is discarded', async () => {
+    // The baseline the paired test is measured against: 4.7 > 2.8.
+    await expect(runMutationGate()).resolves.toMatchObject({
+      decision: 'accepted',
+      reason: 'improved_minibatch_score',
+    });
+  });
+
+  it('compares only paired admitted rows on the uniform strategy', async () => {
+    const record = await runMutationGate({
+      minAdmittedFraction: 0,
+      maxRunDiscardRate: 1,
+      classifier: discardBy({
+        'parent minibatch': [0, 1],
+        'child minibatch': [7],
+      }),
+    });
+    // Over the intersection {2..6}: child 2.0 <= parent 2.5.
+    expect(record).toMatchObject({
+      decision: 'rejected',
+      reason: 'insufficient_minibatch_improvement',
+    });
+  });
+
+  it('reaches the same decision when both sides discard the same rows', async () => {
+    // Restoring the parent's two rows to the parent while also removing them
+    // from the child leaves the intersection identical, so the decision must be
+    // identical too: the gate depends on the intersection, not on which side
+    // dropped what.
+    const record = await runMutationGate({
+      minAdmittedFraction: 0,
+      maxRunDiscardRate: 1,
+      classifier: discardBy({
+        'parent minibatch': [0, 1, 7],
+        'child minibatch': [0, 1, 7],
+      }),
+    });
+    expect(record).toMatchObject({
+      decision: 'rejected',
+      reason: 'insufficient_minibatch_improvement',
+    });
+  });
+
+  it('aborts rather than rejecting when the parent and child share no admitted row', async () => {
+    // Both sides clear `minAdmittedFraction` on their own, and their admitted
+    // sets are disjoint, so there is nothing to compare. A sum of 0 against a
+    // sum of 0 is not a rejection, it is no evidence, and a rejection here
+    // would burn an `earlyStoppingTrials` slot on a provider outage.
+    const record = await runMutationGate({
+      minAdmittedFraction: 0,
+      maxRunDiscardRate: 1,
+      classifier: discardBy({
+        'parent minibatch': [0, 1, 2, 3],
+        'child minibatch': [4, 5, 6, 7],
+      }),
+    });
+    expect(record).toMatchObject({
+      decision: 'aborted',
+      reason: 'insufficient_admitted_rows',
+      disposition: 'aborted',
+    });
+  });
+
+  it('still promotes the child when the discarded rows are outside the disagreement', async () => {
+    // Negative control: discarding rows the two candidates agree on must not
+    // flip the decision, or the test above would prove nothing about pairing.
+    const record = await runMutationGate({
+      minAdmittedFraction: 0,
+      maxRunDiscardRate: 1,
+      classifier: discardBy({
+        'parent minibatch': [3],
+        'child minibatch': [4],
+      }),
+    });
+    expect(record).toMatchObject({ decision: 'accepted' });
+  });
+});
+
+describe('AxGEPA merge gate paired admitted rows', () => {
+  /**
+   * Gate 2 (`system_merge`, on by default: `mergeMax` is 5). It compares a
+   * fresh subsample evaluation against CACHED per-instance scores of the two
+   * parents, so its denominator has three sources, not two.
+   *
+   * Two components over nine examples whose rows rotate through three kinds:
+   * `a` rows that A's improvement helps, `b` rows that B's helps, and `n` rows
+   * that every improvement hurts slightly — the `n` rows are what keep the
+   * siblings mutually non-dominated so a merge is reachable at all.
+   *
+   * `pickSome` draws two `a` rows, two `b` rows and one `n` row, and every row
+   * of a kind carries the same score, so the subsample's composition is fixed
+   * and these sums are exact:
+   *
+   *   merge over all 5:  2(0.53125) + 2(0.6875) + 0.46875 = 2.90625
+   *   parent A over all: 2(0.75)    + 2(0.5)    + 0.46875 = 2.96875
+   *   parent B over all: 2(0.5)     + 2(0.625)  + 0.46875 = 2.71875
+   *   -> 2.90625 < max(...) = 2.96875, so the merge is REJECTED.
+   *
+   * Drop the two `a` rows from the denominator and it inverts:
+   *
+   *   merge over {b,b,n}: 1.375   + 0.46875 = 1.84375
+   *   parent A:           1.0     + 0.46875 = 1.46875
+   *   parent B:           1.25    + 0.46875 = 1.71875
+   *   -> 1.84375 >= 1.71875, so the merge is ACCEPTED.
+   *
+   * The merge candidate is deliberately WORSE than the better parent overall
+   * and better than both on the rows that survive, which is the only shape that
+   * can tell an intersected denominator from a raw one.
+   */
+  const MERGE_TABLE = {
+    a: { none: 0.5, A: 0.75, B: 0.5, AB: 0.53125 },
+    b: { none: 0.5, A: 0.5, B: 0.625, AB: 0.6875 },
+    n: { none: 0.5, A: 0.46875, B: 0.46875, AB: 0.46875 },
+  } as const;
+
+  const buildTwoComponentProgram = () => {
+    const componentA = 'root::instruction';
+    const componentB = 'root::description';
+    const values: Record<string, string> = {
+      [componentA]: 'base',
+      [componentB]: 'base',
+    };
+    const rowKind = (index: number) => (['a', 'b', 'n'] as const)[index % 3]!;
+    const improvedKey = () => {
+      const a = values[componentA] === `better-${componentA}`;
+      const b = values[componentB] === `better-${componentB}`;
+      if (a && b) return 'AB' as const;
+      if (a) return 'A' as const;
+      if (b) return 'B' as const;
+      return 'none' as const;
+    };
+    return {
+      getId: () => 'root',
+      setId: () => {},
+      getInstruction: () => values[componentA]!,
+      setInstruction: (value: string) => {
+        values[componentA] = value;
+      },
+      getSignature: () => ({
+        getDescription: () => values[componentB]!,
+        toString: () => '"base" question:string -> answer:string',
+      }),
+      namedProgramInstances: () => [],
+      getOptimizableComponents: () => [
+        { key: componentA, kind: 'instruction', current: values[componentA]! },
+        { key: componentB, kind: 'description', current: values[componentB]! },
+      ],
+      applyOptimizedComponents: (updates: Readonly<Record<string, string>>) => {
+        for (const id of [componentA, componentB]) {
+          const next = updates[id];
+          if (typeof next === 'string') values[id] = next;
+        }
+      },
+      forward: async (_ai: AxAIService, example: any) => ({
+        score: MERGE_TABLE[rowKind(example.index)][improvedKey()],
+        index: example.index,
+        kind: rowKind(example.index),
+      }),
+      getTraces: () => [],
+      setDemos: () => {},
+      applyOptimization: () => {},
+      getUsage: () => [],
+      resetUsage: () => {},
+    };
+  };
+
+  const runMergeGate = async (
+    trajectoryTermination?: Record<string, unknown>
+  ) => {
+    const optimizer = new AxGEPA({
+      studentAI: {} as AxAIService,
+      teacherAI: {} as AxAIService,
+      numTrials: 12,
+      earlyStoppingTrials: 30,
+      minibatch: true,
+      minibatchSize: 2,
+      mergeMax: 5,
+    } as any);
+    (optimizer as any).reflectTargetInstruction = async (componentId: string) =>
+      `better-${componentId}`;
+    const result = await optimizer.compile(
+      buildTwoComponentProgram() as any,
+      Array.from({ length: 9 }, (_, index) => ({ index })) as any,
+      async ({ prediction }: any) => prediction.score,
+      {
+        maxMetricCalls: 400,
+        skipPerfectScore: false,
+        candidateLineage: true,
+        ...(trajectoryTermination ? { trajectoryTermination } : {}),
+      } as any
+    );
+    return (
+      (result.optimizedProgram?.candidateLineage?.records ?? []) as any[]
+    ).filter((r) => r.strategy === 'system_merge');
+  };
+
+  const subsampleSum = (record: any): number => {
+    const merge = record.evaluations.find(
+      (evaluation: any) => evaluation.phase === 'merge_subsample'
+    );
+    return merge.scalarScore * merge.evaluatedExamples;
+  };
+
+  const discardKindInPhase =
+    (phase: string): AxTrajectoryTerminationClassifier =>
+    (input) =>
+      input.phase === phase && (input.prediction as any)?.kind === 'a'
+        ? { kind: 'environment_failure', cause: 'rate_limit' }
+        : { kind: 'completed' };
+
+  it('rejects the merge on the full denominator', async () => {
+    const merges = await runMergeGate();
+    expect(merges.length).toBeGreaterThan(0);
+    expect(merges.every((r) => r.decision === 'rejected')).toBe(true);
+    expect(merges.map(subsampleSum)).toContainEqual(2.90625);
+  });
+
+  it('compares only paired admitted rows at the merge gate', async () => {
+    const merges = await runMergeGate({
+      minAdmittedFraction: 0,
+      maxRunDiscardRate: 1,
+      classifier: discardKindInPhase('merge subsample'),
+    });
+    expect(merges.length).toBeGreaterThan(0);
+    expect(merges.some((r) => r.decision === 'accepted')).toBe(true);
+  });
+
+  it('aborts the merge rather than accepting it when the denominator is empty', async () => {
+    // `newSum >= Math.max(id1Sum, id2Sum) + threshold` is 0 >= 0 + 0, which is
+    // TRUE — so an empty denominator promotes a merge on no evidence at all
+    // unless the gate refuses first. Reachable even though the merge
+    // evaluation itself cleared its admitted floor, because the parents'
+    // cached masks exclude everything it kept.
+    const merges = await runMergeGate({
+      minAdmittedFraction: 0,
+      maxRunDiscardRate: 1,
+      classifier: (input) =>
+        input.phase === 'validation evaluation' ||
+        input.phase === 'initial Pareto evaluation'
+          ? { kind: 'environment_failure', cause: 'rate_limit' }
+          : { kind: 'completed' },
+    });
+    expect(merges.length).toBeGreaterThan(0);
+    expect(merges.every((r) => r.decision !== 'accepted')).toBe(true);
+    expect(
+      merges.some(
+        (r) =>
+          r.decision === 'aborted' && r.reason === 'insufficient_admitted_rows'
+      )
+    ).toBe(true);
+  });
+
+  it('honours the cached per-instance admitted mask of both parents', async () => {
+    // Nothing is discarded during the merge subsample here: the rows leave the
+    // denominator only because the PARENTS' cached validation evaluations
+    // discarded them. Without `perInstanceAdmitted` there is no way to know
+    // that, and the merge stays rejected.
+    const merges = await runMergeGate({
+      minAdmittedFraction: 0,
+      maxRunDiscardRate: 1,
+      classifier: discardKindInPhase('validation evaluation'),
+    });
+    expect(merges.length).toBeGreaterThan(0);
+    expect(merges.some((r) => r.decision === 'accepted')).toBe(true);
+  });
+});
+
+describe('AxGEPA discriminative minibatch selection', () => {
+  const buildProgram = (
+    score: (index: number, instruction: string) => number
+  ) => {
+    let instruction = 'base';
+    return {
+      getId: () => 'root',
+      setId: () => {},
+      getInstruction: () => instruction,
+      setInstruction: (value: string) => {
+        instruction = value;
+      },
+      getSignature: () => ({
+        getDescription: () => 'base',
+        toString: () => '"base" question:string -> answer:string',
+      }),
+      namedProgramInstances: () => [],
+      getOptimizableComponents: () => [
+        { key: 'root::instruction', kind: 'instruction', current: instruction },
+      ],
+      applyOptimizedComponents: (updates: Readonly<Record<string, string>>) => {
+        const next = updates['root::instruction'];
+        if (typeof next === 'string') instruction = next;
+      },
+      forward: async (_ai: AxAIService, example: any) => ({
+        score: score(example.index, instruction),
+        index: example.index,
+      }),
+      getTraces: () => [],
+      setDemos: () => {},
+      applyOptimization: () => {},
+      getUsage: () => [],
+      resetUsage: () => {},
+    };
+  };
+
+  /**
+   * 12 tasks. Task 0 is the only one that ever separates a pass from a fail:
+   * it alternates on every rollout, so its smoothed pass rate sits at 0.5 and
+   * its Bernoulli variance at the maximum 0.25. The other eleven always pass,
+   * so their variance decays toward zero as trials accumulate and a
+   * variance-weighted sampler must starve them down toward the exploration
+   * floor — which it may never cross.
+   */
+  const buildDiscriminatingFixture = () => {
+    let flips = 0;
+    return buildProgram((index) => {
+      if (index !== 0) return 1;
+      flips += 1;
+      return flips % 2;
+    });
+  };
+
+  /** Every proposal is a real improvement, so every round runs a validation evaluation. */
+  const buildImprovingFixture = () =>
+    buildProgram((_index, instruction) =>
+      instruction === 'base' ? 0.1 : Number(instruction.slice(1)) / 100
+    );
+
+  const run = async (args: {
+    strategy?: 'uniform' | 'discriminative';
+    numTrials?: number;
+    minImprovementThreshold?: number;
+    taskCount?: number;
+    program?: unknown;
+    minibatchSize?: number;
+    reflect?: () => Promise<string>;
+    trajectoryTermination?: unknown;
+  }) => {
+    const events: any[] = [];
+    const optimizer = new AxGEPA({
+      studentAI: {} as AxAIService,
+      teacherAI: {} as AxAIService,
+      numTrials: args.numTrials ?? 8,
+      earlyStoppingTrials: 100,
+      minibatch: true,
+      minibatchSize: args.minibatchSize ?? 2,
+      mergeMax: 0,
+      minImprovementThreshold: args.minImprovementThreshold ?? 0,
+      debugOptimizer: true,
+      optimizerLogger: (event: any) => events.push(event),
+    } as any);
+    (optimizer as any).reflectTargetInstruction =
+      args.reflect ?? (async () => 'better');
+    const result = await optimizer.compile(
+      (args.program ?? buildDiscriminatingFixture()) as any,
+      Array.from({ length: args.taskCount ?? 12 }, (_, index) => ({
+        index,
+      })) as any,
+      async ({ prediction }: any) => prediction.score,
+      {
+        maxMetricCalls: 500,
+        skipPerfectScore: false,
+        candidateLineage: true,
+        ...(args.strategy ? { minibatchStrategy: args.strategy } : {}),
+        ...(args.trajectoryTermination
+          ? { trajectoryTermination: args.trajectoryTermination }
+          : {}),
+      } as any
+    );
+    return { result, events };
+  };
+
+  it('says so when taskDiscrimination is supplied without the strategy that reads it', async () => {
+    const logs: string[] = [];
+    const spy = console.log;
+    console.log = (message?: unknown) => {
+      logs.push(String(message));
+    };
+    try {
+      const optimizer = new AxGEPA({
+        studentAI: {} as AxAIService,
+        teacherAI: {} as AxAIService,
+        numTrials: 1,
+        minibatch: true,
+        minibatchSize: 2,
+        mergeMax: 0,
+      } as any);
+      (optimizer as any).reflectTargetInstruction = async () => 'better';
+      await optimizer.compile(
+        buildDiscriminatingFixture() as any,
+        Array.from({ length: 4 }, (_, index) => ({ index })) as any,
+        async ({ prediction }: any) => prediction.score,
+        {
+          maxMetricCalls: 100,
+          verbose: true,
+          taskDiscrimination: { explorationFloor: 0.3 },
+        } as any
+      );
+    } finally {
+      console.log = spy;
+    }
+    expect(
+      logs.some((line) => line.includes('taskDiscrimination was supplied'))
+    ).toBe(true);
+  });
+
+  it('draws no inclusion snapshot and reports no summary under the default strategy', async () => {
+    const { events } = await run({ numTrials: 2 });
+    expect(
+      events
+        .filter((e) => e.name === 'RoundProgress')
+        .every((e) => e.value.inclusionSnapshot === undefined)
+    ).toBe(true);
+    expect(
+      events.find((e) => e.name === 'OptimizationComplete').value.discrimination
+    ).toBeUndefined();
+  });
+
+  it('concentrates the drawn minibatch on the one discriminating task', async () => {
+    const { events } = await run({ strategy: 'discriminative', numTrials: 40 });
+    const snapshots = events
+      .filter((e) => e.name === 'RoundProgress')
+      .map((e) => e.value.inclusionSnapshot);
+    expect(snapshots.length).toBe(40);
+
+    const draws = new Map<number, number>();
+    for (const snapshot of snapshots) {
+      for (const index of snapshot.sampledIndices) {
+        draws.set(index, (draws.get(index) ?? 0) + 1);
+      }
+    }
+    const discriminating = draws.get(0) ?? 0;
+    const others = [...Array.from({ length: 11 }, (_, i) => i + 1)].map(
+      (index) => draws.get(index) ?? 0
+    );
+    const averageOther =
+      others.reduce((total, count) => total + count, 0) / others.length;
+    // A sampler that computes inclusion probabilities and then ignores them
+    // when drawing would leave this at parity: the assertion is on the SAMPLED
+    // indices, not on the published probabilities. Under a uniform draw every
+    // task's expectation is 40 * 2 / 12 = 6.67.
+    expect(discriminating).toBeGreaterThan(averageOther * 2);
+
+    // The exploration floor is mandatory and non-optional: with
+    // explorationFloor 0.2, batchSize 2 and 12 tasks, no task may fall below
+    // 2 * 0.2 / 12 even after 40 rounds of being useless.
+    const floor = (2 * 0.2) / 12;
+    for (const snapshot of snapshots) {
+      for (const inclusion of snapshot.inclusions) {
+        expect(inclusion.probability).toBeGreaterThanOrEqual(floor - 1e-12);
+      }
+    }
+    // ...and every always-passing task was still drawn at least once.
+    expect(others.every((count) => count > 0)).toBe(true);
+  });
+
+  it('starts statistically uniform, because a cold table has nothing to concentrate on', async () => {
+    const { events } = await run({ strategy: 'discriminative', numTrials: 2 });
+    const first = events.find((e) => e.name === 'RoundProgress').value
+      .inclusionSnapshot;
+    const probabilities = first.inclusions.map((i: any) => i.probability);
+    for (const probability of probabilities) {
+      expect(probability).toBeCloseTo(first.batchSize / first.taskCount, 12);
+    }
+  });
+
+  it('feeds the stat table from exactly the parent and child minibatch phases', async () => {
+    const rounds = 4;
+    const minibatchSize = 2;
+    let version = 0;
+    const nextVersion = () => {
+      version += 10;
+      return `v${version}`;
+    };
+    const { events } = await run({
+      strategy: 'discriminative',
+      numTrials: rounds,
+      minibatchSize,
+      // Every proposal is accepted, so a validation evaluation over all twelve
+      // tasks runs in every round alongside the seed evaluation. Neither may
+      // reach the table.
+      program: buildImprovingFixture(),
+      reflect: async () => nextVersion(),
+    });
+    const summary = events.find((e) => e.name === 'OptimizationComplete').value
+      .discrimination;
+    const totalTrials = summary.finalStats.reduce(
+      (total: number, stat: any) => total + stat.trials,
+      0
+    );
+    // Two trials per sampled task per round, and nothing else. The seed
+    // evaluation and every round's validation evaluation both run over all 12
+    // tasks here, so a table fed from any other phase would overshoot this by a
+    // wide margin.
+    expect(totalTrials).toBe(2 * minibatchSize * rounds);
+    expect(summary.iterations).toBe(rounds);
+    expect(summary.strategy).toBe('discriminative');
+    expect(summary.serializedBytes).toBeGreaterThan(0);
+  });
+
+  it('reports the non-discriminative task fraction over the tasks it actually sampled', async () => {
+    const { events } = await run({ strategy: 'discriminative', numTrials: 12 });
+    const summary = events.find((e) => e.name === 'OptimizationComplete').value
+      .discrimination;
+    // Eleven of the twelve tasks pass for every candidate; only task 0 splits.
+    expect(summary.nonDiscriminativeTaskFraction).toBeGreaterThan(0.5);
+    expect(summary.nonDiscriminativeTaskFraction).toBeLessThan(1);
+  });
+
+  it('compares a per-example mean under discriminative and a sum under uniform', async () => {
+    // Every task improves by exactly +0.4, so the drawn batch cannot matter:
+    // over two rows the SUM difference is 0.8 and the MEAN difference is 0.4.
+    // A threshold of 0.6 sits between them, so the two estimators must disagree
+    // — and only the estimator can explain the disagreement.
+    let instruction = 'base';
+    const program = {
+      getId: () => 'root',
+      setId: () => {},
+      getInstruction: () => instruction,
+      setInstruction: (value: string) => {
+        instruction = value;
+      },
+      getSignature: () => ({
+        getDescription: () => 'base',
+        toString: () => '"base" question:string -> answer:string',
+      }),
+      namedProgramInstances: () => [],
+      getOptimizableComponents: () => [
+        { key: 'root::instruction', kind: 'instruction', current: instruction },
+      ],
+      applyOptimizedComponents: (updates: Readonly<Record<string, string>>) => {
+        const next = updates['root::instruction'];
+        if (typeof next === 'string') instruction = next;
+      },
+      forward: async () => ({
+        score: instruction === 'better' ? 0.5 : 0.1,
+      }),
+      getTraces: () => [],
+      setDemos: () => {},
+      applyOptimization: () => {},
+      getUsage: () => [],
+      resetUsage: () => {},
+    };
+
+    const decisionOf = async (strategy?: 'discriminative') => {
+      const { result } = await run({
+        strategy,
+        numTrials: 1,
+        minImprovementThreshold: 0.6,
+        program,
+      });
+      instruction = 'base';
+      return (
+        (result.optimizedProgram?.candidateLineage?.records ?? []) as any[]
+      ).find((r) => r.strategy === 'reflective_mutation')?.decision;
+    };
+
+    expect(await decisionOf()).toBe('accepted');
+    expect(await decisionOf('discriminative')).toBe('rejected');
+  });
+
+  /**
+   * The fourth quadrant of the promotion table: a classifier AND the
+   * discriminative sampler, together. Each commit's own tests cover one row of
+   * §7.3 each; this is the row where they interact, and it is also the only
+   * place the stat table's "an environment failure is not evidence about task
+   * difficulty either" rule is reachable, because every other sampler test
+   * runs without a classifier and so has no discarded row to skip.
+   *
+   * Task 0 is the only task that separates the candidates. The classifier
+   * discards exactly task 0.
+   */
+  const discriminatingTaskFixture = () =>
+    buildProgram((index, instruction) =>
+      index === 0 ? (instruction === 'better' ? 1 : 0) : 0.5
+    );
+  const discardTaskZero: AxTrajectoryTerminationClassifier = (input) =>
+    input.exampleIndex === 0
+      ? { kind: 'environment_failure', cause: 'transport' }
+      : { kind: 'completed' };
+
+  const runDiscriminatingFixture = (trajectoryTermination?: unknown) =>
+    run({
+      strategy: 'discriminative',
+      numTrials: 6,
+      minibatchSize: 2,
+      taskCount: 4,
+      program: discriminatingTaskFixture(),
+      ...(trajectoryTermination ? { trajectoryTermination } : {}),
+    });
+
+  it('promotes on the discriminative gate when the only discriminating task is admitted', async () => {
+    const { result } = await runDiscriminatingFixture();
+    expect(
+      (
+        (result.optimizedProgram?.candidateLineage?.records ?? []) as any[]
+      ).filter((r) => r.strategy === 'reflective_mutation')
+    ).toContainEqual(expect.objectContaining({ decision: 'accepted' }));
+  });
+
+  it('refuses the same promotion once the discriminating task leaves the paired denominator', async () => {
+    // Both per-batch floors are disabled so the only thing that can change the
+    // decision is the paired denominator itself, not an inconclusive batch or
+    // the run ceiling.
+    const { result, events } = await runDiscriminatingFixture({
+      classifier: discardTaskZero,
+      minAdmittedFraction: 0,
+      maxRunDiscardRate: 1,
+    });
+
+    // The raw batch sum still contains task 0's 1-against-0 improvement — the
+    // all-rows meaning of `sum` never changes — so only the intersected
+    // denominator can explain the rejection.
+    const mutations = (
+      (result.optimizedProgram?.candidateLineage?.records ?? []) as any[]
+    ).filter((r) => r.strategy === 'reflective_mutation');
+    expect(mutations.length).toBeGreaterThan(0);
+    expect(mutations.every((r) => r.decision === 'rejected')).toBe(true);
+
+    // And the discarded rows are not evidence about task difficulty either.
+    // Asserting that task 0 was actually DRAWN is what stops this from passing
+    // vacuously on a sampler that simply never sampled it.
+    const snapshots = events
+      .filter((e) => e.name === 'RoundProgress')
+      .map((e) => e.value.inclusionSnapshot)
+      .filter(Boolean);
+    const drawn = snapshots.flatMap((snapshot: any) => snapshot.sampledIndices);
+    expect(drawn).toContain(0);
+    const summary = events.find((e) => e.name === 'OptimizationComplete').value
+      .discrimination;
+    expect(summary.finalStats[0].trials).toBe(0);
+    expect(
+      summary.finalStats
+        .slice(1)
+        .reduce((total: number, stat: any) => total + stat.trials, 0)
+    ).toBeGreaterThan(0);
+  });
+});
+
+describe('AxGEPA RNG stream discipline (INV-L5)', () => {
+  /**
+   * `this.rand()` is a single shared xorshift stream with four consumers: the
+   * epoch shuffler, parent selection, the merge subsample's unbounded
+   * collision loop, and — only under `'discriminative'` — the sampler.
+   *
+   * Comparing the resulting minibatch indices would pass while a refactor moved
+   * a draw from one consumer to another and silently changed parent selection,
+   * so the COUNT is what is frozen here.
+   */
+  const countDraws = async (
+    compileOptions: Record<string, unknown>
+  ): Promise<number> => {
+    let values: Record<string, string> = {};
+    const componentIds = [
+      'root::instruction',
+      'root::description',
+      'root::fn-desc:answer',
+    ];
+    values = Object.fromEntries(componentIds.map((id) => [id, 'base']));
+    const owner = (index: number) => componentIds[index % 3]!;
+    const program = {
+      getId: () => 'root',
+      setId: () => {},
+      getInstruction: () => values['root::instruction']!,
+      setInstruction: (value: string) => {
+        values['root::instruction'] = value;
+      },
+      getSignature: () => ({
+        getDescription: () => values['root::description']!,
+        toString: () => '"base" question:string -> answer:string',
+      }),
+      namedProgramInstances: () => [],
+      getOptimizableComponents: () =>
+        componentIds.map((key, position) => ({
+          key,
+          kind: ['instruction', 'description', 'fn-desc'][position]!,
+          current: values[key]!,
+        })),
+      applyOptimizedComponents: (updates: Readonly<Record<string, string>>) => {
+        for (const id of componentIds) {
+          const next = updates[id];
+          if (typeof next === 'string') values[id] = next;
+        }
+      },
+      forward: async (_ai: AxAIService, example: any) => {
+        const improved = componentIds.filter(
+          (id) => values[id] === `better-${id}`
+        );
+        const own = improved.includes(owner(example.index)) ? 0.4 : 0;
+        const others = improved.filter(
+          (id) => id !== owner(example.index)
+        ).length;
+        return { score: 0.6 + own - 0.05 * others, index: example.index };
+      },
+      getTraces: () => [],
+      setDemos: () => {},
+      applyOptimization: () => {},
+      getUsage: () => [],
+      resetUsage: () => {},
+    };
+
+    const optimizer = new AxGEPA({
+      studentAI: {} as AxAIService,
+      teacherAI: {} as AxAIService,
+      numTrials: 6,
+      minibatch: true,
+      minibatchSize: 2,
+      mergeMax: 5,
+    } as any);
+    let draws = 0;
+    const rand = (optimizer as any).rand.bind(optimizer);
+    (optimizer as any).rand = () => {
+      draws += 1;
+      return rand();
+    };
+    (optimizer as any).reflectTargetInstruction = async (componentId: string) =>
+      `better-${componentId}`;
+    await optimizer.compile(
+      program as any,
+      Array.from({ length: 9 }, (_, index) => ({ index })) as any,
+      async ({ prediction }: any) => prediction.score,
+      { maxMetricCalls: 200, skipPerfectScore: false, ...compileOptions } as any
+    );
+    return draws;
+  };
+
+  it('consumes an identical rand() draw count when the strategy is omitted', async () => {
+    // Frozen against origin/main. A refactor that relocates a draw fails here
+    // even when every minibatch index still matches.
+    expect(await countDraws({})).toBe(59);
+    expect(await countDraws({ minibatchStrategy: 'uniform' })).toBe(59);
+  });
+
+  it('consumes a different, smaller draw count under discriminative', async () => {
+    // Stated rather than assumed: the epoch shuffler is replaced by exactly one
+    // Madow draw per minibatch, so a discriminative run is not seed-comparable
+    // to a uniform one draw-for-draw. That is why the invariance gate pins the
+    // uniform count and the evaluation compares outcomes, not streams.
+    const discriminative = await countDraws({
+      minibatchStrategy: 'discriminative',
+    });
+    expect(discriminative).toBeLessThan(59);
+    expect(discriminative).toBeGreaterThan(0);
   });
 });

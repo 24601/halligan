@@ -1210,6 +1210,7 @@ import type {
   AxGEPABatchEvaluation,
   AxGEPABatchRow,
   AxGEPAEvaluationState,
+  AxGEPATerminationArgs,
 } from './dsp/optimizers/gepaEvaluation.js';
 import type {
   AxGEPACandidateComponentDelta,
@@ -1332,6 +1333,7 @@ import {
   axSummarizeTrajectoryAdmission,
 } from './dsp/optimizers/trajectoryTermination.js';
 import type {
+  AxGEPARunAdmissionReport,
   AxOptimizerLoggerData,
   AxOptimizerLoggerFunction,
 } from './dsp/optimizerTypes.js';
@@ -3684,6 +3686,8 @@ export type { AxGEPAProposalPolicyArgs };
 export type { AxGEPAReflectiveTuple };
 export type { AxGEPARejectedPriorBlock };
 export type { AxGEPAResolvedLineageOptions };
+export type { AxGEPARunAdmissionReport };
+export type { AxGEPATerminationArgs };
 export type { AxGEPATraceSummary };
 export type { AxGEPATraceSummaryCall };
 export type { AxGateAuthorityOutcome };

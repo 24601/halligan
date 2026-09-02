@@ -92,7 +92,13 @@ export interface AxGEPACandidateLineageManifest {
     | 'completed'
     | 'budget_exhausted'
     | 'early_stopping'
-    | 'aborted';
+    | 'aborted'
+    /**
+     * The run-level trajectory-admission ceiling fired: a host classifier
+     * discarded more than `maxRunDiscardRate` of the evaluated rows. Only
+     * reachable when `AxCompileOptions.trajectoryTermination` is supplied.
+     */
+    | 'excessive_environment_failures';
   readonly termination: {
     readonly phase: string;
     readonly round: number;

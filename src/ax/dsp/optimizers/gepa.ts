@@ -13,6 +13,7 @@ import {
   AxOptimizedProgramImpl,
   type AxParetoResult,
 } from '../optimizer.js';
+import type { AxGEPARunAdmissionReport } from '../optimizerTypes.js';
 import { ax } from '../template.js';
 import type { AxGenOut, AxProgrammable } from '../types.js';
 import type { AxGEPAAdapter } from './gepaAdapter.js';
@@ -58,6 +59,28 @@ import {
   removeDominatedProgramsByInstanceFronts,
   selectProgramCandidateFromInstanceFronts,
 } from './paretoUtils.js';
+import {
+  type AxMinibatchStrategy,
+  type AxTaskDiscriminationOptions,
+  type AxTaskDiscriminationSummary,
+  type AxTaskInclusion,
+  type AxTaskInclusionSnapshot,
+  type AxTaskStatPhase,
+  type AxTaskStatTable,
+  axComputeInclusionProbabilities,
+  axCreateTaskStatTable,
+  axIpwPairedDifference,
+  axResolveTaskDiscriminationOptions,
+  axSampleByInclusion,
+} from './taskDiscrimination.js';
+import {
+  type AxTrajectoryAdmissionOptions,
+  type AxTrajectoryAdmissionReport,
+  axExceedsRunDiscardCeiling,
+  axMergeTrajectoryAdmission,
+  axPairedAdmittedIndices,
+  axResolveTrajectoryAdmissionOptions,
+} from './trajectoryTermination.js';
 
 /** Structured optimization report */
 export interface AxGEPAOptimizationReport {
@@ -377,6 +400,219 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       'candidateLineage'
     );
     const gepaAbortSignal = ownDataOption<AbortSignal>('abortSignal');
+    const trajectoryTerminationInput =
+      ownDataOption<AxTrajectoryAdmissionOptions>('trajectoryTermination');
+    const admissionOptions =
+      typeof trajectoryTerminationInput === 'object' &&
+      trajectoryTerminationInput !== null
+        ? axResolveTrajectoryAdmissionOptions(trajectoryTerminationInput)
+        : undefined;
+    /**
+     * Component kinds the evaluated config actually carries. Derived from the
+     * program's declared components, never from a free-text label, because
+     * `program-source` membership decides which rows a host may not relabel.
+     *
+     * CANDIDATE-INDEPENDENT BY CONSTRUCTION: every candidate `cfg` is a
+     * complete config map (the seed spread with one component overridden), so
+     * this is the whole program's kind set on every candidate, not the set the
+     * candidate changed. A program that declares a `program-source` component
+     * therefore makes EVERY row of the run non-reclassifiable. That is
+     * deliberate rather than incidental — see the `verboseLog` below — because
+     * the alternative launders the R4 hole: an instruction-only candidate that
+     * drives the shared evolved AST into budget errors or bad tool calls would
+     * have exactly those rows dropped from its own denominator.
+     */
+    const kindsForCfg = (
+      cfg: Readonly<Record<string, string>>
+    ): readonly string[] => {
+      const kinds = new Set<string>();
+      for (const target of targets) {
+        if (typeof cfg[target.id] === 'string') kinds.add(target.kind);
+      }
+      return [...kinds];
+    };
+    const minibatchStrategy =
+      ownDataOption<AxMinibatchStrategy>('minibatchStrategy') ?? 'uniform';
+    // Read unconditionally so the "supplied but ignored" case can be reported
+    // instead of silently dropped. Reading an own data property is not
+    // observable in any artifact, event or draw sequence.
+    const taskDiscriminationInput =
+      ownDataOption<AxTaskDiscriminationOptions>('taskDiscrimination');
+    const discriminationOptions =
+      minibatchStrategy === 'discriminative'
+        ? axResolveTaskDiscriminationOptions(taskDiscriminationInput)
+        : undefined;
+    // The sampler only replaces the MINIBATCH draw, so it is inert when GEPA is
+    // evaluating the whole feedback set every round.
+    const discriminativeEnabled =
+      discriminationOptions !== undefined &&
+      this.minibatch &&
+      effectiveFeedbackSet.length >= 1;
+    const statTable: AxTaskStatTable | undefined = discriminativeEnabled
+      ? axCreateTaskStatTable(
+          effectiveFeedbackSet.length,
+          discriminationOptions!
+        )
+      : undefined;
+    const discriminativeBatchSize = Math.max(
+      1,
+      Math.min(this.minibatchSize, effectiveFeedbackSet.length)
+    );
+    const inclusionSnapshots: AxTaskInclusionSnapshot[] = [];
+    let omittedInclusionSnapshots = 0;
+    let discriminativeIterations = 0;
+    let announcedEstimator = false;
+    let runAdmission: AxTrajectoryAdmissionReport | undefined;
+    /**
+     * `inconclusive` is a PER-BATCH verdict, and the run-level fold of it is an
+     * OR, so it is republished under a name that says so rather than telling a
+     * reader the whole run was inconclusive because one batch was.
+     */
+    const runAdmissionReport = (
+      report: Readonly<AxTrajectoryAdmissionReport>
+    ): AxGEPARunAdmissionReport => {
+      const { inconclusive, ...rest } = report;
+      return { ...rest, anyBatchInconclusive: inconclusive };
+    };
+    let admissionCeilingFired = false;
+    /**
+     * Per-row admitted mask for a completed evaluation, positionally parallel
+     * to `AxGEPABatchEvaluation.scalars`. `undefined` when no classifier ran,
+     * which is what keeps every legacy comparison character-identical.
+     */
+    const admittedMask = (
+      evaluation: Readonly<AxGEPABatchEvaluation>
+    ): readonly boolean[] | undefined => {
+      if (!evaluation.admittedIndices) return undefined;
+      const admitted = new Set(evaluation.admittedIndices);
+      return evaluation.scalars.map((_, index) => admitted.has(index));
+    };
+    const sumOverIndices = (
+      indices: readonly number[],
+      scalars: readonly number[]
+    ): number =>
+      indices.reduce((total, index) => total + (scalars[index] ?? 0), 0);
+
+    /**
+     * One discriminative minibatch draw.
+     *
+     * Exactly one `this.rand()` value is consumed, by `axSampleByInclusion`'s
+     * Madow systematic pass — the epoch shuffler is not run at all on this
+     * path. The stream therefore differs from a uniform run of the same seed by
+     * construction, which is why the strategy is opt-in and why INV-L5 asserts
+     * the draw COUNT on the uniform path rather than the resulting indices.
+     */
+    const drawDiscriminativeIndices = (
+      iteration: number
+    ): Readonly<{
+      indices: readonly number[];
+      inclusions: readonly AxTaskInclusion[];
+      snapshot: AxTaskInclusionSnapshot;
+    }> => {
+      const inclusions = axComputeInclusionProbabilities(
+        statTable!.stats(),
+        discriminativeBatchSize,
+        discriminationOptions!
+      );
+      const indices = axSampleByInclusion(
+        inclusions,
+        discriminativeBatchSize,
+        () => this.rand()
+      );
+      discriminativeIterations += 1;
+      // Index-ascending truncation, not top-probability: a stable slice keeps
+      // successive snapshots comparable to one another, and the run-level bound
+      // exists to stop an artifact growing past the size at which it can be
+      // re-validated.
+      const reported = inclusions.slice(
+        0,
+        discriminationOptions!.maxReportedTasks
+      );
+      const snapshot: AxTaskInclusionSnapshot = Object.freeze({
+        iteration,
+        strategy: 'discriminative' as const,
+        batchSize: discriminativeBatchSize,
+        taskCount: inclusions.length,
+        inclusions: reported,
+        omittedTaskCount: inclusions.length - reported.length,
+        sampledIndices: indices,
+      });
+      if (
+        inclusionSnapshots.length < discriminationOptions!.maxInclusionSnapshots
+      ) {
+        inclusionSnapshots.push(snapshot);
+      } else {
+        omittedInclusionSnapshots += 1;
+      }
+      return { indices, inclusions, snapshot };
+    };
+
+    /**
+     * Feed the per-task table from ONE evaluation.
+     *
+     * Called only from the parent and child minibatch sites: those two are the
+     * phases that produce a paired comparison on the feedback set. A merge
+     * subsample, a merge validation, the seed evaluation and the Pareto
+     * evaluations are keyed to a different set and must never advance a trial
+     * count. Discarded rows are skipped — an environment failure is not
+     * evidence about task difficulty either.
+     */
+    const recordTaskStats = (
+      evaluation: Readonly<AxGEPABatchEvaluation>,
+      iteration: number,
+      // Typed to the two phases §7.2 allows, so a future call site from a merge
+      // subsample, a merge validation, the seed evaluation or a Pareto
+      // evaluation does not compile.
+      phase: AxTaskStatPhase
+    ): void => {
+      if (!statTable || !evaluation.exampleIndices) return;
+      const admitted = evaluation.admittedIndices
+        ? new Set(evaluation.admittedIndices)
+        : undefined;
+      let recorded = 0;
+      for (const [rowIndex, scalar] of evaluation.scalars.entries()) {
+        if (admitted && !admitted.has(rowIndex)) continue;
+        const taskIndex = evaluation.exampleIndices[rowIndex];
+        if (taskIndex === undefined) continue;
+        statTable.record(taskIndex, scalar, iteration);
+        recorded += 1;
+      }
+      verboseLog(
+        `task statistics: recorded ${recorded} of ${evaluation.scalars.length} rows from ${phase}`
+      );
+    };
+
+    const buildDiscriminationSummary = ():
+      | AxTaskDiscriminationSummary
+      | undefined => {
+      if (!statTable || !discriminationOptions) return undefined;
+      const finalStats = statTable
+        .stats()
+        .slice(0, discriminationOptions.maxReportedTasks);
+      const sampled = statTable.stats().filter((stat) => stat.trials > 0);
+      const nonDiscriminative = sampled.filter(
+        (stat) => stat.successes === 0 || stat.successes === stat.trials
+      ).length;
+      const rest = {
+        strategy: 'discriminative' as const,
+        iterations: discriminativeIterations,
+        snapshots: inclusionSnapshots,
+        omittedSnapshotCount: omittedInclusionSnapshots,
+        // Denominator is the tasks that were actually sampled: a task with no
+        // recorded trial is not evidence that the sampler had nothing to
+        // concentrate on.
+        nonDiscriminativeTaskFraction:
+          sampled.length === 0 ? 0 : nonDiscriminative / sampled.length,
+        finalStats,
+      };
+      return Object.freeze({
+        ...rest,
+        // Measured over the summary WITHOUT this field, so the number does not
+        // depend on its own width.
+        serializedBytes: new TextEncoder().encode(JSON.stringify(rest))
+          .byteLength,
+      });
+    };
     const lineageEnabled =
       lineageInput === true ||
       (typeof lineageInput === 'object' && lineageInput !== null);
@@ -393,6 +629,31 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       'completed';
     let terminationPhase = 'num_trials_exhausted';
     let terminationRound = this.numTrials;
+    /**
+     * Record why the run stopped, ONCE.
+     *
+     * `'excessive_environment_failures'` is terminal: the run has already been
+     * declared unpublishable, and the loop can still walk through an
+     * early-stopping check or a budget-exhausted candidate on its way out. A
+     * later reason would overwrite the only signal a reader has that the
+     * classifier — not the search — ended the run.
+     */
+    const markRunStopped = (
+      reason: AxGEPACandidateLineageManifest['stoppedReason'],
+      phase: string,
+      round: number
+    ): void => {
+      if (stoppedReason === 'excessive_environment_failures') return;
+      stoppedReason = reason;
+      terminationPhase = phase;
+      terminationRound = round;
+    };
+    /**
+     * Trial the loop is currently inside, 1-based; 0 before the loop starts.
+     * `this.currentRound` is only advanced once a candidate reaches a decision,
+     * so it cannot name the round an evaluation-time failure happened in.
+     */
+    let currentTrialRound = 0;
 
     const candidateEvaluation = lineageEnabled
       ? (
@@ -446,6 +707,36 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
         ? (msg: string) => console.log(`[GEPA] ${msg}`)
         : (_msg: string) => {};
 
+    // Stated rather than silently ignored: an option that does nothing is worse
+    // than an option that refuses, and these are the two shapes where the
+    // sampler is reachable in the type system but inert at runtime.
+    if (discriminationOptions && !this.minibatch) {
+      verboseLog(
+        "minibatchStrategy: 'discriminative' was requested but minibatch is off, so every round already evaluates the whole feedback set and there is nothing to sample; the strategy is inert and no discrimination summary is emitted"
+      );
+    }
+    if (taskDiscriminationInput !== undefined && !discriminationOptions) {
+      verboseLog(
+        `taskDiscrimination was supplied but minibatchStrategy is '${minibatchStrategy}', so the sampler that reads it never runs and every one of its settings is ignored`
+      );
+    }
+    if (
+      admissionOptions &&
+      targets.some((target) => target.kind === 'program-source')
+    ) {
+      verboseLog(
+        'trajectoryTermination is inert for this program: it declares a program-source component, so every candidate carries that kind and Ax overrides every host environment_failure to policy_failure. No row of this run can be discarded; the overrides are counted in admission.overriddenRows'
+      );
+    }
+    if (
+      discriminativeEnabled &&
+      this.minibatchSize > effectiveFeedbackSet.length
+    ) {
+      verboseLog(
+        `minibatchSize ${this.minibatchSize} exceeds the ${effectiveFeedbackSet.length}-task feedback set; the discriminative sampler draws DISTINCT tasks, so it uses ${effectiveFeedbackSet.length} where the uniform sampler pads with repeats`
+      );
+    }
+
     const gepaAdapter = (options as any)?.gepaAdapter as
       | AxGEPAAdapter
       | undefined;
@@ -457,9 +748,11 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
     const stoppedCandidate = lineageEnabled
       ? (budgetReason: string, phase: string, round: number) => {
           const aborted = evaluationState.stopReason === 'aborted';
-          stoppedReason = aborted ? 'aborted' : 'budget_exhausted';
-          terminationPhase = phase;
-          terminationRound = round;
+          markRunStopped(
+            aborted ? 'aborted' : 'budget_exhausted',
+            phase,
+            round
+          );
           return {
             reason: aborted ? 'abort_signal' : budgetReason,
             failure: buildGEPACandidateFailure(
@@ -477,7 +770,8 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       set: readonly AxTypedExample<IN>[],
       _phase: string,
       throwIfInsufficient = false,
-      captureTraces = false
+      captureTraces = false,
+      extra?: Readonly<{ exampleIndices?: readonly number[] }>
     ): Promise<AxGEPABatchEvaluation | undefined> => {
       const result = await evaluateGEPABatch({
         program,
@@ -498,8 +792,47 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
         captureTraces,
         captureFailures: lineageEnabled,
         abortSignal: gepaAbortSignal,
+        ...(admissionOptions
+          ? {
+              termination: {
+                ...admissionOptions,
+                affectedKinds: kindsForCfg(cfg),
+              },
+            }
+          : {}),
+        ...(extra?.exampleIndices
+          ? { exampleIndices: extra.exampleIndices }
+          : {}),
       });
       this.stats.totalCalls = bootstrapMetricCalls + evaluationState.totalCalls;
+      // A per-batch admitted floor alone cannot catch a classifier that
+      // discards just under the floor on every batch forever, so the run-level
+      // discard rate is accumulated here, at the single point every evaluation
+      // passes through.
+      if (result?.admission && admissionOptions) {
+        runAdmission = runAdmission
+          ? axMergeTrajectoryAdmission(runAdmission, result.admission)
+          : result.admission;
+        if (
+          !admissionCeilingFired &&
+          axExceedsRunDiscardCeiling(runAdmission, admissionOptions)
+        ) {
+          admissionCeilingFired = true;
+          // Set here, at the one point the ceiling can be raised, rather than
+          // at the loop checkpoints that react to it: the ceiling can also
+          // cross during a final validation evaluation or after an
+          // early-stopping break, and those paths leave the loop without
+          // passing another checkpoint.
+          markRunStopped(
+            'excessive_environment_failures',
+            _phase.toLowerCase().replace(/\s+/g, '_'),
+            currentTrialRound
+          );
+          verboseLog(
+            `Run discard rate ${runAdmission.discardRate.toFixed(3)} exceeds maxRunDiscardRate ${admissionOptions.maxRunDiscardRate}; ending the run without publishing a best score`
+          );
+        }
+      }
       return result;
     };
 
@@ -558,6 +891,15 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
     ];
 
     const perInstanceScores: number[][] = [baseEval.scalars];
+    /**
+     * Kept in lockstep with `perInstanceScores`. The merge gate compares a
+     * fresh subsample evaluation against these CACHED per-instance scores, so
+     * without a matching admitted mask the two sides of that comparison can sit
+     * on different denominators.
+     */
+    const perInstanceAdmitted: (readonly boolean[] | undefined)[] = [
+      admittedMask(baseEval),
+    ];
 
     optLogger?.({
       name: 'OptimizationStart',
@@ -614,7 +956,8 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
     ).map((p) => p.idx);
 
     const buildLineageManifest = (
-      selectedCandidateIdx?: number
+      selectedCandidateIdx?: number,
+      extra?: Readonly<{ terminal?: boolean }>
     ): AxGEPACandidateLineageManifest | undefined => {
       if (!lineageEnabled) return undefined;
       const selectedCandidateId =
@@ -646,6 +989,16 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
                   : 'not_on_final_pareto_frontier',
       }));
       let omittedRecordCount = omittedLineageRecords;
+      /**
+       * "No candidate selected" and "the run terminated without publishing
+       * one" are different states and only the first is `in_progress`. The run
+       * discard ceiling produces the second: it suppresses `bestCandidateIdx`
+       * BY DESIGN, so keying the manifest on a missing selection alone would
+       * erase the one reason a reader needs — and would label a terminated run
+       * a periodic snapshot.
+       */
+      const inProgress =
+        selectedCandidateIdx === undefined && extra?.terminal !== true;
       const makeManifest = (): AxGEPACandidateLineageManifest => {
         const retainedIds = new Set(records.map((record) => record.id));
         return {
@@ -663,17 +1016,10 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
           ),
           metricCallsUsed: this.stats.totalCalls,
           metricCallBudget: rolloutBudgetPareto,
-          stoppedReason:
-            selectedCandidateIdx === undefined ? 'in_progress' : stoppedReason,
+          stoppedReason: inProgress ? 'in_progress' : stoppedReason,
           termination: {
-            phase:
-              selectedCandidateIdx === undefined
-                ? 'checkpoint_snapshot'
-                : terminationPhase,
-            round:
-              selectedCandidateIdx === undefined
-                ? this.currentRound
-                : terminationRound,
+            phase: inProgress ? 'checkpoint_snapshot' : terminationPhase,
+            round: inProgress ? this.currentRound : terminationRound,
             metricCallsUsed: this.stats.totalCalls,
           },
           checkpointSemantics: 'snapshot_only',
@@ -716,19 +1062,19 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
     let _prevHypervolume: number | undefined;
 
     for (let t = 0; t < this.numTrials; t++) {
+      currentTrialRound = t + 1;
+      // `markRunStopped` already recorded the phase the ceiling fired in, which
+      // is more informative than this checkpoint; the checkpoint only breaks.
+      if (admissionCeilingFired) break;
       if (gepaAbortSignal?.aborted) {
-        stoppedReason = 'aborted';
-        terminationPhase = 'loop_boundary';
-        terminationRound = t;
+        markRunStopped('aborted', 'loop_boundary', t);
         break;
       }
       if (
         rolloutBudgetPareto !== undefined &&
         this.stats.totalCalls >= Math.max(1, Math.floor(rolloutBudgetPareto))
       ) {
-        stoppedReason = 'budget_exhausted';
-        terminationPhase = 'loop_boundary';
-        terminationRound = t;
+        markRunStopped('budget_exhausted', 'loop_boundary', t);
         break;
       }
       // Parent selection via per-instance fronts (frequency sampling)
@@ -947,9 +1293,119 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
           );
           mergeFailures?.push(...evaluationFailures!(mergeEval));
 
-          const newSum = mergeEval.sum;
-          const id1Sum = idxs.reduce((sum, z) => sum + (s1[z] ?? 0), 0);
-          const id2Sum = idxs.reduce((sum, z) => sum + (s2[z] ?? 0), 0);
+          if (mergeEval.admission?.inconclusive) {
+            verboseLog(
+              `Iteration ${t + 1}: merge subsample inconclusive (${mergeEval.admission.admittedRows}/${mergeEval.admission.evaluatedRows} rows admitted); aborting the merge candidate`
+            );
+            recordCandidate?.(() => {
+              const delta = buildGEPACandidateComponentDelta(
+                candidates[a]!.cfg,
+                mergedCfg,
+                lineageOptions!
+              );
+              return {
+                id: mergeCandidateId!,
+                parentIds: [candidates[i]!.id!, candidates[j]!.id!],
+                commonAncestorId: candidates[a]!.id!,
+                round: t + 1,
+                strategy: 'system_merge',
+                componentDelta: delta.delta,
+                omittedComponentCount: delta.omittedComponentCount,
+                evaluations: mergeEvaluations!,
+                metricCallsAtDecision: this.stats.totalCalls,
+                metricCallBudget: rolloutBudgetPareto,
+                decision: 'aborted',
+                reason: 'insufficient_admitted_rows',
+                disposition: 'aborted',
+                failures: mergeFailures!.length ? mergeFailures : undefined,
+              };
+            });
+            continue;
+          }
+
+          // The run has already been declared unpublishable, and the accept
+          // branch below spends a full validation evaluation over the Pareto
+          // set. Stop here rather than at the next round's checkpoint.
+          if (admissionCeilingFired) break;
+
+          // GATE 2 (system merge). Its denominator is the subsample positions
+          // admitted by the fresh merge evaluation AND by both parents' cached
+          // validation evaluations. Without the intersection, dropping k rows
+          // from one side lowers only that side's raw total and the merge is
+          // decided by whichever evaluation a flaky provider hit hardest.
+          // With no classifier every mask is absent, `mergeComparisonPositions`
+          // is `0..idxs.length-1` in order, and all three sums reduce in the
+          // same order from the same seed as before — character-identical.
+          const mergeComparisonPositions: readonly number[] =
+            mergeEval.admittedIndices === undefined
+              ? idxs.map((_, position) => position)
+              : (() => {
+                  const positionByIndex = new Map(
+                    idxs.map((z, position) => [z, position] as const)
+                  );
+                  const admittedParetoIndices = (
+                    mask: readonly boolean[] | undefined
+                  ): readonly number[] =>
+                    mask ? idxs.filter((z) => mask[z] === true) : idxs;
+                  return axPairedAdmittedIndices(
+                    axPairedAdmittedIndices(
+                      mergeEval.admittedIndices.map(
+                        (position) => idxs[position]!
+                      ),
+                      admittedParetoIndices(perInstanceAdmitted[i])
+                    ),
+                    admittedParetoIndices(perInstanceAdmitted[j])
+                  ).map((z) => positionByIndex.get(z)!);
+                })();
+          // Fail closed. `newSum >= Math.max(0, 0) + 0` is TRUE, so an empty
+          // denominator would promote a merge on no evidence at all — and an
+          // empty intersection is reachable even when the merge evaluation
+          // itself cleared `minAdmittedFraction`, because the two parents'
+          // cached masks can exclude everything it kept.
+          if (
+            mergeEval.admittedIndices !== undefined &&
+            mergeComparisonPositions.length === 0
+          ) {
+            verboseLog(
+              `Iteration ${t + 1}: merge subsample shares no admitted row with both parents; aborting the merge candidate`
+            );
+            recordCandidate?.(() => {
+              const delta = buildGEPACandidateComponentDelta(
+                candidates[a]!.cfg,
+                mergedCfg,
+                lineageOptions!
+              );
+              return {
+                id: mergeCandidateId!,
+                parentIds: [candidates[i]!.id!, candidates[j]!.id!],
+                commonAncestorId: candidates[a]!.id!,
+                round: t + 1,
+                strategy: 'system_merge',
+                componentDelta: delta.delta,
+                omittedComponentCount: delta.omittedComponentCount,
+                evaluations: mergeEvaluations!,
+                metricCallsAtDecision: this.stats.totalCalls,
+                metricCallBudget: rolloutBudgetPareto,
+                decision: 'aborted',
+                reason: 'insufficient_admitted_rows',
+                disposition: 'aborted',
+                failures: mergeFailures!.length ? mergeFailures : undefined,
+              };
+            });
+            continue;
+          }
+          const newSum = mergeComparisonPositions.reduce(
+            (sum, position) => sum + (mergeEval.scalars[position] ?? 0),
+            0
+          );
+          const id1Sum = mergeComparisonPositions.reduce(
+            (sum, position) => sum + (s1[idxs[position]!] ?? 0),
+            0
+          );
+          const id2Sum = mergeComparisonPositions.reduce(
+            (sum, position) => sum + (s2[idxs[position]!] ?? 0),
+            0
+          );
 
           if (
             newSum >=
@@ -1012,6 +1468,7 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
               scores: childEval.avg,
             });
             perInstanceScores.push(childEval.scalars);
+            perInstanceAdmitted.push(admittedMask(childEval));
             const beforeSize = archive.length;
             const hvBefore =
               hypervolume2D(archive.map((idx) => candidates[idx]!.scores)) ?? 0;
@@ -1089,18 +1546,30 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
 
       this.lastIterFoundNewProgram = false;
 
+      const draw = discriminativeEnabled
+        ? drawDiscriminativeIndices(t)
+        : undefined;
+      const miniIndices: readonly number[] = this.minibatch
+        ? (draw?.indices ??
+          this.nextMinibatchIndices(effectiveFeedbackSet.length, t))
+        : effectiveFeedbackSet.map((_, index) => index);
       const mini = this.minibatch
-        ? this.nextMinibatchIndices(effectiveFeedbackSet.length, t).map(
-            (z: number) => effectiveFeedbackSet[z]!
-          )
+        ? miniIndices.map((z: number) => effectiveFeedbackSet[z]!)
         : effectiveFeedbackSet;
+      // The feedback-set indices are threaded only on the discriminative path:
+      // the stat table is the only consumer, and the uniform path must not gain
+      // a field it never had.
+      const miniEvalExtra = discriminativeEnabled
+        ? { exampleIndices: miniIndices }
+        : undefined;
 
       const parentMiniEval = await evalBatch(
         candidates[parentIdx]!.cfg,
         mini as readonly AxTypedExample<IN>[],
         'parent minibatch',
         false,
-        true
+        true,
+        miniEvalExtra
       );
       if (!parentMiniEval) {
         if (lineageEnabled) {
@@ -1111,6 +1580,18 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
           );
         }
         break;
+      }
+      recordTaskStats(parentMiniEval, t, 'parent_minibatch');
+      if (admissionCeilingFired) break;
+      // Too few admitted rows means the batch cannot decide anything. No
+      // candidate has been proposed yet at this point, so the round is skipped
+      // rather than a candidate being recorded as rejected on evidence that
+      // was never there.
+      if (parentMiniEval.admission?.inconclusive) {
+        verboseLog(
+          `Iteration ${t + 1}: parent minibatch inconclusive (${parentMiniEval.admission.admittedRows}/${parentMiniEval.admission.evaluatedRows} rows admitted); skipping the round`
+        );
+        continue;
       }
 
       if ((options as any)?.skipPerfectScore ?? true) {
@@ -1272,7 +1753,10 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       const childMiniEval = await evalBatch(
         proposedCfg,
         mini as readonly AxTypedExample<IN>[],
-        'child minibatch'
+        'child minibatch',
+        false,
+        false,
+        miniEvalExtra
       );
       if (!childMiniEval) {
         if (lineageEnabled) {
@@ -1306,6 +1790,7 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
         }
         break;
       }
+      recordTaskStats(childMiniEval, t, 'child_minibatch');
       mutationEvaluations?.push(
         candidateEvaluation!(
           'child_minibatch',
@@ -1315,9 +1800,14 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       );
       mutationFailures?.push(...evaluationFailures!(childMiniEval));
 
-      const accepted =
-        childMiniEval.sum > parentMiniEval.sum + this.minImprovementThreshold;
-
+      // Hoisted ABOVE the gate on purpose. An aborted candidate is the common
+      // case under a flaky provider and it is the case a reader most needs to
+      // see, but the abort paths below `continue`, so with the round counter
+      // and the publisher defined after them an aborted round emitted no
+      // RoundProgress, evaluated no checkpoint, and left `currentRound` behind.
+      // Nothing here is observable without a classifier: the abort branch is
+      // unreachable, and no code between the old and new position reads
+      // `this.currentRound`.
       this.currentRound = t + 1;
       const serializableCompileOptions = (() => {
         const { abortSignal: _abortSignal, ...rest } = (options ??
@@ -1378,16 +1868,133 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
             ...(checkpointLineage
               ? { candidateLineage: checkpointLineage }
               : {}),
-          }
+          },
+          // `options` is deliberately not forwarded here: `totalRounds` on the
+          // emitted RoundProgress has always been `options?.maxIterations ?? 0`
+          // with no options, and changing it would break INV-L1.
+          undefined,
+          runAdmission || draw
+            ? {
+                ...(draw ? { inclusionSnapshot: draw.snapshot } : {}),
+                ...(runAdmission
+                  ? { admission: runAdmissionReport(runAdmission) }
+                  : {}),
+              }
+            : undefined
         );
       };
+
+      // GATE 1 (reflective mutation). Parent and child are two separate
+      // evaluations of the same minibatch, so they can discard different rows.
+      // `sum` is a raw total: comparing each side's own admitted total means
+      // dropping k rows from the parent lowers the parent's number while
+      // leaving the child's untouched, and the child gets promoted for it.
+      // Intersecting first gives both sides the same denominator by
+      // construction. With no classifier both `admittedIndices` are absent and
+      // the comparison below is the untouched
+      // `childMiniEval.sum > parentMiniEval.sum + t`.
+      const pairedMinibatchIndices =
+        parentMiniEval.admittedIndices && childMiniEval.admittedIndices
+          ? axPairedAdmittedIndices(
+              parentMiniEval.admittedIndices,
+              childMiniEval.admittedIndices
+            )
+          : undefined;
+      // Never accepted, never rejected: an inconclusive batch is not evidence
+      // either way, and treating it as a rejection would let a flaky provider
+      // exhaust `earlyStoppingTrials`.
+      //
+      // An EMPTY intersection is the same situation and is checked separately,
+      // because both sides can clear `minAdmittedFraction` individually and
+      // still share no row — disjoint discards leave nothing to compare, and a
+      // comparison of 0 against 0 is not a rejection, it is no evidence.
+      if (
+        childMiniEval.admission?.inconclusive ||
+        pairedMinibatchIndices?.length === 0
+      ) {
+        verboseLog(
+          `Iteration ${t + 1}: child minibatch inconclusive (${childMiniEval.admission?.admittedRows ?? 0}/${childMiniEval.admission?.evaluatedRows ?? 0} rows admitted, ${pairedMinibatchIndices?.length ?? 0} paired with the parent); aborting the candidate`
+        );
+        recordCandidate?.(() => {
+          const delta = buildGEPACandidateComponentDelta(
+            candidates[parentIdx]!.cfg,
+            proposedCfg,
+            lineageOptions!
+          );
+          return {
+            id: mutationCandidateId!,
+            parentIds: [candidates[parentIdx]!.id!],
+            round: t + 1,
+            strategy,
+            componentDelta: delta.delta,
+            omittedComponentCount: delta.omittedComponentCount,
+            evaluations: mutationEvaluations!,
+            metricCallsAtDecision: this.stats.totalCalls,
+            metricCallBudget: rolloutBudgetPareto,
+            decision: 'aborted',
+            reason: 'insufficient_admitted_rows',
+            disposition: 'aborted',
+            failures: mutationFailures!.length ? mutationFailures : undefined,
+          };
+        });
+        // An aborted round still leaves a RoundProgress behind, carrying the
+        // cumulative admission that ended it. Lineage is opt-in; without this
+        // an aborted round is invisible in the event stream entirely.
+        await publishDecision('aborted');
+        if (admissionCeilingFired) break;
+        continue;
+      }
+      if (admissionCeilingFired) break;
+
+      const parentComparisonSum = pairedMinibatchIndices
+        ? sumOverIndices(pairedMinibatchIndices, parentMiniEval.scalars)
+        : parentMiniEval.sum;
+      const childComparisonSum = pairedMinibatchIndices
+        ? sumOverIndices(pairedMinibatchIndices, childMiniEval.scalars)
+        : childMiniEval.sum;
+      const pairedComparisonRowIndices: readonly number[] =
+        pairedMinibatchIndices ?? miniIndices.map((_, rowIndex) => rowIndex);
+      /**
+       * Under `'discriminative'` the batch is a πps sample, so a raw sum is a
+       * biased estimate of the population difference: the easy tasks are
+       * deliberately under-drawn. The Hájek/IPW paired difference weights each
+       * row by `1/π` and is compared on a PER-EXAMPLE MEAN scale, not a sum.
+       * With the
+       * default `minImprovementThreshold` of 0 both scales mean "child beat
+       * parent", so the default degrades gracefully; a caller who set a
+       * non-zero sum-scale threshold must divide it by the batch size.
+       */
+      const ipwEstimate =
+        draw && pairedComparisonRowIndices.length > 0
+          ? axIpwPairedDifference(
+              pairedComparisonRowIndices.map((rowIndex) => ({
+                index: miniIndices[rowIndex]!,
+                value: parentMiniEval.scalars[rowIndex] ?? 0,
+              })),
+              pairedComparisonRowIndices.map((rowIndex) => ({
+                index: miniIndices[rowIndex]!,
+                value: childMiniEval.scalars[rowIndex] ?? 0,
+              })),
+              draw.inclusions
+            )
+          : undefined;
+      if (draw && !announcedEstimator) {
+        announcedEstimator = true;
+        verboseLog(
+          `Discriminative minibatch active: gate=reflective_mutation estimator=ipw_hajek scale=per_example_mean; minImprovementThreshold=${this.minImprovementThreshold} is compared against a mean difference, not a sum`
+        );
+      }
+      const accepted = ipwEstimate
+        ? ipwEstimate.estimate > this.minImprovementThreshold
+        : childComparisonSum >
+          parentComparisonSum + this.minImprovementThreshold;
 
       if (!accepted) {
         for (const groupTarget of targetGroup) {
           componentSelector.recordResult(groupTarget.id, false, t);
         }
         verboseLog(
-          `Iteration ${t + 1}: Rejected (child=${childMiniEval.sum.toFixed(3)} <= parent=${parentMiniEval.sum.toFixed(3)})`
+          `Iteration ${t + 1}: Rejected (child=${childComparisonSum.toFixed(3)} <= parent=${parentComparisonSum.toFixed(3)})`
         );
         recordCandidate?.(() => {
           const delta = buildGEPACandidateComponentDelta(
@@ -1416,9 +2023,7 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
         });
         await publishDecision('rejected');
         if (++stagnation >= this.earlyStoppingTrials) {
-          stoppedReason = 'early_stopping';
-          terminationPhase = 'early_stopping';
-          terminationRound = t + 1;
+          markRunStopped('early_stopping', 'early_stopping', t + 1);
           verboseLog(
             `Early stopping: ${stagnation} iterations without improvement`
           );
@@ -1428,7 +2033,7 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       }
 
       verboseLog(
-        `Iteration ${t + 1}: Accepted (child=${childMiniEval.sum.toFixed(3)} > parent=${parentMiniEval.sum.toFixed(3)})`
+        `Iteration ${t + 1}: Accepted (child=${childComparisonSum.toFixed(3)} > parent=${parentComparisonSum.toFixed(3)})`
       );
       for (const groupTarget of targetGroup) {
         componentSelector.recordResult(groupTarget.id, true, t);
@@ -1485,6 +2090,7 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
         scores: childEval.avg,
       });
       perInstanceScores.push(childEval.scalars);
+      perInstanceAdmitted.push(admittedMask(childEval));
 
       const beforeSize = archive.length;
       const hvBefore =
@@ -1532,9 +2138,7 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
           `Iteration ${t + 1}: Archive unchanged (stagnation=${stagnation}/${this.earlyStoppingTrials})`
         );
         if (stagnation >= this.earlyStoppingTrials) {
-          stoppedReason = 'early_stopping';
-          terminationPhase = 'early_stopping';
-          terminationRound = t + 1;
+          markRunStopped('early_stopping', 'early_stopping', t + 1);
           verboseLog(
             `Early stopping: ${stagnation} iterations without archive improvement`
           );
@@ -1557,15 +2161,19 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       this.tieEpsilon
     );
 
-    // Pick bestScore as max scalarized score on frontier
+    // Pick bestScore as max scalarized score on frontier.
+    // When the run-level discard ceiling fired, the scores on the frontier were
+    // computed over a denominator a host classifier removed most of, so NO best
+    // score and no optimized artifact are published — a number here would be a
+    // claim the evidence cannot support.
     const bestScore =
-      pareto.length > 0
+      pareto.length > 0 && !admissionCeilingFired
         ? Math.max(...pareto.map((p) => scalarize(p.scores)))
         : 0;
 
     // On score ties, prefer the later accepted candidate over the seed.
     let bestCandidateIdx: number | undefined;
-    if (pareto.length > 0) {
+    if (pareto.length > 0 && !admissionCeilingFired) {
       const first = pareto[0]!;
       let maxS = scalarize(first.scores);
       bestCandidateIdx = first.idx;
@@ -1595,7 +2203,10 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       customLabels
     );
 
-    const candidateLineage = buildLineageManifest(bestCandidateIdx);
+    const candidateLineage = buildLineageManifest(bestCandidateIdx, {
+      terminal: admissionCeilingFired,
+    });
+    const discriminationSummary = buildDiscriminationSummary();
 
     // Build a unified optimized program (mirrors MiPRO) for the selected best candidate
     const optimizationTime = Date.now() - _startTime;
@@ -1658,6 +2269,12 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
                 },
           totalCalls: this.stats.totalCalls,
           stats: this.stats,
+          ...(runAdmission
+            ? { admission: runAdmissionReport(runAdmission) }
+            : {}),
+          ...(discriminationSummary
+            ? { discrimination: discriminationSummary }
+            : {}),
         },
       });
     }

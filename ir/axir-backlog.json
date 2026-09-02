@@ -1995,6 +1995,25 @@
       "verification": null
     },
     {
+      "id": "axir-2026-09-02-gepa-trajectory-admission-at-both-promotion-gates-and-opt-in-dis",
+      "status": "open",
+      "title": "GEPA trajectory admission at both promotion gates and opt-in discriminative minibatch selection",
+      "createdAt": "2026-09-02",
+      "sourcePR": 92,
+      "sourceCommit": "02685baabdd047c06f918a0f45cd5eed47bda0f7",
+      "tsPaths": ["src/ax/dsp/optimizers/gepa.ts"],
+      "portableSurface": "axoptimize",
+      "impact": "Wires host-owned trajectory termination classification into evaluateGEPABatch so environment-failed rows leave the promotion denominator with the discard rate reported, intersects the admitted index sets at BOTH of GEPA's promotion gates (reflective mutation and the default-on system merge, via a new perInstanceAdmitted mask), and adds an opt-in discriminative minibatch strategy with Beta(1,1)-smoothed water-filled inclusion probabilities, Madow systematic pips sampling and a Hajek/IPW paired-difference accept branch. A port must reproduce: the all-rows meaning of avg/scalars/sum under admission; the non-reclassifiable override for config-error rows and for any row of a program-source candidate; the inconclusive-batch abort and the run-level discard ceiling that publishes no best score; the intersected denominator at both gates; and the fact that with every option omitted the artifact, events, checkpoints, selection and rand() draw sequence are unchanged.",
+      "suggestedAxirWork": [
+        "Add or update the TS-derived conformance fixture.",
+        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
+        "Run npm run axir:conformance:check and npm run test:axir."
+      ],
+      "completedAt": null,
+      "completedByCommit": null,
+      "verification": null
+    },
+    {
       "id": "axir-2026-09-02-kernel-indexed-skill-tiers-with-requires-gating-per-skill-cost-a",
       "status": "open",
       "title": "Kernel/indexed skill tiers with requires gating, per-skill cost accounting, verification budget, and bounded verifier rails",
