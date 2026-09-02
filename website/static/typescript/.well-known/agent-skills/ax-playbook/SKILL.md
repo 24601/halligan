@@ -6,13 +6,13 @@ version: "24.0.17"
 
 # Playbook Codegen Rules (@ax-llm/ax)
 
-Use this skill to generate context-playbook code. A playbook grows an evolving body of task knowledge and renders it into a program's context. The evolution engine (ACE — Agentic Context Engineering) is hidden behind `playbook(...)`, exactly as `optimize(...)` hides its optimizer. Prefer the `playbook(...)` concept; only reach for `AxACE` directly when the user explicitly wants the low-level engine.
+Use this skill to generate context-playbook code. A playbook grows an evolving body of task knowledge and renders it into a program's context. The evolution engine (ACE, Agentic Context Engineering) is hidden behind `playbook(...)`, exactly as `optimize(...)` hides its optimizer. Prefer the `playbook(...)` concept; only reach for `AxACE` directly when the user explicitly wants the low-level engine.
 
 ## Use These Defaults
 
 - Create with `playbook(program, { studentAI, teacherAI? })`; it returns an `AxPlaybook` handle.
-- Grow offline with `await pb.evolve(examples, metric)` — returns `{ bestScore, playbook }`.
-- Grow online with `await pb.update({ example, prediction, feedback })` — no metric needed.
+- Grow offline with `await pb.evolve(examples, metric)`, which returns `{ bestScore, playbook }`.
+- Grow online with `await pb.update({ example, prediction, feedback })`: no metric needed.
 - Apply with `pb.applyTo(program)` (defaults to the bound program).
 - Persist with `pb.toJSON()` and restore with `playbook(program, opts).load(snapshot)`.
 - Inspect with `pb.render()` (markdown) and `pb.getState()` (`{ playbook, artifact }`).
@@ -24,9 +24,9 @@ Use this skill to generate context-playbook code. A playbook grows an evolving b
 ## Critical Rules
 
 - `playbook(...)` binds to an `AxGen` program; `evolve`/`update` need that program's signature.
-- `evolve()` returns only `{ bestScore, playbook }`. There is no Pareto front and no `optimizedProgram` — that is `optimize(...)`'s shape, not a playbook's.
+- `evolve()` returns only `{ bestScore, playbook }`. There is no Pareto front and no `optimizedProgram`. That is `optimize(...)`'s shape, not a playbook's.
 - `update({ example, prediction, feedback })` requires the full `{ example, prediction }`; `example` must match the program's input fields (plus any expected output). Do not pass bare input fields at the top level.
-- `update()` works without a prior `evolve()`/`load()` — the handle hydrates lazily on first use.
+- `update()` works without a prior `evolve()`/`load()`: the handle hydrates lazily on first use.
 - `applyTo()` injects a `## Context Playbook` block into the program description; calling it repeatedly recomposes from the original base (no stacking).
 - Keep the offline `metric` deterministic and cheap, like a GEPA metric.
 - A playbook is plain JSON. Persist `pb.toJSON()` and `load(...)` it into a fresh program for production.
@@ -200,7 +200,7 @@ const view = pb.renderForActor({
 - `axProjectActorPlaybook` drops optimizer-tier bullets, applies the lifecycle
   and applicability gates, and applies the precondition re-check when `authority`
   is supplied. `axRenderActorPlaybook` is the only actor-facing renderer and
-  throws for any view it did not produce — the view's `kind` field is a label a
+  throws for any view it did not produce: the view's `kind` field is a label a
   caller can forge, and a JSON round-trip drops the brand.
 - The curator may only **downgrade**. `visibility` on a curator operation is
   typed `'optimizer'` and is runtime-checked, because parsed curator JSON reaches
@@ -237,7 +237,7 @@ const ids = ace.retainRejectedMutation({
 
 Operations are applied with `visibility: 'optimizer'` forced and the result
 attached; bullets that already existed keep their prior content and tier, so only
-their evidence moved. The entry is sticky — the verification dedupe key includes
+their evidence moved. The entry is sticky: the verification dedupe key includes
 `result`, and a retained rejection is never replaced by another result.
 
 ### Version compatibility
@@ -245,7 +245,7 @@ their evidence moved. The entry is sticky — the verification dedupe key includ
 `AxACEPlaybook.version` is stamped `2` on the first write that creates a tiered
 bullet, and `AX_ACE_MAX_SUPPORTED_PLAYBOOK_VERSION` (currently `2`) is the read
 gate that refuses anything above it. It is a module constant, not a package
-export — the generated barrel carries `ax`/`Ax`-prefixed names only, so compare
+export. The generated barrel carries `ax`/`Ax`-prefixed names only, so compare
 against the literal or use the exported
 `axPlaybookRequiresVisibilitySupport(playbook)`. Two residuals stand, deliberately:
 
@@ -269,7 +269,7 @@ playbook(prodProgram, { studentAI }).load(snapshot).applyTo(prodProgram);
 
 `a.playbook({ target })` returns an agent-aware `AxAgentPlaybook` (the stage `AxPlaybook` handle plus an agent-level `evolve`). The one playbook the agent renders into its prompt grows three ways:
 
-- Continuous (trust): the construction-time `playbook` option (see `ax-agent`) harvests each run's failures automatically — no dataset.
+- Continuous (trust): the construction-time `playbook` option (see `ax-agent`) harvests each run's failures automatically: no dataset.
 - On-demand (trust): `apb.update({ example, prediction, feedback })`.
 - Batch verified (proof): `apb.evolve(dataset, options)` runs the full agent over a task set, mines failure clusters, and proposes one playbook bullet per weakness; with `verify` (default on) it keeps a bullet only if held-in improves AND the `validation` held-out set does not regress, else exact rollback. `verify: false` = trust-batch. Bullets-only.
 - Accepted verified proposals receive an `agent.playbook.evolve` receipt from the trusted evaluator boundary. Rejected proposals restore the exact pre-proposal snapshot, including evidence metadata.
@@ -326,7 +326,7 @@ snapshot rollback. The result also exposes `retentionAnchors`.
 `evaluatorId` is a required caller-managed metric/judge configuration identity.
 Receipts include it with canonical current/held-out/slice corpus digests, a
 policy digest, and deterministic evaluation sequence numbers. Digests cover
-the cloned task fields—including weights—and thresholds. Canonical values are
+the cloned task fields (including weights) and thresholds. Canonical values are
 type-tagged: object keys are sorted, dates use ISO timestamps, Map entries and
 Set elements are sorted by their complete canonical encoding, and typed arrays
 include their view type and bytes. Arrays encode length and every enumerable
@@ -358,7 +358,7 @@ generate candidates, auto-deploy, or promote outside this `evolve` call. Slice
 names, versions, task collection, semantic train/validation disjointness, and
 evaluator validity remain caller authority; use frozen, separately collected
 data and audit overlap before the run. A finite anchor set can detect measured
-regressions only—it is not proof against catastrophic forgetting or live-model
+regressions only. It is not proof against catastrophic forgetting or live-model
 drift.
 
 This narrow boundary applies to agent playbook bullets. It does not claim to
@@ -458,7 +458,7 @@ behaves exactly as it did before them.
 ### What halligan claims, and what it does not
 
 halligan implements **bounded harness adaptation** (A/P/M/E in the survey's
-vocabulary) — it proposes, gates, and retains context artifacts under explicit
+vocabulary): it proposes, gates, and retains context artifacts under explicit
 thresholds. It is **not** recursive self-improvement: it does not modify its own
 optimizer, its own evaluator, or its own gate, and `agentRecursiveOptimize` is
 recursive decomposition, not RSI.
@@ -469,8 +469,8 @@ solutions.
 
 ### Evidence requirements for any PR claiming improvement (R1-R12)
 
-A PR whose description contains a performance claim — "improves", "beats",
-"+N points", "learns", "self-improves" — supplies all twelve, or restates the
+A PR whose description contains a performance claim ("improves", "beats",
+"+N points", "learns", "self-improves") supplies all twelve, or restates the
 claim as machinery evidence only.
 
 | # | Requirement | What supplies it |
@@ -490,9 +490,9 @@ claim as machinery evidence only.
 
 Three refusals that are not negotiable:
 
-- **Zero accepted candidates is a valid machinery result and an invalid capability result.**
-- **Best-observed across iterations is not a deployment number.** Report the run you would deploy.
-- **A relative gain is reported next to its absolute base.** "+132%" off 0.03 is not a result.
+- Zero accepted candidates is a valid machinery result and an invalid capability result.
+- Best-observed across iterations is not a deployment number. Report the run you would deploy.
+- A relative gain is reported next to its absolute base. "+132%" off 0.03 is not a result.
 
 ### Matched-budget control arm
 
@@ -545,9 +545,9 @@ Three bases, and only one can gate:
 | `rendered_only` | default | **no** |
 
 - Host recipe: scan `prediction.actionLog` for the `[<bulletId>]` prefix `renderPlaybook` emits, and return the invocation count.
-- An `applicability_counterfactual` reach of `1.0` is the **expected** reading for evolve-curated bullets, not a good one — the receipt labels it (`reach_counterfactual_basis`) rather than suppressing it.
+- An `applicability_counterfactual` reach of `1.0` is the **expected** reading for evolve-curated bullets, not a good one. The receipt labels it (`reach_counterfactual_basis`) rather than suppressing it.
 - Reach `0` under `host_probe` with a positive delta emits `reach_zero_positive_delta`: that is a prompting or format effect, not the artifact.
-- A probe that throws makes the split `unmeasured` and emits `reach_probe_failed`. The run continues — reach is evidence, not scoring.
+- A probe that throws makes the split `unmeasured` and emits `reach_probe_failed`. The run continues: reach is evidence, not scoring.
 
 ### Validity conjuncts
 
@@ -566,7 +566,7 @@ Three bases, and only one can gate:
 
 - Every required predicate must pass on **both** splits.
 - `unmeasured` is never a pass. Under `require` it fails the candidate with `validity:<id>@<split> unmeasured`.
-- `unknown_function_call_rate` and `tool_error_rate` are computed **in Ax** against the agent's registered function set. `classifyFunctionCall` is a host **override**, recorded as `overriddenByHost: true` — not the only source, because a classifier that returns `ok` for everything would launder the gate.
+- `unknown_function_call_rate` and `tool_error_rate` are computed **in Ax** against the agent's registered function set. `classifyFunctionCall` is a host **override**, recorded as `overriddenByHost: true`. It is not the only source, because a classifier that returns `ok` for everything would launder the gate.
 
 ### Transfer cells
 
@@ -587,11 +587,11 @@ Three bases, and only one can gate:
 - **Never emit an average.** `AxAgentPlaybookTransferReport` has no mean field and a type test bans adding one. Averages hide catastrophic cells: a matrix whose cells are `+0.50` and `-0.36` averages to a win and contains a target that got materially worse.
 - One cell per `(target, split)`, each with its own anchor, candidate, delta, interval and model identity. `regressedCells` lists `${targetId}:${split}` for every cell past the floor.
 - The anchor is the **target's own** reading of the unevolved artifact, taken before any mutation. Borrowing the primary model's baseline would attribute the model gap to the playbook.
-- `target.id` is caller-owned. Ax never derives a cell label from the service. `target.evaluatorId` is **caller-side metadata only**: it is validated as a string and Ax never reads it — it appears on no cell, no receipt and no accounting row. Use it to tag your own records; do not expect it back.
+- `target.id` is caller-owned. Ax never derives a cell label from the service. `target.evaluatorId` is **caller-side metadata only**: it is validated as a string and Ax never reads it. It appears on no cell, no receipt and no accounting row. Use it to tag your own records; do not expect it back.
 - Largest budget multiplier in the API: `|targets| x sum(splits) x runsPerTask x (1 + maxDiscardRedraws) x 2`, failing closed before mutation when `transfer.maxMetricCalls` cannot pay for it. Each `(target, split)` pass draws from **its own** sub-budget, so one target's re-draws can never truncate another's pass and be reported as that target regressing.
 - Fails closed on a matrix it cannot read: a missing cell, an incomplete pass, or a pair it could not align. A pass that ran out of its own budget says so, and names the budget rather than the target.
 - When the run produced no artifact change the matrix is `not_run` with that reason: the candidate pass would score the same artifact the anchors already scored and charge the caller's own services to measure run-to-run noise.
-- A non-`off` gate that fails without rolling anything back — a dry run, or a run that accepted nothing — still says so, on the same warning, with the reason nothing was rolled back. A failing gate is never indistinguishable from `gates.transfer: 'off'`.
+- A non-`off` gate that fails without rolling anything back (a dry run, or a run that accepted nothing) still says so, on the same warning, with the reason nothing was rolled back. A failing gate is never indistinguishable from `gates.transfer: 'off'`.
 - After a run-level rollback `result.transfer` is returned **unchanged**, describing the artifact that was withdrawn. It is a record of what was measured, not of what is live; `applied`, `playbookSnapshot` and every receipt are the fields that moved.
 
 ### Trajectory termination
@@ -613,7 +613,7 @@ Three bases, and only one can gate:
 { prune: { enabled: true, operation: 'remove', minTokenReduction: 20 } }
 ```
 
-- A removal is a mutation and pays the same price as an addition: the same re-evaluation, the same retention receipt, the same gate chain — in its **loss-tolerance** variant, because a removal cannot raise the current-task mean by `minHeldInGain`.
+- A removal is a mutation and pays the same price as an addition: the same re-evaluation, the same retention receipt, the same gate chain, in its **loss-tolerance** variant, because a removal cannot raise the current-task mean by `minHeldInGain`.
 - Gated by a leave-one-out held-out sweep (`result.redundancy`) plus a rendered-size reduction the prune must actually deliver.
 - **No silent truncation.** Over `maxRenderedTokens` with `onOverflow: 'warn'` you get `rendered_size_over_budget`, not a shorter playbook.
 - Residual, stated plainly: the curator can still remove bullets on the **curate** path via `REMOVE`, `evidence.lifecycle.status` or `supersedes`, so the prune gate is not a complete removal control. Section-overflow eviction is reported (`curate_eviction`, `outcome.evictions`) but not gated.
@@ -628,12 +628,12 @@ Three bases, and only one can gate:
 ```
 
 - The **grant** says "this principal may promote into this playbook" and binds to a stable `resourceId` the host can pre-grant. `AxResourceScope` is matched by exact identity **before** the host authorizer runs, so Ax never derives the id.
-- The **veto** is the only channel that sees the candidate. Reject-only, conjunctive, fail-closed: anything that is not `false` / `{ vetoed: false }` — `undefined` included — is a veto.
+- The **veto** is the only channel that sees the candidate. Reject-only, conjunctive, fail-closed: anything that is not `false` / `{ vetoed: false }` (`undefined` included) is a veto.
 - `promotionDigest` is **receipt metadata, not consent**. It identifies what was promoted; it authorizes nothing.
 - No `promotionAuthority` configured stays permissive but is never silent: `promotion_without_receipt`.
 - A promoted candidate rescinded by a run-level gate moves all five together: `promotion.status = 'promoted_then_rolled_back'`, `evidence.decision = 'superseded'`, `applied = 'rolled_back'`, `playbookSnapshot = undefined`, plus `promotion_rolled_back`.
 - `onProgress` emits a `'promotion'` phase per nomination carrying the decision: the status, plus the denial code and reason, the blocking veto ids, or the granted receipt id. A promotion that was denied is visible while the run is still going, not only afterwards on the result.
-- Hosts supplying a veto or an authority run `runAxAgentPlaybookEvidenceConformance` first. It makes **real** host calls — two veto invocations and one genuine `axAuthorize` against the live `AxAuthorityContext` — so pre-grant `axPlaybookEvidenceConformanceOperation` on `axPlaybookEvidenceConformanceResource` before calling it, or the kit's own request is denied and it asserts nothing.
+- Hosts supplying a veto or an authority run `runAxAgentPlaybookEvidenceConformance` first. It makes **real** host calls (two veto invocations and one genuine `axAuthorize` against the live `AxAuthorityContext`), so pre-grant `axPlaybookEvidenceConformanceOperation` on `axPlaybookEvidenceConformanceResource` before calling it, or the kit's own request is denied and it asserts nothing.
 
 ### Held-out is a selection split
 
@@ -655,19 +655,19 @@ result.sealedTest;   // { status: 'completed', baseline, final, delta, interval,
   inhabitant of the report in which it influenced anything, and no gate reads
   it. When the run produced no artifact change it reports `not_run` with the
   reason rather than reporting run-to-run noise, and when either pass could not
-  finish the whole split — budget exhausted, or every attempt at a task
-  discarded — it reports `not_run` too: a prefix mean is not a test number, and
+  finish the whole split (budget exhausted, or every attempt at a task
+  discarded), it reports `not_run` too: a prefix mean is not a test number, and
   a pass that scored nothing has a mean of `0` that would otherwise publish as
   the run's delta. Either way `sealed_test_not_run` fires and no delta exists.
   A restore that fails around phase 11 throws `sealed_test_failed` in phase
   `sealed_test`, never the control arm's error.
 
-- The `held_out_reused_for_selection` warning and its family-wise error rate go in the PR's Evaluation section verbatim, alongside the sealed-test delta — or an explicit statement that no sealed test was run.
+- The `held_out_reused_for_selection` warning and its family-wise error rate go in the PR's Evaluation section verbatim, alongside the sealed-test delta, or an explicit statement that no sealed test was run.
 
 ## Playbook vs optimize()
 
-- `playbook(...)` — accumulate reusable, evolving task knowledge; the only path that also learns online via `update(...)`.
-- `optimize(...)` / `agent.optimize(...)` — tune instruction text and few-shot demos offline to a best/Pareto result.
+- `playbook(...)`: accumulate reusable, evolving task knowledge; the only path that also learns online via `update(...)`.
+- `optimize(...)` / `agent.optimize(...)`: tune instruction text and few-shot demos offline to a best/Pareto result.
 - They are complementary; a project can use both.
 
 ## Troubleshooting
@@ -718,7 +718,7 @@ request is denied and the echo assertion is never made.
 
 ## Examples
 
-- `src/examples/agent-playbook-evidence.ts` — the full evidence surface on one
+- `src/examples/agent-playbook-evidence.ts`, the full evidence surface on one
   run: control arm, band, intervals, validity, reach, transfer, sealed test.
 
 ```bash
@@ -735,7 +735,7 @@ npm run tsx src/examples/agent-playbook-evidence.ts
 - Do **not** estimate `costUsd`. Ax has no provider cost field; supply `costFor` or leave the basis `unknown`.
 - Do **not** treat `applicability_counterfactual` or `rendered_only` reach as evidence, and do not configure them expecting the reach gate to pass.
 - Do **not** bind `promotionAuthority.resourceId` to a per-candidate value. A derived id is one no host could have pre-granted.
-- Do **not** hand-write `AxAgentPlaybookEvolveResult` doubles without `control`, `accounting` and `applied` — they are required, and `applied` is a three-state discriminant, not a boolean.
+- Do **not** hand-write `AxAgentPlaybookEvolveResult` doubles without `control`, `accounting` and `applied`: they are required, and `applied` is a three-state discriminant, not a boolean.
 - Do **not** read `sealedTest` before the run finishes or feed it into a threshold. Nothing in the gate chain may consume it.
 
 ## See Also
