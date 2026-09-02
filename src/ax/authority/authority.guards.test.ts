@@ -236,7 +236,7 @@ describe('Ax evidence guards at the authorization boundary', () => {
 
   it('the thrown error satisfies axIsGuardPredicateFailure and nothing else does', async () => {
     // The structural guard is exported for cross-realm callers, so it must
-    // recognise the real error this path throws, not only a synthetic one.
+    // accept the real error this path throws, not only a synthetic one.
     const { authority } = harness({
       grants: [grant({ requirements: [requirement()] })],
       evidence: [],

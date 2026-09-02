@@ -174,7 +174,7 @@ describe('Ax evidence guard evaluation', () => {
       match: { op: 'fresh' },
     });
     const aged = requirement({ maxAgeMs: 1 });
-    const clockless = requirement({ kind: 'device.posture' });
+    const timeless = requirement({ kind: 'device.posture' });
     const evidence = [
       observation(),
       observation({ kind: 'device.posture', value: 'strong' }),
@@ -186,7 +186,7 @@ describe('Ax evidence guard evaluation', () => {
       undefined as unknown as number,
       '10000' as unknown as number,
     ]) {
-      const result = evaluate([fresh, aged, clockless], evidence, { now });
+      const result = evaluate([fresh, aged, timeless], evidence, { now });
       expect(result.allow).toBe(false);
       expect(result.failures.map((entry) => entry.code)).toEqual([
         'stale',
@@ -195,7 +195,7 @@ describe('Ax evidence guard evaluation', () => {
     }
     // The same inputs on a finite clock allow, so the denial is the clock's.
     expect(
-      evaluate([fresh, aged, clockless], evidence, { now: NOW - 1_000 }).allow
+      evaluate([fresh, aged, timeless], evidence, { now: NOW - 1_000 }).allow
     ).toBe(true);
   });
 
