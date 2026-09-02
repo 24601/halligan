@@ -617,7 +617,8 @@ export class AxACE extends AxBaseOptimizer {
                   feedbackIds: [feedbackId],
                   ...(this.aceConfig.defaultBulletVisibility
                     ? {
-                        visibility: this.aceConfig.defaultBulletVisibility,
+                        defaultVisibility:
+                          this.aceConfig.defaultBulletVisibility,
                       }
                     : {}),
                 },
@@ -812,7 +813,7 @@ export class AxACE extends AxBaseOptimizer {
         protectedBulletIds: protectedIds,
         hostEvidence: {
           ...(this.aceConfig.defaultBulletVisibility
-            ? { visibility: this.aceConfig.defaultBulletVisibility }
+            ? { defaultVisibility: this.aceConfig.defaultBulletVisibility }
             : {}),
           ...args.evidence,
           source: args.evidence?.source ?? 'online',

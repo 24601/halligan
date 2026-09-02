@@ -908,12 +908,23 @@ function supersedesOptimizer(
 /**
  * Resolve the tier a written bullet carries.
  *
- * Precedence, and the order matters: an explicit host tier wins, because the
- * host owns promotion. Otherwise the curator may only downgrade; an ADD or
- * UPDATE that carries no `visibility` never clears an existing `'optimizer'`
- * (`op.visibility ?? bullet.visibility` would let an absent field launder a
- * bullet back into the actor prompt); and a write that copies optimizer-tier
- * content verbatim, or supersedes an optimizer-tier bullet, inherits the tier.
+ * Precedence, and the order matters:
+ * 1. an explicit per-call `hostEvidence.visibility` wins, because the host owns
+ *    promotion and is naming these operations explicitly;
+ * 2. the curator may only downgrade, and an ADD or UPDATE that carries no
+ *    `visibility` never clears an existing `'optimizer'`
+ *    (`op.visibility ?? bullet.visibility` would let an absent field launder a
+ *    bullet back into the actor prompt);
+ * 3. a write that copies optimizer-tier content verbatim, or supersedes an
+ *    optimizer-tier bullet, inherits the tier;
+ * 4. only then does the engine-wide creation default apply, and only to a
+ *    bullet that has no tier yet.
+ *
+ * Step 4 is deliberately last. An engine-wide default routed through step 1
+ * applies to every operation in the batch, so a curator-chosen `UPDATE` on an
+ * existing optimizer-tier bullet would flip it to `'actor'` — a model-driven
+ * promotion through a host-owned knob, and the exact laundering steps 2-3 exist
+ * to stop.
  *
  * These rules block copy, supersede-swap and merge-survivor promotion. They do
  * NOT block paraphrase, and no exact-content rule can. The tier gates artifacts,
@@ -945,6 +956,12 @@ function resolveWrittenVisibility(args: {
   }
   if (supersedesOptimizer(args.playbook, args.supersedes)) {
     return 'optimizer';
+  }
+  if (
+    args.current === undefined &&
+    args.hostEvidence?.defaultVisibility !== undefined
+  ) {
+    return args.hostEvidence.defaultVisibility;
   }
   return args.current;
 }
@@ -1017,6 +1034,7 @@ function assertHostEvidence(value: unknown): void {
       (typeof value.confidence !== 'number' ||
         !Number.isFinite(value.confidence))) ||
     !isVisibilityStructurallyValid(value.visibility) ||
+    !isVisibilityStructurallyValid(value.defaultVisibility) ||
     !isEvidenceStructurallyValid({
       verification: value.verification,
       authorityProvenance: value.authorityProvenance,

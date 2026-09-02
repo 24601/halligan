@@ -417,6 +417,113 @@ describe('visibility laundering is blocked', () => {
     expect(replacement?.visibility).toBe('optimizer');
   });
 
+  it('an engine-wide default cannot launder a verbatim copy into the actor tier', () => {
+    // `defaultBulletVisibility: 'actor'` is a CREATION default. Routed as an
+    // explicit per-call host promotion it would apply to every operation in the
+    // batch and beat both inheritance rules.
+    const playbook = optimizerSeed();
+    applyCuratorOperations(
+      playbook,
+      [{ type: 'ADD', section: 'Guidelines', content: LEAK }],
+      { hostEvidence: { source: 'online', defaultVisibility: 'actor' } }
+    );
+    const added = playbook.sections.Guidelines?.find(
+      (entry) => entry.id !== 'actor-keep'
+    );
+    expect(added?.visibility).toBe('optimizer');
+    expect(
+      axRenderActorPlaybook(axProjectActorPlaybook(playbook, { now: NOW }))
+    ).not.toContain(LEAK);
+  });
+
+  it('an engine-wide default cannot launder a supersede-swap into the actor tier', () => {
+    const playbook = optimizerSeed();
+    applyCuratorOperations(
+      playbook,
+      [
+        {
+          type: 'ADD',
+          section: 'Common Pitfalls',
+          content: 'a rewrite that replaces the internal diagnostic',
+          supersedes: ['optimizer-seed'],
+        },
+      ],
+      { hostEvidence: { source: 'online', defaultVisibility: 'actor' } }
+    );
+    const replacement = playbook.sections['Common Pitfalls']?.find(
+      (entry) => entry.id !== 'optimizer-seed'
+    );
+    expect(replacement?.visibility).toBe('optimizer');
+  });
+
+  it('an engine-wide default cannot promote an existing optimizer bullet', () => {
+    // The worst of the three: the host set an engine-wide default, but the
+    // CURATOR picked the bulletId. Promotion is host-owned per RFC 6.
+    const playbook = optimizerSeed();
+    applyCuratorOperations(
+      playbook,
+      [
+        {
+          type: 'UPDATE',
+          section: 'Common Pitfalls',
+          bulletId: 'optimizer-seed',
+          content: 'a mild rewording of the internal diagnostic',
+        },
+      ],
+      { hostEvidence: { source: 'online', defaultVisibility: 'actor' } }
+    );
+    expect(playbook.sections['Common Pitfalls']?.[0]?.visibility).toBe(
+      'optimizer'
+    );
+  });
+
+  it('the creation default still stamps a genuinely new bullet', () => {
+    // The knob is not inert: a bullet with no tier and no inheritance takes it.
+    const playbook = optimizerSeed();
+    applyCuratorOperations(
+      playbook,
+      [
+        {
+          type: 'ADD',
+          section: 'Guidelines',
+          content: 'a brand new piece of actor guidance',
+        },
+      ],
+      { hostEvidence: { source: 'online', defaultVisibility: 'actor' } }
+    );
+    expect(
+      playbook.sections.Guidelines?.find(
+        (entry) => entry.content === 'a brand new piece of actor guidance'
+      )?.visibility
+    ).toBe('actor');
+  });
+
+  it('an explicit per-call host visibility still promotes, and is validated', () => {
+    // The host promotion path is intentionally absolute — it is the ONLY way a
+    // bullet leaves the optimizer tier, and the host is naming the ops.
+    const playbook = optimizerSeed();
+    applyCuratorOperations(
+      playbook,
+      [
+        {
+          type: 'UPDATE',
+          section: 'Common Pitfalls',
+          bulletId: 'optimizer-seed',
+        },
+      ],
+      { hostEvidence: { source: 'manual', visibility: 'actor' } }
+    );
+    expect(playbook.sections['Common Pitfalls']?.[0]?.visibility).toBe('actor');
+    expect(() =>
+      applyCuratorOperations(optimizerSeed(), [], {
+        hostEvidence: {
+          source: 'manual',
+          defaultVisibility: 'nope',
+        } as never,
+      })
+    ).toThrow(TypeError);
+  });
+
   it('dedupePlaybookByContent takes the more restrictive visibility of a merged pair', () => {
     const playbook = createEmptyPlaybook('Merge fixture');
     playbook.sections.Guidelines = [

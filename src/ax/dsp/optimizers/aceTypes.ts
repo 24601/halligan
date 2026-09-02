@@ -84,11 +84,24 @@ export type AxACEHostEvidence = {
   confidence?: number;
   verification?: readonly AxACEVerificationResult[];
   /**
-   * Host-only promotion path. The curator can never set this to `'actor'`:
-   * `AxACECuratorOperation.visibility` is typed `'optimizer'` and
-   * runtime-checked. Applied to both created and updated bullets.
+   * Host-only promotion path, scoped to THIS call. The curator can never set it
+   * to `'actor'`: `AxACECuratorOperation.visibility` is typed `'optimizer'` and
+   * runtime-checked. It takes precedence over every inheritance rule, because
+   * the host owns promotion and is naming these operations explicitly.
+   *
+   * Never route an engine-wide default through this field. A default applies to
+   * every operation in the batch including a curator-chosen `UPDATE`, which
+   * would let the curator promote an existing optimizer-tier bullet by naming
+   * its id. That is what `defaultVisibility` is for.
    */
   visibility?: AxACEBulletVisibility;
+  /**
+   * Creation default. Applied ONLY to a bullet that has no tier yet, and only
+   * after the curator-downgrade, verbatim-content and supersede-swap
+   * inheritance rules have had their say — so it can never promote an existing
+   * `'optimizer'` bullet or launder optimizer-tier content into the actor tier.
+   */
+  defaultVisibility?: AxACEBulletVisibility;
   /** Host-written authority facts for the bullets this operation writes. */
   authorityProvenance?: AxSkillProvenance;
 };
@@ -249,8 +262,10 @@ export interface AxACEOptions {
   /** Optional host run identifier attached to compile-generated provenance. */
   sourceRunId?: string;
   /**
-   * Stamped onto every bullet this engine writes, created or updated. Leave
-   * unset for legacy behaviour: no `visibility` field is written at all.
+   * Stamped onto bullets this engine CREATES, as a creation default. It never
+   * promotes a bullet that already carries a tier and never overrides the
+   * verbatim-content or supersede-swap inheritance rules. Leave unset for
+   * legacy behaviour: no `visibility` field is written at all.
    */
   defaultBulletVisibility?: AxACEBulletVisibility;
 }
