@@ -396,7 +396,13 @@ export class AxMindChatError extends Error {
       | 'claimed'
       | 'empty_content'
       | 'no_transport'
-      | 'send_indeterminate',
+      | 'send_indeterminate'
+      /**
+       * The step a reply-state question names is not in this log. Reporting
+       * `unanswered` for a step the log cannot see would authorize a reply to
+       * a message that does not exist here, so it fails closed instead.
+       */
+      | 'unknown_trigger',
     readonly evidenceStepId?: string,
     options?: ErrorOptions
   ) {
