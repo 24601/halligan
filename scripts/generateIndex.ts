@@ -99,6 +99,9 @@ const internalExportNames = new Set([
   'AxAgentToolReceiptBinding',
   'AxAgentToolReceiptObservation',
   'axValidateWorkingStateConfig',
+  // The skillState config gate the agent constructor runs eagerly. Same
+  // reason: hosts configure the mode through `AxSkillStateConfig`.
+  'axValidateSkillStateConfig',
   // Bare lowercase pointer parser shared by statePatch.ts and workingState.ts.
   // Listed deliberately: it is module plumbing, not public API.
   'parseStatePatchPointer',
