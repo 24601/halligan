@@ -16,7 +16,7 @@ import {
 import type { AxGEPARunAdmissionReport } from '../optimizerTypes.js';
 import { ax } from '../template.js';
 import type { AxGenOut, AxProgrammable } from '../types.js';
-import { axCompareCodeUnits } from './digests.js';
+import { type AxSha256Digest, axCompareCodeUnits } from './digests.js';
 import type { AxGEPAAdapter } from './gepaAdapter.js';
 import {
   bootstrapGEPADemos,
@@ -48,6 +48,7 @@ import {
   buildGEPACandidateComponentDelta,
   buildGEPACandidateFailure,
   buildGEPAReflectionOutcomes,
+  fingerprintGEPAValue,
   freezeGEPACandidateLineageManifest,
   resolveGEPALineageOptions,
 } from './gepaLineage.js';
@@ -63,6 +64,7 @@ import {
   axHarnessStamp,
 } from './harnessRecipe.js';
 import {
+  type AxComponentClass,
   type AxMutationAnnotation,
   type AxMutationAnnotator,
   type AxMutationDepthHistogram,
@@ -70,6 +72,7 @@ import {
   type AxMutationSurface,
   axBuildMutationDepthHistogram,
   axDefaultMutationAnnotator,
+  axInferComponentClass,
   axValidateMutationAnnotation,
 } from './mutationTaxonomy.js';
 import {
@@ -79,6 +82,18 @@ import {
   removeDominatedProgramsByInstanceFronts,
   selectProgramCandidateFromInstanceFronts,
 } from './paretoUtils.js';
+import {
+  AX_REJECTED_LEDGER_REF_MAX_DIGESTS,
+  type AxRejectedCandidateExpiry,
+  type AxRejectedCandidateExpiryContext,
+  type AxRejectedCandidateLedgerEntry,
+  AxRejectedCandidateLedgerError,
+  type AxRejectedCandidateLedgerRef,
+  type AxRejectedCandidateLedgerStore,
+  axMergeRejectedCandidateLedgerRefs,
+  axRejectedCandidateDigest,
+  axRejectedCandidateLedgerEntry,
+} from './rejectedCandidateLedger.js';
 import {
   type AxMinibatchStrategy,
   type AxTaskDiscriminationOptions,
@@ -489,6 +504,59 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
         : undefined;
     /** Component kind by component id, for the mutation-surface derivation. */
     const kindById = new Map(targets.map((target) => [target.id, target.kind]));
+    const rejectedLedgerInput = ownDataOption<
+      Readonly<{
+        store: AxRejectedCandidateLedgerStore;
+        storeId: string;
+        clock: { now(): number };
+        expiresWhen: readonly AxRejectedCandidateExpiry[];
+        expiryContext?: AxRejectedCandidateExpiryContext;
+        maxPriorEntries?: number;
+      }>
+    >('rejectedCandidateLedger');
+    const ledgerOptions =
+      typeof rejectedLedgerInput === 'object' && rejectedLedgerInput !== null
+        ? {
+            ...rejectedLedgerInput,
+            maxPriorEntries: Math.max(
+              1,
+              Math.floor(rejectedLedgerInput.maxPriorEntries ?? 8)
+            ),
+          }
+        : undefined;
+    if (ledgerOptions) {
+      // Validated ONCE, before any metric call. A store that is down is
+      // degraded operation and must never abort a run (§6.3); an `expiresWhen`
+      // with no TTL is a caller bug that would produce permanent negative
+      // memory, and discovering it one entry at a time inside the
+      // record-failure path would bury it in `failures`.
+      if (
+        !Array.isArray(ledgerOptions.expiresWhen) ||
+        ledgerOptions.expiresWhen.length === 0
+      ) {
+        throw new AxRejectedCandidateLedgerError({
+          code: 'empty_expiry',
+          message:
+            'rejectedCandidateLedger.expiresWhen must name at least one expiry clause',
+        });
+      }
+      if (
+        !ledgerOptions.expiresWhen.some((clause) => clause.kind === 'after_ms')
+      ) {
+        throw new AxRejectedCandidateLedgerError({
+          code: 'expiry_requires_ttl',
+          message:
+            'rejectedCandidateLedger.expiresWhen must include an after_ms clause; the other clauses only fire when the READER supplies the matching context, so without a TTL an entry read with an empty context is permanent',
+        });
+      }
+    }
+    /**
+     * Identity digests of the entries THIS run recorded. Carried on the
+     * artifact as a pointer set; the entries themselves live only in the host
+     * store, which is what makes them survive an artifact rollback.
+     */
+    const ledgerEntryDigests = new Set<AxSha256Digest>();
+    let omittedLedgerDigestCount = 0;
     const minibatchStrategy =
       ownDataOption<AxMinibatchStrategy>('minibatchStrategy') ?? 'uniform';
     // Read unconditionally so the "supplied but ignored" case can be reported
@@ -885,6 +953,167 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
         ...(harnessStamp ? { harness: harnessStamp } : {}),
         ...(annotations?.admission ? { admission: annotations.admission } : {}),
       };
+    };
+
+    /**
+     * Record one rejected candidate into the host ledger.
+     *
+     * DEGRADES, never aborts (§6.3): a store that throws or hangs yields a
+     * lineage `runtime` failure and the run continues. The rejection is already
+     * in lineage; losing the durable copy is a reduction in memory, not a
+     * reason to throw away an optimization run.
+     *
+     * The entry is a PRIOR, never a prohibition: nothing downstream refuses a
+     * candidate for being in the ledger, and `expiresWhen` bounds how long it
+     * can influence anything at all.
+     */
+    const recordRejectedCandidate = async (
+      args: Readonly<{
+        parentCfg: Readonly<Record<string, string>>;
+        proposedCfg: Readonly<Record<string, string>>;
+        reason: string;
+        mutation?: AxMutationAnnotation;
+        gate: 'reflective_mutation' | 'system_merge';
+        estimator: 'sum' | 'ipw_hajek';
+        parentScore: number;
+        childScore: number;
+        stderr?: number;
+        admission?: Readonly<AxTrajectoryAdmissionReport>;
+        onFailure?: (failure: AxGEPACandidateFailure) => void;
+      }>
+    ): Promise<void> => {
+      if (!ledgerOptions) return;
+      try {
+        const changed = Object.keys(args.proposedCfg)
+          .filter(
+            (componentId) =>
+              args.parentCfg[componentId] !== args.proposedCfg[componentId]
+          )
+          .sort(axCompareCodeUnits);
+        if (changed.length === 0) return;
+        const componentDelta = changed.map((componentId) => ({
+          componentId,
+          afterFingerprint: fingerprintGEPAValue(
+            args.proposedCfg[componentId]!
+          ),
+        }));
+        const componentClasses: AxComponentClass[] = [];
+        for (const componentId of changed) {
+          try {
+            componentClasses.push(
+              axInferComponentClass(componentId, mutationOptions?.hostKinds)
+            );
+          } catch {
+            // An unmapped kind is not a reason to lose the entry; the
+            // component id is still carried in `implicatedSurfaces`.
+          }
+        }
+        // The one genuinely UNTRUSTED field: it quotes the model's own
+        // proposed text back, which is what makes the prior useful and exactly
+        // why it never enters the trusted reference channel. Bounded here and
+        // clamped again to 1000 characters by the entry constructor.
+        const diagnosis = [
+          args.reason,
+          ...changed.map(
+            (componentId) =>
+              `${componentId}=${JSON.stringify(
+                args.proposedCfg[componentId]!.slice(0, 200)
+              )}`
+          ),
+        ].join('; ');
+        const entry = axRejectedCandidateLedgerEntry({
+          candidateDigest: await axRejectedCandidateDigest({
+            componentDelta,
+            ...(harnessStamp ? { harness: harnessStamp } : {}),
+          }),
+          recordedAt: ledgerOptions.clock.now(),
+          diagnosis,
+          implicatedSurfaces: changed,
+          componentClasses: [...new Set(componentClasses)].sort(),
+          ...(args.mutation ? { mutation: args.mutation } : {}),
+          // GEPA states no predicted delta: it does not form a hypothesis
+          // about a candidate, it evaluates one. An empty array says that,
+          // where a fabricated prediction would not.
+          predictedDeltas: [],
+          observedDeltas: [
+            {
+              metric: 'scalar',
+              split: 'held_in',
+              delta: args.childScore - args.parentScore,
+            },
+          ],
+          gateReading: {
+            parentScore: args.parentScore,
+            childScore: args.childScore,
+            threshold: this.minImprovementThreshold,
+            estimator: args.estimator,
+            ...(args.stderr === undefined ? {} : { stderr: args.stderr }),
+            admittedRows: args.admission?.admittedRows ?? 0,
+            discardedRows: args.admission?.discardedRows ?? 0,
+            gate: args.gate,
+          },
+          ...(harnessStamp ? { harness: harnessStamp } : {}),
+          expiresWhen: ledgerOptions.expiresWhen,
+        });
+        await ledgerOptions.store.record(entry, gepaAbortSignal);
+        // A SET: `record` is idempotent by digest, so re-proposing the same
+        // text supersedes one entry rather than creating a second, and the
+        // artifact's pointer set must say the same thing the store does.
+        if (
+          ledgerEntryDigests.has(entry.candidateDigest) ||
+          ledgerEntryDigests.size < AX_REJECTED_LEDGER_REF_MAX_DIGESTS
+        ) {
+          ledgerEntryDigests.add(entry.candidateDigest);
+        } else {
+          omittedLedgerDigestCount += 1;
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        verboseLog(
+          `rejected-candidate ledger unavailable, continuing without a durable record: ${message}`
+        );
+        if (lineageEnabled) {
+          args.onFailure?.(
+            buildGEPACandidateFailure(
+              'runtime',
+              `rejected_candidate_ledger: ${message}`,
+              lineageOptions!
+            )
+          );
+        }
+      }
+    };
+
+    /**
+     * The untrusted prior for the components a round is about to propose.
+     *
+     * Read with the host's expiry context and the injected clock, so an entry
+     * whose stated conditions no longer hold is gone by construction rather
+     * than by anybody remembering to purge.
+     */
+    const fetchRejectedPrior = async (
+      componentIds: readonly string[]
+    ): Promise<readonly AxRejectedCandidateLedgerEntry[] | undefined> => {
+      if (!ledgerOptions) return undefined;
+      try {
+        const entries = await ledgerOptions.store.list(
+          {
+            componentIds,
+            limit: ledgerOptions.maxPriorEntries,
+            now: ledgerOptions.clock.now(),
+            ...(ledgerOptions.expiryContext
+              ? { context: ledgerOptions.expiryContext }
+              : {}),
+          },
+          gepaAbortSignal
+        );
+        return entries.length > 0 ? entries : undefined;
+      } catch (error) {
+        verboseLog(
+          `rejected-candidate ledger read failed, proposing without a prior: ${error instanceof Error ? error.message : String(error)}`
+        );
+        return undefined;
+      }
     };
 
     const recordCandidate = lineageEnabled
@@ -1657,6 +1886,18 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
             verboseLog(
               `Iteration ${t + 1}: merge subsample inconclusive (${mergeEval.admission.admittedRows}/${mergeEval.admission.evaluatedRows} rows admitted); aborting the merge candidate`
             );
+            await recordRejectedCandidate({
+              parentCfg: candidates[a]!.cfg,
+              proposedCfg: mergedCfg,
+              reason: 'insufficient_admitted_rows',
+              mutation: mergeAnnotation,
+              gate: 'system_merge',
+              estimator: 'sum',
+              parentScore: 0,
+              childScore: 0,
+              admission: mergeEval.admission,
+              onFailure: (failure) => mergeFailures?.push(failure),
+            });
             recordCandidate?.(
               () => {
                 const delta = buildGEPACandidateComponentDelta(
@@ -1732,6 +1973,18 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
             verboseLog(
               `Iteration ${t + 1}: merge subsample shares no admitted row with both parents; aborting the merge candidate`
             );
+            await recordRejectedCandidate({
+              parentCfg: candidates[a]!.cfg,
+              proposedCfg: mergedCfg,
+              reason: 'insufficient_admitted_rows',
+              mutation: mergeAnnotation,
+              gate: 'system_merge',
+              estimator: 'sum',
+              parentScore: 0,
+              childScore: 0,
+              admission: mergeEval.admission,
+              onFailure: (failure) => mergeFailures?.push(failure),
+            });
             recordCandidate?.(
               () => {
                 const delta = buildGEPACandidateComponentDelta(
@@ -1884,6 +2137,21 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
           if (mergeAccepted) {
             continue;
           }
+          // The merge gate always reports `estimator: 'sum'`: its subsample is
+          // a score-disagreement stratified draw with no inclusion
+          // probabilities, so no IPW estimate of it exists.
+          await recordRejectedCandidate({
+            parentCfg: candidates[a]!.cfg,
+            proposedCfg: mergedCfg,
+            reason: 'insufficient_subsample_improvement',
+            mutation: mergeAnnotation,
+            gate: 'system_merge',
+            estimator: 'sum',
+            parentScore: Math.max(id1Sum, id2Sum),
+            childScore: newSum,
+            admission: mergeEval.admission,
+            onFailure: (failure) => mergeFailures?.push(failure),
+          });
           recordCandidate?.(
             () => {
               const delta = buildGEPACandidateComponentDelta(
@@ -2075,6 +2343,13 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
         }
       }
 
+      // Read once per round, for exactly the components this round proposes.
+      // Expiry is evaluated at query time against the host's context and the
+      // injected clock, so an entry whose stated conditions no longer hold
+      // never reaches the proposer.
+      const rejectedPrior = await fetchRejectedPrior(
+        targetGroup.map((groupTarget) => groupTarget.id)
+      );
       for (const groupTarget of targetGroup) {
         if (
           proposedCfg[groupTarget.id] !==
@@ -2120,7 +2395,8 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
                   )
                 );
               }
-            : undefined
+            : undefined,
+          rejectedPrior
         );
       }
 
@@ -2384,6 +2660,18 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
         verboseLog(
           `Iteration ${t + 1}: child minibatch inconclusive (${childMiniEval.admission?.admittedRows ?? 0}/${childMiniEval.admission?.evaluatedRows ?? 0} rows admitted, ${pairedMinibatchIndices?.length ?? 0} paired with the parent); aborting the candidate`
         );
+        await recordRejectedCandidate({
+          parentCfg: candidates[parentIdx]!.cfg,
+          proposedCfg,
+          reason: 'insufficient_admitted_rows',
+          mutation: candidateAnnotation,
+          gate: 'reflective_mutation',
+          estimator: 'sum',
+          parentScore: 0,
+          childScore: 0,
+          admission: childMiniEval.admission,
+          onFailure: (failure) => mutationFailures?.push(failure),
+        });
         recordCandidate?.(
           () => {
             const delta = buildGEPACandidateComponentDelta(
@@ -2471,6 +2759,30 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
         verboseLog(
           `Iteration ${t + 1}: Rejected (child=${childComparisonSum.toFixed(3)} <= parent=${parentComparisonSum.toFixed(3)})`
         );
+        await recordRejectedCandidate({
+          parentCfg: candidates[parentIdx]!.cfg,
+          proposedCfg,
+          reason:
+            buildGEPACandidateComponentDelta(
+              candidates[parentIdx]!.cfg,
+              proposedCfg,
+              lineageOptions ?? resolveGEPALineageOptions()
+            ).delta.length === 0
+              ? 'no_component_change'
+              : 'insufficient_minibatch_improvement',
+          mutation: candidateAnnotation,
+          gate: 'reflective_mutation',
+          // The estimator the gate ACTUALLY used, so a ledger reader can tell
+          // a sum comparison from an IPW one rather than assuming.
+          estimator: ipwEstimate ? 'ipw_hajek' : 'sum',
+          parentScore: ipwEstimate ? 0 : parentComparisonSum,
+          childScore: ipwEstimate ? ipwEstimate.estimate : childComparisonSum,
+          ...(ipwEstimate?.stderr === undefined
+            ? {}
+            : { stderr: ipwEstimate.stderr }),
+          admission: childMiniEval.admission,
+          onFailure: (failure) => mutationFailures?.push(failure),
+        });
         recordCandidate?.(
           () => {
             const delta = buildGEPACandidateComponentDelta(
@@ -2702,6 +3014,22 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
     const candidateLineage = buildLineageManifest(bestCandidateIdx, {
       terminal: admissionCeilingFired,
     });
+    /**
+     * A POINTER SET, not the entries. This is what makes the ledger survive an
+     * artifact rollback: rewinding the artifact rewinds the pointers, and the
+     * entries stay in the host store where the next run still finds them.
+     */
+    const rejectedCandidateLedgerRef: AxRejectedCandidateLedgerRef | undefined =
+      ledgerOptions && ledgerEntryDigests.size > 0
+        ? // Normalized through the same helper asymmetric rollback unions with,
+          // so the artifact's ref is validated and clamped by one code path
+          // rather than two that can disagree.
+          axMergeRejectedCandidateLedgerRefs(undefined, {
+            storeId: ledgerOptions.storeId,
+            entryDigests: [...ledgerEntryDigests],
+            omittedDigestCount: omittedLedgerDigestCount,
+          })
+        : undefined;
     const discriminationSummary = buildDiscriminationSummary();
     const finalHistogram = mutationHistogram();
     const finalBestChain = buildBestChain(bestCandidateIdx);
@@ -2716,6 +3044,9 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
             componentMap: { ...candidates[bestCandidateIdx]!.cfg },
             selectorState: componentSelector.snapshot(),
             candidateLineage,
+            ...(rejectedCandidateLedgerRef
+              ? { rejectedCandidateLedgerRef }
+              : {}),
             demos: bootstrappedDemos,
             examples: examples as unknown as any[],
             modelConfig: undefined,
@@ -2934,7 +3265,12 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
         kind: 'runtime' | 'validator';
         message: string;
       }>
-    ) => void
+    ) => void,
+    /**
+     * Untrusted rejected-candidate prior. Rendered into its own delimited
+     * prompt field, never into the trusted optimization-reference channel.
+     */
+    rejectedPrior?: readonly AxRejectedCandidateLedgerEntry[]
   ): Promise<string> {
     const tuples: Array<{
       input: AxExample;
@@ -3041,6 +3377,7 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       maxAttempts: 2,
       onFailure,
       proposal: options?.gepaProposal,
+      ...(rejectedPrior && rejectedPrior.length > 0 ? { rejectedPrior } : {}),
     });
 
     return proposed ?? currentInstruction;

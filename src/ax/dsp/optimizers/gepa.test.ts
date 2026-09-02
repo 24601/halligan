@@ -7,6 +7,7 @@ import {
 import { ax } from '../template.js';
 import { AxGEPA } from './gepa.js';
 import { axHarnessRecipe } from './harnessRecipe.js';
+import { AxInMemoryRejectedCandidateLedger } from './rejectedCandidateLedger.js';
 import type { AxTrajectoryTerminationClassifier } from './trajectoryTermination.js';
 
 const createSingleRootProgram = (
@@ -662,7 +663,7 @@ describe('AxGEPA Optimizer', () => {
       });
     });
 
-    it('does not read candidate-lineage, abort, trajectory-termination, sampler, harness or mutation accessors at the opt-in boundary', async () => {
+    it('does not read candidate-lineage, abort, trajectory-termination, sampler, harness, mutation or ledger accessors at the opt-in boundary', async () => {
       let reads = 0;
       const inheritedOptions = Object.create({
         get candidateLineage() {
@@ -692,6 +693,10 @@ describe('AxGEPA Optimizer', () => {
         get mutationAnnotation() {
           reads += 1;
           throw new Error('inherited mutationAnnotation was read');
+        },
+        get rejectedCandidateLedger() {
+          reads += 1;
+          throw new Error('inherited rejectedCandidateLedger was read');
         },
       });
       Object.defineProperty(inheritedOptions, 'maxMetricCalls', {
@@ -747,6 +752,13 @@ describe('AxGEPA Optimizer', () => {
           get() {
             reads += 1;
             throw new Error('mutationAnnotation accessor was read');
+          },
+        },
+        rejectedCandidateLedger: {
+          enumerable: true,
+          get() {
+            reads += 1;
+            throw new Error('rejectedCandidateLedger accessor was read');
           },
         },
         maxMetricCalls: { enumerable: true, value: 2 },
@@ -827,13 +839,14 @@ describe('AxGEPA Optimizer', () => {
 
       // One own-descriptor read per opt-in option reached on the default path:
       // candidateLineage, abortSignal, trajectoryTermination, harnessRecipe,
-      // mutationAnnotation, minibatchStrategy and taskDiscrimination. The last
+      // mutationAnnotation, rejectedCandidateLedger, minibatchStrategy and
+      // taskDiscrimination. The last
       // is read even on the uniform path so that supplying it without the
       // strategy that consumes it can be REPORTED rather than silently
       // ignored; reading an own data property is not observable in any
       // artifact, event or draw sequence. This count is the tripwire that a
       // new option was added without being routed through `ownDataOption`.
-      expect(descriptorCalls).toBe(7);
+      expect(descriptorCalls).toBe(8);
       expect(result.optimizedProgram?.candidateLineage).toBeUndefined();
     });
 
@@ -2962,5 +2975,205 @@ describe('lineage version 2 annotations', () => {
     expect(
       new Set(records.map((record) => record.causalEvidenceRecordId)).size
     ).toBe(records.length);
+  });
+});
+
+describe('rejected-candidate ledger wiring', () => {
+  const makeClock = () => {
+    let now = 1_000;
+    return {
+      now: () => now,
+      advanceBy: (ms: number) => {
+        now += ms;
+      },
+    };
+  };
+
+  /**
+   * Two rounds where the proposal is always WORSE than the parent, so both are
+   * rejected at gate 1 and both must reach the ledger.
+   */
+  const runRejecting = async (
+    ledger: Record<string, unknown> | undefined,
+    overrides: Record<string, unknown> = {}
+  ) => {
+    const priorSeenPerRound: unknown[][] = [];
+    const optimizer = new AxGEPA({
+      studentAI: {} as AxAIService,
+      teacherAI: {} as AxAIService,
+      numTrials: 2,
+      minibatch: false,
+      mergeMax: 0,
+      earlyStoppingTrials: 10,
+      minImprovementThreshold: 0,
+      ...overrides,
+    });
+    const program = createSingleRootProgram('task', async (instruction) => ({
+      score: instruction === 'task' ? 1 : 0,
+    }));
+    (optimizer as any).reflectTargetInstruction = async (
+      ...args: unknown[]
+    ) => {
+      priorSeenPerRound.push((args[11] as unknown[]) ?? []);
+      return 'worse';
+    };
+    const result = await optimizer.compile(
+      program as any,
+      [{ question: 'q1' }, { question: 'q2' }],
+      async ({ prediction }) => prediction.score,
+      {
+        maxMetricCalls: 60,
+        skipPerfectScore: false,
+        candidateLineage: true,
+        ...(ledger ? { rejectedCandidateLedger: ledger } : {}),
+      }
+    );
+    return { result, priorSeenPerRound };
+  };
+
+  it('records a rejection and offers it back as an untrusted prior next round', async () => {
+    const clock = makeClock();
+    const store = new AxInMemoryRejectedCandidateLedger({ clock });
+    const { result, priorSeenPerRound } = await runRejecting({
+      store,
+      storeId: 'test-store',
+      clock,
+      expiresWhen: [{ kind: 'after_ms', ttlMs: 60_000 }],
+    });
+
+    // Round 1 saw nothing; round 2 saw round 1's rejection.
+    expect(priorSeenPerRound).toHaveLength(2);
+    expect(priorSeenPerRound[0]).toEqual([]);
+    expect(priorSeenPerRound[1]).toHaveLength(1);
+    const offered = priorSeenPerRound[1]![0] as any;
+    expect(offered.implicatedSurfaces).toEqual(['root::instruction']);
+    expect(offered.gateReading).toMatchObject({
+      gate: 'reflective_mutation',
+      estimator: 'sum',
+    });
+    // The diagnosis quotes the model's own proposed text back — which is
+    // exactly why it is untrusted and never enters the reference channel.
+    expect(offered.diagnosis).toContain('insufficient_minibatch_improvement');
+    expect(offered.diagnosis).toContain('root::instruction="worse"');
+
+    // The artifact carries POINTERS only.
+    const ref = (result.optimizedProgram as any)?.rejectedCandidateLedgerRef;
+    expect(ref?.storeId).toBe('test-store');
+    expect(ref?.entryDigests).toHaveLength(1);
+    expect(ref?.entryDigests[0]).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(ref?.omittedDigestCount).toBe(0);
+    // Both rounds proposed the same value, so both rejections supersede onto
+    // one entry rather than accumulating duplicates.
+    const stored = await store.list({ now: clock.now() });
+    expect(stored).toHaveLength(1);
+    expect(stored[0]?.candidateDigest).toBe(ref?.entryDigests[0]);
+  });
+
+  it('drops an entry from the prior once its ttl has elapsed', async () => {
+    const clock = makeClock();
+    const store = new AxInMemoryRejectedCandidateLedger({ clock });
+    await runRejecting({
+      store,
+      storeId: 'test-store',
+      clock,
+      expiresWhen: [{ kind: 'after_ms', ttlMs: 60_000 }],
+    });
+    expect(await store.list({ now: clock.now() })).toHaveLength(1);
+    clock.advanceBy(60_000);
+    // Fail-open: negative memory that outlives its stated conditions is a
+    // capability ceiling, so the entry leaves the query result.
+    expect(await store.list({ now: clock.now() })).toHaveLength(0);
+  });
+
+  it('continues the run and records a runtime failure when the store throws', async () => {
+    const clock = makeClock();
+    const throwing = {
+      capabilities: {
+        durability: 'volatile',
+        rollbackSurvival: 'unknown',
+      } as const,
+      record: async () => {
+        throw new Error('ledger offline');
+      },
+      list: async () => {
+        throw new Error('ledger offline');
+      },
+      purgeExpired: async () => 0,
+    };
+    const { result } = await runRejecting({
+      store: throwing,
+      storeId: 'broken',
+      clock,
+      expiresWhen: [{ kind: 'after_ms', ttlMs: 60_000 }],
+    });
+
+    // The run completed and still selected an artifact.
+    expect(result.optimizedProgram?.componentMap).toEqual({
+      'root::instruction': 'task',
+    });
+    const records = result.optimizedProgram?.candidateLineage?.records ?? [];
+    const rejected = records.filter((record) => record.decision === 'rejected');
+    expect(rejected.length).toBeGreaterThan(0);
+    expect(
+      rejected.some((record) =>
+        record.failures?.some(
+          (failure) =>
+            failure.kind === 'runtime' &&
+            failure.messageFingerprint !== undefined
+        )
+      )
+    ).toBe(true);
+    // No ref: nothing was durably recorded, and claiming otherwise on the
+    // artifact would be a pointer into an empty store.
+    expect(
+      (result.optimizedProgram as any)?.rejectedCandidateLedgerRef
+    ).toBeUndefined();
+  });
+
+  it('refuses an expiry with no ttl before any metric call', async () => {
+    const clock = makeClock();
+    const store = new AxInMemoryRejectedCandidateLedger({ clock });
+    let forwardCalls = 0;
+    const optimizer = new AxGEPA({
+      studentAI: {} as AxAIService,
+      teacherAI: {} as AxAIService,
+      numTrials: 1,
+    });
+    await expect(
+      optimizer.compile(
+        createSingleRootProgram('task', async () => {
+          forwardCalls += 1;
+          return { score: 0 };
+        }) as any,
+        [{ question: 'q1' }, { question: 'q2' }],
+        async ({ prediction }) => prediction.score,
+        {
+          maxMetricCalls: 20,
+          rejectedCandidateLedger: {
+            store,
+            storeId: 'test-store',
+            clock,
+            expiresWhen: [{ kind: 'model_changed', boundModelId: 'model-a' }],
+          },
+        }
+      )
+    ).rejects.toThrow('expiry_requires_ttl');
+    // Refused BEFORE anything ran: permanent negative memory is a caller bug,
+    // not a degraded store, so it fails loudly and for free.
+    expect(forwardCalls).toBe(0);
+  });
+
+  it('writes no ledger ref and offers no prior when the option is omitted', async () => {
+    const { result, priorSeenPerRound } = await runRejecting(undefined);
+    expect(priorSeenPerRound.every((prior) => prior.length === 0)).toBe(true);
+    expect(
+      (result.optimizedProgram as any)?.rejectedCandidateLedgerRef
+    ).toBeUndefined();
+    expect(
+      Object.hasOwn(
+        result.optimizedProgram as object,
+        'rejectedCandidateLedgerRef'
+      )
+    ).toBe(false);
   });
 });

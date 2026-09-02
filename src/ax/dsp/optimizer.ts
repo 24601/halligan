@@ -36,6 +36,7 @@ import {
   cloneAndFreezeGEPACandidateLineageManifest,
 } from './optimizers/gepaLineage.js';
 import type { AxGEPAComponentBanditState } from './optimizers/gepaSelection.js';
+import type { AxRejectedCandidateLedgerRef } from './optimizers/rejectedCandidateLedger.js';
 import type { AxOptimizerLoggerFunction } from './optimizerTypes.js';
 import type { AxGenOut, AxProgramDemos } from './types.js';
 
@@ -866,6 +867,12 @@ export interface AxOptimizedProgram<OUT = any> {
   /** Optional host-authored causal claim and evaluation receipts for candidates. */
   causalCandidateEvidence?: AxCausalCandidateEvidenceManifest;
   candidateLineage?: AxGEPACandidateLineageManifest;
+  /**
+   * POINTER ONLY. The rejected-candidate entries live in a host store the
+   * artifact cannot rewrite, which is what lets them survive a rollback of
+   * this snapshot.
+   */
+  rejectedCandidateLedgerRef?: AxRejectedCandidateLedgerRef;
   demos?: AxProgramDemos<any, OUT>[];
 
   // Model configuration
@@ -913,6 +920,12 @@ export class AxOptimizedProgramImpl<OUT = any>
   public readonly selectorState?: Record<string, AxGEPAComponentBanditState>;
   public readonly causalCandidateEvidence?: AxCausalCandidateEvidenceManifest;
   public declare readonly candidateLineage?: AxGEPACandidateLineageManifest;
+  /**
+   * `declare` + conditional assignment, matching `candidateLineage`: an
+   * unconditional `this.x = undefined` would put the key on every artifact,
+   * and `Object.keys` on a legacy artifact is part of INV-L1.
+   */
+  public declare readonly rejectedCandidateLedgerRef?: AxRejectedCandidateLedgerRef;
   public readonly demos?: AxProgramDemos<any, OUT>[];
   public readonly examples?: AxExample[];
   public readonly modelConfig?: {
@@ -943,6 +956,7 @@ export class AxOptimizedProgramImpl<OUT = any>
     causalEvidenceVerifier?: AxCausalEvidenceAuthorityVerifier;
     causalEvidenceAlreadyIssued?: symbol;
     candidateLineage?: AxGEPACandidateLineageManifest;
+    rejectedCandidateLedgerRef?: AxRejectedCandidateLedgerRef;
     demos?: AxProgramDemos<any, OUT>[];
     examples?: AxExample[];
     modelConfig?: AxOptimizedProgram<OUT>['modelConfig'];
@@ -963,6 +977,9 @@ export class AxOptimizedProgramImpl<OUT = any>
       this.candidateLineage = cloneAndFreezeGEPACandidateLineageManifest(
         config.candidateLineage
       );
+    }
+    if (config.rejectedCandidateLedgerRef) {
+      this.rejectedCandidateLedgerRef = config.rejectedCandidateLedgerRef;
     }
     if (config.causalCandidateEvidence && !config.causalEvidenceVerifier) {
       throw new Error('causal evidence verifier is required');
