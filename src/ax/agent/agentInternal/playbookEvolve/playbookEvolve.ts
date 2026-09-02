@@ -124,6 +124,7 @@ import {
   PRUNE_DEFAULT_MIN_TOKEN_REDUCTION,
   PRUNE_DEFAULT_OPERATION,
   pruneCandidateRanking,
+  pruneOverflowSet,
   redundancyVerdictOf,
   renderedTokensOf,
   selectPruneProposals,
@@ -2036,27 +2037,47 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
     const onOverflow = pruneOptions.onOverflow ?? 'propose';
     const overBudget =
       maxRenderedTokens !== undefined && renderedTokens > maxRenderedTokens;
-    if (overBudget) {
-      // `renderPlaybook` truncates nothing — it emits every applicable bullet —
-      // so the ceiling is a trigger, never a silent cut.
+    const operation = pruneOptions.operation ?? PRUNE_DEFAULT_OPERATION;
+    // The disclosure is DEFERRED until the phase knows what the overflow
+    // actually cost. `renderPlaybook` truncates nothing — it emits every
+    // applicable bullet — so the ceiling is a trigger, never a silent cut; but a
+    // warning emitted before the prune it triggered goes on saying the playbook
+    // is over budget even when the prune brought it back under, which is the
+    // stale-disclosure failure this subsystem exists to remove.
+    let disclosed = false;
+    const discloseOverBudget = (settlement: string): void => {
+      if (!overBudget || disclosed) return;
+      disclosed = true;
       runWarnings.push({
         code: 'rendered_size_over_budget',
-        message: `the rendered playbook is ${renderedTokens} estimated tokens against a ceiling of ${maxRenderedTokens}; ${
-          onOverflow === 'warn'
-            ? 'onOverflow is "warn", so this is reported and nothing was pruned'
-            : 'prune proposals were emitted'
-        }. Nothing is ever truncated: renderPlaybook emits every applicable bullet.`,
+        message: `the rendered playbook is ${renderedTokens} estimated tokens against a ceiling of ${maxRenderedTokens}; ${settlement}. Nothing is ever truncated: renderPlaybook emits every applicable bullet.`,
       });
-    }
-    if (!validationTasks?.length || !anchorHeldOutRecords) {
+    };
+    // `validateEvidenceOptions` already refuses `prune.enabled` without a
+    // validation split, so the first clause is a type narrowing. The held-out
+    // anchor is the part that can still go missing mid-run: every accept
+    // re-anchors it, and a re-anchor batch that produced no records leaves the
+    // sweep with nothing to compare an ablation against.
+    const heldOutAnchorMean = heldOut;
+    if (
+      !validationTasks?.length ||
+      !anchorHeldOutRecords ||
+      heldOutAnchorMean === undefined
+    ) {
+      discloseOverBudget(
+        'the leave-one-out sweep did not run, so nothing was pruned'
+      );
       return {
         status: 'not_run',
         reason:
-          'the leave-one-out sweep needs a non-empty validation set: a redundancy reading taken on the split the artifact was selected on measures selection, not redundancy',
+          'the leave-one-out sweep needs a non-empty validation set with a readable held-out anchor: a redundancy reading taken on the split the artifact was selected on measures selection, not redundancy',
       };
     }
     const ranking = pruneCandidateRanking(state.playbook, nowIsoValue);
     if (ranking.length === 0) {
+      discloseOverBudget(
+        'the rendered playbook has no removable bullet, so nothing was pruned'
+      );
       return {
         status: 'not_run',
         reason: 'the rendered playbook has no removable bullet',
@@ -2080,7 +2101,13 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
         partial = true;
         break;
       }
-      let ablated: AxAgentEvalBatchResult<IN, OUT> | undefined;
+      let measured:
+        | Readonly<{
+            batch: AxAgentEvalBatchResult<IN, OUT>;
+            renderedTokensWithout: number;
+          }>
+        | undefined;
+      let ablationError: unknown;
       try {
         const view = transformPlaybookForPrune({
           playbook: state.playbook,
@@ -2089,25 +2116,63 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
           reason: 'leave-one-out ablation',
           nowIso: nowIsoValue,
         });
+        const renderedTokensWithout = renderedTokensOf(
+          view.playbook,
+          nowIsoValue
+        );
         playbookHandle?.load?.({
           playbook: view.playbook,
           artifact: state.artifact,
         });
-        ablated = await runPhaseBatch(
-          'redundancy_ablation',
-          validationTasks,
-          'heldOut'
-        );
+        measured = {
+          batch: await runPhaseBatch(
+            'redundancy_ablation',
+            validationTasks,
+            'heldOut'
+          ),
+          renderedTokensWithout,
+        };
       } catch (error) {
-        if (options?.abortSignal?.aborted) throw error;
+        ablationError = error;
+      }
+      // The ablated view is a playbook with a bullet deleted that NOBODY asked
+      // to delete, so a failed restore is not a bookkeeping problem: it leaves
+      // that view live. It gets the same one bounded retry §6 gives the
+      // control-arm restore, and a second failure is a typed, named failure
+      // rather than a raw ACE `load` error escaping from a `finally` and
+      // replacing whatever was in flight.
+      try {
+        playbookHandle?.load?.(state);
+      } catch (firstRestoreError) {
+        try {
+          playbookHandle?.load?.(state);
+        } catch (secondRestoreError) {
+          throw new AxAgentPlaybookEvolveError(
+            'prune_apply_failed',
+            'redundancy_ablation',
+            `the leave-one-out ablation of bullet '${ref.bullet.id}' could not be undone after two attempts; the live playbook is still the ABLATED view and the artifact is indeterminate.`,
+            {
+              cause: new AggregateError(
+                [
+                  ...(ablationError === undefined ? [] : [ablationError]),
+                  firstRestoreError,
+                  secondRestoreError,
+                ],
+                `AxAgent.playbook().evolve(): the leave-one-out ablation of bullet '${ref.bullet.id}' could not be undone.`
+              ),
+            }
+          );
+        }
+      }
+      if (ablationError !== undefined) {
+        if (options?.abortSignal?.aborted) throw ablationError;
         // An ablation that threw measured nothing. The sweep continues — a
         // single unreadable bullet must not silence every other verdict — and
         // the report says `partial` so no reader mistakes it for a full read.
         partial = true;
-      } finally {
-        playbookHandle?.load?.(state);
       }
-      if (!ablated) continue;
+      if (!measured) continue;
+      const ablated = measured.batch;
       const interval = intervalFor(
         anchorHeldOutRecords,
         ablated.records,
@@ -2117,7 +2182,7 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
         partial = true;
         if (!interval) continue;
       }
-      const heldOutDelta = ablated.mean - (heldOut ?? 0);
+      const heldOutDelta = ablated.mean - heldOutAnchorMean;
       entries.push({
         bulletId: ref.bullet.id,
         section: ref.section,
@@ -2128,10 +2193,21 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
           interval,
           ...(bandSpread !== undefined ? { bandSpread } : {}),
         }),
-        renderedTokens: estimateTokenCount(ref.bullet.content),
+        // The bullet's RENDERED contribution, measured as the exact difference
+        // between the full render and the render without it — not
+        // `estimateTokenCount(content)`, which misses the per-bullet prefix and
+        // the section framing `renderPlaybook` emits and therefore reads
+        // systematically low in both the ordering key and the report.
+        renderedTokens: Math.max(
+          0,
+          renderedTokens - measured.renderedTokensWithout
+        ),
       });
     }
     if (entries.length === 0) {
+      discloseOverBudget(
+        'no leave-one-out ablation produced a reading, so nothing was pruned'
+      );
       return {
         status: 'not_run',
         reason: partial
@@ -2144,7 +2220,12 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
       entries,
       accounting: sweepAccounting(),
     };
-    if (onOverflow === 'warn' && overBudget) return report;
+    if (onOverflow === 'warn' && overBudget) {
+      discloseOverBudget(
+        'onOverflow is "warn", so this is reported and nothing was pruned'
+      );
+      return report;
+    }
     const thresholds = {
       maxCurrentLoss:
         pruneOptions.maxCurrentLoss ?? PRUNE_DEFAULT_MAX_CURRENT_LOSS,
@@ -2155,15 +2236,23 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
     const proposals = selectPruneProposals({
       entries,
       playbook: state.playbook,
-      operation: pruneOptions.operation ?? PRUNE_DEFAULT_OPERATION,
+      operation,
       trigger: overBudget ? 'rendered_size_budget' : 'redundancy_sweep',
       thresholds,
       nowIso: nowIsoValue,
-      ...(overBudget
+      // A size budget asks for the bytes back, not for every bullet the sweep
+      // was able to call prunable. The overflow set is the smallest prefix of
+      // the ranking that actually reaches the ceiling, so a playbook a few
+      // tokens over its budget does not lose every redundant bullet it has.
+      ...(overBudget && maxRenderedTokens !== undefined
         ? {
-            restrictTo: new Set(
-              ranking.slice(0, maxAblations).map((ref) => ref.bullet.id)
-            ),
+            restrictTo: pruneOverflowSet({
+              entries,
+              playbook: state.playbook,
+              operation,
+              maxRenderedTokens,
+              nowIso: nowIsoValue,
+            }),
           }
         : {}),
     });
@@ -2190,6 +2279,24 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
         heldOutTolerance: thresholds.maxHeldOutLoss,
       });
     }
+    // Now — and only now — the overflow disclosure can say what the overflow
+    // cost, including whether the prune it triggered actually brought the render
+    // back under the ceiling.
+    const settledTokens = (() => {
+      const settled = captureSnapshot(playbookHandle);
+      return settled?.playbook
+        ? renderedTokensOf(settled.playbook, nowIsoValue)
+        : undefined;
+    })();
+    discloseOverBudget(
+      proposals.length === 0
+        ? 'no bullet was prunable, so nothing was proposed and the render is unchanged'
+        : `${proposals.length} prune proposal(s) were emitted and the rendered playbook is now ${settledTokens ?? renderedTokens} estimated tokens, ${
+            (settledTokens ?? renderedTokens) <= (maxRenderedTokens ?? 0)
+              ? 'within the ceiling'
+              : 'still over the ceiling'
+          }`
+    );
     return report;
   };
 

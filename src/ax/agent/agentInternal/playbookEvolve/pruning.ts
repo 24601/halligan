@@ -258,6 +258,55 @@ export type AxPruneThresholds = Readonly<{
 }>;
 
 /**
+ * The overflow set: the smallest prefix of the prunable readings, in ranking
+ * order, whose removal actually brings the render back under the ceiling.
+ *
+ * THE PREFIX IS THE POINT. A size budget asks for the bytes back, not for every
+ * bullet the sweep was able to call redundant. Proposing all of them would spend
+ * capability the budget never asked for — a playbook 20 tokens over its ceiling
+ * with three prunable bullets worth 300 would lose all three. `entries` arrive
+ * in the sweep's ranking order (`helpfulCount asc, harmfulCount desc, updatedAt
+ * asc`), so walking that order removes the least valuable bullet first and stops
+ * the moment the ceiling is met.
+ *
+ * Measured against the REAL render after each addition rather than against a sum
+ * of per-bullet estimates: `renderPlaybook` emits section headers and per-bullet
+ * prefixes, so removing the last bullet of a section frees more than the bullet
+ * costs, and a sum would systematically under-remove.
+ *
+ * Returns every prunable id when no prefix reaches the ceiling — the budget then
+ * cannot be met, and holding bullets back would free less than the caller asked
+ * for while still paying the whole risk.
+ */
+export function pruneOverflowSet(args: {
+  entries: readonly AxAgentPlaybookRedundancyEntry[];
+  playbook: Readonly<AxACEPlaybook>;
+  operation: AxAgentPlaybookPruneOperation;
+  maxRenderedTokens: number;
+  nowIso: string;
+}): ReadonlySet<string> {
+  const prunable = args.entries
+    .filter((entry) => isPrunableVerdict(entry.verdict))
+    .map((entry) => entry.bulletId);
+  const accumulated: string[] = [];
+  for (const bulletId of prunable) {
+    accumulated.push(bulletId);
+    const projected = renderedTokensOf(
+      transformPlaybookForPrune({
+        playbook: args.playbook,
+        bulletIds: accumulated,
+        operation: args.operation,
+        reason: 'rendered-size overflow projection',
+        nowIso: args.nowIso,
+      }).playbook,
+      args.nowIso
+    );
+    if (projected <= args.maxRenderedTokens) break;
+  }
+  return new Set(accumulated);
+}
+
+/**
  * One proposal per operation, over every prunable bullet, ordered by descending
  * rendered size so the largest saving is named first in the rationale.
  *

@@ -13,6 +13,7 @@ import {
   applyPrune,
   isPrunableVerdict,
   pruneCandidateRanking,
+  pruneOverflowSet,
   redundancyVerdictOf,
   renderedTokensOf,
   selectPruneProposals,
@@ -393,6 +394,63 @@ describe('prune proposal selection', () => {
     expect(proposals[0]?.bulletIds).toEqual(['small']);
   });
 
+  describe('the overflow set', () => {
+    const withoutIds = (bulletIds: readonly string[]): number =>
+      renderedTokensOf(
+        transformPlaybookForPrune({
+          playbook,
+          bulletIds,
+          operation: 'remove',
+          reason: 'measurement',
+          nowIso: NOW_ISO,
+        }).playbook,
+        NOW_ISO
+      );
+
+    it('stops at the smallest prefix that reaches the ceiling', () => {
+      // `entries` are in ranking order, so the prunable prefix is
+      // [small, big]. A ceiling that removing `small` alone already satisfies
+      // must not cost `big` as well.
+      const ceiling = withoutIds(['small']);
+      expect(ceiling).toBeLessThan(renderedTokensOf(playbook, NOW_ISO));
+      const overflow = pruneOverflowSet({
+        entries,
+        playbook,
+        operation: 'remove',
+        maxRenderedTokens: ceiling,
+        nowIso: NOW_ISO,
+      });
+      expect([...overflow]).toEqual(['small']);
+      // The counter-assertion: `big` really was prunable and really is bigger.
+      expect(overflow.has('big')).toBe(false);
+      expect(withoutIds(['big'])).toBeLessThan(ceiling);
+    });
+
+    it('takes every prunable bullet when no prefix reaches the ceiling', () => {
+      const overflow = pruneOverflowSet({
+        entries,
+        playbook,
+        operation: 'remove',
+        maxRenderedTokens: 0,
+        nowIso: NOW_ISO,
+      });
+      expect([...overflow].sort()).toEqual(['big', 'small']);
+      // Never the load-bearing one, whatever the ceiling asks for.
+      expect(overflow.has('keeper')).toBe(false);
+    });
+
+    it('never names a bullet the sweep did not call prunable', () => {
+      const overflow = pruneOverflowSet({
+        entries: entries.filter((entry) => entry.verdict === 'load_bearing'),
+        playbook,
+        operation: 'remove',
+        maxRenderedTokens: 0,
+        nowIso: NOW_ISO,
+      });
+      expect(overflow.size).toBe(0);
+    });
+  });
+
   it('proposes nothing when every reading is load-bearing or unresolved', () => {
     expect(
       selectPruneProposals({
@@ -731,6 +789,50 @@ function pruneFixture(options?: { extraBullets?: readonly AxACEBullet[] }) {
   return { handle, self, metric };
 }
 
+/**
+ * Two bullets whose removal HELPS, of very different rendered size, plus one
+ * that is load-bearing. `bulk` outranks `chaff` in the sweep (higher
+ * `harmfulCount`), so a ceiling that removing `bulk` alone already satisfies
+ * must cost `chaff` nothing — even though `chaff` is prunable too.
+ */
+function overflowFixture() {
+  const handle = pruneHandle(
+    playbookOf([
+      bulletOf('bulk', {
+        harmfulCount: 5,
+        content: `bulk guidance that misleads the actor ${'and costs many rendered tokens '.repeat(12)}`,
+      }),
+      bulletOf('chaff', { harmfulCount: 1, content: 'chaff misleads too' }),
+      bulletOf('keeper', { content: 'load bearing guidance the actor needs' }),
+    ])
+  );
+  const has = (id: string): boolean =>
+    Object.values(handle.current().playbook.sections).some((bullets) =>
+      (bullets as AxACEBullet[]).some((bullet) => bullet.id === id)
+    );
+  const self = {
+    init: { ai: {} as any },
+    getPlaybook: () => handle,
+    _forwardForEvaluation: async () => ({
+      completionType: 'final' as const,
+      output: { bulk: has('bulk'), chaff: has('chaff'), keeper: has('keeper') },
+      actionLog: '',
+      functionCalls: [],
+      toolErrors: [],
+      turnCount: 1,
+      usage: [],
+    }),
+  };
+  const metric = async ({ prediction }: any) => {
+    const raw =
+      (prediction.output.bulk ? -0.4 : 0) +
+      (prediction.output.chaff ? -0.3 : 0) +
+      (prediction.output.keeper ? 0.9 : 0);
+    return Math.max(0, Math.min(1, raw));
+  };
+  return { handle, self, metric };
+}
+
 const PRUNE_DATASET = {
   train: [
     { input: { q: 1 }, criteria: 'c', id: 't1' },
@@ -882,6 +984,125 @@ describe('the prune phase', () => {
         { metric, scoreThreshold: 0, prune: { enabled: true } }
       )
     ).rejects.toThrow(/measures selection, not redundancy/);
+  });
+
+  it('restricts a size-budget prune to the bullets the ceiling needs', async () => {
+    const { handle, self, metric } = overflowFixture();
+    const before = handle.current().playbook;
+    const full = renderedTokensOf(before, NOW_ISO);
+    // The exact ceiling removing `bulk` alone reaches. `chaff` is prunable and
+    // freeing it too would be capability the budget never asked for.
+    const ceiling = renderedTokensOf(
+      transformPlaybookForPrune({
+        playbook: before,
+        bulletIds: ['bulk'],
+        operation: 'remove',
+        reason: 'measurement',
+        nowIso: NOW_ISO,
+      }).playbook,
+      NOW_ISO
+    );
+    expect(ceiling).toBeLessThan(full);
+
+    const result = await evolveAgentPlaybook(self as any, PRUNE_DATASET, {
+      metric,
+      scoreThreshold: 0,
+      maxMetricCalls: 40,
+      prune: {
+        enabled: true,
+        operation: 'remove',
+        maxRenderedTokens: ceiling,
+        onOverflow: 'propose',
+      },
+    });
+
+    // Both noisy bullets really were prunable — that is what makes the
+    // restriction observable rather than vacuous.
+    const entries =
+      result.redundancy?.status === 'completed' ||
+      result.redundancy?.status === 'partial'
+        ? result.redundancy.entries
+        : [];
+    expect(
+      Object.fromEntries(
+        entries.map((entry) => [entry.bulletId, entry.verdict])
+      )
+    ).toEqual({ bulk: 'harmful', chaff: 'harmful', keeper: 'load_bearing' });
+
+    const prune = result.outcomes.filter((outcome) => outcome.kind === 'prune');
+    expect(prune).toHaveLength(1);
+    expect(prune[0]?.prune?.trigger).toBe('rendered_size_budget');
+    expect(prune[0]?.prune?.bulletIds).toEqual(['bulk']);
+    expect(prune[0]?.prune?.bulletIds).not.toContain('chaff');
+    expect(prune[0]?.accepted).toBe(true);
+
+    // The bullet outside the overflow set is still live.
+    const live = handle
+      .current()
+      .playbook.sections.failures_to_avoid.map(
+        (bullet: AxACEBullet) => bullet.id
+      );
+    expect(live.sort()).toEqual(['chaff', 'keeper']);
+
+    // The disclosure is settled, not stale: it reports the render AFTER the
+    // prune it triggered.
+    const warning = result.warnings?.find(
+      (entry) => entry.code === 'rendered_size_over_budget'
+    );
+    expect(warning?.message).toContain('within the ceiling');
+    expect(warning?.message).not.toContain('still over the ceiling');
+  });
+
+  it('fails closed, named, when an ablation cannot be undone', async () => {
+    const { handle, self, metric } = pruneFixture();
+    let ablatedOnce = false;
+    let restoreAttempts = 0;
+    const bulletCount = (snapshot: any): number =>
+      Object.values(snapshot.playbook.sections).reduce(
+        (total: number, bullets: any) => total + bullets.length,
+        0
+      );
+    const brittle = {
+      ...handle,
+      load: (snapshot: any) => {
+        if (bulletCount(snapshot) < 2) {
+          ablatedOnce = true;
+          handle.load(snapshot);
+          return;
+        }
+        if (ablatedOnce) {
+          restoreAttempts++;
+          throw new Error('the ACE handle refused the restore');
+        }
+        handle.load(snapshot);
+      },
+    };
+    (self as any).getPlaybook = () => brittle;
+
+    const error = await evolveAgentPlaybook(self as any, PRUNE_DATASET, {
+      metric,
+      scoreThreshold: 0,
+      prune: { enabled: true, operation: 'remove' },
+    }).then(
+      () => undefined,
+      (thrown: unknown) => thrown
+    );
+
+    // A raw ACE `load` error escaping from a `finally` would leave the caller
+    // with no code, no phase and no idea which bullet is missing.
+    expect(axIsAgentPlaybookEvolveError(error)).toBe(true);
+    expect((error as any).code).toBe('prune_apply_failed');
+    expect((error as any).phase).toBe('redundancy_ablation');
+    expect((error as Error).message).toContain(
+      'could not be undone after two attempts'
+    );
+    // The message names the bullet whose absence the live artifact now carries.
+    expect((error as Error).message).toMatch(/ablation of bullet '\w+'/);
+    expect((error as Error).message).toContain('indeterminate');
+    expect((error as any).cause).toBeInstanceOf(AggregateError);
+    // One bounded RETRY, exactly as the control-arm restore gets: two attempts,
+    // never one and never a loop.
+    expect(restoreAttempts).toBe(2);
   });
 
   it('is inert when prune is not enabled', async () => {
