@@ -91,7 +91,7 @@ export type AxGuardFailureCode =
   | 'predicate_failed'
   | 'malformed_requirement';
 
-/** Diagnosable without being disclosive: op + kind + code, never a value. */
+/** Diagnosable without disclosing: op + kind + code, never a value. */
 export interface AxGuardFailure {
   readonly kind: string;
   readonly op: AxGuardOp;

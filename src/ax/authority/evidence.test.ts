@@ -110,7 +110,7 @@ describe('Ax evidence guard evaluation', () => {
       { op: 'ne', value: 'weak' },
       { op: 'in', values: ['strong'] },
       { op: 'notIn', values: ['weak'] },
-      { op: 'contains', value: 'stro' },
+      { op: 'contains', value: 'strong' },
       { op: 'fresh' },
     ];
     for (const match of matches) {
@@ -168,8 +168,16 @@ describe('Ax evidence guard evaluation', () => {
       { match: { op: 'in', values: ['a', 'b'] }, value: 'c', allow: false },
       { match: { op: 'notIn', values: ['a'] }, value: 'b', allow: true },
       { match: { op: 'notIn', values: ['a'] }, value: 'a', allow: false },
-      { match: { op: 'contains', value: 'ro' }, value: 'strong', allow: true },
-      { match: { op: 'contains', value: 'zz' }, value: 'strong', allow: false },
+      {
+        match: { op: 'contains', value: 'strong' },
+        value: 'hardware-strong',
+        allow: true,
+      },
+      {
+        match: { op: 'contains', value: 'weak' },
+        value: 'hardware-strong',
+        allow: false,
+      },
       { match: { op: 'contains', value: 'b' }, value: ['a', 'b'], allow: true },
       {
         match: { op: 'contains', value: 'c' },
@@ -222,7 +230,7 @@ describe('Ax evidence guard evaluation', () => {
 
   it('denies an unknown operator supplied as runtime data', () => {
     // F4 at the evaluator. The capture path throws earlier; this is the
-    // defence for a host that calls axEvaluateGuards directly.
+    // defense for a host that calls axEvaluateGuards directly.
     const result = evaluate(
       [
         {

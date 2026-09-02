@@ -174,7 +174,7 @@ describe('Ax evidence guards at the authorization boundary', () => {
   });
 
   it('axAuthorize denies from a raw AxAuthorityContext whose grant declares a requirement', async () => {
-    // End to end from an unsnapshotted context through captureGrant ->
+    // End to end from a raw, never-snapshotted context through captureGrant ->
     // matchingGrants -> guards. Evaluator-only tests would pass even if the
     // guard block never fired.
     const { authority } = harness({

@@ -23,7 +23,7 @@ const observation: AxEvidenceObservation = {
 // The match union narrows on `op`.
 const equals: AxEvidenceMatch = { op: 'eq', value: 'strong' };
 const oneOf: AxEvidenceMatch = { op: 'in', values: ['strong', 'hardware'] };
-const substring: AxEvidenceMatch = { op: 'contains', value: 'stro' };
+const substring: AxEvidenceMatch = { op: 'contains', value: 'strong' };
 const fresh: AxEvidenceMatch = { op: 'fresh' };
 void [equals, oneOf, substring, fresh];
 
@@ -35,7 +35,7 @@ void freshWithValue;
 const inWithValue: AxEvidenceMatch = { op: 'in', value: 1 };
 void inWithValue;
 
-// @ts-expect-error `sameAs` was cut from the algebra and must stay uncallable.
+// @ts-expect-error `sameAs` was cut from the algebra and must stay unusable.
 const sameAs: AxEvidenceMatch = { op: 'sameAs', kind: 'session.mfa' };
 void sameAs;
 

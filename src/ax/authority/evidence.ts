@@ -59,7 +59,7 @@ function canonicalValue(value: unknown, depth = 0): string {
   if (Array.isArray(value)) {
     return `[${value.map((entry) => canonicalValue(entry, depth + 1)).join(',')}]`;
   }
-  if (!isRecord(value)) return '"[ax:nonvalue]"';
+  if (!isRecord(value)) return '"[ax:non-value]"';
   const entries = Object.entries(value)
     .filter(([, entry]) => entry !== undefined)
     .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
