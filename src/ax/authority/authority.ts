@@ -1,5 +1,9 @@
 import type { AxFunction } from '../ai/types.js';
-import { axIsEvidenceRequirement } from './evidence.js';
+import {
+  axCollectGrantRequirements,
+  axEvaluateGuards,
+  axIsEvidenceRequirement,
+} from './evidence.js';
 import type {
   AxActor,
   AxAuthorityClaim,
@@ -11,6 +15,7 @@ import type {
   AxAuthorizationRequestContext,
   AxCapabilityGrant,
   AxDelegationClaims,
+  AxEvidenceObservation,
   AxEvidenceRequirement,
   AxResourceScope,
 } from './types.js';
@@ -20,6 +25,8 @@ const authoritySnapshots = new WeakSet<object>();
 const DEFAULT_AUTHORIZE_TIMEOUT_MS = 30_000;
 /** Bounds the per-grant contingency list a host may declare. */
 const MAX_GRANT_REQUIREMENTS = 32;
+const EMPTY_EVIDENCE: readonly Readonly<AxEvidenceObservation>[] =
+  Object.freeze([]);
 
 export class AxAuthorizationDeniedError extends Error {
   constructor(
@@ -28,7 +35,8 @@ export class AxAuthorizationDeniedError extends Error {
       | 'no_matching_grant'
       | 'invalid_receipt'
       | 'cancelled'
-      | 'timeout',
+      | 'timeout'
+      | 'guard_predicate_failed',
     message: string
   ) {
     super(message);
@@ -181,6 +189,45 @@ function captureRequirements(
   );
 }
 
+/**
+ * Host-observed facts are host-owned data at an execution boundary, so they get
+ * the same clone-and-freeze treatment as principals, grants, and claims. A
+ * structurally invalid observation throws rather than being silently ignored.
+ */
+function captureObservations(
+  value: unknown,
+  label: string
+): readonly Readonly<AxEvidenceObservation>[] {
+  if (value === undefined) return EMPTY_EVIDENCE;
+  if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
+  return Object.freeze(
+    Array.from(value, (entry, index) => {
+      const path = `${label}[${index}]`;
+      const version = entry?.version;
+      const kind = entry?.kind;
+      const sourceId = entry?.sourceId;
+      const observedAt = entry?.observedAt;
+      const leaseEpoch = entry?.leaseEpoch;
+      if (version !== 1) throw new Error(`${path}.version must be 1`);
+      nonEmpty(kind, `${path}.kind`);
+      nonEmpty(sourceId, `${path}.sourceId`);
+      finite(observedAt, `${path}.observedAt`);
+      finite(leaseEpoch, `${path}.leaseEpoch`);
+      if (!Number.isInteger(leaseEpoch) || leaseEpoch < 0) {
+        throw new Error(`${path}.leaseEpoch must be a non-negative integer`);
+      }
+      return Object.freeze({
+        version: 1,
+        kind,
+        sourceId,
+        observedAt,
+        value: captureValue(entry?.value, `${path}.value`, new Set()),
+        leaseEpoch,
+      }) as Readonly<AxEvidenceObservation>;
+    })
+  );
+}
+
 function captureGrant(
   grant: Readonly<AxCapabilityGrant>
 ): Readonly<AxCapabilityGrant> {
@@ -284,6 +331,8 @@ export function axSnapshotAuthority(
   const authorize = authority?.authorize;
   const configuredTimeout = authority?.authorizeTimeoutMs;
   const now = authority?.now;
+  const sourceEvidence = authority?.evidence;
+  const observeEvidence = authority?.observeEvidence;
   const onAudit = authority?.onAudit;
 
   const principalId = principal?.id;
@@ -340,6 +389,13 @@ export function axSnapshotAuthority(
   if (new Set(grants.map((grant) => grant.id)).size !== grants.length) {
     throw new Error('AxAuthorityContext grant IDs must be unique');
   }
+  if (observeEvidence !== undefined && typeof observeEvidence !== 'function') {
+    throw new Error('AxAuthorityContext.observeEvidence must be a function');
+  }
+  const evidence =
+    sourceEvidence === undefined
+      ? undefined
+      : captureObservations(sourceEvidence, 'AxAuthorityContext.evidence');
   const snapshot = Object.freeze({
     principal: capturedPrincipal,
     actor: capturedActor,
@@ -349,6 +405,8 @@ export function axSnapshotAuthority(
     authorize,
     authorizeTimeoutMs,
     ...(now ? { now } : {}),
+    ...(evidence ? { evidence } : {}),
+    ...(observeEvidence ? { observeEvidence } : {}),
     ...(onAudit ? { onAudit } : {}),
   });
   authoritySnapshots.add(snapshot);
@@ -625,6 +683,29 @@ function snapshotReceipt(
 }
 
 /**
+ * One evidence read per `axAuthorize`. A supplier is what makes `maxAgeMs`
+ * usable: the snapshot cache means a frozen `evidence` array only ever ages
+ * within a run, while `observeEvidence` re-reads the host's current facts.
+ * A supplier that throws or returns malformed data yields no evidence, so every
+ * declared requirement fails closed with `missing_observation`.
+ */
+function resolveEvidence(
+  snapshot: Readonly<AxAuthorityContext>
+): readonly Readonly<AxEvidenceObservation>[] {
+  if (snapshot.observeEvidence) {
+    try {
+      return captureObservations(
+        snapshot.observeEvidence(),
+        'AxAuthorityContext.observeEvidence()'
+      );
+    } catch {
+      return EMPTY_EVIDENCE;
+    }
+  }
+  return snapshot.evidence ?? EMPTY_EVIDENCE;
+}
+
+/**
  * Perform exact local scope checks, then require an exactly-bound host receipt.
  * Host verification remains authoritative; Ax does not authenticate grants.
  */
@@ -678,6 +759,48 @@ export async function axAuthorize(
       `No active capability grant matches ${operation}`
     );
   }
+  // Guards run after a grant matched and before the host authorizer is called,
+  // so a guard denial costs zero host calls and emits exactly one audit event.
+  // They are deliberately not re-evaluated after the receipt: the receipt is
+  // the authority and is already bound to the request context that carried
+  // this evidence.
+  const evidence = resolveEvidence(snapshot);
+  const requirements = axCollectGrantRequirements(grants);
+  if (requirements.length) {
+    const evaluation = axEvaluateGuards({
+      operation,
+      resource: scopedResource,
+      requirements,
+      evidence,
+      leaseEpoch: snapshot.leaseEpoch,
+      now,
+    });
+    if (!evaluation.allow) {
+      const first = evaluation.failures[0];
+      await audit(
+        snapshot,
+        {
+          operation,
+          resourceType: scopedResource.type,
+          actorKind: snapshot.actor.kind,
+          decision: 'deny',
+          grantCount: grants.length,
+          at: now,
+          code: 'guard_predicate_failed',
+          // The one bounded exception to redaction-by-construction: operator
+          // and fact kind, never an observation value or a source ID.
+          ...(first
+            ? { failedPredicateKind: `${first.op}:${first.kind}` }
+            : {}),
+        },
+        signal
+      );
+      throw new AxAuthorizationDeniedError(
+        'guard_predicate_failed',
+        `Evidence guard failed for ${operation}`
+      );
+    }
+  }
   const id = requestId();
   let receipt: Readonly<AxAuthorizationReceipt> | undefined;
   try {
@@ -694,6 +817,8 @@ export async function axAuthorize(
           grants,
           leaseEpoch: snapshot.leaseEpoch,
           now,
+          evidence,
+          requirements,
         },
         signal
       )
