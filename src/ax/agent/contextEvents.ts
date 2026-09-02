@@ -71,13 +71,6 @@ export type AxAgentContextEvent =
       suppressed: boolean;
     }
   /**
-   * Emitted once per field per run when `autoUpgrade.contextFields` keeps an
-   * oversized undeclared input value runtime-only. The value stays available
-   * in the code runtime as `inputs.<fieldName>`; the prompt carries a
-   * truncated preview (or nothing when `promptPreviewChars` is undefined)
-   * plus a `contextMetadata` entry.
-   */
-  /**
    * Emitted once per run per skill whose recorded authority no longer holds.
    * Carries failure KINDS and COUNTS only — never an id, a value, or a
    * resource name.
@@ -118,6 +111,13 @@ export type AxAgentContextEvent =
       status: 'within' | 'exceeded';
       disabledRails: readonly string[];
     }
+  /**
+   * Emitted once per field per run when `autoUpgrade.contextFields` keeps an
+   * oversized undeclared input value runtime-only. The value stays available
+   * in the code runtime as `inputs.<fieldName>`; the prompt carries a
+   * truncated preview (or nothing when `promptPreviewChars` is undefined)
+   * plus a `contextMetadata` entry.
+   */
   | {
       kind: 'field_auto_promoted';
       stage: AxAgentContextStage;

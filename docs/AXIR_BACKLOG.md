@@ -183,7 +183,7 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
   - Status: open
   - Source PR: #97
   - Source commit: `3a9f187d01ce593115d2428ba666a98dd03abccb`
-  - TS paths: `src/ax/dsp/optimizers/aceTypes.ts`
+  - TS paths: `src/ax/dsp/optimizers/aceTypes.ts`, `src/ax/dsp/optimizers/acePlaybook.ts`, `src/ax/dsp/optimizers/ace.ts`, `src/ax/dsp/playbook.ts`
   - Impact: Adds AxACEBulletVisibility with an actor-default for legacy bullets, a branded actor playbook projection that omits the optimizer tier while renderPlaybook stays the full renderer for the reflector and curator, a rejected-retained verification result that survives normalization and dedupe, redaction of host-only authority provenance from every model-facing serialization, and an optional retrieval-time precondition re-check on the render path. Legacy playbooks render byte-identically.
   - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 - `axir-2026-09-02-agent-playbook-evolve-termination-classification-per-attempt-evi` [axagent] Agent playbook evolve: termination classification, per-attempt evidence, bootstrap intervals, variance band, validity conjuncts, reach instrumentation, gate chain and evidence receipt
@@ -232,7 +232,7 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
   - Status: open
   - Source PR: #97
   - Source commit: `3a9f187d01ce593115d2428ba666a98dd03abccb`
-  - TS paths: `src/ax/agent/skillCatalog.ts`
+  - TS paths: `src/ax/agent/skillCatalog.ts`, `src/ax/agent/skillCost.ts`, `src/ax/agent/skillProvenance.ts`, `src/ax/agent/executableSkills.ts`, `src/ax/agent/agentInternal/skillsTypes.ts`, `src/ax/agent/agentInternal/skillsHelpers.ts`, `src/ax/agent/agentInternal/actorLoop.ts`, `src/ax/agent/agentInternal/actorLoopSetup.ts`, `src/ax/agent/agentInternal/signatureBuilders.ts`, `src/ax/agent/agentInternal/runtimeGlobals.ts`, `src/ax/agent/agentInternal/initialization.ts`, `src/ax/agent/contextEvents.ts`
   - Impact: Adds kernel/indexed catalog tiers with a token budget and requires-based eligibility gating applied uniformly to the kernel, the Available Skills index and discover({skills}); per-skill cost profiles with value-aware ranking; a deterministic single-terminal-state verification budget; and an always-on afterToolCall verifier rail that is deadline-bounded, error-contained and disabled on fault. All additive; unset options preserve current selection, ranking, and prompt bytes. The serialized skills prompt state shape is unchanged.
   - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 - `axir-2026-09-02-learning-surface-part-1-interaction-report-records-persistabilit` [axoptimize] Learning surface part 1: interaction/report records, persistability check, store port with append+CAS release chain, store conformance, report schema, eligibility reducer
@@ -253,7 +253,7 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
   - Status: open
   - Source PR: #97
   - Source commit: `3a9f187d01ce593115d2428ba666a98dd03abccb`
-  - TS paths: `src/ax/authority/skillProvenance.ts`
+  - TS paths: `src/ax/authority/types.ts`, `src/ax/authority/evidence.ts`, `src/ax/authority/skillProvenance.ts`, `src/ax/authority/index.ts`
   - Impact: Adds AxSkillProvenance with a deterministic model-free extraction from the effect ledger and authorization receipts, a capped and truncation-flagged accumulator, an fnv1a64 identity digest, and a retrieval-time re-check resolving eight failure kinds through a policy record to admit, downgrade, park or drop. Guidance defaults to an annotated advisory and executables to park; an absent host axis is skipped rather than failed and absent provenance admits. No behaviour change when no artifact carries provenance.
   - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 - `axir-2026-09-02-typed-evidence-observations-guard-predicates-and-evidence-guards` [runtime] Typed evidence observations, guard predicates, and evidence guards at the host-authority boundary

@@ -843,7 +843,7 @@ export async function runActorLoop<IN extends AxGenIn>(
     );
     // `loads` and `uses` stay separate numbers: a skill rendered and never
     // declared is uninformative, not cheap.
-    for (const id of loadedSkillIdsForRun(s)) {
+    for (const id of loadedSkillIdsForRun(s.currentSkillsPromptState)) {
       profiles.set(id, axRecordSkillLoad(profiles.get(id), id, nowIso));
     }
     for (const sample of samples) {
@@ -852,13 +852,15 @@ export async function runActorLoop<IN extends AxGenIn>(
         axUpdateSkillCostProfile(profiles.get(sample.id), sample, nowIso)
       );
     }
-    Promise.resolve(
-      s.onSkillCost?.(
-        [...profiles.values()].sort((a, b) =>
-          a.id < b.id ? -1 : a.id > b.id ? 1 : 0
-        )
+    // Awaited, and a rejection propagates: `onSkillCost` is a durable-state
+    // write (the profiles feed the next run's ranking), so a run that resolved
+    // before the write landed — or swallowed its failure — would hand the host
+    // silently stale profiles.
+    await s.onSkillCost?.(
+      [...profiles.values()].sort((a, b) =>
+        a.id < b.id ? -1 : a.id > b.id ? 1 : 0
       )
-    ).catch(() => {});
+    );
   }
 
   const executorResult =
@@ -890,9 +892,8 @@ export async function runActorLoop<IN extends AxGenIn>(
 }
 
 /** Ids rendered into this run's Loaded Skills section, for the `loads` counter. */
-function loadedSkillIdsForRun(s: any): readonly string[] {
-  const loaded = s.currentSkillsPromptState?.loaded as
-    | Map<string, unknown>
-    | undefined;
-  return loaded ? [...loaded.keys()] : [];
+function loadedSkillIdsForRun(
+  state: Readonly<{ loaded?: ReadonlyMap<string, unknown> }> | undefined
+): readonly string[] {
+  return state?.loaded ? [...state.loaded.keys()] : [];
 }

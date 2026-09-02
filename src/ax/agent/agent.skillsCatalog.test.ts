@@ -15,6 +15,7 @@ import type { AxAgentContextEvent } from './contextEvents.js';
 import { agent } from './index.js';
 import type { AxCodeRuntime } from './rlm.js';
 import { axBuildExecutorDefinition } from './rlm.js';
+import type { AxAgentSkillCostProfile } from './skillCost.js';
 
 // ----- Fixtures -----
 
@@ -191,6 +192,59 @@ describe('rankCatalogSkills (advisory hint — strict guards)', () => {
 
   it('suppresses on no signal', () => {
     expect(rankCatalogSkills('xyzzy quux', CATALOG)).toEqual([]);
+  });
+
+  it('promotes a cheap skill from BELOW the similarity cut', () => {
+    // Value-aware ranking scored an already-truncated list, so it could only
+    // reorder inside the similarity top-K and never actually promote anything.
+    const bodies = [
+      'deploy production service '.repeat(8),
+      'deploy production service '.repeat(3),
+      'deploy production widget '.repeat(3),
+      'deploy widget widget '.repeat(3),
+      'service widget widget '.repeat(2),
+      'production widget widget widget ',
+    ];
+    const catalog: AxAgentCatalogSkill[] = bodies.map((content, index) => ({
+      id: `runbook-${index}`,
+      name: `Runbook ${index}`,
+      description: `Notes number ${index}`,
+      content,
+    }));
+    const query = 'deploy the service to production';
+    const profile = (
+      id: string,
+      successes: number,
+      tokensTotal: number
+    ): AxAgentSkillCostProfile => ({
+      id,
+      loads: 20,
+      uses: 20,
+      successes,
+      tokensTotal,
+      wallMsTotal: 0,
+      verificationRoundsTotal: 0,
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    });
+
+    const similarityOnly = rankCatalogSkills(query, catalog).map((r) => r.id);
+    expect(similarityOnly).toEqual(['runbook-0', 'runbook-1', 'runbook-2']);
+
+    const valueAware = rankCatalogSkills(query, catalog, {
+      costProfiles: [
+        // Cheap and always successful, but ranked 4th on similarity alone.
+        profile('runbook-3', 20, 200),
+        // Expensive and never successful, but the similarity leader.
+        profile('runbook-0', 0, 400_000),
+      ],
+    }).map((r) => r.id);
+
+    expect(valueAware).toContain('runbook-3');
+    expect(valueAware[0]).toBe('runbook-3');
+    // Still truncated to the caller's topK — the shortlist is widened for
+    // scoring, not handed to the model.
+    expect(valueAware).toHaveLength(similarityOnly.length);
+    expect(valueAware).not.toContain('runbook-0');
   });
 });
 
@@ -590,13 +644,52 @@ describe('skills catalog — tiers, eligibility, and cost', () => {
       ],
       onSkillCost: () => {},
     } as never);
-    void parent;
-    const childOptions = (
-      child as unknown as { options?: Record<string, unknown> }
-    ).options;
-    expect(childOptions?.skillPolicy).toBeUndefined();
-    expect(childOptions?.verifierRails).toBeUndefined();
-    expect(childOptions?.onSkillCost).toBeUndefined();
+    // Read the RESOLVED executor state, not the constructor options: the
+    // options object is never written to, so asserting on it passes whether
+    // or not inheritance exists.
+    const resolved = (a: unknown) =>
+      (a as { executor: Record<string, unknown> }).executor;
+    // Positive control — the parent really did resolve all three.
+    expect(resolved(parent).skillPolicy).toBeDefined();
+    expect(resolved(parent).verifierRails).toBeDefined();
+    expect(resolved(parent).onSkillCost).toBeDefined();
+    // And none of them reached the child.
+    expect(resolved(child).skillPolicy).toBeUndefined();
+    expect(resolved(child).verifierRails).toBeUndefined();
+    expect(resolved(child).onSkillCost).toBeUndefined();
+    expect(resolved(child).skillsCatalog).toBeUndefined();
+  });
+
+  it('round-trips kernel tier membership through getState/setState', async () => {
+    // The kernel is seeded into `currentSkillsPromptState`, so a restore must
+    // put it back in the Loaded Skills section without re-running selection.
+    const capture: ExecutorCapture = { systems: [], users: [] };
+    const mockAI = makeSkillsMockAI(capture);
+    const first = agent('query:string -> answer:string', {
+      ai: mockAI,
+      runtime: makeSkillsUsedRuntime('kernel-skill'),
+      skillsCatalog: GATED_CATALOG,
+      skillPolicy: { environment: { bins: [] } },
+      maxTurns: 4,
+    } as never);
+    await first.forward(mockAI, { query: 'help me ship the release' });
+    const state = first.getState();
+    expect(JSON.stringify(state)).toContain('kernel-skill');
+
+    const restoredCapture: ExecutorCapture = { systems: [], users: [] };
+    const restoredAI = makeSkillsMockAI(restoredCapture);
+    const second = agent('query:string -> answer:string', {
+      ai: restoredAI,
+      runtime: makeSkillsUsedRuntime('kernel-skill'),
+      // Deliberately NO catalog: the kernel membership has to come back from
+      // the state, not from a fresh selection.
+      maxTurns: 4,
+    } as never);
+    second.setState(state as never);
+    await second.forward(restoredAI, { query: 'again' });
+    expect(restoredCapture.users[0] ?? '').toContain(
+      'Kernel guidance the actor always sees.'
+    );
   });
 });
 
@@ -646,6 +739,13 @@ function makeSkillsUsedRuntime(skillId: string): AxCodeRuntime {
           }
           return 'ok';
         },
+        // Required for `getState()`; the runtime bindings are irrelevant here,
+        // the skills-prompt state is what this exercises.
+        snapshotGlobals: async () => ({
+          version: 1 as const,
+          entries: [],
+          bindings: {},
+        }),
         patchGlobals: async (patch: Record<string, unknown>) => {
           const { [AX_INPUTS_PATCH_GLOBAL]: staged, ...rest } = patch;
           Object.assign(globals ?? {}, rest);

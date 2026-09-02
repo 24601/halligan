@@ -198,6 +198,24 @@ function normalizeVerifierDecisions(
 export function axExtractSkillProvenance(
   source: Readonly<AxSkillProvenanceSource>
 ): AxSkillProvenance {
+  // Fail at the layer that MINTS the record, not three layers later as an
+  // opaque `malformed_provenance`. Without this a caller could build a
+  // digest-consistent provenance that `axIsSkillProvenance` rejects, and the
+  // only symptom would be a park at retrieval time with no way back to the
+  // bad input.
+  if (
+    typeof source.leaseEpoch !== 'number' ||
+    !Number.isFinite(source.leaseEpoch)
+  ) {
+    throw new TypeError(
+      'AxSkillProvenance: leaseEpoch must be a finite number'
+    );
+  }
+  if (!isCanonicalIsoTimestamp(source.capturedAt)) {
+    throw new TypeError(
+      'AxSkillProvenance: capturedAt must be a canonical ISO timestamp'
+    );
+  }
   let truncated = source.truncated === true;
 
   const effectsById = new Map<
@@ -652,6 +670,16 @@ function countFailures(
  * it is accepted so callers thread one clock per path rather than reaching for
  * `AxSkillAuthoritySnapshot.now`, and so a future time-dependent axis does not
  * change this signature.
+ */
+/**
+ * `_now` is the calling path's authoritative clock, accepted for signature
+ * symmetry with the rest of the re-check surface and deliberately unused: every
+ * failure axis here is a SET comparison (grants held, lease epoch, verifier
+ * verdicts, environment keys, effect status, truncation), so no outcome depends
+ * on the time. It is a parameter, not a behaviour — the clock is load-bearing
+ * on the paths that own expiry (`AxExecutableSkillArtifact.expiresAt` via
+ * `AxExecutableSkillContext.now`), not inside this function. If a
+ * time-dependent axis is ever added it resolves `now ?? current.now`.
  */
 export function axRecheckSkillProvenance(
   provenance: Readonly<AxSkillProvenance> | undefined,

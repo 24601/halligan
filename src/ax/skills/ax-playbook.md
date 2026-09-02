@@ -243,8 +243,11 @@ their evidence moved. The entry is sticky — the verification dedupe key includ
 ### Version compatibility
 
 `AxACEPlaybook.version` is stamped `2` on the first write that creates a tiered
-bullet, and `AX_ACE_MAX_SUPPORTED_PLAYBOOK_VERSION` is the read gate that refuses
-anything above it. Two residuals stand, deliberately:
+bullet, and `AX_ACE_MAX_SUPPORTED_PLAYBOOK_VERSION` (currently `2`) is the read
+gate that refuses anything above it. It is a module constant, not a package
+export — the generated barrel carries `ax`/`Ax`-prefixed names only, so compare
+against the literal or use the exported
+`axPlaybookRequiresVisibilitySupport(playbook)`. Two residuals stand, deliberately:
 
 - an ax older than this release does not read `playbook.version` at all, so it
   renders optimizer-tier bullets into the actor prompt. A version-2 playbook must

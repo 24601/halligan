@@ -439,6 +439,7 @@ import {
   axDefaultSkillRankingWeights,
   axFireVerifierRails,
   axInitialVerificationBudgetState,
+  axRailAbortScope,
   axRecordSkillLoad,
   axRunVerifierRail,
   axSkillValueScore,
@@ -2814,6 +2815,7 @@ export { axProgramSourceVersion };
 export { axProjectActorPlaybook };
 export { axProjectTrajectory };
 export { axPromoteSkill };
+export { axRailAbortScope };
 export { axReactCanonicalJSON };
 export { axReactSerializeHistory };
 export { axRecheckSkillProvenance };

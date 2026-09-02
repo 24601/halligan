@@ -34,6 +34,7 @@ import {
   type AxAgentVerifierRailBinding,
   axCountVerificationToolCall,
   axFireVerifierRails,
+  axRailAbortScope,
 } from '../skillCost.js';
 import { normalizeMemoriesInput } from './memoriesHelpers.js';
 import type { AxAgentMemoryResult } from './memoriesTypes.js';
@@ -243,21 +244,23 @@ export function wrapFunction(
     // configured (RFC 7.5), so this is counted before the rails-empty exit.
     axCountVerificationToolCall(rails, normalizedQualifiedName);
     if (rails.rails.length === 0) return;
+    // Scoped, not merged: rails fire after every tool call, so a composed
+    // signal that leaves listeners behind accumulates them for the whole run.
+    const scope = axRailAbortScope(abortSignal, invocationSignal);
     try {
-      const signal =
-        mergeAbortSignals(abortSignal, invocationSignal) ??
-        new AbortController().signal;
       await axFireVerifierRails(rails, {
         stage: rails.stage,
         qualifiedName: normalizedQualifiedName,
         name: fn.name,
         args: callArgs,
-        signal,
+        signal: scope.signal,
         ...outcome,
       });
     } catch {
       // A rail failure is contained inside axFireVerifierRails; this catch is
       // the same belt-and-braces the existing observers use.
+    } finally {
+      scope.dispose();
     }
   };
 

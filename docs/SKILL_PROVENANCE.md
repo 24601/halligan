@@ -68,7 +68,9 @@ takes no `AxAIService` parameter and never will.
 ## Bounds and truncation
 
 `AX_SKILL_PROVENANCE_MAX_EFFECTS` and `AX_SKILL_PROVENANCE_MAX_AUTHORIZATIONS`
-are both 256. Over-cap input is deduped by `operation` plus sorted grant ids
+are both 256. Like every `AX_`-prefixed bound in this document they are module
+constants, not package exports: the generated barrel keeps `ax`/`Ax`-prefixed
+names only, so quote the numbers here rather than importing the identifiers. Over-cap input is deduped by `operation` plus sorted grant ids
 first, then the **oldest** remaining entries are dropped and `truncated: true` is
 stamped. A truncated provenance contributes a `provenance_truncated` failure to
 every re-check, so a weaker record is visible rather than a silently smaller one.
@@ -132,6 +134,15 @@ executable artifacts, `AxACEPlaybookRenderOptions.now` for playbook renders,
 `AxSkillAuthoritySnapshot.now` is a fallback used only where the calling path
 supplies none. A mismatch is never an error.
 
+Note what the clock does *not* do: **no `axRecheckSkillProvenance` axis is
+time-dependent.** Every one of the eight failure kinds is a set comparison, so
+the re-check's outcome is a pure function of the provenance and the snapshot.
+The clock is load-bearing on the paths that own expiry — `expiresAt` on an
+executable artifact, `applicability` windows on a playbook bullet — and the
+`now` argument on the re-check exists for signature symmetry with those paths.
+It is threaded so a future time-dependent axis has one place to read, not
+because one exists today.
+
 ## Optimizer-only visibility
 
 `AxACEBullet.visibility` is `'actor' | 'optimizer'`, absent meaning `'actor'`.
@@ -175,9 +186,11 @@ host-only field is added.
 ## Version compatibility
 
 `AxACEPlaybook.version` is stamped `2` on the first write that creates a bullet
-carrying `visibility`. `AX_ACE_MAX_SUPPORTED_PLAYBOOK_VERSION` is the read gate:
-`renderPlaybook`, `axProjectActorPlaybook` and `assertPlaybookMutable` all refuse
-a playbook above it.
+carrying `visibility`. `AX_ACE_MAX_SUPPORTED_PLAYBOOK_VERSION` (currently `2`) is
+the read gate: `renderPlaybook`, `axProjectActorPlaybook` and
+`assertPlaybookMutable` all refuse a playbook above it. It is a module constant,
+not a package export — compare against the literal `2`, or call
+`axPlaybookRequiresVisibilitySupport`, which IS exported.
 
 Two residuals are accepted and documented rather than fixed:
 

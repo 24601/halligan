@@ -181,10 +181,23 @@ export function createCatalogSkillsSearch(
   };
 }
 
+/** Similarity shortlist widening when cost profiles are supplied — see below. */
+const SKILL_VALUE_SHORTLIST_FACTOR = 4;
+/** Mirrors `relevanceRanker`'s `DEFAULT_TOP_K`; the widening needs the number. */
+const DEFAULT_SKILL_HINT_TOP_K = 3;
+
 /**
  * Rank catalog skills against the task for the advisory relevance hint.
  * Uses the ranker's STRICT default guards (unlike `createCatalogSkillsSearch`)
  * so a low-confidence hint degrades to nothing.
+ *
+ * With cost profiles the similarity shortlist is widened before the value score
+ * is applied, then truncated back to the caller's `topK`. Scoring an already
+ * truncated list would let value-aware ranking reorder only inside the
+ * similarity top-K, so a cheap high-success skill ranked just below the cut
+ * could never be promoted — the mechanism would be a tiebreaker, not a ranker.
+ * Every ranker guard is unaffected: `minScore`, `marginRatio` and `minDocs` are
+ * evaluated against the top match and the whole catalog, not against `topK`.
  */
 export function rankCatalogSkills(
   task: string,
@@ -216,7 +229,15 @@ export function rankCatalogSkills(
   const profiles = opts?.costProfiles
     ? new Map(opts.costProfiles.map((profile) => [profile.id, profile]))
     : undefined;
-  const ranked = rankDocuments(task, docs, opts).map((r) => ({
+  const topK = opts?.topK ?? DEFAULT_SKILL_HINT_TOP_K;
+  const shortlist = rankDocuments(
+    task,
+    docs,
+    profiles
+      ? { ...opts, topK: topK * SKILL_VALUE_SHORTLIST_FACTOR }
+      : (opts ?? {})
+  );
+  const ranked = shortlist.map((r) => ({
     id: r.id,
     name: nameById.get(r.id) ?? r.id,
     // With no profile the value score is a positive constant multiple of the
@@ -226,7 +247,7 @@ export function rankCatalogSkills(
       : r.score,
   }));
   return profiles
-    ? ranked.sort((left, right) => right.score - left.score)
+    ? ranked.sort((left, right) => right.score - left.score).slice(0, topK)
     : ranked;
 }
 

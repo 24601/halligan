@@ -1386,20 +1386,17 @@ function normalizeVerification(
           }
         : {}),
     }));
-  // `result` is part of the key: without it a later `passed` from the same
-  // verifier, test, and timestamp silently overwrote a retained rejection, and
-  // the asymmetric rollback became symmetric again.
+  // `result` IS the stickiness, and it is the whole of it: with `result` in the
+  // key a later `passed` from the same verifier, test and timestamp lands on a
+  // different key and cannot overwrite a retained rejection — both survive.
+  // Without it the later write won and the asymmetric rollback became
+  // symmetric again. A same-key collision therefore implies an equal result,
+  // so last-write-wins is safe here.
   const keyOf = (value: AxACEVerificationResult): string =>
     `${value.verifierId}\u0000${value.testId ?? ''}\u0000${value.timestamp ?? ''}\u0000${value.result}`;
   const unique = new Map<string, AxACEVerificationResult>();
   for (const value of normalized) {
-    const key = keyOf(value);
-    const existing = unique.get(key);
-    // Sticky: a retained rejection is never replaced by another result.
-    if (existing?.result === 'rejected-retained') {
-      continue;
-    }
-    unique.set(key, value);
+    unique.set(keyOf(value), value);
   }
   return [...unique.values()].sort((a, b) => keyOf(a).localeCompare(keyOf(b)));
 }

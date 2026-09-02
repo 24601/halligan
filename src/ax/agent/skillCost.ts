@@ -452,6 +452,48 @@ export type AxAgentVerifierRailBinding = Readonly<{
 }>;
 
 /**
+ * Compose the run-level and per-invocation abort signals for one rail firing,
+ * with an explicit `dispose`.
+ *
+ * `mergeAbortSignals`' manual fallback leaves a listener on the run-level signal
+ * until abort, and rails fire after EVERY tool call — so on hosts without
+ * `AbortSignal.any` those listeners accumulate for the whole run. Invariant I9
+ * ("no listener survives settle") has to hold for the composed signal too, not
+ * only for the rail's own deadline.
+ */
+export function axRailAbortScope(
+  runSignal: AbortSignal | undefined,
+  invocationSignal: AbortSignal | undefined
+): Readonly<{ signal: AbortSignal; dispose: () => void }> {
+  const noop = () => {};
+  if (!runSignal || !invocationSignal || runSignal === invocationSignal) {
+    return Object.freeze({
+      signal: runSignal ?? invocationSignal ?? new AbortController().signal,
+      dispose: noop,
+    });
+  }
+  const controller = new AbortController();
+  if (runSignal.aborted || invocationSignal.aborted) {
+    controller.abort(
+      runSignal.aborted ? runSignal.reason : invocationSignal.reason
+    );
+    return Object.freeze({ signal: controller.signal, dispose: noop });
+  }
+  const onAbort = (event: Event) => {
+    controller.abort((event.target as AbortSignal).reason);
+  };
+  runSignal.addEventListener('abort', onAbort, { once: true });
+  invocationSignal.addEventListener('abort', onAbort, { once: true });
+  return Object.freeze({
+    signal: controller.signal,
+    dispose: () => {
+      runSignal.removeEventListener('abort', onAbort);
+      invocationSignal.removeEventListener('abort', onAbort);
+    },
+  });
+}
+
+/**
  * Count one settled tool call against the budget when its qualified name is in
  * `budget.verificationTools`.
  *

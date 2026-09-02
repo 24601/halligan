@@ -9,6 +9,7 @@ import {
   axAttributeSkillCost,
   axDedupeRailDiagnostics,
   axInitialVerificationBudgetState,
+  axRailAbortScope,
   axRecordSkillLoad,
   axRunVerifierRail,
   axSkillValueScore,
@@ -357,5 +358,54 @@ describe('rail containment', () => {
       50
     );
     expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
+  });
+});
+
+describe('axRailAbortScope', () => {
+  it('leaves no listener on the run signal after any settle path', () => {
+    // Rails fire after EVERY tool call, so the COMPOSED signal has to obey the
+    // same no-listener-survives-settle rule the rail's own deadline does.
+    // `mergeAbortSignals`' manual fallback does not, and would accumulate one
+    // listener per tool call for the whole run.
+    const run = new AbortController();
+    for (let index = 0; index < 25; index++) {
+      const invocation = new AbortController();
+      const scope = axRailAbortScope(run.signal, invocation.signal);
+      expect(scope.signal.aborted).toBe(false);
+      scope.dispose();
+    }
+    expect(getEventListeners(run.signal, 'abort')).toHaveLength(0);
+  });
+
+  it('aborts from either side, and passes a lone signal straight through', () => {
+    const run = new AbortController();
+    const invocation = new AbortController();
+    const fromInvocation = axRailAbortScope(run.signal, invocation.signal);
+    invocation.abort(new Error('invocation cancelled'));
+    expect(fromInvocation.signal.aborted).toBe(true);
+    fromInvocation.dispose();
+
+    const run2 = new AbortController();
+    const scope2 = axRailAbortScope(run2.signal, new AbortController().signal);
+    run2.abort(new Error('run cancelled'));
+    expect(scope2.signal.aborted).toBe(true);
+    scope2.dispose();
+
+    // One side absent: no controller, no listener, nothing to dispose.
+    const lone = new AbortController();
+    expect(axRailAbortScope(lone.signal, undefined).signal).toBe(lone.signal);
+    expect(axRailAbortScope(undefined, lone.signal).signal).toBe(lone.signal);
+    expect(getEventListeners(lone.signal, 'abort')).toHaveLength(0);
+    expect(axRailAbortScope(undefined, undefined).signal.aborted).toBe(false);
+  });
+
+  it('is already aborted when either side aborted before the call', () => {
+    const already = new AbortController();
+    already.abort(new Error('gone'));
+    const other = new AbortController();
+    const scope = axRailAbortScope(already.signal, other.signal);
+    expect(scope.signal.aborted).toBe(true);
+    scope.dispose();
+    expect(getEventListeners(other.signal, 'abort')).toHaveLength(0);
   });
 });
