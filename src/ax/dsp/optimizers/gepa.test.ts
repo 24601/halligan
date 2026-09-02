@@ -1343,6 +1343,127 @@ describe('AxGEPA trajectory admission', () => {
   const lineageRecords = (result: any) =>
     (result.optimizedProgram?.candidateLineage?.records ?? []) as any[];
 
+  /**
+   * A program whose optimizable components are exactly `kinds`. Used to pin
+   * what a declared `program-source` component does to admission for the WHOLE
+   * program, mutated or not.
+   */
+  const createProgramWithKinds = (
+    kinds: readonly string[],
+    forwardImpl: (example: any) => any
+  ) => {
+    const id = 'root';
+    const values: Record<string, string> = Object.fromEntries(
+      kinds.map((kind) => [`${id}::${kind}`, 'base'])
+    );
+    const program = {
+      getId: () => id,
+      setId: () => {},
+      getInstruction: () => values[`${id}::instruction`] ?? 'base',
+      setInstruction: (next: string) => {
+        values[`${id}::instruction`] = next;
+      },
+      getSignature: () => ({
+        getDescription: () => 'base',
+        toString: () => '"base" question:string -> answer:string',
+      }),
+      namedProgramInstances: () => [{ id, program }],
+      getOptimizableComponents: () =>
+        kinds.map((kind) => ({
+          key: `${id}::${kind}`,
+          kind,
+          current: values[`${id}::${kind}`]!,
+        })),
+      applyOptimizedComponents: (updates: Readonly<Record<string, string>>) => {
+        for (const key of Object.keys(values)) {
+          if (typeof updates[key] === 'string') values[key] = updates[key]!;
+        }
+      },
+      forward: async (_ai: AxAIService, example: any) => forwardImpl(example),
+      getTraces: () => [],
+      setDemos: () => {},
+      applyOptimization: () => {},
+      getUsage: () => [],
+      resetUsage: () => {},
+    };
+    return program;
+  };
+
+  const runWithKinds = async (kinds: readonly string[]) => {
+    const events: any[] = [];
+    const logs: string[] = [];
+    const optimizer = new AxGEPA({
+      studentAI: {} as AxAIService,
+      teacherAI: {} as AxAIService,
+      numTrials: 1,
+      minibatch: false,
+      minImprovementThreshold: 0,
+      debugOptimizer: true,
+      optimizerLogger: (event: any) => events.push(event),
+    } as any);
+    (optimizer as any).reflectTargetInstruction = async () => 'better';
+    const spy = console.log;
+    console.log = (message?: unknown) => {
+      logs.push(String(message));
+    };
+    try {
+      await optimizer.compile(
+        createProgramWithKinds(kinds, () => {
+          throw new Error('provider 429');
+        }) as any,
+        [{ i: 0 }, { i: 1 }, { i: 2 }, { i: 3 }] as any,
+        async ({ prediction }: any) => prediction.score,
+        {
+          maxMetricCalls: 60,
+          verbose: true,
+          candidateLineage: true,
+          trajectoryTermination: {
+            classifier: discardEveryFailure,
+            minAdmittedFraction: 0,
+            maxRunDiscardRate: 1,
+          },
+        } as any
+      );
+    } finally {
+      console.log = spy;
+    }
+    return {
+      admission: events.find((e) => e.name === 'OptimizationComplete')?.value
+        .admission,
+      inertWarning: logs.some((line) =>
+        line.includes('trajectoryTermination is inert for this program')
+      ),
+    };
+  };
+
+  it('admits nothing and says so when the program declares a program-source component', async () => {
+    // Every candidate config is a COMPLETE map, so `affectedKinds` is the whole
+    // program's kind set on every candidate — a declared program-source
+    // component makes every row of the run non-reclassifiable, including the
+    // seed evaluation, which mutated nothing at all. Conservative, but silent
+    // is worse than refusing, so it is stated in the log too.
+    const withSource = await runWithKinds(['instruction', 'program-source']);
+    expect(withSource.admission.discardedRows).toBe(0);
+    expect(withSource.admission.overriddenRows).toBeGreaterThan(0);
+    expect(withSource.admission.overriddenRows).toBe(
+      withSource.admission.evaluatedRows
+    );
+    expect(withSource.inertWarning).toBe(true);
+  });
+
+  it('admits the same rows when the program declares no program-source component', async () => {
+    // The control that makes the test above mean something: identical fixture,
+    // identical classifier, program-source component removed. Now the host's
+    // environment failures stand.
+    const withoutSource = await runWithKinds(['instruction', 'description']);
+    expect(withoutSource.admission.overriddenRows).toBe(0);
+    expect(withoutSource.admission.discardedRows).toBeGreaterThan(0);
+    expect(withoutSource.admission.discardedRows).toBe(
+      withoutSource.admission.evaluatedRows
+    );
+    expect(withoutSource.inertWarning).toBe(false);
+  });
+
   it('reports the run discard rate without changing what avg, scalars or sum mean', async () => {
     const { result, events } = await runOptimizer({
       examples: [{ i: 0 }, { i: 1 }, { i: 2 }, { i: 3 }],

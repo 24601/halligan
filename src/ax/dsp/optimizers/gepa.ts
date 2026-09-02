@@ -409,6 +409,16 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
      * Component kinds the evaluated config actually carries. Derived from the
      * program's declared components, never from a free-text label, because
      * `program-source` membership decides which rows a host may not relabel.
+     *
+     * CANDIDATE-INDEPENDENT BY CONSTRUCTION: every candidate `cfg` is a
+     * complete config map (the seed spread with one component overridden), so
+     * this is the whole program's kind set on every candidate, not the set the
+     * candidate changed. A program that declares a `program-source` component
+     * therefore makes EVERY row of the run non-reclassifiable. That is
+     * deliberate rather than incidental — see the `verboseLog` below — because
+     * the alternative launders the R4 hole: an instruction-only candidate that
+     * drives the shared evolved AST into budget errors or bad tool calls would
+     * have exactly those rows dropped from its own denominator.
      */
     const kindsForCfg = (
       cfg: Readonly<Record<string, string>>
@@ -678,6 +688,14 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
     if (discriminationOptions && !this.minibatch) {
       verboseLog(
         "minibatchStrategy: 'discriminative' was requested but minibatch is off, so every round already evaluates the whole feedback set and there is nothing to sample; the strategy is inert and no discrimination summary is emitted"
+      );
+    }
+    if (
+      admissionOptions &&
+      targets.some((target) => target.kind === 'program-source')
+    ) {
+      verboseLog(
+        'trajectoryTermination is inert for this program: it declares a program-source component, so every candidate carries that kind and Ax overrides every host environment_failure to policy_failure. No row of this run can be discarded; the overrides are counted in admission.overriddenRows'
       );
     }
     if (

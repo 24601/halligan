@@ -24,10 +24,20 @@ import {
  * Everything `evaluateGEPABatch` needs to classify a row's termination.
  *
  * `affectedKinds` are the `AxOptimizableComponent.kind` values the evaluated
- * candidate config carries. They are handed to the host classifier as advisory
- * context AND used by Ax to decide which rows may never be relabelled as
- * environment failures — a candidate that carries a `program-source` component
- * IS its evolved AST, so that AST's runtime failures are the candidate's own.
+ * config CARRIES — the whole program's kind set, not the subset the candidate
+ * changed, because every candidate config is a complete map. They are handed
+ * to the host classifier as advisory context AND used by Ax to decide which
+ * rows may never be relabelled as environment failures.
+ *
+ * So a program that declares a `program-source` component makes every row of
+ * every candidate non-reclassifiable: that program IS its evolved AST, the AST
+ * is shared by every candidate, and a candidate that merely steers it into
+ * budget errors or bad tool calls must not have those rows leave its own
+ * denominator. The override only ever turns an environment failure INTO a
+ * policy failure, so the widening can only make the evidence more
+ * conservative; GEPA logs one line saying admission is inert for such a
+ * program rather than leaving the caller to discover it from a zero discard
+ * count.
  */
 export type AxGEPATerminationArgs = AxResolvedTrajectoryAdmissionOptions & {
   readonly affectedKinds: readonly string[];
