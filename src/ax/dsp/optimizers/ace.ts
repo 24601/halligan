@@ -20,6 +20,7 @@ import {
   type AxACEPlaybookRenderOptions,
   applyCuratorOperations,
   axProjectActorPlaybook,
+  axRedactPlaybookForModel,
   axRenderActorPlaybook,
   clonePlaybook,
   createEmptyPlaybook,
@@ -1569,7 +1570,7 @@ export class AxACE extends AxBaseOptimizer {
           markdown: renderPlaybook(executablePlaybook, {
             includeInapplicable: true,
           }),
-          structured: executablePlaybook,
+          structured: axRedactPlaybookForModel(executablePlaybook),
         }),
         expected_answer:
           Object.keys(expectedAnswer).length > 0
@@ -1623,7 +1624,7 @@ export class AxACE extends AxBaseOptimizer {
           markdown: renderPlaybook(executablePlaybook, {
             includeInapplicable: true,
           }),
-          structured: executablePlaybook,
+          structured: axRedactPlaybookForModel(executablePlaybook),
         }),
         reflection: JSON.stringify(reflection),
         question_context: this.stringifyBounded(questionContext),

@@ -1,4 +1,7 @@
-import type { AxSkillPreconditionCheck } from '../../authority/skillProvenance.js';
+import type {
+  AxSkillPreconditionCheck,
+  AxSkillProvenance,
+} from '../../authority/skillProvenance.js';
 import type { AxExample } from '../common_types.js';
 
 /**
@@ -54,6 +57,13 @@ export type AxACEBulletEvidence = {
   provenance?: AxACEProvenance[];
   verification?: AxACEVerificationResult[];
   lifecycle?: AxACEBulletLifecycle;
+  /**
+   * Host-written. The authority facts this bullet's source trajectory used.
+   * HOST-ONLY: `axRedactPlaybookForModel` strips this before any model-facing
+   * serialization. It carries grant ids, receipt ids and request digests, and
+   * must never reach a provider.
+   */
+  authorityProvenance?: AxSkillProvenance;
 };
 
 /**
@@ -73,6 +83,8 @@ export type AxACEHostEvidence = {
    * runtime-checked. Applied to both created and updated bullets.
    */
   visibility?: AxACEBulletVisibility;
+  /** Host-written authority facts for the bullets this operation writes. */
+  authorityProvenance?: AxSkillProvenance;
 };
 
 /**

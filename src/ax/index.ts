@@ -1078,6 +1078,7 @@ import {
   type AxACEBulletChange,
   type AxACEPlaybookRenderOptions,
   axProjectActorPlaybook,
+  axRedactPlaybookForModel,
   axRenderActorPlaybook,
 } from './dsp/optimizers/acePlaybook.js';
 import type {
@@ -2755,6 +2756,7 @@ export { axReactSerializeHistory };
 export { axRecheckSkillProvenance };
 export { axRecordMindSalience };
 export { axRecoverMindPacerState };
+export { axRedactPlaybookForModel };
 export { axRejectedCandidateDigest };
 export { axRejectedCandidateLedgerEntry };
 export { axRejectedCandidatePrior };

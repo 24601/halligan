@@ -1,3 +1,4 @@
+import { axIsSkillProvenance } from '../../authority/skillProvenance.js';
 import { getCrypto } from '../../util/crypto.js';
 import type {
   AxACEActorPlaybookView,
@@ -409,6 +410,30 @@ export function axRenderActorPlaybook(
   return renderPlaybook(view.playbook, options);
 }
 
+/**
+ * Strip every host-only evidence field from a playbook before it is serialized
+ * into a model prompt. Today that is `evidence.authorityProvenance`; this is the
+ * single place a future host-only field is added.
+ *
+ * Required because `createExecutablePlaybookView` is a clone plus an
+ * applicability filter that strips nothing, and the reflector and curator
+ * serialize that view straight to the provider.
+ */
+export function axRedactPlaybookForModel(
+  playbook: Readonly<AxACEPlaybook>
+): AxACEPlaybook {
+  const redacted = clonePlaybook(playbook);
+  for (const bullets of Object.values(redacted.sections)) {
+    for (const bullet of bullets) {
+      if (bullet.evidence?.authorityProvenance !== undefined) {
+        const { authorityProvenance: _hostOnly, ...rest } = bullet.evidence;
+        bullet.evidence = rest;
+      }
+    }
+  }
+  return redacted;
+}
+
 /** @internal Build the safe playbook view supplied to executable ACE stages. */
 export function createExecutablePlaybookView(
   playbook: Readonly<AxACEPlaybook>,
@@ -548,6 +573,12 @@ function isEvidenceStructurallyValid(value: unknown): boolean {
             typeof entry.sourceRunId !== 'string') ||
           conditionList(entry.feedbackIds) === null
       ))
+  ) {
+    return false;
+  }
+  if (
+    value.authorityProvenance !== undefined &&
+    !axIsSkillProvenance(value.authorityProvenance)
   ) {
     return false;
   }
@@ -813,7 +844,10 @@ function assertHostEvidence(value: unknown): void {
       (typeof value.confidence !== 'number' ||
         !Number.isFinite(value.confidence))) ||
     !isVisibilityStructurallyValid(value.visibility) ||
-    !isEvidenceStructurallyValid({ verification: value.verification })
+    !isEvidenceStructurallyValid({
+      verification: value.verification,
+      authorityProvenance: value.authorityProvenance,
+    })
   ) {
     throw new TypeError('AxACE: host evidence is malformed');
   }
@@ -1224,6 +1258,8 @@ function mergeBulletEvidence(
       }
     : existing?.lifecycle;
   const provenance = mergeProvenance(existing?.provenance, host);
+  const authorityProvenance =
+    host?.authorityProvenance ?? existing?.authorityProvenance;
   const verification = normalizeVerification([
     ...(existing?.verification ?? []),
     ...(host?.verification ?? []),
@@ -1244,6 +1280,7 @@ function mergeBulletEvidence(
     !applicability &&
     !lifecycle &&
     !provenance &&
+    !authorityProvenance &&
     verification.length === 0 &&
     evidenceCount === 0
   ) {
@@ -1260,6 +1297,7 @@ function mergeBulletEvidence(
     ...(provenance ? { provenance } : {}),
     ...(verification.length ? { verification } : {}),
     ...(lifecycle ? { lifecycle } : {}),
+    ...(authorityProvenance ? { authorityProvenance } : {}),
   };
 }
 
@@ -1366,6 +1404,12 @@ function mergeStoredEvidence(
     ...(verification.length ? { verification } : {}),
     ...((incoming.lifecycle ?? existing.lifecycle)
       ? { lifecycle: incoming.lifecycle ?? existing.lifecycle }
+      : {}),
+    ...((incoming.authorityProvenance ?? existing.authorityProvenance)
+      ? {
+          authorityProvenance:
+            incoming.authorityProvenance ?? existing.authorityProvenance,
+        }
       : {}),
   };
 }

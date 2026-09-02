@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { collectCoveredFailureSignatures } from '../../agent/playbookConfig.js';
 import type { AxAIService } from '../../ai/types.js';
+import { axExtractSkillProvenance } from '../../authority/skillProvenance.js';
 import { AxPlaybook } from '../playbook.js';
 import { f } from '../sig.js';
 import { ax } from '../template.js';
@@ -9,6 +10,7 @@ import { AxACE, AxACEOptimizedProgram } from './ace.js';
 import {
   applyCuratorOperations,
   axProjectActorPlaybook,
+  axRedactPlaybookForModel,
   axRenderActorPlaybook,
   createEmptyPlaybook,
   createExecutablePlaybookView,
@@ -440,6 +442,163 @@ describe('visibility laundering is blocked', () => {
     expect(
       axRenderActorPlaybook(axProjectActorPlaybook(playbook, { now: NOW }))
     ).toContain('unrelated new guidance');
+  });
+});
+
+describe('host-only provenance never reaches a model', () => {
+  const GRANT_ID = 'grant-secret-8a71';
+  const RECEIPT_ID = 'receipt-secret-3c02';
+  const REQUEST_DIGEST = 'sha256:secret-request-digest';
+
+  function provenance() {
+    return axExtractSkillProvenance({
+      effects: [
+        {
+          id: 'effect-1',
+          deliveryId: 'd-1',
+          runId: 'r-1',
+          identityScope: 's-1',
+          operation: 'payments.capture',
+          idempotencyKey: 'k-1',
+          replaySafety: 'idempotent',
+          requestDigest: REQUEST_DIGEST,
+          status: 'succeeded',
+          createdAt: 1,
+          updatedAt: 1,
+          dispatchCount: 1,
+          version: 1,
+        },
+      ],
+      receipts: [
+        {
+          version: 1,
+          receiptId: RECEIPT_ID,
+          requestId: 'q-1',
+          decision: 'allow',
+          operation: 'payments.capture',
+          resource: { type: 'account', id: 'acct-1' },
+          principalId: 'p-1',
+          actor: { id: 'a-1', kind: 'agent' },
+          grantIds: [GRANT_ID],
+          leaseEpoch: 1,
+          authorizedAt: 2,
+        },
+      ],
+      leaseEpoch: 1,
+      capturedAt: NOW,
+    });
+  }
+
+  function playbookWithProvenance(): AxACEPlaybook {
+    const playbook = createEmptyPlaybook('Provenance fixture');
+    playbook.sections.Guidelines = [
+      bullet({
+        id: 'with-provenance',
+        content: 'guidance distilled from an authorized trajectory',
+        evidence: { authorityProvenance: provenance() },
+      }),
+      bullet({ id: 'plain', content: 'guidance with no provenance' }),
+    ];
+    return playbook;
+  }
+
+  it('axRedactPlaybookForModel removes authorityProvenance from every bullet', () => {
+    const playbook = playbookWithProvenance();
+    const redacted = axRedactPlaybookForModel(playbook);
+    for (const entry of Object.values(redacted.sections).flat()) {
+      expect(entry.evidence?.authorityProvenance).toBeUndefined();
+    }
+    // The source is untouched: redaction is for the wire, not for the store.
+    expect(
+      playbook.sections.Guidelines?.[0]?.evidence?.authorityProvenance
+    ).toBeDefined();
+    expect(redacted.sections.Guidelines?.[0]?.content).toBe(
+      playbook.sections.Guidelines?.[0]?.content
+    );
+  });
+
+  it('the serialized reflector input carries no grant, receipt, or request digest', async () => {
+    const playbook = playbookWithProvenance();
+    const ace = new AxACE(
+      { studentAI: {} as AxAIService, teacherAI: {} as AxAIService },
+      { initialPlaybook: playbook }
+    );
+    ace.hydrate(
+      ax(f().input('question', f.string()).output('answer', f.string()).build())
+    );
+    const reflector = (ace as any).getOrCreateReflectorProgram();
+    const forwardSpy = vi.spyOn(reflector, 'forward').mockResolvedValue({
+      reasoning: '',
+      errorIdentification: 'no error',
+      rootCauseAnalysis: '',
+      correctApproach: '',
+      keyInsight: '',
+      bulletTags: [],
+    });
+    await (ace as any).runReflector({
+      example: { question: 'q' },
+      generatorOutput: { reasoning: '', answer: {}, bulletIds: [] },
+    });
+    const sent = (forwardSpy.mock.calls[0]?.[1] as any).playbook as string;
+    for (const marker of [GRANT_ID, RECEIPT_ID, REQUEST_DIGEST]) {
+      expect(sent).not.toContain(marker);
+    }
+    // The bullet itself is still there, so a stub that sent nothing fails.
+    expect(sent).toContain('with-provenance');
+  });
+
+  it('the serialized curator input carries no grant, receipt, or request digest', async () => {
+    const playbook = playbookWithProvenance();
+    const mockAI = {
+      name: 'mock',
+      chat: vi.fn().mockResolvedValue({
+        results: [{ index: 0, content: '{"reasoning":"m","operations":[]}' }],
+      }),
+      getOptions: () => ({ tracer: undefined }),
+      getLogger: () => undefined,
+    } as unknown as AxAIService;
+    const ace = new AxACE({
+      studentAI: {} as AxAIService,
+      teacherAI: mockAI,
+    });
+    const curator = (ace as any).getOrCreateCuratorProgram();
+    const forwardSpy = vi.spyOn(curator, 'forward');
+    await (ace as any).runCurator({
+      program: ax(
+        f().input('question', f.string()).output('answer', f.string()).build()
+      ),
+      example: { question: 'q' },
+      reflection: { keyInsight: 'k' },
+      playbook,
+    });
+    const sent = (forwardSpy.mock.calls[0]?.[1] as any).playbook as string;
+    for (const marker of [GRANT_ID, RECEIPT_ID, REQUEST_DIGEST]) {
+      expect(sent).not.toContain(marker);
+    }
+    expect(sent).toContain('with-provenance');
+  });
+
+  it('a structurally malformed authorityProvenance fails the bullet closed', () => {
+    const playbook = playbookWithProvenance();
+    (
+      playbook.sections.Guidelines![0]!.evidence as Record<string, unknown>
+    ).authorityProvenance = { version: 1 };
+    expect(() => applyCuratorOperations(playbook, [])).toThrow(TypeError);
+  });
+
+  it('host evidence carries provenance onto the bullet it writes', () => {
+    const playbook = createEmptyPlaybook('Host provenance');
+    playbook.sections.Guidelines = [];
+    applyCuratorOperations(
+      playbook,
+      [{ type: 'ADD', section: 'Guidelines', content: 'new guidance' }],
+      {
+        hostEvidence: { source: 'manual', authorityProvenance: provenance() },
+      }
+    );
+    expect(
+      playbook.sections.Guidelines?.[0]?.evidence?.authorityProvenance?.digest
+    ).toBe(provenance().digest);
   });
 });
 
