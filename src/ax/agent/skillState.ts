@@ -121,6 +121,14 @@ export interface AxSkillStateConfig<S = Record<string, unknown>> {
   resolveSkill?: (ref: AxExecutableSkillRef) => Promise<AxAgentSkillResult>;
   /** Number of prior observations kept in the prompt. Default 1. */
   observationWindow?: number;
+  /**
+   * Observability sink for every attempted transition, accepted or not. Called
+   * once per `applyPatch`. Fail-soft like `AxWorkingStateConfig.onTrace`: a
+   * throwing sink never fails the turn.
+   */
+  onTransition?: (
+    transition: Readonly<AxSkillStateTransition<S>>
+  ) => void | Promise<void>;
 }
 
 type ObservationEntry = Readonly<{ turn: number; text: string }>;
@@ -180,17 +188,20 @@ export class AxSkillStateRuntime<S = Record<string, unknown>> {
   private readonly observationWindow: number;
   private readonly observations: ObservationEntry[] = [];
   private readonly transitionLog: AxSkillStateTransition<S>[] = [];
+  private readonly onTransition?: AxSkillStateConfig<S>['onTransition'];
   private lastGuidanceNotes: readonly AxWorkingStateGuidanceNote[] = [];
 
   private constructor(args: {
     workingState: AxWorkingState<S>;
     skill: AxAgentSkillResult;
     observationWindow: number;
+    onTransition?: AxSkillStateConfig<S>['onTransition'];
   }) {
     this.workingState = args.workingState;
     this.skill = args.skill;
     this.skillSpecText = renderSkillSpec(args.skill);
     this.observationWindow = args.observationWindow;
+    this.onTransition = args.onTransition;
   }
 
   /** @internal Constructed by `axSkillStateRuntime`. */
@@ -213,6 +224,7 @@ export class AxSkillStateRuntime<S = Record<string, unknown>> {
       workingState,
       skill,
       observationWindow: config.observationWindow ?? DEFAULT_OBSERVATION_WINDOW,
+      ...(config.onTransition ? { onTransition: config.onTransition } : {}),
     });
   }
 
@@ -293,7 +305,7 @@ export class AxSkillStateRuntime<S = Record<string, unknown>> {
         'patch_invalid'
       );
       this.lastGuidanceNotes = outcome.guidance ?? [];
-      return this.record({
+      return await this.record({
         turn: context.turn,
         patch: [],
         rationaleDigest,
@@ -317,7 +329,7 @@ export class AxSkillStateRuntime<S = Record<string, unknown>> {
       ? undefined
       : rejectionFor(outcome.error, outcome.parked.length);
 
-    return this.record({
+    return await this.record({
       turn: context.turn,
       patch: validation.patch,
       rationaleDigest,
@@ -342,9 +354,9 @@ export class AxSkillStateRuntime<S = Record<string, unknown>> {
     return this.transitionLog.slice();
   }
 
-  private record(
+  private async record(
     transition: Omit<AxSkillStateTransition<S>, 'at'>
-  ): AxSkillStateTransition<S> {
+  ): Promise<AxSkillStateTransition<S>> {
     const full: AxSkillStateTransition<S> = {
       ...transition,
       at: this.workingState.now(),
@@ -352,9 +364,16 @@ export class AxSkillStateRuntime<S = Record<string, unknown>> {
     // Only accepted transitions enter the ledger: a refused attempt changed no
     // state, so recording it as a transition would put attempts-as-deltas into
     // the audit record. Refusals are already visible on the Gamma trace, in the
-    // parked ledger and in the returned value.
+    // parked ledger, on the returned value and through `onTransition`.
     if (full.accepted) {
       this.transitionLog.push(full);
+    }
+    if (this.onTransition) {
+      try {
+        await this.onTransition(full);
+      } catch {
+        // Observability is fail-soft, like `onFunctionCall` and `onTrace`.
+      }
     }
     return full;
   }

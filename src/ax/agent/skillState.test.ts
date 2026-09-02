@@ -501,6 +501,36 @@ describe('AxSkillStateRuntime transitions', () => {
     expect(transition.at).toBe(1_500);
   });
 
+  it('reports every attempt through onTransition and survives a throwing sink', async () => {
+    // Observability is fail-soft: a host sink that throws must not fail the
+    // turn, and both accepted and refused attempts are reported.
+    const seen: Array<{ accepted: boolean; rejection?: string }> = [];
+    const state = await makeState();
+    const receipt = await mint(state, 'inventory.pick');
+    const runtime = await makeRuntime(state, {
+      onTransition: (transition) => {
+        seen.push({
+          accepted: transition.accepted,
+          ...(transition.rejection ? { rejection: transition.rejection } : {}),
+        });
+        throw new Error('sink exploded');
+      },
+    });
+
+    await runtime.applyPatch('not a patch', undefined, TURN);
+    const accepted = await runtime.applyPatch(
+      completionPatch(receipt.ref),
+      undefined,
+      TURN
+    );
+
+    expect(accepted.accepted).toBe(true);
+    expect(seen).toEqual([
+      { accepted: false, rejection: 'schema' },
+      { accepted: true },
+    ]);
+  });
+
   it('exposes AxSkillStateRuntime as a class with a private constructor', () => {
     // The house pattern: validation lives in the factory, so a host cannot
     // construct an unvalidated runtime.
