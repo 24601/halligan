@@ -109,6 +109,7 @@ import type {
   AxAgentEvalBatchResult,
   AxAgentEvalBudget,
 } from './agent/agentInternal/playbookEvolve/evalHarness.js';
+import { runAxAgentPlaybookEvidenceConformance } from './agent/agentInternal/playbookEvolve/evidenceConformance.js';
 import type { AxAgentFailureCluster } from './agent/agentInternal/playbookEvolve/failureClusters.js';
 import type {
   AxGateAuthorityOutcome,
@@ -3081,6 +3082,7 @@ export { playbook };
 export { programSource };
 export { react };
 export { refine };
+export { runAxAgentPlaybookEvidenceConformance };
 export { runAxEventStoreConformance };
 export { runAxLearningStoreConformance };
 export { runAxTrajectoryStoreConformance };

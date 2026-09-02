@@ -3322,3 +3322,330 @@ describe('agent.playbook().evolve() control-arm run-level verdict edge cases', (
     expect(warning.message).toContain('no candidate was accepted');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Promotion authority (RFC 4.9): the judge nominates; the grant binds the
+// playbook; the veto decides the candidate.
+// ---------------------------------------------------------------------------
+
+const PROMOTION_NOW = 10_000;
+const PROMOTION_RESOURCE_ID = 'playbook:evolve-test-agent';
+const PROMOTE_OPERATION = 'ax.agent.playbook.promote';
+const CANDIDATE_TYPE = 'ax.agent.playbook.candidate';
+
+const promotionGrant = (override: Record<string, unknown> = {}) => ({
+  version: 1 as const,
+  id: 'grant-1',
+  principalId: 'principal-a',
+  actor: { id: 'actor-a', kind: 'agent' as const },
+  operations: [PROMOTE_OPERATION],
+  resources: [{ type: CANDIDATE_TYPE, id: PROMOTION_RESOURCE_ID }],
+  issuedAt: PROMOTION_NOW - 100,
+  expiresAt: PROMOTION_NOW + 100,
+  leaseEpoch: 3,
+  ...override,
+});
+
+const promotionReceipt = (
+  operation: string,
+  context: any,
+  override: Record<string, unknown> = {}
+) => ({
+  version: 1 as const,
+  receiptId: 'receipt-1',
+  requestId: context.requestId,
+  decision: 'allow' as const,
+  operation,
+  resource: context.resource,
+  principalId: context.principal.id,
+  actor: { id: context.actor.id, kind: context.actor.kind },
+  grantIds: context.grants.map((value: any) => value.id),
+  leaseEpoch: context.leaseEpoch,
+  authorizedAt: context.now,
+  ...override,
+});
+
+const promotionAuthority = (override: Record<string, unknown> = {}) => ({
+  resourceId: PROMOTION_RESOURCE_ID,
+  authority: {
+    principal: { id: 'principal-a' },
+    actor: { id: 'actor-a', kind: 'agent' as const },
+    grants: [promotionGrant()],
+    leaseEpoch: 3,
+    now: () => PROMOTION_NOW,
+    authorize: (operation: string, context: any) =>
+      promotionReceipt(operation, context),
+    ...override,
+  },
+});
+
+describe('agent.playbook().evolve() promotion authority', () => {
+  it('produces a nomination, never a promotion: a denial rejects the candidate', async () => {
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(
+      { train: TASKS, validation: VALIDATION_TASKS },
+      {
+        metric: scoreByAnswer,
+        maxProposals: 1,
+        promotionAuthority: promotionAuthority({
+          authorize: (operation: string, context: any) =>
+            promotionReceipt(operation, context, { decision: 'deny' }),
+        }),
+      }
+    );
+    const outcome = result.outcomes[0];
+    // Every metric gate passed — the judge nominated — and the candidate still
+    // did not land, because promotion is not the judge's to grant.
+    expect(outcome?.evidence?.nomination.nominated).toBe(true);
+    expect(outcome?.accepted).toBe(false);
+    expect(outcome?.reason).toContain('authority gate failed');
+    expect(outcome?.promotion).toMatchObject({
+      status: 'denied',
+      code: 'host_denied',
+    });
+    // Exact rollback: the bullet never reaches the actor prompt.
+    expect(actorPromptOf(ag)).not.toContain(BULLET_MARKER);
+    expect(result.playbookSnapshot).toBeUndefined();
+  });
+
+  it('promotes on a real pre-issued grant bound to resourceId', async () => {
+    const seen: string[] = [];
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(
+      { train: TASKS, validation: VALIDATION_TASKS },
+      {
+        metric: scoreByAnswer,
+        maxProposals: 1,
+        promotionAuthority: promotionAuthority({
+          authorize: (operation: string, context: any) => {
+            seen.push(context.resource.id);
+            return promotionReceipt(operation, context);
+          },
+        }),
+      }
+    );
+    const outcome = result.outcomes[0];
+    expect(outcome?.accepted).toBe(true);
+    expect(outcome?.promotion?.status).toBe('promoted');
+    expect(
+      outcome?.promotion?.status === 'promoted' &&
+        outcome.promotion.receipt.resource.id
+    ).toBe(PROMOTION_RESOURCE_ID);
+    expect(outcome?.evidence?.promotion.status).toBe('promoted');
+    // The GRANT binds the playbook. A digest-bound implementation would have
+    // asked about a value no host could pre-grant and been denied outright.
+    expect(seen).toEqual([PROMOTION_RESOURCE_ID]);
+    expect(seen).not.toContain(outcome?.evidence?.nomination.promotionDigest);
+    expect(actorPromptOf(ag)).toContain(BULLET_MARKER);
+    // A promotion with a receipt does not warn about a missing one.
+    expect(
+      result.warnings?.some(
+        (warning: any) => warning.code === 'promotion_without_receipt'
+      )
+    ).toBe(false);
+  });
+
+  it('denies a digest-shaped resourceId, because no host can pre-grant it', async () => {
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(
+      { train: TASKS, validation: VALIDATION_TASKS },
+      {
+        metric: scoreByAnswer,
+        maxProposals: 1,
+        promotionAuthority: {
+          ...promotionAuthority(),
+          resourceId: 'fnv1a64:9d3c0f11aa22bb33',
+        },
+      }
+    );
+    expect(result.outcomes[0]?.promotion).toMatchObject({
+      status: 'denied',
+      code: 'no_matching_grant',
+    });
+    expect(result.outcomes[0]?.accepted).toBe(false);
+  });
+
+  it('blocks a candidate every metric gate accepted, conjunctively', async () => {
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(
+      { train: TASKS, validation: VALIDATION_TASKS },
+      {
+        metric: scoreByAnswer,
+        maxProposals: 1,
+        promotionVeto: [
+          () => false,
+          (nomination: any) => ({
+            vetoId: 'policy',
+            vetoed: nomination.nominated,
+            reason: 'not this candidate',
+          }),
+          // The forgotten `return`: Ax reads it as a veto, not an allow.
+          () => undefined as unknown as boolean,
+        ],
+      }
+    );
+    const outcome = result.outcomes[0];
+    expect(outcome?.accepted).toBe(false);
+    expect(outcome?.reason).toContain('veto gate failed');
+    expect(outcome?.promotion?.status).toBe('vetoed');
+    const vetoes =
+      outcome?.promotion?.status === 'vetoed' ? outcome.promotion.vetoes : [];
+    // All three are recorded, not just the first blocker: a receipt that cannot
+    // say whether the others agreed is not an audit trail.
+    expect(vetoes).toHaveLength(3);
+    expect(vetoes.filter((veto: any) => veto.vetoed)).toHaveLength(2);
+    expect(actorPromptOf(ag)).not.toContain(BULLET_MARKER);
+  });
+
+  it('a declining veto cannot promote a candidate the metric gates rejected', async () => {
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(
+      { train: TASKS, validation: VALIDATION_TASKS },
+      {
+        metric: scoreByAnswer,
+        maxProposals: 1,
+        // Unreachable gain: gate 1 rejects before any host call is spent.
+        minHeldInGain: 5,
+        promotionVeto: () => ({ vetoed: false }),
+      }
+    );
+    const outcome = result.outcomes[0];
+    expect(outcome?.accepted).toBe(false);
+    expect(outcome?.promotion?.status).toBe('not_nominated');
+    expect(
+      outcome?.evidence?.gates.entries.find((entry: any) => entry.id === 'veto')
+        ?.status
+    ).toBe('skipped');
+    expect(actorPromptOf(ag)).not.toContain(BULLET_MARKER);
+  });
+
+  it('warns when a candidate is promoted with no authority configured', async () => {
+    const { ag } = makeAgent();
+    const result = await ag
+      .playbook()
+      .evolve(
+        { train: TASKS, validation: VALIDATION_TASKS },
+        { metric: scoreByAnswer, maxProposals: 1, gates: { validity: 'warn' } }
+      );
+    expect(result.outcomes[0]?.accepted).toBe(true);
+    // The default stays permissive; the absence of a grant is on the record.
+    expect(
+      result.warnings?.find(
+        (warning: any) => warning.code === 'promotion_without_receipt'
+      )?.message
+    ).toContain('no promotionAuthority configured');
+  });
+
+  it('records a cancelled authority call and still rethrows the aborted error', async () => {
+    const controller = new AbortController();
+    const { ag } = makeAgent();
+    await expect(
+      ag
+        .playbook()
+        .evolve(
+          { train: TASKS, validation: VALIDATION_TASKS },
+          {
+            metric: scoreByAnswer,
+            maxProposals: 1,
+            abortSignal: controller.signal,
+            promotionAuthority: promotionAuthority({
+              authorize: (operation: string, context: any) => {
+                controller.abort(new Error('caller cancelled'));
+                return promotionReceipt(operation, context);
+              },
+            }),
+          }
+        )
+      // Cancellation semantics stay exactly what they were for the caller.
+    ).rejects.toThrow('AxAgent.playbook().evolve(): aborted');
+    expect(actorPromptOf(ag)).not.toContain(BULLET_MARKER);
+  });
+
+  it('leaves no abort listener behind after the veto and authority gates', async () => {
+    const controller = new AbortController();
+    const before = getEventListeners(controller.signal, 'abort').length;
+    const { ag } = makeAgent();
+    await ag.playbook().evolve(
+      { train: TASKS, validation: VALIDATION_TASKS },
+      {
+        metric: scoreByAnswer,
+        maxProposals: 1,
+        abortSignal: controller.signal,
+        promotionVeto: [() => false, () => ({ vetoed: false })],
+        promotionAuthority: promotionAuthority(),
+      }
+    );
+    expect(getEventListeners(controller.signal, 'abort').length).toBe(before);
+  });
+
+  it('falls back to task-id split digests and never throws on a class input', async () => {
+    class HostOwnedInput {
+      constructor(public readonly question: string) {}
+    }
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(
+      {
+        train: [
+          { input: new HostOwnedInput('q1'), criteria: 'answers', id: 'ct1' },
+          { input: new HostOwnedInput('q2'), criteria: 'answers', id: 'ct2' },
+        ],
+        validation: [
+          { input: new HostOwnedInput('q3'), criteria: 'answers', id: 'cv1' },
+        ],
+      },
+      { metric: scoreByAnswer, maxProposals: 1, gates: { validity: 'warn' } }
+    );
+    // `canonicalSerialize` rejects non-plain prototypes, so digesting the raw
+    // task objects would have turned a `gates.*` run into a brand-new throw.
+    const nomination = result.outcomes[0]?.evidence?.nomination;
+    expect(nomination?.splitDigestBasis).toBe('task_ids');
+    expect(nomination?.splitDigests.current).not.toBe('');
+    expect(nomination?.splitDigests.heldOut).not.toBe('');
+  });
+
+  it('refuses a promotion option on the trust-batch path', async () => {
+    const { ag } = makeAgent();
+    for (const options of [
+      { promotionVeto: () => false },
+      { promotionAuthority: promotionAuthority() },
+    ]) {
+      await expect(
+        ag.playbook().evolve(TASKS, {
+          metric: scoreByAnswer,
+          verify: false,
+          ...options,
+        })
+      ).rejects.toThrow(/cannot be combined with verify: false/);
+    }
+  });
+
+  it('rejects a promotion authority that could never produce a receipt', async () => {
+    const { ag } = makeAgent();
+    for (const [config, pattern] of [
+      [
+        { ...promotionAuthority(), resourceId: '  ' },
+        /host-grantable identity/,
+      ],
+      [
+        { ...promotionAuthority(), authority: {} },
+        /must be an AxAuthorityContext/,
+      ],
+      [
+        {
+          ...promotionAuthority(),
+          authority: { ...promotionAuthority().authority, grants: [] },
+        },
+        /every promotion would be denied with no_matching_grant/,
+      ],
+    ] as const) {
+      await expect(
+        ag
+          .playbook()
+          .evolve(
+            { train: TASKS, validation: VALIDATION_TASKS },
+            { metric: scoreByAnswer, promotionAuthority: config as any }
+          )
+      ).rejects.toThrow(pattern);
+    }
+  });
+});

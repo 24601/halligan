@@ -1133,13 +1133,21 @@ import {
   type AxAgentPlaybookEvidenceWarning,
   AxAgentPlaybookEvolveError,
   type AxAgentPlaybookInterval,
+  type AxAgentPlaybookNomination,
+  type AxAgentPlaybookPromotionAuthority,
+  type AxAgentPlaybookPromotionRecord,
+  type AxAgentPlaybookPromotionVeto,
+  type AxAgentPlaybookPruneOptions,
+  type AxAgentPlaybookPruneProposal,
   type AxAgentPlaybookReachProbe,
+  type AxAgentPlaybookRedundancyReport,
   type AxAgentPlaybookTransferReport,
   type AxAgentPlaybookValidityReport,
   type AxAgentTrajectoryClassifier,
   type AxAgentTrajectoryTermination,
   axClassifyAxServiceTermination,
   axIsAgentPlaybookEvolveError,
+  runAxAgentPlaybookEvidenceConformance,
 } from './index.js';
 
 const playbookClassifier: AxAgentTrajectoryClassifier = ({ errorName }) =>
@@ -1177,6 +1185,43 @@ void playbookTransfer;
 void playbookControl;
 void playbookAttempt;
 void playbookTermination;
+
+// A veto is REJECT-ONLY at the type level too: it may return a decision, never
+// a promotion, and `undefined` is not in the return type — a host that forgets
+// a `return` gets a compile error before it gets a silent fail-closed veto.
+const playbookVeto: AxAgentPlaybookPromotionVeto = (nomination) => ({
+  vetoId: 'policy',
+  vetoed: !nomination.nominated,
+});
+void playbookVeto;
+
+declare const playbookNomination: AxAgentPlaybookNomination;
+// The grant binds a host-grantable identity, never the per-candidate digest.
+const playbookGrantedResource: string = playbookNomination.resourceId;
+void playbookGrantedResource;
+
+declare const playbookPromotion: AxAgentPlaybookPromotionRecord;
+declare const playbookPrune: AxAgentPlaybookPruneProposal;
+declare const playbookRedundancy: AxAgentPlaybookRedundancyReport;
+const playbookPruneOptions: AxAgentPlaybookPruneOptions = { enabled: true };
+const playbookPromotionAuthority: AxAgentPlaybookPromotionAuthority = {
+  authority: {
+    principal: { id: 'p' },
+    actor: { id: 'a', kind: 'agent' },
+    grants: [],
+    leaseEpoch: 0,
+    authorize: () => {
+      throw new Error('not called in a type test');
+    },
+  },
+  resourceId: 'playbook:support',
+};
+void playbookPromotion;
+void playbookPrune;
+void playbookRedundancy;
+void playbookPruneOptions;
+void playbookPromotionAuthority;
+void runAxAgentPlaybookEvidenceConformance;
 
 const playbookEvolveError = new AxAgentPlaybookEvolveError(
   'evidence_incomplete',

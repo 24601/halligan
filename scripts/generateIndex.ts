@@ -168,6 +168,10 @@ function hasValidPrefix(name: string): boolean {
       name === 'eventPath' ||
       name === 'eventRoute' ||
       name === 'eventTarget' ||
+      // Host-callback conformance kits. Deliberate API decisions, not build
+      // fixes: a host that supplies a classifier, reach probe, veto or
+      // authorizer needs an executable contract it can run.
+      name === 'runAxAgentPlaybookEvidenceConformance' ||
       name === 'runAxEventStoreConformance' ||
       name === 'runAxLearningStoreConformance' ||
       name === 'runAxTrajectoryStoreConformance' ||
