@@ -59,6 +59,19 @@ import {
   selectProgramCandidateFromInstanceFronts,
 } from './paretoUtils.js';
 import {
+  type AxMinibatchStrategy,
+  type AxTaskDiscriminationOptions,
+  type AxTaskDiscriminationSummary,
+  type AxTaskInclusion,
+  type AxTaskInclusionSnapshot,
+  type AxTaskStatTable,
+  axComputeInclusionProbabilities,
+  axCreateTaskStatTable,
+  axIpwPairedDifference,
+  axResolveTaskDiscriminationOptions,
+  axSampleByInclusion,
+} from './taskDiscrimination.js';
+import {
   type AxTrajectoryAdmissionOptions,
   type AxTrajectoryAdmissionReport,
   axExceedsRunDiscardCeiling,
@@ -406,6 +419,34 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       }
       return [...kinds];
     };
+    const minibatchStrategy =
+      ownDataOption<AxMinibatchStrategy>('minibatchStrategy') ?? 'uniform';
+    const discriminationOptions =
+      minibatchStrategy === 'discriminative'
+        ? axResolveTaskDiscriminationOptions(
+            ownDataOption<AxTaskDiscriminationOptions>('taskDiscrimination')
+          )
+        : undefined;
+    // The sampler only replaces the MINIBATCH draw, so it is inert when GEPA is
+    // evaluating the whole feedback set every round.
+    const discriminativeEnabled =
+      discriminationOptions !== undefined &&
+      this.minibatch &&
+      effectiveFeedbackSet.length >= 1;
+    const statTable: AxTaskStatTable | undefined = discriminativeEnabled
+      ? axCreateTaskStatTable(
+          effectiveFeedbackSet.length,
+          discriminationOptions!
+        )
+      : undefined;
+    const discriminativeBatchSize = Math.max(
+      1,
+      Math.min(this.minibatchSize, effectiveFeedbackSet.length)
+    );
+    const inclusionSnapshots: AxTaskInclusionSnapshot[] = [];
+    let omittedInclusionSnapshots = 0;
+    let discriminativeIterations = 0;
+    let announcedEstimator = false;
     let runAdmission: AxTrajectoryAdmissionReport | undefined;
     let admissionCeilingFired = false;
     /**
@@ -425,6 +466,118 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       scalars: readonly number[]
     ): number =>
       indices.reduce((total, index) => total + (scalars[index] ?? 0), 0);
+
+    /**
+     * One discriminative minibatch draw.
+     *
+     * Exactly one `this.rand()` value is consumed, by `axSampleByInclusion`'s
+     * Madow systematic pass — the epoch shuffler is not run at all on this
+     * path. The stream therefore differs from a uniform run of the same seed by
+     * construction, which is why the strategy is opt-in and why INV-L5 asserts
+     * the draw COUNT on the uniform path rather than the resulting indices.
+     */
+    const drawDiscriminativeIndices = (
+      iteration: number
+    ): Readonly<{
+      indices: readonly number[];
+      inclusions: readonly AxTaskInclusion[];
+      snapshot: AxTaskInclusionSnapshot;
+    }> => {
+      const inclusions = axComputeInclusionProbabilities(
+        statTable!.stats(),
+        discriminativeBatchSize,
+        discriminationOptions!
+      );
+      const indices = axSampleByInclusion(
+        inclusions,
+        discriminativeBatchSize,
+        () => this.rand()
+      );
+      discriminativeIterations += 1;
+      // Index-ascending truncation, not top-probability: a stable slice keeps
+      // successive snapshots comparable to one another, and the run-level bound
+      // exists to stop an artifact growing past the size at which it can be
+      // re-validated.
+      const reported = inclusions.slice(
+        0,
+        discriminationOptions!.maxReportedTasks
+      );
+      const snapshot: AxTaskInclusionSnapshot = Object.freeze({
+        iteration,
+        strategy: 'discriminative' as const,
+        batchSize: discriminativeBatchSize,
+        taskCount: inclusions.length,
+        inclusions: reported,
+        omittedTaskCount: inclusions.length - reported.length,
+        sampledIndices: indices,
+      });
+      if (
+        inclusionSnapshots.length < discriminationOptions!.maxInclusionSnapshots
+      ) {
+        inclusionSnapshots.push(snapshot);
+      } else {
+        omittedInclusionSnapshots += 1;
+      }
+      return { indices, inclusions, snapshot };
+    };
+
+    /**
+     * Feed the per-task table from ONE evaluation.
+     *
+     * Called only from the parent and child minibatch sites: those two are the
+     * phases that produce a paired comparison on the feedback set. A merge
+     * subsample, a merge validation, the seed evaluation and the Pareto
+     * evaluations are keyed to a different set and must never advance a trial
+     * count. Discarded rows are skipped — an environment failure is not
+     * evidence about task difficulty either.
+     */
+    const recordTaskStats = (
+      evaluation: Readonly<AxGEPABatchEvaluation>,
+      iteration: number
+    ): void => {
+      if (!statTable || !evaluation.exampleIndices) return;
+      const admitted = evaluation.admittedIndices
+        ? new Set(evaluation.admittedIndices)
+        : undefined;
+      for (const [rowIndex, scalar] of evaluation.scalars.entries()) {
+        if (admitted && !admitted.has(rowIndex)) continue;
+        const taskIndex = evaluation.exampleIndices[rowIndex];
+        if (taskIndex === undefined) continue;
+        statTable.record(taskIndex, scalar, iteration);
+      }
+    };
+
+    const buildDiscriminationSummary = ():
+      | AxTaskDiscriminationSummary
+      | undefined => {
+      if (!statTable || !discriminationOptions) return undefined;
+      const finalStats = statTable
+        .stats()
+        .slice(0, discriminationOptions.maxReportedTasks);
+      const sampled = statTable.stats().filter((stat) => stat.trials > 0);
+      const nonDiscriminative = sampled.filter(
+        (stat) => stat.successes === 0 || stat.successes === stat.trials
+      ).length;
+      const rest = {
+        strategy: 'discriminative' as const,
+        iterations: discriminativeIterations,
+        snapshots: inclusionSnapshots,
+        omittedSnapshotCount: omittedInclusionSnapshots,
+        // Denominator is the tasks that were actually sampled: a task with no
+        // recorded trial is not evidence that the sampler had nothing to
+        // concentrate on.
+        nonDiscriminativeTaskFraction:
+          sampled.length === 0 ? 0 : nonDiscriminative / sampled.length,
+        finalStats,
+      };
+      return Object.freeze({
+        ...rest,
+        // Measured over the summary WITHOUT this field, so the number does not
+        // depend on its own width.
+        serializedBytes: new TextEncoder().encode(JSON.stringify(rest))
+          .byteLength,
+      });
+    };
     const lineageEnabled =
       lineageInput === true ||
       (typeof lineageInput === 'object' && lineageInput !== null);
@@ -1251,18 +1404,30 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
 
       this.lastIterFoundNewProgram = false;
 
+      const draw = discriminativeEnabled
+        ? drawDiscriminativeIndices(t)
+        : undefined;
+      const miniIndices: readonly number[] = this.minibatch
+        ? (draw?.indices ??
+          this.nextMinibatchIndices(effectiveFeedbackSet.length, t))
+        : effectiveFeedbackSet.map((_, index) => index);
       const mini = this.minibatch
-        ? this.nextMinibatchIndices(effectiveFeedbackSet.length, t).map(
-            (z: number) => effectiveFeedbackSet[z]!
-          )
+        ? miniIndices.map((z: number) => effectiveFeedbackSet[z]!)
         : effectiveFeedbackSet;
+      // The feedback-set indices are threaded only on the discriminative path:
+      // the stat table is the only consumer, and the uniform path must not gain
+      // a field it never had.
+      const miniEvalExtra = discriminativeEnabled
+        ? { exampleIndices: miniIndices }
+        : undefined;
 
       const parentMiniEval = await evalBatch(
         candidates[parentIdx]!.cfg,
         mini as readonly AxTypedExample<IN>[],
         'parent minibatch',
         false,
-        true
+        true,
+        miniEvalExtra
       );
       if (!parentMiniEval) {
         if (lineageEnabled) {
@@ -1274,6 +1439,7 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
         }
         break;
       }
+      recordTaskStats(parentMiniEval, t);
       if (admissionCeilingFired) {
         stoppedReason = 'excessive_environment_failures';
         terminationPhase = 'parent_minibatch';
@@ -1450,7 +1616,10 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       const childMiniEval = await evalBatch(
         proposedCfg,
         mini as readonly AxTypedExample<IN>[],
-        'child minibatch'
+        'child minibatch',
+        false,
+        false,
+        miniEvalExtra
       );
       if (!childMiniEval) {
         if (lineageEnabled) {
@@ -1484,6 +1653,7 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
         }
         break;
       }
+      recordTaskStats(childMiniEval, t);
       mutationEvaluations?.push(
         candidateEvaluation!(
           'child_minibatch',
@@ -1558,8 +1728,42 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       const childComparisonSum = pairedMinibatchIndices
         ? sumOverIndices(pairedMinibatchIndices, childMiniEval.scalars)
         : childMiniEval.sum;
-      const accepted =
-        childComparisonSum > parentComparisonSum + this.minImprovementThreshold;
+      const pairedComparisonRowIndices: readonly number[] =
+        pairedMinibatchIndices ?? miniIndices.map((_, rowIndex) => rowIndex);
+      /**
+       * Under `'discriminative'` the batch is a πps sample, so a raw sum is a
+       * biased estimate of the population difference: the easy tasks are
+       * deliberately under-drawn. The Hájek/IPW paired difference weights each
+       * row by `1/π` and is compared on a PER-EXAMPLE MEAN scale, not a sum.
+       * With the
+       * default `minImprovementThreshold` of 0 both scales mean "child beat
+       * parent", so the default degrades gracefully; a caller who set a
+       * non-zero sum-scale threshold must divide it by the batch size.
+       */
+      const ipwEstimate =
+        draw && pairedComparisonRowIndices.length > 0
+          ? axIpwPairedDifference(
+              pairedComparisonRowIndices.map((rowIndex) => ({
+                index: miniIndices[rowIndex]!,
+                value: parentMiniEval.scalars[rowIndex] ?? 0,
+              })),
+              pairedComparisonRowIndices.map((rowIndex) => ({
+                index: miniIndices[rowIndex]!,
+                value: childMiniEval.scalars[rowIndex] ?? 0,
+              })),
+              draw.inclusions
+            )
+          : undefined;
+      if (draw && !announcedEstimator) {
+        announcedEstimator = true;
+        verboseLog(
+          `Discriminative minibatch active: gate=reflective_mutation estimator=ipw_hajek scale=per_example_mean; minImprovementThreshold=${this.minImprovementThreshold} is compared against a mean difference, not a sum`
+        );
+      }
+      const accepted = ipwEstimate
+        ? ipwEstimate.estimate > this.minImprovementThreshold
+        : childComparisonSum >
+          parentComparisonSum + this.minImprovementThreshold;
 
       this.currentRound = t + 1;
       const serializableCompileOptions = (() => {
@@ -1626,7 +1830,12 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
           // emitted RoundProgress has always been `options?.maxIterations ?? 0`
           // with no options, and changing it would break INV-L1.
           undefined,
-          runAdmission ? { admission: runAdmission } : undefined
+          runAdmission || draw
+            ? {
+                ...(draw ? { inclusionSnapshot: draw.snapshot } : {}),
+                ...(runAdmission ? { admission: runAdmission } : {}),
+              }
+            : undefined
         );
       };
 
@@ -1849,6 +2058,7 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
     );
 
     const candidateLineage = buildLineageManifest(bestCandidateIdx);
+    const discriminationSummary = buildDiscriminationSummary();
 
     // Build a unified optimized program (mirrors MiPRO) for the selected best candidate
     const optimizationTime = Date.now() - _startTime;
@@ -1912,6 +2122,9 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
           totalCalls: this.stats.totalCalls,
           stats: this.stats,
           ...(runAdmission ? { admission: runAdmission } : {}),
+          ...(discriminationSummary
+            ? { discrimination: discriminationSummary }
+            : {}),
         },
       });
     }

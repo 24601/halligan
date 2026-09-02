@@ -1,4 +1,8 @@
 import type { AxOptimizationStats } from './common_types.js';
+import type {
+  AxTaskDiscriminationSummary,
+  AxTaskInclusionSnapshot,
+} from './optimizers/taskDiscrimination.js';
 import type { AxTrajectoryAdmissionReport } from './optimizers/trajectoryTermination.js';
 
 // Optimizer logging types
@@ -25,6 +29,11 @@ export type AxOptimizerLoggerData =
          * supplied. Cumulative run-level admission at the end of this round.
          */
         admission?: AxTrajectoryAdmissionReport;
+        /**
+         * GEPA only, and only under `minibatchStrategy: 'discriminative'`.
+         * The inclusion probabilities this round's minibatch was drawn from.
+         */
+        inclusionSnapshot?: AxTaskInclusionSnapshot;
       };
     }
   | {
@@ -52,6 +61,11 @@ export type AxOptimizerLoggerData =
          * supplied. Whole-run admission accounting.
          */
         admission?: AxTrajectoryAdmissionReport;
+        /**
+         * GEPA only, and only under `minibatchStrategy: 'discriminative'`.
+         * Bounded run-level sampler report.
+         */
+        discrimination?: AxTaskDiscriminationSummary;
       };
     }
   | {

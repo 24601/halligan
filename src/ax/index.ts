@@ -1210,6 +1210,7 @@ import type {
   AxGEPABatchEvaluation,
   AxGEPABatchRow,
   AxGEPAEvaluationState,
+  AxGEPATerminationArgs,
 } from './dsp/optimizers/gepaEvaluation.js';
 import type {
   AxGEPACandidateComponentDelta,
@@ -3684,6 +3685,7 @@ export type { AxGEPAProposalPolicyArgs };
 export type { AxGEPAReflectiveTuple };
 export type { AxGEPARejectedPriorBlock };
 export type { AxGEPAResolvedLineageOptions };
+export type { AxGEPATerminationArgs };
 export type { AxGEPATraceSummary };
 export type { AxGEPATraceSummaryCall };
 export type { AxGateAuthorityOutcome };
