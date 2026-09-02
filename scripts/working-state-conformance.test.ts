@@ -8,11 +8,20 @@
  * seven-op patch, and asserts the committed classes, the parked reasons, the
  * resulting goal statuses and the compare-and-set revision advance.
  *
- * Lives in `scripts/` because it reads the fixture from disk and `src/ax` may
- * not use node builtins. The fixture itself lives in
- * `ir/conformance/axagent-ts/` rather than `ir/conformance/axagent/` because
- * working state is not ported to AxIR yet, and every generated language
- * package executes the latter directory (see that directory's README).
+ * Both the runner and the fixture live under `scripts/` rather than under
+ * `ir/conformance/`, deliberately. Working state is NOT ported to AxIR — that
+ * is exactly what its backlog entry records — and every directory under
+ * `ir/conformance/` is enumerated by machinery that assumes the generated
+ * language packages can execute it: `conformanceSuitePaths` in
+ * `tools/axir/internal/axir/verify.go` runs the listed suites against every
+ * target, and `sampleFixtures` in `scripts/axir-perturb-check.mjs` samples
+ * EVERY subdirectory for the mutation gate. Putting an unported behaviour's
+ * fixture there either fails all five targets or invites reshaping it until a
+ * target can "pass" without implementing the behaviour, which is the
+ * fabrication the AxIR gates exist to prevent.
+ *
+ * The runner also has to live here because it reads the fixture from disk and
+ * `src/ax` may not use node builtins.
  */
 
 import { readFileSync } from 'node:fs';
@@ -26,7 +35,7 @@ import {
 import { AxInMemoryProgramStateStore } from '../src/ax/event/memoryStore.js';
 import { AxManualEventClock } from '../src/ax/event/types.js';
 
-const FIXTURE_PATH = 'ir/conformance/axagent-ts/working-state-commit.json';
+const FIXTURE_PATH = 'scripts/fixtures/working-state-commit.json';
 
 type Fixture = {
   input: {

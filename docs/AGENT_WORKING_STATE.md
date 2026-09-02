@@ -258,13 +258,19 @@ a separate change.
 Working state is **not ported to AxIR**. It is recorded in the backlog as
 `axir-2026-09-02-verifier-gated-typed-working-state-for-the-actor-loop`.
 
-Its kernel is pinned by `ir/conformance/axagent-ts/working-state-commit.json`,
-executed against the real kernel by
-`scripts/working-state-conformance.test.ts` in the root `npm test` chain. That
-fixture deliberately lives outside `ir/conformance/axagent/`: every generated
-language package enumerates and executes that directory, so a fixture for an
-unported behaviour placed there would either fail every target or be reshaped
-until a target could "pass" it without implementing the behaviour.
+Its kernel is pinned by `scripts/fixtures/working-state-commit.json`, executed
+against the real kernel by `scripts/working-state-conformance.test.ts` in the
+root `npm test` chain.
+
+That fixture deliberately does **not** live under `ir/conformance/`. Every
+directory there is enumerated by machinery that assumes the generated language
+packages can execute it — `conformanceSuitePaths` runs the listed suites
+against every target, and the perturbation gate samples every subdirectory —
+so a fixture for an unported behaviour placed there either fails all five
+targets or invites reshaping it until a target can "pass" without implementing
+the behaviour. When working state is migrated into AxIR, the fixture moves
+into the target-executed suite in the same change that makes every target able
+to pass it.
 
 ## Known gaps
 
