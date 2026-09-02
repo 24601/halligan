@@ -951,6 +951,34 @@ describe('AxWorkingState parks, budgets and store', () => {
     ]);
   });
 
+  it('throws AxWorkingStateStoreError with phase commit when the store fails without moving', async () => {
+    // A host store may throw anything, so "conflict" is decided by evidence:
+    // a failure that did NOT move the stored revision is an outage, and an
+    // outage is not a recoverable in-run condition.
+    const inner = new AxInMemoryProgramStateStore();
+    const store: AxProgramStateStore = {
+      load: (key) => inner.load(key),
+      compareAndSet: async () => {
+        throw new Error('disk full');
+      },
+      delete: (key) => inner.delete(key),
+    };
+    const state = await axWorkingState<Facts>(
+      {
+        stateSignature: STATE_SIGNATURE,
+        store,
+        clock: new AxManualEventClock(0),
+      },
+      { runId: 'ws:test:1', stage: 'executor' }
+    );
+    await expect(
+      state.commit(
+        patch([{ op: 'add', path: '/facts/shipped', value: true }]),
+        TURN
+      )
+    ).rejects.toMatchObject({ code: 'state_store_failed', phase: 'commit' });
+  });
+
   it('throws AxWorkingStateStoreError with phase load when the store cannot be read', async () => {
     const store: AxProgramStateStore = {
       load: async () => {

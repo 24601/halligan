@@ -1861,23 +1861,11 @@ export class AxWorkingState<S = Record<string, unknown>> {
         this.revision = envelope.revision;
         return working.filter((entry) => entry.class !== 'guard');
       } catch (err) {
-        if (attempt >= 2) {
-          for (const entry of working) {
-            if (entry.class === 'guard') continue;
-            parked.push(
-              this.buildParkedDelta(entry, 'revision_conflict', context)
-            );
-            guidance.push(this.guidanceNote('revision_conflict', entry));
-          }
-          // Recorded, not thrown: a conflict is an in-run condition.
-          void new AxWorkingStateConflictError(
-            this.config.storeKey,
-            this.revision,
-            context.turn
-          );
-          return [];
-        }
-        // Reload and rebase once.
+        // A host store may throw anything, so "conflict" is decided by
+        // EVIDENCE rather than by the error's shape: reload and see whether
+        // the stored revision actually moved. A store that failed without
+        // moving is an outage, not a conflict, and an outage is not a
+        // recoverable in-run condition.
         let reloaded: Awaited<ReturnType<AxProgramStateStore['load']>>;
         try {
           reloaded = await this.config.store.load(this.config.storeKey);
@@ -1889,15 +1877,30 @@ export class AxWorkingState<S = Record<string, unknown>> {
             context.turn
           );
         }
-        if (!reloaded) {
-          // The store lost the key entirely; that is not a recoverable in-run
-          // condition.
+        if (!reloaded || reloaded.revision === this.revision) {
           throw new AxWorkingStateStoreError(
             this.config.storeKey,
             'commit',
             err,
             context.turn
           );
+        }
+        if (attempt >= 2) {
+          for (const entry of working) {
+            if (entry.class === 'guard') continue;
+            parked.push(
+              this.buildParkedDelta(entry, 'revision_conflict', context)
+            );
+            guidance.push(this.guidanceNote('revision_conflict', entry));
+          }
+          // Recorded, not thrown: a conflict is an in-run condition, and the
+          // retry is bounded at one rebase.
+          void new AxWorkingStateConflictError(
+            this.config.storeKey,
+            this.revision,
+            context.turn
+          );
+          return [];
         }
         this.revision = reloaded.revision;
         if (isRecord(reloaded.state)) {
