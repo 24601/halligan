@@ -429,6 +429,65 @@ describe('structural admission rules', () => {
     expect(reasons(tree, 's1')).toEqual([]);
   });
 
+  it('classifies a cyclic entry as non-json-config instead of crashing', () => {
+    // RFC §6.5 names a cycle as `non-json-config` first. It used to reach
+    // `axEventCanonicalJson` — a recursive JSON.stringify — through the
+    // tree-level size cap, before any per-entry inspection ran, and every
+    // caller saw a `RangeError` no `axIs*` guard matches. `axInspectHarnessTree`
+    // promises a denial is data.
+    const config: Record<string, unknown> = { text: 'Answer briefly.' };
+    config.self = config;
+    const cyclic = {
+      id: 'i1',
+      kind: 'instruction',
+      config,
+    } as unknown as AxHarnessEntry;
+
+    expect(reasons([cyclic], 'i1')).toContain('non-json-config');
+    // …and the tree-level pass over a cyclic tree no longer throws either.
+    expect(() =>
+      axInspectHarnessTree([cyclic, instruction('i2')])
+    ).not.toThrow();
+    expect(reasons([cyclic, instruction('i2')], 'i2')).toEqual([]);
+
+    // Every throwing entry point classifies it, rather than leaking a
+    // RangeError to `publish()` / `seed()` / an evolve step.
+    for (const run of [
+      () => axAdmitHarnessTree([cyclic]),
+      () =>
+        axApplyHarnessMutations([], [
+          {
+            op: 'create',
+            id: 'i1',
+            options: { kind: 'instruction', config: config as never },
+          },
+        ] as never),
+    ]) {
+      try {
+        run();
+        throw new Error('expected a denial');
+      } catch (error) {
+        expect(axIsHarnessAdmissionError(error)).toBe(true);
+        expect((error as AxHarnessAdmissionError).reason).toBe(
+          'non-json-config'
+        );
+      }
+    }
+  });
+
+  it('classifies a cyclic entry from axHarnessContentId too', async () => {
+    const config: Record<string, unknown> = { text: 'Answer briefly.' };
+    config.self = config;
+    const cyclic = {
+      id: 'i1',
+      kind: 'instruction',
+      config,
+    } as unknown as AxHarnessEntry;
+    await expect(axHarnessContentId([cyclic])).rejects.toThrow(
+      AxHarnessAdmissionError
+    );
+  });
+
   it('rejects an oversized entry', () => {
     const huge = 'x'.repeat(70 * 1024);
     expect(reasons([instruction('i1', huge)], 'i1')).toContain(

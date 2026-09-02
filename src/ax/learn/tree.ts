@@ -163,6 +163,10 @@ function scanForCredentials(
   rootPath: string,
   findings: Finding[]
 ): void {
+  // A tree arrives from a model, a proposer, or a persisted store, so it may
+  // be cyclic or share references. `seen` keeps the walk total: a cycle must
+  // be classified (`non-json-config`, below), never crash the inspector.
+  const seen = new WeakSet<object>();
   const walk = (value: unknown, path: string, key?: string): void => {
     if (typeof value === 'string') {
       if (key !== undefined && CREDENTIAL_KEY.test(key)) {
@@ -172,6 +176,10 @@ function scanForCredentials(
         findings.push({ reason: 'credential-shaped-literal', path });
       }
       return;
+    }
+    if (typeof value === 'object' && value !== null) {
+      if (seen.has(value)) return;
+      seen.add(value);
     }
     if (Array.isArray(value)) {
       if (key !== undefined && CREDENTIAL_KEY.test(key)) {
@@ -193,6 +201,24 @@ function scanForCredentials(
     }
   };
   walk(root, rootPath);
+}
+
+/**
+ * Canonical byte length, or `undefined` when the value cannot be canonicalized
+ * at all.
+ *
+ * `axEventCanonicalJson` is a recursive `JSON.stringify`, so a cyclic entry
+ * blows the stack. Sizing must therefore be able to FAIL rather than throw:
+ * a cycle is `non-json-config` — the reason RFC §6.5 names first — and
+ * `axInspectHarnessTree`'s contract is that a denial is data.
+ */
+function canonicalByteLength(value: unknown): number | undefined {
+  try {
+    return new TextEncoder().encode(axEventCanonicalJson(value as never))
+      .byteLength;
+  } catch {
+    return undefined;
+  }
 }
 
 function requireText(
@@ -250,9 +276,10 @@ export const axInspectHarnessTree = (
 
   // The tree-level size cap is charged to every entry: an oversized tree is
   // not one entry's fault, and refusing it wholesale is what fails closed.
-  const treeOversized =
-    new TextEncoder().encode(axEventCanonicalJson(tree)).byteLength >
-    MAX_TREE_BYTES;
+  // An unsizeable tree is not "not oversized": the entry that made it
+  // unsizeable is denied `non-json-config` in the loop below.
+  const treeBytes = canonicalByteLength(tree);
+  const treeOversized = treeBytes !== undefined && treeBytes > MAX_TREE_BYTES;
 
   tree.forEach((raw, index) => {
     const findings: Finding[] = [];
@@ -384,10 +411,13 @@ export const axInspectHarnessTree = (
       }
     }
 
-    const entryBytes = new TextEncoder().encode(
-      axEventCanonicalJson(entry)
-    ).byteLength;
-    if (entryBytes > MAX_ENTRY_BYTES) {
+    const entryBytes = canonicalByteLength(entry);
+    if (entryBytes === undefined) {
+      // A cycle, or anything else `axEventCanonicalJson` cannot encode. The
+      // entry cannot be persisted, digested or rendered, so it is denied with
+      // the reason that says exactly that.
+      findings.push({ reason: 'non-json-config', path: '' });
+    } else if (entryBytes > MAX_ENTRY_BYTES) {
       findings.push({ reason: 'oversized-entry', path: '' });
     }
     if (treeOversized) {
