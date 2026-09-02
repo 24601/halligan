@@ -205,8 +205,8 @@ on either side.
 
 ## Build versus buy: the RFC-6902 subset
 
-`src/ax/agent/statePatch.ts` implements `add`/`remove`/`replace`/`test` in
-about 250 lines rather than adding `fast-json-patch` or `rfc6902`.
+`src/ax/agent/statePatch.ts` implements `add`/`remove`/`replace`/`test` in one
+dependency-free module rather than adding `fast-json-patch` or `rfc6902`.
 
 - `src/ax/package.json` has exactly one runtime dependency
   (`@opentelemetry/api`) and builds `platform: 'neutral'`. Adding a second
