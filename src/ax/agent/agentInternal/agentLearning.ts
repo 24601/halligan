@@ -232,12 +232,25 @@ export class AxAgentLearning<
       );
     } catch (error) {
       if (this.config.recordFailures === true) {
-        await this.append({
-          artifactRef,
-          failure: error,
-          input: values,
-          usageFrom: { actorSeen, responderSeen },
-        });
+        try {
+          await this.append({
+            artifactRef,
+            failure: error,
+            input: values,
+            usageFrom: { actorSeen, responderSeen },
+          });
+        } catch (appendError) {
+          // A bookkeeping failure may not REPLACE the agent's own failure.
+          // I2b says a broken store can never report a successful run as
+          // errored; the mirror obligation is that it can never hide why a
+          // failed run failed, which is the harder of the two to debug.
+          // `errors[0]` is always the original — the same shape
+          // `axHarnessEvolve` uses when a rollback fails on a failing step.
+          throw new AggregateError(
+            [error, appendError],
+            'AxAgentLearning.run(): the agent run failed AND recording that failure failed'
+          );
+        }
       }
       throw error;
     }

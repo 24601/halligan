@@ -293,6 +293,79 @@ describe('AxAgentLearning.run()', () => {
     expect((seen[0] as Error).message).toBe('disk on fire');
   });
 
+  it('keeps the agent error when recordFailures cannot append it', async () => {
+    // The mirror of I2b. Previously the store's error rejected `run()` and
+    // the agent's own error was lost — not even attached — so the caller was
+    // told "disk on fire" about a run that failed for an entirely different
+    // reason.
+    const clock = new AxManualEventClock(NOW);
+    const store = new AxInMemoryLearningStore({ clock });
+    const surface = await axLearningSurface({
+      scenario: 'support',
+      store,
+      clock,
+      seed: SEED,
+      idFactory: ids('rel'),
+    });
+    const ai = makeAI('throw');
+    const broken = {
+      ...store,
+      capabilities: store.capabilities,
+      clock,
+      append: async () => {
+        throw new Error('disk on fire');
+      },
+      get: store.get.bind(store),
+      page: store.page.bind(store),
+      markConsumed: store.markConsumed.bind(store),
+      putRelease: store.putRelease.bind(store),
+      promoteRelease: store.promoteRelease.bind(store),
+      head: store.head.bind(store),
+      releases: store.releases.bind(store),
+    };
+
+    const strict = agent('query:string -> answer:string', {
+      ai,
+      learning: {
+        scenario: 'support',
+        store: broken,
+        surface,
+        clock,
+        recordFailures: true,
+      },
+    });
+    let raised: unknown;
+    try {
+      await strict.learn().run(ai, { query: 'x' });
+    } catch (error) {
+      raised = error;
+    }
+    expect(raised).toBeInstanceOf(AggregateError);
+    const errors = (raised as AggregateError).errors as Error[];
+    // The agent's own failure comes first and is never discarded.
+    expect(errors[0]?.message).toContain('provider exploded');
+    expect(errors[1]?.message).toBe('disk on fire');
+
+    // With onRecordError the append error is routed and the ORIGINAL error is
+    // what the caller sees, unwrapped.
+    const routed: unknown[] = [];
+    const lenient = agent('query:string -> answer:string', {
+      ai,
+      learning: {
+        scenario: 'support',
+        store: broken,
+        surface,
+        clock,
+        recordFailures: true,
+        onRecordError: (error: unknown) => routed.push(error),
+      },
+    });
+    await expect(lenient.learn().run(ai, { query: 'x' })).rejects.toThrow(
+      /provider exploded/
+    );
+    expect((routed[0] as Error).message).toBe('disk on fire');
+  });
+
   it('onInteraction fires once, is awaited, and its rejection reaches onRecordError', async () => {
     const order: string[] = [];
     const { a, ai } = await harness({
