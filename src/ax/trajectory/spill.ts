@@ -115,7 +115,7 @@ export async function axResolveTrajectoryStep(
   return resolved ?? step;
 }
 
-/** Batch form; exactly one blob fetch per distinct ref (the prepass). */
+/** Batch form; exactly one blob fetch per distinct ref (the pre-pass). */
 export async function axResolveTrajectorySteps(
   steps: readonly Readonly<AxTrajectoryStep>[],
   blobs: AxTrajectoryBlobStore | undefined,

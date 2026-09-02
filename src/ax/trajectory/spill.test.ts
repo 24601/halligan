@@ -16,7 +16,7 @@ import {
 import { axTrajectoryUtf8ByteLength } from './util.js';
 
 /**
- * A counting blob store. Local to this file on purpose: the batch prepass can
+ * A counting blob store. Local to this file on purpose: the batch pre-pass can
  * only be proved by an implementation that records every get.
  */
 class SpyBlobStore implements AxTrajectoryBlobStore {
@@ -259,7 +259,7 @@ describe('axResolveTrajectoryStep', () => {
     ).rejects.toBeInstanceOf(AxTrajectoryBlobError);
   });
 
-  it('leaves an unspilled step untouched and fetches nothing', async () => {
+  it('leaves a step with no spilled field untouched and fetches nothing', async () => {
     const blobs = new SpyBlobStore();
     const plain = step({ data: { content: 'small' } });
     const resolved = await axResolveTrajectoryStep(plain, blobs);
@@ -278,7 +278,7 @@ describe('axResolveTrajectorySteps', () => {
       blobs,
     });
     // Three steps citing the SAME content: a content-addressed store hands out
-    // one ref, and the prepass must collapse them to one fetch.
+    // one ref, and the pre-pass must collapse them to one fetch.
     const steps = [1, 2, 3].map((seq) =>
       step({
         stepId: `step-${seq}`,

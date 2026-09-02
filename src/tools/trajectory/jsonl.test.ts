@@ -187,7 +187,7 @@ describe('AxJSONLTrajectoryStore on-disk contract', () => {
     );
   });
 
-  it('drops an unparseable interior frame without losing the rest', async () => {
+  it('drops an interior frame it cannot parse without losing the rest', async () => {
     const clock = new AxManualEventClock(5_000);
     const directory = root();
     const store = newStore(directory, clock);

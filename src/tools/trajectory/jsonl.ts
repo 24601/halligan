@@ -292,7 +292,7 @@ export class AxJSONLTrajectoryStore implements AxTrajectoryStore {
    */
   injectCorruptTrailingFrame(trajectoryId: string): void {
     this.record(trajectoryId);
-    appendFileSync(this.stepsPath(trajectoryId), '{"stepId":"torn","trajec');
+    appendFileSync(this.stepsPath(trajectoryId), '{"stepId":"torn"');
     this.records.delete(trajectoryId);
   }
 
@@ -863,34 +863,7 @@ export class AxJSONLTrajectoryStore implements AxTrajectoryStore {
       ts = normalized;
     }
     const stepId = request.stepId ?? axTrajectoryId('step');
-    const fingerprint = axTrajectoryStepFingerprint({
-      stepId,
-      trajectoryId: request.trajectoryId,
-      type: request.type,
-      runId: request.runId,
-      triggerStep: request.triggerStep,
-      launchedBy: request.launchedBy,
-      source: request.source,
-      data,
-    });
     const previous = record.byId.get(stepId);
-    if (previous) {
-      if (record.fingerprints.get(stepId) !== fingerprint) {
-        failAppend(
-          `step id ${stepId} already exists with different content`,
-          'validate',
-          'duplicate_step_id'
-        );
-      }
-      return {
-        stepId,
-        seq: previous.seq,
-        ts: previous.ts,
-        durability: 'persistent',
-        spilled: (previous.blobs ?? []).map((blob) => blob.field),
-        duplicate: true,
-      };
-    }
 
     let spilled: Awaited<ReturnType<typeof axSpillTrajectoryFields>>;
     try {
@@ -926,6 +899,26 @@ export class AxJSONLTrajectoryStore implements AxTrajectoryStore {
       data: spilled.data,
       blobs: spilled.blobs.length > 0 ? spilled.blobs : undefined,
     };
+    // The fingerprint is taken over the PERSISTED step, so a replay compares
+    // equal without rehydrating a blob and load() recomputes it from bytes.
+    const fingerprint = axTrajectoryStepFingerprint(step);
+    if (previous) {
+      if (record.fingerprints.get(stepId) !== fingerprint) {
+        failAppend(
+          `step id ${stepId} already exists with different content`,
+          'validate',
+          'duplicate_step_id'
+        );
+      }
+      return {
+        stepId,
+        seq: previous.seq,
+        ts: previous.ts,
+        durability: 'persistent',
+        spilled: (previous.blobs ?? []).map((blob) => blob.field),
+        duplicate: true,
+      };
+    }
     // One `\n`-terminated write per step: a reader either sees the whole line
     // or, after a power loss, a trailing fragment the parser drops (I3).
     const line = `${JSON.stringify(step)}\n`;

@@ -226,7 +226,7 @@ export async function runAxTrajectoryStoreConformance(
     assert(
       new Set(indexes).size === 50 &&
         indexes.every((value) => typeof value === 'number'),
-      'C-ATOM: every interleaved append is complete and parseable'
+      'C-ATOM: every interleaved append is complete and readable'
     );
     assert(
       atomicSteps.every((step, position) => step.seq === position),

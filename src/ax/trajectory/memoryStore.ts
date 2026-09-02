@@ -631,35 +631,12 @@ export class AxInMemoryTrajectoryStore implements AxTrajectoryStore {
       ts = normalized;
     }
     const stepId = request.stepId ?? axTrajectoryId('step');
-    const fingerprint = axTrajectoryStepFingerprint({
-      stepId,
-      trajectoryId: request.trajectoryId,
-      type: request.type,
-      runId: request.runId,
-      triggerStep: request.triggerStep,
-      launchedBy: request.launchedBy,
-      source: request.source,
-      data,
-    });
     const previous = record.byId.get(stepId);
-    if (previous) {
-      if (record.fingerprints.get(stepId) !== fingerprint) {
-        failAppend(
-          `step id ${stepId} already exists with different content`,
-          'validate',
-          'duplicate_step_id'
-        );
-      }
-      return {
-        stepId,
-        seq: previous.seq,
-        ts: previous.ts,
-        durability: 'volatile',
-        spilled: (previous.blobs ?? []).map((blob) => blob.field),
-        duplicate: true,
-      };
-    }
-    if (this.maxSteps !== undefined && record.steps.length >= this.maxSteps) {
+    if (
+      previous === undefined &&
+      this.maxSteps !== undefined &&
+      record.steps.length >= this.maxSteps
+    ) {
       failAppend(
         `maxSteps ${this.maxSteps} reached`,
         'commit',
@@ -701,6 +678,27 @@ export class AxInMemoryTrajectoryStore implements AxTrajectoryStore {
       data: spilled.data,
       blobs: spilled.blobs.length > 0 ? spilled.blobs : undefined,
     };
+    // The fingerprint is taken over the PERSISTED step, so a replay of a
+    // spilled step compares equal without rehydrating a blob, and a file store
+    // can recompute it while reloading a log from disk.
+    const fingerprint = axTrajectoryStepFingerprint(step);
+    if (previous) {
+      if (record.fingerprints.get(stepId) !== fingerprint) {
+        failAppend(
+          `step id ${stepId} already exists with different content`,
+          'validate',
+          'duplicate_step_id'
+        );
+      }
+      return {
+        stepId,
+        seq: previous.seq,
+        ts: previous.ts,
+        durability: 'volatile',
+        spilled: (previous.blobs ?? []).map((blob) => blob.field),
+        duplicate: true,
+      };
+    }
     const size = axTrajectoryStepBytes(step);
     if (this.maxBytes !== undefined && record.bytes + size > this.maxBytes) {
       failAppend(

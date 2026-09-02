@@ -38,8 +38,8 @@ describe('AxInMemoryTrajectoryStore append', () => {
     );
 
     // create() writes the header step at seq 0, so user appends run 1..200.
-    const seqs = receipts.map((receipt) => receipt.seq).sort((a, b) => a - b);
-    expect(seqs).toEqual(Array.from({ length: 200 }, (_, i) => i + 1));
+    const assigned = receipts.map((r) => r.seq).sort((a, b) => a - b);
+    expect(assigned).toEqual(Array.from({ length: 200 }, (_, i) => i + 1));
     expect(new Set(receipts.map((r) => r.stepId)).size).toBe(200);
 
     const stats = await store.stats(trajectoryId);
@@ -148,7 +148,7 @@ describe('AxInMemoryTrajectoryStore append', () => {
     expect(step?.data.shape).toEqual({ nested: [1, 'two', true, null] });
   });
 
-  it('rejects an unpersistable field value', async () => {
+  it('rejects a field value that cannot be persisted', async () => {
     const { store, trajectoryId } = await seeded();
     await expect(
       store.append({

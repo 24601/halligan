@@ -1,0 +1,77 @@
+{
+  "name": "trajectory step types declare their class, wakeability and source policy",
+  "kind": "trajectory",
+  "operation": "step_classification",
+  "note": "TypeScript-consumed in v1: conformanceSuitePaths in tools/axir/internal/axir/verify.go is a hardcoded directory list and does not include axmind, so the five generated targets do not read this file. Registering the suite is filed in the AxIR backlog.",
+  "cases": [
+    {
+      "type": "action",
+      "expected": {
+        "stepClass": "narrative",
+        "wakeable": true,
+        "carriesSource": true,
+        "visibleWork": true
+      }
+    },
+    {
+      "type": "thought",
+      "expected": {
+        "stepClass": "narrative",
+        "wakeable": true,
+        "carriesSource": true,
+        "visibleWork": false
+      }
+    },
+    {
+      "type": "error",
+      "expected": {
+        "stepClass": "narrative",
+        "wakeable": true,
+        "carriesSource": true,
+        "neverRetriggersSelf": true
+      }
+    },
+    {
+      "type": "feedback",
+      "expected": {
+        "stepClass": "machinery",
+        "wakeable": false,
+        "carriesSource": false
+      }
+    },
+    {
+      "type": "mind-wake",
+      "expected": {
+        "stepClass": "machinery",
+        "wakeable": true,
+        "wakeSignal": true,
+        "carriesSource": false
+      }
+    },
+    {
+      "type": "reply-claim",
+      "expected": {
+        "stepClass": "machinery",
+        "wakeable": false,
+        "carriesSource": false
+      }
+    },
+    {
+      "type": "merge",
+      "expected": {
+        "stepClass": "structural",
+        "wakeable": true,
+        "carriesSource": false,
+        "visibleWork": true
+      }
+    },
+    {
+      "type": "host.unregistered",
+      "expected": {
+        "stepClass": "unknown",
+        "wakeable": false,
+        "carriesSource": true
+      }
+    }
+  ]
+}

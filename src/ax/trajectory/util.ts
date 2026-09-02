@@ -46,7 +46,8 @@ export function axNormalizeTrajectoryTimestamp(
 }
 
 /**
- * Depth-first persistability check. Mirrors the event plane: finite numbers,
+ * Depth-first check that a value can be persisted. Mirrors the event plane:
+ * finite numbers,
  * strings, booleans, null, arrays and plain objects only, and no cycles.
  * Returns the offending path, or undefined when the value is persistable.
  */
@@ -105,7 +106,12 @@ export function axTrajectoryCompactData(
 /**
  * Canonical bytes for one step, used to decide whether a preset stepId is an
  * identical replay (receipt.duplicate) or a genuine collision (which throws).
- * `seq` and `ts` are excluded because the store assigns them.
+ * `seq` and `ts` are excluded because the store assigns them; `blobs` IS
+ * included, because a spilled field's inline head is not enough to tell two
+ * different values apart -- the digest is.
+ *
+ * It is taken over the PERSISTED step, so a store can recompute it while
+ * reloading a log from disk without rehydrating a single blob.
  */
 export function axTrajectoryStepFingerprint(
   step: Readonly<
@@ -119,6 +125,7 @@ export function axTrajectoryStepFingerprint(
       | 'launchedBy'
       | 'source'
       | 'data'
+      | 'blobs'
     >
   >
 ): string {
@@ -131,6 +138,7 @@ export function axTrajectoryStepFingerprint(
     launchedBy: step.launchedBy,
     source: step.source,
     data: step.data,
+    blobs: step.blobs,
   });
 }
 
