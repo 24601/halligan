@@ -972,6 +972,15 @@ void guardEvaluation.failures[0]?.value;
 // compile. A symbol that silently fails `hasValidPrefix` would break here.
 import {
   type AxCandidateEffectDeclaration,
+  type AxCausalAttributionStatement,
+  type AxCausalCandidateCost,
+  type AxCausalCandidateDiscrimination,
+  type AxCausalCandidateEvidenceCloneOptions,
+  type AxCausalCandidateEvidencePolicy,
+  type AxCausalLeaveOneOutMatrix,
+  type AxGEPADeployableBestChain,
+  type AxGEPAReflectionCategory,
+  type AxGEPAReflectionOutcome,
   type AxHarnessRecipe,
   AxInMemoryRejectedCandidateLedger,
   AxManualEventClock,
@@ -981,7 +990,11 @@ import {
   type AxTaskInclusion,
   type AxTrajectoryTermination,
   axComputeInclusionProbabilities,
+  axDeriveLeaveOneOutAttribution,
   axHarnessRecipe,
+  axIsCausalAttributionRequiredError,
+  axMutationDepths,
+  axMutationEfforts,
   axRunRejectedCandidateLedgerConformance,
   axValidateCandidateEffectDeclaration,
 } from './index.js';
@@ -1043,6 +1056,70 @@ void axRunRejectedCandidateLedgerConformance(
   () => new AxInMemoryRejectedCandidateLedger({ clock: b3Clock }),
   { clock: b3Clock }
 );
+
+// === Track B3 lineage version 2 and evidence version 4 ===
+const b3Reflection: readonly AxGEPAReflectionOutcome[] = [
+  { category: 'fixed', count: 1 },
+  { category: 'regressed', count: 0 },
+];
+void b3Reflection;
+
+const b3Category: AxGEPAReflectionCategory = 'still_passing';
+void b3Category;
+
+// @ts-expect-error the reflection category union is closed.
+const b3BadCategory: AxGEPAReflectionCategory = 'improved';
+void b3BadCategory;
+
+const b3BestChain: AxGEPADeployableBestChain = {
+  candidateId: 'c3',
+  ancestry: ['c0', 'c1', 'c3'],
+};
+void b3BestChain;
+
+const b3Cost: AxCausalCandidateCost = {
+  metricCalls: 40,
+  effort: 'high',
+  costUsd: undefined,
+};
+void b3Cost;
+
+const b3Discrimination: AxCausalCandidateDiscrimination = {
+  strategy: 'discriminative',
+  estimator: 'ipw_hajek',
+  gate: 'reflective_mutation',
+  estimate: 0.2,
+  pairedRowCount: 8,
+};
+void b3Discrimination;
+
+const b3Attribution: AxCausalAttributionStatement = {
+  status: 'inconclusive',
+  reason: 'components could not be separated',
+};
+void b3Attribution;
+
+const b3Policy: AxCausalCandidateEvidencePolicy = {
+  attribution: 'required',
+  effects: 'required',
+};
+const b3Floor: AxCausalCandidateEvidenceCloneOptions = {
+  requirePolicyAtLeast: b3Policy,
+};
+void b3Floor;
+
+declare const b3Matrix: AxCausalLeaveOneOutMatrix;
+void b3Matrix.metricCalls;
+
+void axDeriveLeaveOneOutAttribution(
+  {
+    metrics: [{ metric: 'accuracy', before: 0.5, after: 0.8, sampleCount: 7 }],
+  },
+  { metrics: [{ metric: 'accuracy', before: 0.5, after: 0.5, sampleCount: 7 }] }
+);
+void axIsCausalAttributionRequiredError(new Error('x'));
+void axMutationDepths[0];
+void axMutationEfforts[0];
 
 // === Playbook evidence surface (Track B2) ===
 // These types are the contract a host reads off a completed evolve() run, so
