@@ -62,14 +62,14 @@
       "type": "skill-md",
       "description": "This skill helps an LLM generate correct AxAgent RLM/runtime code using @ax-llm/ax. Use when the user asks about RLM code execution, AxJSRuntime, speculative programmatic tool calling, contextFields, contextPolicy, liveRuntimeState, promptLevel, stage prompt controls, executorModelPolicy, maxRuntimeChars, agent.test(...), llmQuery(...), recursionOptions, or long-running agent runtime behavior.",
       "url": "ax-agent-rlm/SKILL.md",
-      "digest": "sha256:9138f969f3da94ff7c08ad5ff716753b8e942e98b75459f520dc61830fc4abf0"
+      "digest": "sha256:5d8bd96d2cca94f7f36cc4fd958e85613b46cbfcd00a9cec6a3c00224b58d044"
     },
     {
       "name": "ax-agent-memory-skills",
       "type": "skill-md",
       "description": "This skill helps an LLM generate correct AxAgent memory retrieval, context-map, and dynamic skill-loading code using @ax-llm/ax. Use when the user asks about contextMap, AxAgentContextMap, onMemoriesSearch, memoriesCatalog, recall(...), inputs.memories, onLoadedMemories, onUsedMemories, onSkillsSearch, skillsCatalog, AxAgentCatalogSkill, discover({ skills }), onLoadedSkills, onUsedSkills, preloaded skills, preloading memories at forward time, relevanceRanking hints, loaded memory/skill IDs, or carrying memories across forward() calls.",
       "url": "ax-agent-memory-skills/SKILL.md",
-      "digest": "sha256:a994926bd6eb3592604694c7b36b839e3667e76138635b2bc890d6238ad95ed4"
+      "digest": "sha256:98ee6d6fc6eb3ec88403e0b038fd9f4ac544c8b128f692e1e02d0625863c772a"
     },
     {
       "name": "ax-agent-observability",
@@ -104,7 +104,7 @@
       "type": "skill-md",
       "description": "This skill helps an LLM generate correct AxGEPA optimization code using @ax-llm/ax. Use when the user asks about AxGEPA, GEPA, Pareto optimization, multi-objective prompt tuning, reflective prompt evolution, validationExamples, maxMetricCalls, or optimizing a generator, flow, or agent tree.",
       "url": "ax-gepa/SKILL.md",
-      "digest": "sha256:7b5f4ef47d203a56939b36444129ca7da3e81f35a37441474dc428d61703b712"
+      "digest": "sha256:e26b29890574fe65cda4abc1bfe96ee83f155a5d9bebe9a30f4a678a1d09f925"
     },
     {
       "name": "ax-refine",
@@ -118,14 +118,14 @@
       "type": "skill-md",
       "description": "This skill helps an LLM generate correct verifier-gated working state, skillState memory-mode and call-time skill injection code using @ax-llm/ax. Use when the user asks about AxWorkingState, goal ledgers, actorMemoryMode, statePatch, state checkers, tool receipts, parked deltas, callTimeSkills, or long-horizon agent state.",
       "url": "ax-agent-state/SKILL.md",
-      "digest": "sha256:1b45af07c41d5260111006734f6d65f4fecc0045dccab412abe896745b0fbdb8"
+      "digest": "sha256:9cfbae65ee5fa201d11004f8c84865b1e44531eec5e54144865cb133ef5e86ec"
     },
     {
       "name": "ax-learn",
       "type": "skill-md",
       "description": "This skill helps an LLM generate correct learning-surface code using @ax-llm/ax. Use when the user asks about interaction receipts, agent.learn(), report(), AxLearningStore, harness trees, axHarnessEvolve, release chains, or self-improving agent patterns.",
       "url": "ax-learn/SKILL.md",
-      "digest": "sha256:72d6d1a90cffb277cea8901eae2ffb9898e52b7c37bb73f1c76d14796406e625"
+      "digest": "sha256:2b71dfdbe9a160b87b73c57b195eb50593d29bad01e11a9d09da76134aab5278"
     },
     {
       "name": "ax-mind",
@@ -146,7 +146,7 @@
       "type": "skill-md",
       "description": "Use AxTrajectoryStore to keep an append-only agent life log with digest-verified blob spill, fork/merge, durable per-consumer cursors, a bounded filtered backward tail, and tiered-rollup context projection. Use when the user asks about AxTrajectoryStore, AxTrajectoryStep, axProjectTrajectory, rollups, drill-down, AxJSONLTrajectoryStore, or runAxTrajectoryStoreConformance.",
       "url": "ax-trajectory/SKILL.md",
-      "digest": "sha256:149c04a0ed9ba6850bc26e6d9beddbaae541f948f8b3e4c7443986a75db34ec2"
+      "digest": "sha256:6c2743ce971bc7c1121acf02222e493e0d5c39e3b4ba2a89251e05715eeb6079"
     }
   ]
 }

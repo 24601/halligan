@@ -23,7 +23,7 @@ only *points* at. The fourth travels on both, and on `RoundProgress` and
 ## Record schema at version 4
 
 `AxCausalCandidateEvidenceManifest.version` is `3 | 4`. A manifest is emitted at
-version 4 whenever **any** version-4 feature is used — a declared `policy`, or
+version 4 whenever **any** version-4 feature is used: a declared `policy`, or
 any of the eight new record fields, or the leave-one-out matrix, or the three
 structural fields on an affected component. It is **not** gated on `policy`
 alone.
@@ -82,7 +82,7 @@ before.
 | A `configError` row, or any row of a program declaring a `program-source` component, classified `environment_failure` by the host | overridden to `policy_failure`; `admission.overriddenRows` incremented |
 
 Every row above is exercised by `npm run evaluate:gepa-manifests`, together with
-control rows that must be **accepted** — a refusal that fires on everything is
+control rows that must be **accepted**. A refusal that fires on everything is
 not a gate.
 
 ## Authority
@@ -123,7 +123,7 @@ no reader can mistake which instrument decided.
 **A ledger `gateReading` records what the gate actually compared, or says it
 compared nothing.** `parentScore` and `childScore` are optional and travel
 together: a candidate aborted for `insufficient_admitted_rows` never computed a
-comparison, so both are absent and `observedDeltas` is empty — `0` and `0`
+comparison, so both are absent and `observedDeltas` is empty. `0` and `0`
 would be a measured tie that never happened. Under `'ipw_hajek'` the instrument
 estimates a paired *difference*, so the reading carries `differenceEstimate`
 and no score pair. Half a pair is refused (`invalid_gate_reading`).
@@ -158,12 +158,12 @@ asserts it re-validates, not merely that it is small.
 `AxRejectedCandidateLedgerStore` is a host-implementable port. A durable
 implementation belongs outside any artifact rollback boundary.
 
-- `record(entry, signal?)` — idempotent by `candidateDigest`; a later entry
+- `record(entry, signal?)`: idempotent by `candidateDigest`; a later entry
   supersedes an earlier one.
-- `list(query, signal?)` — expiry is evaluated **at query time** against the
+- `list(query, signal?)`: expiry is evaluated **at query time** against the
   caller's context and `now`.
-- `purgeExpired(now, context, signal?)` — returns the number removed.
-- `close?()` — idempotent.
+- `purgeExpired(now, context, signal?)`: returns the number removed.
+- `close?()`: idempotent.
 
 `axRunRejectedCandidateLedgerConformance(factory, { clock })` is the executable
 contract a host store runs to earn `capabilities.conformance`. It asserts
@@ -194,8 +194,8 @@ ceiling, so "unknown" resolves toward forgetting.
 ### Asymmetric rollback
 
 `axReplaceOptimizedProgramSnapshot` unions **only** `rejectedCandidateLedgerRef`.
-The causal evidence history keeps its existing refusal — it throws on a
-divergent history — because its records carry a strict sequence and a strict
+The causal evidence history keeps its existing refusal, which throws on a
+divergent history, because its records carry a strict sequence and a strict
 parent chain and its receipts a strictly increasing count, so two chains cannot
 be unioned and still verify. Removing the refusal would delete the one control
 that stops a rollback substituting a fabricated evidence history.

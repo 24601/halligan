@@ -13,7 +13,7 @@ Go uses a map. `AxIRRuntimeCapabilities` is the portable interchange projection
 of that existing vocabulary, not an alias for every generated target record.
 
 `AxRuntimeCapabilitiesV1` is explicitly versioned as
-`ax-runtime-capabilities/v1` and extends—not aliases—the AxIR record with:
+`ax-runtime-capabilities/v1` and extends, and does not alias, the AxIR record with:
 
 - Node/browser/Deno/unknown platform
 - base and feature protocols

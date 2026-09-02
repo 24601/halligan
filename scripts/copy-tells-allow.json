@@ -1,0 +1,45 @@
+{
+  "$comment": "files: per-file rule allowances, each with a non-empty reason. The dash rule (dash-em-en) can never be allowlisted. deferred: files still carrying tells that a later rewrite pass owns; their findings are counted and reported as 'deferred' rather than failing the gate, and this map must shrink to empty.",
+  "files": {
+    "tools/copy/skills/anti-tell-copy/SKILL.md": {
+      "vocab": "the skill is the catalogue of tells; the words are its subject matter",
+      "struct-not-x-its-y": "the checklist quotes the construction it bans",
+      "struct-in-conclusion": "the checklist quotes the phrase it bans",
+      "struct-key-takeaways": "the checklist quotes the phrase it bans",
+      "struct-lets-dive": "the checklist quotes the phrase it bans",
+      "struct-bolded-lead-triad": "the tell tables are genuine tables of three or more rows",
+      "phrase-ever-evolving": "the checklist quotes the phrase it bans",
+      "phrase-game-changer": "the checklist quotes the phrase it bans",
+      "phrase-fast-paced": "the checklist quotes the phrase it bans",
+      "phrase-at-its-core": "the checklist quotes the phrase it bans",
+      "phrase-worth-noting": "the checklist quotes the phrase it bans",
+      "phrase-navigate-landscape": "the checklist quotes the phrase it bans",
+      "phrase-not-only-but-also": "the checklist quotes the phrase it bans",
+      "phrase-heres-the-thing": "the checklist quotes the phrase it bans"
+    },
+    "src/ax/skills/ax-agent-rlm.md": {
+      "struct-bolded-lead-triad": "distiller/executor/responder is a real three-stage pipeline, and the delegation guide is a five-row labelled table"
+    }
+  },
+  "deferred": {
+    "README.md": "owned by another lane this week; scheduled for the second anti-tell rewrite pass",
+    "docs/ARCHITECTURE.md": "not yet rewritten; queued for the next anti-tell pass, tells are counted and reported, not suppressed",
+    "docs/AUDIO.md": "not yet rewritten; queued for the next anti-tell pass, tells are counted and reported, not suppressed",
+    "docs/AXIR_BACKLOG.md": "not yet rewritten; queued for the next anti-tell pass, tells are counted and reported, not suppressed",
+    "docs/AXIR_GATES.md": "not yet rewritten; queued for the next anti-tell pass, tells are counted and reported, not suppressed",
+    "docs/AXIR_VERIFICATION.md": "not yet rewritten; queued for the next anti-tell pass, tells are counted and reported, not suppressed",
+    "docs/CHANGELOG.md": "not yet rewritten; queued for the next anti-tell pass, tells are counted and reported, not suppressed",
+    "docs/CLAUDE.md": "not yet rewritten; queued for the next anti-tell pass, tells are counted and reported, not suppressed",
+    "docs/EVENT_RUNTIME.md": "not yet rewritten; queued for the next anti-tell pass, tells are counted and reported, not suppressed",
+    "docs/MIND.md": "owned by another lane this week; scheduled for the second anti-tell rewrite pass",
+    "src/ax/skills/ax-agent-observability.md": "not yet rewritten; queued for the next anti-tell pass, tells are counted and reported, not suppressed",
+    "src/ax/skills/ax-agent-optimize.md": "not yet rewritten; queued for the next anti-tell pass, tells are counted and reported, not suppressed",
+    "src/ax/skills/ax-agent.md": "not yet rewritten; queued for the next anti-tell pass, tells are counted and reported, not suppressed",
+    "src/ax/skills/ax-ai.md": "not yet rewritten; queued for the next anti-tell pass, tells are counted and reported, not suppressed",
+    "src/ax/skills/ax-flow.md": "not yet rewritten; queued for the next anti-tell pass, tells are counted and reported, not suppressed",
+    "src/ax/skills/ax-gen.md": "not yet rewritten; queued for the next anti-tell pass, tells are counted and reported, not suppressed",
+    "src/ax/skills/ax-llm.md": "not yet rewritten; queued for the next anti-tell pass, tells are counted and reported, not suppressed",
+    "src/ax/skills/ax-playbook.md": "owned by another lane this week; scheduled for the second anti-tell rewrite pass",
+    "src/ax/skills/ax-signature.md": "not yet rewritten; queued for the next anti-tell pass, tells are counted and reported, not suppressed"
+  }
+}

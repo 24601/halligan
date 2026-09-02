@@ -120,7 +120,7 @@ therefore costs zero host calls and produces exactly one audit event.
 host authors policy with. Ax does not compile, infer, or extend policy, and
 will not grow a policy language. Adding a seventh operator requires a named
 host requirement recorded in this document.** There are no wildcards, roles,
-implied operations, resource hierarchies, or composition — the same rule this
+implied operations, resource hierarchies, or composition, which is the same rule this
 document already states for scope matching.
 
 Guards never substitute for the host receipt. They gate *whether the host is
@@ -160,7 +160,7 @@ than silently disabling freshness. `axAuthorize` additionally rejects a
 non-finite `now()` outright, since the same clock decides grant expiry.
 
 Lease-epoch binding is unconditional and is not an operator: an observation
-taken under a prior epoch never satisfies any requirement. Ambiguity is a deny —
+taken under a prior epoch never satisfies any requirement. Ambiguity is a deny.
 Ax never picks the freshest, the first, or the "best" of several candidate
 observations. Absent evidence is never treated as satisfied.
 
@@ -187,7 +187,7 @@ A guard denial throws `AxAuthorizationDeniedError` with code
 `guard_predicate_failed` and emits one audit event with the same code plus
 `failedPredicateKind`. That field is the one deliberate, bounded exception to
 redaction-by-construction: it is exactly `"<op>:<kind>"` of the first failed
-requirement — host-authored labels only. It never carries an observation value,
+requirement, host-authored labels only. It never carries an observation value,
 a source ID, a claim, a resource ID, or a receipt reason.
 
 `AxGuardFailure.op` is one of the six operators or the literal `'unknown'`: a
@@ -220,8 +220,8 @@ called once per `axAuthorize` call, mirroring the existing `now?: () => number`
 idiom. When present its result replaces `evidence` for that request. This is
 what makes `maxAgeMs` usable in a long-lived context: the snapshot is cached, so
 a frozen `evidence` array only ever ages within a run, while a supplier
-re-reads the host's current facts. A supplier that throws — or returns a
-malformed observation — yields no evidence, so every declared requirement fails
+re-reads the host's current facts. A supplier that throws, or returns a
+malformed observation, yields no evidence, so every declared requirement fails
 closed with `missing_observation`.
 
 Ax always passes `evidence` and `requirements` (possibly empty) into
