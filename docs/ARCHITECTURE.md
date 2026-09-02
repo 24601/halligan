@@ -45,8 +45,8 @@ Ax has nine main runtime surfaces:
    receipts, late out-of-order feedback with a pure eligibility reducer, a
    diffable harness tree with a fail-closed admission gate, and a
    content-addressed release chain whose head only a human moves.
-10. **AxIR generated libraries**: Python, Java, C++, Go, and Rust packages emitted from
-   the shared portable semantics.
+10. **AxIR generated libraries**: Python, Java, C++, Go, and Rust packages emitted
+    from the shared portable semantics.
 
 These surfaces are connected by the shared Ax program contract: `forward`,
 inputs, outputs, examples, demos, traces, usage, chat logs, optimizer

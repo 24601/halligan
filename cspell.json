@@ -41,15 +41,20 @@
     "staircase",
     "straddle",
     "straddling",
+    "subrun",
     "subruns",
-    "unclosable",
+    "terminalised",
     "timebase",
     "timebases",
     "topo",
     "tripwire",
+    "unclosable",
     "unevolved",
     "unforgeable",
+    "unparked",
     "unproduced",
+    "unstamping",
+    "unsummarized",
     "unvalidated"
   ]
 }

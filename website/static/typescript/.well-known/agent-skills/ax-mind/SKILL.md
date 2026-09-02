@@ -122,6 +122,10 @@ const auxiliary: AxMindThinker = {
   timer. At most one thinker may declare it.
 - `createProgram` receives the mind itself, which is how a thinker's tools
   reach a runtime that did not exist when the thinker record was built.
+- Give a SECOND thinker an explicit `subscription.types`. Suppression is per
+  thinker, so two thinkers on the default subscription wake each other on their
+  own `idle` steps forever. The shipped pair is safe because `axMindResponder`
+  listens for `message` only.
 
 ## Pacing
 
@@ -161,6 +165,14 @@ output: a new visible step is `visible`, a new thought is `thought`, neither is
   store, rather than the one you hoped for.
 - `reconcile()` recomputes health, rebuilds each thinker's pacer state from the
   trajectory, and converges the log to the effect ledger.
+- Work a thinker does in its own SINK counts: the mind installs a trailing
+  `mind-settle` sink after the thinker's sinks, so the wake that sent a reply
+  is `visible`, not `idle`.
+- A delivery that terminalises with no pace decision -- a dead-lettered context
+  assembly (`AxTrajectoryRollupError('meta_conflict')`,
+  `AxTrajectoryQueryError('unsupported_types')`), a settle that threw, a
+  delivery abandoned before `forward` -- re-arms ONE wake at that thinker's
+  `capMs`. The arm is a runtime guarantee, not a code path.
 
 ## Chat Semantics
 
@@ -185,6 +197,13 @@ the JUDGMENT ("does it need a reply"). The rows are a priority order:
   The disjunction is load-bearing: a per-attempt `claimId` inside a key that
   also carries `replyTo` destroys the cross-attempt dedupe.
 - The claim fails OPEN. A retry is safer than a dropped message.
+- Self-addressed traffic is refused in BOTH directions with one error:
+  `AxMindChatError('self_addressed')` from `receive()` and from the send tool
+  alike, plus an explaining `observation` in the log. A host can guard the
+  whole boundary with `axIsMindChatError`.
+- Third-party text reaches a thinker QUOTED: `axMindQuote` one-lines, bounds
+  and fences a sender name and a message body, so a body carrying a fake
+  `Signals (...)` header cannot forge the mind's own hint block.
 - **Sends are NOT exactly-once.** A transport call that throws leaves the
   effect `dispatched` for a resolver; it is never re-dispatched blind, and the
   message is missing from the log until a resolver settles it.
@@ -224,9 +243,16 @@ Every thinker step has explicit ceilings, never inherited from a total:
 budget: { maxWallClockMs: 600_000, maxTokens: 120_000, maxSubRuns: 8, maxDepth: 2 }
 ```
 
+`maxTokens` is the DELTA one step spends, measured across that step's own
+`forward`; `AxProgram.getUsage()` accumulates for the life of the program, so
+comparing the raw total to a per-step cap would brick a thinker after
+`maxTokens / spend-per-wake` wakes.
+
 Exceeding one raises `AxMindBudgetExceededError`, appends an `error` step, and
 descends the ladder. `subRun()` is capped by `maxSubRuns` and `maxDepth` and
-ALWAYS merges something back, success or failure.
+ALWAYS merges something back, success or failure. Pass `thinker` on the sub-run
+request whenever more than one thinker step can be in flight: the mind refuses
+to guess whose cap to spend rather than charge the wrong one.
 
 ## Authority Boundary
 

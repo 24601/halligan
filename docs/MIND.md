@@ -47,6 +47,22 @@ menu (`act` / `think` / `share` / `learn` / `goals` / `idle`), and
 `axMindResponder` is a single generation with a chat-shaped context and an
 inner-life block, cheap enough to run on every inbound message.
 
+**Two thinkers need narrow subscriptions.** Self-suppression is per thinker, so
+it stops a thinker re-triggering on its OWN writing and nothing else. Two
+thinkers that both take the default subscription (every wakeable narrative type)
+wake each other on their own `idle` steps and never stop — an unbounded,
+token-spending ping-pong with no work in it. The shipped pair is safe because
+`axMindResponder` subscribes to `message` only; give any second thinker an
+explicit `subscription.types` for the same reason. `mind.test.ts` asserts the
+shipped pair's step count stays bounded.
+
+Third-party text reaches a thinker QUOTED. `axMindQuote` one-lines, bounds and
+fences every remote-controlled value the responder interpolates (a sender name,
+a message body), because the assembled prompt is newline-framed: a body carrying
+a newline and `Signals (hints about your own recent behaviour...)` would
+otherwise forge the mind's own hint block. This is the salience buffer's fence
+applied to the same text on the other path.
+
 ## Dispatch decision table
 
 Evaluated in order, per drained step, per subscribed thinker. The first
@@ -133,6 +149,20 @@ mode; an always-alive loop that owns an injected clock is not.
   only contend for the same deliveries, and the measured consequence of that
   contention is a claim going stale mid-model-call and aborting a run that was
   doing nothing wrong.
+- The step's **settle** — the work probe AFTER, the outcome step and the pace
+  decision — runs once per delivery, from whichever of three places gets there
+  first: the run itself, a trailing `mind-settle` sink installed after the
+  thinker's own sinks, or the tick's reaper. A thinker whose effect IS a sink
+  (the shipped responder replies from one) would otherwise have every answering
+  wake recorded as `idle`, because sinks run after `forward` resolves.
+- A delivery that terminalises with no pace decision — a dead-lettered context
+  assembly, a settle that throws, a delivery abandoned between assembly and
+  forward — re-arms **one** wake at the thinker's own `capMs`, and the tick's
+  reaper releases its in-flight record. The arm is a runtime guarantee, so a
+  throw anywhere in the orchestration degrades to a delay, never silence.
+- The two typed projection failures — `AxTrajectoryRollupError('meta_conflict')`
+  and `AxTrajectoryQueryError('unsupported_types')` — dead-letter the delivery
+  BEFORE any model call, and the thinker still wakes again.
 - A wake that fails past its attempt budget appends NOTHING -- nothing ran --
   so `deadLetters()` is the only place a host can see one.
 - Every liveness bug degrades to a `<= watchdogMs` delay, never a dead mind. A
@@ -293,12 +323,13 @@ C4–C14 by `npm run mind:durability:eval`.
   never idle by construction, so `waitForIdle()` is NOT its shutdown path and
   refusing every close while a step ran would make a persistent mind
   unclosable.
-- **A sink runs AFTER the step settles.** `axMindResponder` sends its reply
-  from a sink, so that send is not counted by the work probe of the step that
-  produced it. The responder declares no pacer, so its ladder is inert and
-  nothing depends on that classification; a thinker that both owns the pacer
-  and does its visible work in a sink would rate itself `empty`, and should do
-  that work in a tool instead.
+- **A sink's work IS counted, one layer later.** The mind installs a trailing
+  `mind-settle` sink after the thinker's own sinks, so a reply written from a
+  sink moves the work probe of the wake that produced it. The runtime dispatches
+  final sinks only when the run produced an output, so a run that threw settles
+  inline instead, and the tick's reaper settles anything neither path reached.
+  What is still true: a sink that fails is dead-lettered by the runtime and the
+  mind continues to the next sink.
 - **The ownership lease has no TTL.** `AxInMemoryMindOwnershipStore` is
   process-local, and `close()` releases the lease; a durable ownership store
   that outlives a crash needs a host-side lease expiry.
@@ -335,20 +366,24 @@ ceiling; the shipped total is higher, and each raise has a reason:
 | `types.ts` | 600 | the context-request record, the whole artifact source with its change and receipt records, and the in-memory ownership store — RFC 4.9/4.10 declarations the pacing lane deferred for want of a consumer |
 | `pacer.ts` | 300 | the fuse derived from the descent cost, plus `parkedUntil` |
 | `health.ts` | 150 | the derived stalled threshold |
-| `routes.ts` | 250 | as estimated |
+| `routes.ts` | 270 | the `wake-suppressed-self` diagnostic: a suppressed wake creates no delivery and no step, so nothing else can see the decision |
 | `sources.ts` | 610 | two `AxEventSource`s, the pure duty query, per-consumer cursor load/save, unit-commit planning, and a sleep that leaves no listener behind |
 | `chat.ts` | 800 | the ledgered send is declare → dispatch → transport → settle with a branch per non-`intent` status, plus `axMindReconcileChatSends` |
 | `salience.ts` | 180 | the fenced, byte-bounded quoting of third-party text |
 | `skills.ts` | 150 | as estimated |
 | `context.ts` | 160 | new: the pure wake classification, synthetic trigger and routing-signal table, extracted so the hint policy is reviewable without the runtime |
-| `step.ts` | 160 | new: a thinker rendered as an `AxEventTarget`, plus the delegating `AxProgrammable` wrapper that brackets one run |
-| `subruns.ts` | 140 | new: fork → run → merge with the depth and spend caps |
+| `step.ts` | 180 | new: a thinker rendered as an `AxEventTarget`, the delegating `AxProgrammable` wrapper that brackets one run, and the trailing `mind-settle` sink |
+| `subruns.ts` | 150 | new: fork → run → merge with the depth and spend caps, plus the bound on an unsummarized merge content |
 | `thinkers.ts` | 560 | the monolith, the responder, `AxMindDeterministicProgram`, the function menu and the prompt assembly |
-| `mind.ts` | 1_300 | RFC 5.1 gives this file five deliverables at once and none of the surface they need: the options record is 90 lines, the start sequence is seven steps with five typed refusals, and the context assembly carries the dead-letter path M19 depends on |
+| `mind.ts` | 1_450 | RFC 5.1 gives this file five deliverables at once and none of the surface they need: the options record is 90 lines, the start sequence is seven steps with five typed refusals, and the context assembly carries the dead-letter path M19 depends on. The review raise adds the idempotent delivery-keyed settle, the liveness-fallback arm (M7 layer (b)), the tick's reaper and the named sub-run owner |
 | `index.ts` | 175 | the barrel grew with the runtime |
 
-Raising one again needs the same treatment: a reason per file, here and in the
-cap table.
+The DIRECTORY ceiling is **5,650** non-blank production lines against RFC 5.1's
+3,050. That is a real miss against RFC 11's definition of done, stated here
+rather than left to be discovered: the estimate costed the declaration surface
+and the shipped files carry the implementation too, at 80 columns with a doc
+comment on each non-obvious policy. Raising either again needs the same
+treatment: a reason per file, here and in the cap table.
 
 ## Conformance fixtures
 
