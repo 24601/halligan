@@ -2519,7 +2519,13 @@ export abstract class AxBaseOptimizer implements AxOptimizer {
     bestScore: number,
     bestConfiguration?: Record<string, unknown>,
     optimizerState: Record<string, unknown> = {},
-    options?: AxCompileOptions
+    options?: AxCompileOptions,
+    /**
+     * Extra optimizer-specific fields merged into the `RoundProgress` payload.
+     * Omitted by every caller that has none, so the emitted key set — and
+     * therefore the serialized event bytes — is unchanged for them.
+     */
+    roundExtras?: Readonly<Record<string, unknown>>
   ): Promise<void> {
     this.currentRound = round;
     this.scoreHistory.push(score);
@@ -2545,6 +2551,7 @@ export abstract class AxBaseOptimizer implements AxOptimizer {
         currentScore: score,
         bestScore,
         configuration,
+        ...(roundExtras ?? {}),
       },
     });
   }

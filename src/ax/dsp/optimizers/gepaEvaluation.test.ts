@@ -6,6 +6,10 @@ import {
   normalizeGEPAScores,
   scalarizeGEPAScores,
 } from './gepaEvaluation.js';
+import {
+  type AxTrajectoryTerminationClassifier,
+  axResolveTrajectoryAdmissionOptions,
+} from './trajectoryTermination.js';
 
 describe('normalizeGEPAMetricResult', () => {
   it('preserves legacy scalar and multi-objective metric results', async () => {
@@ -428,5 +432,320 @@ describe('evaluateGEPABatch', () => {
         scalarize: (scores) => scalarizeGEPAScores(scores),
       })
     ).rejects.toThrow('ordinary mixed config error');
+  });
+});
+
+describe('evaluateGEPABatch trajectory admission', () => {
+  const admissionArgs = (
+    classifier: AxTrajectoryTerminationClassifier,
+    overrides?: Readonly<{
+      affectedKinds?: readonly string[];
+      minAdmittedFraction?: number;
+    }>
+  ) => ({
+    ...axResolveTrajectoryAdmissionOptions({
+      classifier,
+      minAdmittedFraction: overrides?.minAdmittedFraction ?? 0,
+    }),
+    affectedKinds: overrides?.affectedKinds ?? ['instruction'],
+  });
+
+  const failingProgram = (failIndexes: ReadonlySet<number>) => ({
+    applyOptimizedComponents: () => {},
+    forward: async (_ai: AxAIService, input: any) => {
+      if (failIndexes.has(input.index)) throw new Error(`boom-${input.index}`);
+      return { value: input.index };
+    },
+  });
+
+  const set = (count: number) =>
+    Array.from({ length: count }, (_, index) => ({ index })) as any;
+
+  it('emits no admission surface at all when no classifier is supplied', async () => {
+    const state = { totalCalls: 0, observedScoreKeys: new Set<string>() };
+    const result = await evaluateGEPABatch({
+      program: failingProgram(new Set([1])) as any,
+      ai: {} as AxAIService,
+      metricFn: async ({ prediction }: any) =>
+        (prediction?.value ?? -1) >= 0 ? 1 : 0,
+      cfg: {},
+      set: set(3),
+      phase: 'legacy',
+      sampleCount: 1,
+      maxMetricCalls: 10,
+      state,
+      applyConfig: () => {},
+      scalarize: (scores) => scalarizeGEPAScores(scores),
+    });
+
+    expect(result?.terminations).toBeUndefined();
+    expect(result?.admission).toBeUndefined();
+    expect(result?.admittedIndices).toBeUndefined();
+    expect(result?.exampleIndices).toBeUndefined();
+    expect(result?.rows.every((row) => row.termination === undefined)).toBe(
+      true
+    );
+  });
+
+  it('discards environment failures from the admitted set while leaving sum, scalars and avg over every row', async () => {
+    const state = { totalCalls: 0, observedScoreKeys: new Set<string>() };
+    const result = await evaluateGEPABatch({
+      program: failingProgram(new Set([1, 3])) as any,
+      ai: {} as AxAIService,
+      metricFn: async ({ prediction }: any) =>
+        (prediction?.value ?? -1) >= 0 ? 1 : 0,
+      cfg: {},
+      set: set(4),
+      phase: 'parent minibatch',
+      sampleCount: 1,
+      maxMetricCalls: 10,
+      state,
+      applyConfig: () => {},
+      scalarize: (scores) => scalarizeGEPAScores(scores),
+      termination: admissionArgs((input) =>
+        input.error?.startsWith('boom-')
+          ? { kind: 'environment_failure', cause: 'rate_limit' }
+          : { kind: 'completed' }
+      ),
+    });
+
+    expect(result?.admittedIndices).toEqual([0, 2]);
+    expect(result?.admission).toMatchObject({
+      evaluatedRows: 4,
+      admittedRows: 2,
+      discardedRows: 2,
+      discardRate: 0.5,
+      causes: { rate_limit: 2 },
+      overriddenRows: 0,
+      inconclusive: false,
+    });
+    // The all-rows meaning of sum/scalars/avg is what keeps the legacy accept
+    // expression and skipPerfectScore honest; admission is additive only.
+    expect(result?.scalars).toEqual([1, 0, 1, 0]);
+    expect(result?.sum).toBe(2);
+    expect(result?.avg).toEqual({ score: 0.5 });
+    expect(result?.rows[1]?.admitted).toBe(false);
+    expect(result?.rows[0]?.admitted).toBeUndefined();
+    expect(result?.rows[0]?.termination).toEqual({ kind: 'completed' });
+  });
+
+  it('overrides a host environment failure on a program-source candidate and counts it', async () => {
+    const state = { totalCalls: 0, observedScoreKeys: new Set<string>() };
+    const result = await evaluateGEPABatch({
+      program: failingProgram(new Set([1])) as any,
+      ai: {} as AxAIService,
+      metricFn: async ({ prediction }: any) =>
+        (prediction?.value ?? -1) >= 0 ? 1 : 0,
+      cfg: {},
+      set: set(2),
+      phase: 'child minibatch',
+      sampleCount: 1,
+      maxMetricCalls: 10,
+      state,
+      applyConfig: () => {},
+      scalarize: (scores) => scalarizeGEPAScores(scores),
+      termination: admissionArgs(
+        () => ({ kind: 'environment_failure', cause: 'timeout' }),
+        { affectedKinds: ['instruction', 'program-source'] }
+      ),
+    });
+
+    expect(result?.admission).toMatchObject({
+      evaluatedRows: 2,
+      admittedRows: 2,
+      discardedRows: 0,
+      overriddenRows: 2,
+    });
+    expect(result?.admittedIndices).toEqual([0, 1]);
+    expect(result?.rows[1]?.termination).toEqual({
+      kind: 'policy_failure',
+      cause: 'non_reclassifiable',
+    });
+  });
+
+  it('overrides a host environment failure on a config-error row even when the candidate has no program source', async () => {
+    const state = { totalCalls: 0, observedScoreKeys: new Set<string>() };
+    let forwardCalls = 0;
+    const result = await evaluateGEPABatch({
+      program: {
+        applyOptimizedComponents: () => {},
+        forward: async () => {
+          forwardCalls += 1;
+          return { value: 1 };
+        },
+      } as any,
+      ai: {} as AxAIService,
+      metricFn: async () => 1,
+      cfg: { 'root::instruction': 'bad' },
+      set: set(2),
+      phase: 'child minibatch',
+      sampleCount: 1,
+      maxMetricCalls: 10,
+      state,
+      applyConfig: () => {},
+      validateConfig: () => {
+        throw new Error('component value rejected');
+      },
+      scalarize: (scores) => scalarizeGEPAScores(scores),
+      termination: admissionArgs(() => ({
+        kind: 'environment_failure',
+        cause: 'sandbox',
+      })),
+    });
+
+    expect(forwardCalls).toBe(0);
+    expect(result?.admission).toMatchObject({
+      discardedRows: 0,
+      overriddenRows: 2,
+      admittedRows: 2,
+    });
+    expect(result?.rows[0]?.termination).toEqual({
+      kind: 'policy_failure',
+      cause: 'non_reclassifiable',
+    });
+  });
+
+  it('flags a batch inconclusive below the admitted floor', async () => {
+    const state = { totalCalls: 0, observedScoreKeys: new Set<string>() };
+    const result = await evaluateGEPABatch({
+      program: failingProgram(new Set([0, 1, 2])) as any,
+      ai: {} as AxAIService,
+      metricFn: async ({ prediction }: any) =>
+        (prediction?.value ?? -1) >= 0 ? 1 : 0,
+      cfg: {},
+      set: set(4),
+      phase: 'parent minibatch',
+      sampleCount: 1,
+      maxMetricCalls: 10,
+      state,
+      applyConfig: () => {},
+      scalarize: (scores) => scalarizeGEPAScores(scores),
+      termination: admissionArgs(
+        (input) =>
+          input.error === undefined
+            ? { kind: 'completed' }
+            : { kind: 'environment_failure', cause: 'transport' },
+        { minAdmittedFraction: 0.5 }
+      ),
+    });
+
+    expect(result?.admission?.inconclusive).toBe(true);
+    expect(result?.admittedIndices).toEqual([3]);
+  });
+
+  it('classifies adapter rows with no error and no failure kind', async () => {
+    const state = { totalCalls: 0, observedScoreKeys: new Set<string>() };
+    const seen: unknown[] = [];
+    const result = await evaluateGEPABatch({
+      program: {} as any,
+      ai: {} as AxAIService,
+      metricFn: async () => 0,
+      adapter: {
+        evaluate: async () => ({
+          outputs: [{ ok: true }, { ok: false }],
+          scores: [1, 0],
+        }),
+        make_reflective_dataset: () => ({}),
+      },
+      cfg: {},
+      set: set(2),
+      phase: 'adapter admission',
+      sampleCount: 1,
+      maxMetricCalls: 10,
+      state,
+      applyConfig: () => {},
+      scalarize: (scores) => scalarizeGEPAScores(scores),
+      termination: admissionArgs((input) => {
+        seen.push({ error: input.error, failureKind: input.failureKind });
+        return (input.prediction as any)?.ok
+          ? { kind: 'completed' }
+          : { kind: 'environment_failure', cause: 'other' };
+      }),
+    });
+
+    expect(seen).toEqual([
+      { error: undefined, failureKind: undefined },
+      { error: undefined, failureKind: undefined },
+    ]);
+    expect(result?.admittedIndices).toEqual([0]);
+    expect(result?.admission?.discardRate).toBe(0.5);
+    expect(result?.sum).toBe(1);
+  });
+
+  it('does not double-count rows an adapter classified before falling through to the direct path', async () => {
+    const state = { totalCalls: 0, observedScoreKeys: new Set<string>() };
+    const result = await evaluateGEPABatch({
+      program: failingProgram(new Set()) as any,
+      ai: {} as AxAIService,
+      metricFn: async () => 1,
+      adapter: {
+        evaluate: async () => {
+          throw new Error('adapter down');
+        },
+        make_reflective_dataset: () => ({}),
+      },
+      cfg: {},
+      set: set(2),
+      phase: 'adapter fallback',
+      sampleCount: 1,
+      maxMetricCalls: 10,
+      state,
+      applyConfig: () => {},
+      scalarize: (scores) => scalarizeGEPAScores(scores),
+      termination: admissionArgs(() => ({ kind: 'completed' })),
+    });
+
+    expect(result?.terminations).toHaveLength(2);
+    expect(result?.admission?.evaluatedRows).toBe(2);
+  });
+
+  it('passes the feedback-set index through to the classifier and republishes it', async () => {
+    const state = { totalCalls: 0, observedScoreKeys: new Set<string>() };
+    const seen: number[] = [];
+    const result = await evaluateGEPABatch({
+      program: failingProgram(new Set()) as any,
+      ai: {} as AxAIService,
+      metricFn: async () => 1,
+      cfg: {},
+      set: set(2),
+      phase: 'parent minibatch',
+      sampleCount: 1,
+      maxMetricCalls: 10,
+      state,
+      applyConfig: () => {},
+      scalarize: (scores) => scalarizeGEPAScores(scores),
+      exampleIndices: [7, 4],
+      termination: admissionArgs((input) => {
+        seen.push(input.exampleIndex);
+        return { kind: 'completed' };
+      }),
+    });
+
+    expect(seen).toEqual([7, 4]);
+    expect(result?.exampleIndices).toEqual([7, 4]);
+  });
+
+  it('refuses an exampleIndices vector whose length does not match the set', async () => {
+    const state = { totalCalls: 0, observedScoreKeys: new Set<string>() };
+    await expect(
+      evaluateGEPABatch({
+        program: failingProgram(new Set()) as any,
+        ai: {} as AxAIService,
+        metricFn: async () => 1,
+        cfg: {},
+        set: set(3),
+        phase: 'parent minibatch',
+        sampleCount: 1,
+        maxMetricCalls: 10,
+        state,
+        applyConfig: () => {},
+        scalarize: (scores) => scalarizeGEPAScores(scores),
+        exampleIndices: [0, 1],
+      })
+    ).rejects.toMatchObject({
+      name: 'AxTaskDiscriminationError',
+      code: 'unknown_task_index',
+    });
+    expect(state.totalCalls).toBe(0);
   });
 });

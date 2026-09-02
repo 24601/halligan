@@ -6,6 +6,7 @@ import {
 } from '../optimizer.js';
 import { ax } from '../template.js';
 import { AxGEPA } from './gepa.js';
+import type { AxTrajectoryTerminationClassifier } from './trajectoryTermination.js';
 
 const createSingleRootProgram = (
   baseInstruction: string,
@@ -660,7 +661,7 @@ describe('AxGEPA Optimizer', () => {
       });
     });
 
-    it('does not read candidate-lineage or abort accessors at the opt-in boundary', async () => {
+    it('does not read candidate-lineage, abort or trajectory-termination accessors at the opt-in boundary', async () => {
       let reads = 0;
       const inheritedOptions = Object.create({
         get candidateLineage() {
@@ -670,6 +671,10 @@ describe('AxGEPA Optimizer', () => {
         get abortSignal() {
           reads += 1;
           throw new Error('inherited abortSignal was read');
+        },
+        get trajectoryTermination() {
+          reads += 1;
+          throw new Error('inherited trajectoryTermination was read');
         },
       });
       Object.defineProperty(inheritedOptions, 'maxMetricCalls', {
@@ -690,6 +695,13 @@ describe('AxGEPA Optimizer', () => {
           get() {
             reads += 1;
             throw new Error('abortSignal accessor was read');
+          },
+        },
+        trajectoryTermination: {
+          enumerable: true,
+          get() {
+            reads += 1;
+            throw new Error('trajectoryTermination accessor was read');
           },
         },
         maxMetricCalls: { enumerable: true, value: 2 },
@@ -768,7 +780,10 @@ describe('AxGEPA Optimizer', () => {
         compileOptions
       );
 
-      expect(descriptorCalls).toBe(2);
+      // One own-descriptor read per opt-in option: candidateLineage,
+      // abortSignal, trajectoryTermination. This count is the tripwire that a
+      // new option was added without being routed through `ownDataOption`.
+      expect(descriptorCalls).toBe(3);
       expect(result.optimizedProgram?.candidateLineage).toBeUndefined();
     });
 
@@ -1247,6 +1262,237 @@ describe('AxGEPA Optimizer', () => {
         capturedPrompt.indexOf('Explicit feedback:')
       );
       expect(capturedPrompt).not.toContain('[object Object]');
+    });
+  });
+});
+
+describe('AxGEPA trajectory admission', () => {
+  /**
+   * A classifier that calls every rollout failure an environment failure. It is
+   * the most permissive host possible, which is exactly what makes it a useful
+   * test instrument: anything Ax still refuses to discard, it refuses on its
+   * own authority.
+   */
+  const discardEveryFailure: AxTrajectoryTerminationClassifier = (input) =>
+    input.error === undefined
+      ? { kind: 'completed' }
+      : { kind: 'environment_failure', cause: 'transport' };
+
+  const runOptimizer = async (args: {
+    forward: (instruction: string, example: any) => any;
+    examples: readonly Record<string, unknown>[];
+    optimizer?: Record<string, unknown>;
+    compile?: Record<string, unknown>;
+  }) => {
+    const events: any[] = [];
+    const optimizer = new AxGEPA({
+      studentAI: {} as AxAIService,
+      teacherAI: {} as AxAIService,
+      numTrials: 1,
+      minibatch: false,
+      minImprovementThreshold: 0,
+      debugOptimizer: true,
+      optimizerLogger: (event: any) => events.push(event),
+      ...args.optimizer,
+    } as any);
+    (optimizer as any).reflectTargetInstruction = async () => 'better';
+    const program = createSingleRootProgram('base', args.forward);
+    const result = await optimizer.compile(
+      program as any,
+      args.examples as any,
+      async ({ prediction }: any) => prediction.score,
+      {
+        maxMetricCalls: 60,
+        candidateLineage: true,
+        ...args.compile,
+      } as any
+    );
+    return { result, events };
+  };
+
+  const lineageRecords = (result: any) =>
+    (result.optimizedProgram?.candidateLineage?.records ?? []) as any[];
+
+  it('reports the run discard rate without changing what avg, scalars or sum mean', async () => {
+    const { result, events } = await runOptimizer({
+      examples: [{ i: 0 }, { i: 1 }, { i: 2 }, { i: 3 }],
+      forward: (_instruction, example) => {
+        if (example.i === 3) throw new Error('provider 429');
+        return { score: 1 };
+      },
+      compile: { trajectoryTermination: { classifier: discardEveryFailure } },
+    });
+
+    const complete = events.find((e) => e.name === 'OptimizationComplete');
+    expect(complete.value.admission).toMatchObject({
+      discardedRows: expect.any(Number),
+      causes: { transport: expect.any(Number) },
+    });
+    expect(complete.value.admission.discardedRows).toBeGreaterThan(0);
+    expect(complete.value.admission.evaluatedRows).toBe(
+      complete.value.admission.admittedRows +
+        complete.value.admission.discardedRows
+    );
+    // The seed evaluation still averages the discarded zero: admission is a
+    // separate report, never a recomputation of the score.
+    const seed = lineageRecords(result).find((r) => r.strategy === 'seed');
+    expect(seed.evaluations[0].scalarScore).toBe(0.75);
+    expect(seed.evaluations[0].evaluatedExamples).toBe(4);
+  });
+
+  it('emits no admission report when the option is omitted', async () => {
+    const { events } = await runOptimizer({
+      examples: [{ i: 0 }, { i: 1 }],
+      forward: (_instruction, example) => {
+        if (example.i === 1) throw new Error('provider 429');
+        return { score: 1 };
+      },
+    });
+    const complete = events.find((e) => e.name === 'OptimizationComplete');
+    expect(complete.value.admission).toBeUndefined();
+    expect(Object.keys(complete.value)).not.toContain('admission');
+    const progress = events.find((e) => e.name === 'RoundProgress');
+    expect(Object.keys(progress.value)).toEqual([
+      'round',
+      'totalRounds',
+      'currentScore',
+      'bestScore',
+      'configuration',
+    ]);
+  });
+
+  it('keeps skipPerfectScore reading all rows so an environment failure does not skip the round', async () => {
+    const { result } = await runOptimizer({
+      examples: [{ i: 0 }, { i: 1 }],
+      forward: (_instruction, example) => {
+        if (example.i === 1) throw new Error('provider 429');
+        return { score: 1 };
+      },
+      compile: {
+        skipPerfectScore: true,
+        perfectScore: 1,
+        trajectoryTermination: { classifier: discardEveryFailure },
+      },
+    });
+
+    // Every ADMITTED parent row scored a perfect 1. If `scalars` were narrowed
+    // to admitted rows, `scalars.every(s => s >= perfect)` would be true and
+    // the round would be skipped, producing no mutation candidate at all.
+    expect(
+      lineageRecords(result).some((r) => r.strategy === 'reflective_mutation')
+    ).toBe(true);
+  });
+
+  it('aborts a candidate instead of rejecting it when too few child rows were admitted', async () => {
+    const { result } = await runOptimizer({
+      examples: [{ i: 0 }, { i: 1 }, { i: 2 }, { i: 3 }],
+      forward: (instruction) => {
+        if (instruction === 'better') throw new Error('provider 429');
+        return { score: 0.5 };
+      },
+      compile: { trajectoryTermination: { classifier: discardEveryFailure } },
+    });
+
+    const mutation = lineageRecords(result).find(
+      (r) => r.strategy === 'reflective_mutation'
+    );
+    expect(mutation).toMatchObject({
+      decision: 'aborted',
+      reason: 'insufficient_admitted_rows',
+      disposition: 'aborted',
+    });
+  });
+
+  it('ends the run and publishes no best score above the run discard ceiling', async () => {
+    const { result, events } = await runOptimizer({
+      examples: [{ i: 0 }, { i: 1 }, { i: 2 }, { i: 3 }, { i: 4 }, { i: 5 }],
+      forward: () => {
+        throw new Error('provider 429');
+      },
+      compile: {
+        trajectoryTermination: {
+          classifier: discardEveryFailure,
+          maxRunDiscardRate: 0.4,
+          minRunRowsForCeiling: 4,
+        },
+      },
+    });
+
+    expect(result.bestScore).toBe(0);
+    expect(result.optimizedProgram).toBeUndefined();
+    const complete = events.find((e) => e.name === 'OptimizationComplete');
+    expect(complete.value.bestScore).toBe(0);
+    expect(complete.value.bestConfiguration).toEqual({});
+    expect(complete.value.admission.discardRate).toBeGreaterThan(0.4);
+  });
+
+  it('keeps running below the ceiling on the same fixture', async () => {
+    const { result } = await runOptimizer({
+      examples: [{ i: 0 }, { i: 1 }, { i: 2 }, { i: 3 }, { i: 4 }, { i: 5 }],
+      forward: () => {
+        throw new Error('provider 429');
+      },
+      compile: {
+        trajectoryTermination: {
+          classifier: discardEveryFailure,
+          maxRunDiscardRate: 1,
+          minRunRowsForCeiling: 4,
+          minAdmittedFraction: 0,
+        },
+      },
+    });
+
+    expect(result.optimizedProgram).toBeDefined();
+  });
+
+  it('refuses a host reclassification on a config-error row', async () => {
+    const events: any[] = [];
+    const optimizer = new AxGEPA({
+      studentAI: {} as AxAIService,
+      teacherAI: {} as AxAIService,
+      numTrials: 0,
+      minibatch: false,
+      debugOptimizer: true,
+      optimizerLogger: (event: any) => events.push(event),
+    } as any);
+    let forwardCalls = 0;
+    const program = createSingleRootProgram('base', () => {
+      forwardCalls += 1;
+      return { score: 1 };
+    });
+    (program as any).getOptimizableComponents = () => [
+      {
+        key: 'root::program-source',
+        kind: 'program-source',
+        current: 'source',
+        validate: () => 'always invalid',
+      },
+    ];
+    (program as any).applyOptimizedComponents = () => {};
+
+    const result = await optimizer.compile(
+      program as any,
+      [{ i: 0 }, { i: 1 }] as any,
+      async ({ prediction }: any) => prediction?.score ?? 0,
+      {
+        maxMetricCalls: 20,
+        candidateLineage: true,
+        trajectoryTermination: {
+          classifier: () => ({
+            kind: 'environment_failure',
+            cause: 'sandbox',
+          }),
+        },
+      } as any
+    );
+
+    expect(forwardCalls).toBe(0);
+    expect(result.optimizedProgram).toBeDefined();
+    const complete = events.find((e) => e.name === 'OptimizationComplete');
+    expect(complete.value.admission).toMatchObject({
+      discardedRows: 0,
+      overriddenRows: 2,
+      admittedRows: 2,
     });
   });
 });

@@ -2,6 +2,7 @@ import type { AxAIService, AxLoggerFunction } from '../ai/types.js';
 import type { AxGEPAAdapter } from './optimizers/gepaAdapter.js';
 import type { AxGEPACandidateLineageOptions } from './optimizers/gepaLineage.js';
 import type { AxGEPAProposalOptions } from './optimizers/gepaReflection.js';
+import type { AxTrajectoryAdmissionOptions } from './optimizers/trajectoryTermination.js';
 import type { AxOptimizerLoggerData } from './optimizerTypes.js';
 import type { AxFieldValue, AxResultPickerFunction } from './types.js';
 
@@ -212,6 +213,19 @@ export interface AxCompileOptions {
   abortSignal?: AbortSignal;
   /** Opt in to GEPA candidate lineage with defaults or retention/privacy controls. */
   candidateLineage?: boolean | AxGEPACandidateLineageOptions;
+  /**
+   * GEPA only. Omit to keep today's "every failure is a policy failure"
+   * scoring, byte for byte.
+   *
+   * Supplying this object turns on host-owned trajectory termination
+   * classification: rows a host classifies as `environment_failure` leave the
+   * promotion comparison (they are still scored into `avg`/`scalars`/`sum`,
+   * whose meaning never changes) and the run reports its discard rate. Ax
+   * never infers an environment failure, and it overrides one on rows whose
+   * candidate carries a `program-source` component or whose config failed to
+   * validate.
+   */
+  trajectoryTermination?: AxTrajectoryAdmissionOptions;
   /**
    * Custom labels to include in OpenTelemetry metrics.
    * These labels are merged with axGlobals.customLabels and AI service customLabels.

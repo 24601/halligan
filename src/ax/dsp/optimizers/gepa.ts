@@ -58,6 +58,13 @@ import {
   removeDominatedProgramsByInstanceFronts,
   selectProgramCandidateFromInstanceFronts,
 } from './paretoUtils.js';
+import {
+  type AxTrajectoryAdmissionOptions,
+  type AxTrajectoryAdmissionReport,
+  axExceedsRunDiscardCeiling,
+  axMergeTrajectoryAdmission,
+  axResolveTrajectoryAdmissionOptions,
+} from './trajectoryTermination.js';
 
 /** Structured optimization report */
 export interface AxGEPAOptimizationReport {
@@ -377,6 +384,29 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       'candidateLineage'
     );
     const gepaAbortSignal = ownDataOption<AbortSignal>('abortSignal');
+    const trajectoryTerminationInput =
+      ownDataOption<AxTrajectoryAdmissionOptions>('trajectoryTermination');
+    const admissionOptions =
+      typeof trajectoryTerminationInput === 'object' &&
+      trajectoryTerminationInput !== null
+        ? axResolveTrajectoryAdmissionOptions(trajectoryTerminationInput)
+        : undefined;
+    /**
+     * Component kinds the evaluated config actually carries. Derived from the
+     * program's declared components, never from a free-text label, because
+     * `program-source` membership decides which rows a host may not relabel.
+     */
+    const kindsForCfg = (
+      cfg: Readonly<Record<string, string>>
+    ): readonly string[] => {
+      const kinds = new Set<string>();
+      for (const target of targets) {
+        if (typeof cfg[target.id] === 'string') kinds.add(target.kind);
+      }
+      return [...kinds];
+    };
+    let runAdmission: AxTrajectoryAdmissionReport | undefined;
+    let admissionCeilingFired = false;
     const lineageEnabled =
       lineageInput === true ||
       (typeof lineageInput === 'object' && lineageInput !== null);
@@ -477,7 +507,8 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       set: readonly AxTypedExample<IN>[],
       _phase: string,
       throwIfInsufficient = false,
-      captureTraces = false
+      captureTraces = false,
+      extra?: Readonly<{ exampleIndices?: readonly number[] }>
     ): Promise<AxGEPABatchEvaluation | undefined> => {
       const result = await evaluateGEPABatch({
         program,
@@ -498,8 +529,37 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
         captureTraces,
         captureFailures: lineageEnabled,
         abortSignal: gepaAbortSignal,
+        ...(admissionOptions
+          ? {
+              termination: {
+                ...admissionOptions,
+                affectedKinds: kindsForCfg(cfg),
+              },
+            }
+          : {}),
+        ...(extra?.exampleIndices
+          ? { exampleIndices: extra.exampleIndices }
+          : {}),
       });
       this.stats.totalCalls = bootstrapMetricCalls + evaluationState.totalCalls;
+      // A per-batch admitted floor alone cannot catch a classifier that
+      // discards just under the floor on every batch forever, so the run-level
+      // discard rate is accumulated here, at the single point every evaluation
+      // passes through.
+      if (result?.admission && admissionOptions) {
+        runAdmission = runAdmission
+          ? axMergeTrajectoryAdmission(runAdmission, result.admission)
+          : result.admission;
+        if (
+          !admissionCeilingFired &&
+          axExceedsRunDiscardCeiling(runAdmission, admissionOptions)
+        ) {
+          admissionCeilingFired = true;
+          verboseLog(
+            `Run discard rate ${runAdmission.discardRate.toFixed(3)} exceeds maxRunDiscardRate ${admissionOptions.maxRunDiscardRate}; ending the run without publishing a best score`
+          );
+        }
+      }
       return result;
     };
 
@@ -716,6 +776,12 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
     let _prevHypervolume: number | undefined;
 
     for (let t = 0; t < this.numTrials; t++) {
+      if (admissionCeilingFired) {
+        stoppedReason = 'excessive_environment_failures';
+        terminationPhase = 'loop_boundary';
+        terminationRound = t;
+        break;
+      }
       if (gepaAbortSignal?.aborted) {
         stoppedReason = 'aborted';
         terminationPhase = 'loop_boundary';
@@ -947,6 +1013,36 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
           );
           mergeFailures?.push(...evaluationFailures!(mergeEval));
 
+          if (mergeEval.admission?.inconclusive) {
+            verboseLog(
+              `Iteration ${t + 1}: merge subsample inconclusive (${mergeEval.admission.admittedRows}/${mergeEval.admission.evaluatedRows} rows admitted); aborting the merge candidate`
+            );
+            recordCandidate?.(() => {
+              const delta = buildGEPACandidateComponentDelta(
+                candidates[a]!.cfg,
+                mergedCfg,
+                lineageOptions!
+              );
+              return {
+                id: mergeCandidateId!,
+                parentIds: [candidates[i]!.id!, candidates[j]!.id!],
+                commonAncestorId: candidates[a]!.id!,
+                round: t + 1,
+                strategy: 'system_merge',
+                componentDelta: delta.delta,
+                omittedComponentCount: delta.omittedComponentCount,
+                evaluations: mergeEvaluations!,
+                metricCallsAtDecision: this.stats.totalCalls,
+                metricCallBudget: rolloutBudgetPareto,
+                decision: 'aborted',
+                reason: 'insufficient_admitted_rows',
+                disposition: 'aborted',
+                failures: mergeFailures!.length ? mergeFailures : undefined,
+              };
+            });
+            continue;
+          }
+
           const newSum = mergeEval.sum;
           const id1Sum = idxs.reduce((sum, z) => sum + (s1[z] ?? 0), 0);
           const id2Sum = idxs.reduce((sum, z) => sum + (s2[z] ?? 0), 0);
@@ -1111,6 +1207,22 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
           );
         }
         break;
+      }
+      if (admissionCeilingFired) {
+        stoppedReason = 'excessive_environment_failures';
+        terminationPhase = 'parent_minibatch';
+        terminationRound = t + 1;
+        break;
+      }
+      // Too few admitted rows means the batch cannot decide anything. No
+      // candidate has been proposed yet at this point, so the round is skipped
+      // rather than a candidate being recorded as rejected on evidence that
+      // was never there.
+      if (parentMiniEval.admission?.inconclusive) {
+        verboseLog(
+          `Iteration ${t + 1}: parent minibatch inconclusive (${parentMiniEval.admission.admittedRows}/${parentMiniEval.admission.evaluatedRows} rows admitted); skipping the round`
+        );
+        continue;
       }
 
       if ((options as any)?.skipPerfectScore ?? true) {
@@ -1315,6 +1427,50 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       );
       mutationFailures?.push(...evaluationFailures!(childMiniEval));
 
+      // Never accepted, never rejected: an inconclusive batch is not evidence
+      // either way, and treating it as a rejection would let a flaky provider
+      // exhaust `earlyStoppingTrials`.
+      if (childMiniEval.admission?.inconclusive) {
+        verboseLog(
+          `Iteration ${t + 1}: child minibatch inconclusive (${childMiniEval.admission.admittedRows}/${childMiniEval.admission.evaluatedRows} rows admitted); aborting the candidate`
+        );
+        recordCandidate?.(() => {
+          const delta = buildGEPACandidateComponentDelta(
+            candidates[parentIdx]!.cfg,
+            proposedCfg,
+            lineageOptions!
+          );
+          return {
+            id: mutationCandidateId!,
+            parentIds: [candidates[parentIdx]!.id!],
+            round: t + 1,
+            strategy,
+            componentDelta: delta.delta,
+            omittedComponentCount: delta.omittedComponentCount,
+            evaluations: mutationEvaluations!,
+            metricCallsAtDecision: this.stats.totalCalls,
+            metricCallBudget: rolloutBudgetPareto,
+            decision: 'aborted',
+            reason: 'insufficient_admitted_rows',
+            disposition: 'aborted',
+            failures: mutationFailures!.length ? mutationFailures : undefined,
+          };
+        });
+        if (admissionCeilingFired) {
+          stoppedReason = 'excessive_environment_failures';
+          terminationPhase = 'child_minibatch';
+          terminationRound = t + 1;
+          break;
+        }
+        continue;
+      }
+      if (admissionCeilingFired) {
+        stoppedReason = 'excessive_environment_failures';
+        terminationPhase = 'child_minibatch';
+        terminationRound = t + 1;
+        break;
+      }
+
       const accepted =
         childMiniEval.sum > parentMiniEval.sum + this.minImprovementThreshold;
 
@@ -1378,7 +1534,12 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
             ...(checkpointLineage
               ? { candidateLineage: checkpointLineage }
               : {}),
-          }
+          },
+          // `options` is deliberately not forwarded here: `totalRounds` on the
+          // emitted RoundProgress has always been `options?.maxIterations ?? 0`
+          // with no options, and changing it would break INV-L1.
+          undefined,
+          runAdmission ? { admission: runAdmission } : undefined
         );
       };
 
@@ -1557,15 +1718,19 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       this.tieEpsilon
     );
 
-    // Pick bestScore as max scalarized score on frontier
+    // Pick bestScore as max scalarized score on frontier.
+    // When the run-level discard ceiling fired, the scores on the frontier were
+    // computed over a denominator a host classifier removed most of, so NO best
+    // score and no optimized artifact are published — a number here would be a
+    // claim the evidence cannot support.
     const bestScore =
-      pareto.length > 0
+      pareto.length > 0 && !admissionCeilingFired
         ? Math.max(...pareto.map((p) => scalarize(p.scores)))
         : 0;
 
     // On score ties, prefer the later accepted candidate over the seed.
     let bestCandidateIdx: number | undefined;
-    if (pareto.length > 0) {
+    if (pareto.length > 0 && !admissionCeilingFired) {
       const first = pareto[0]!;
       let maxS = scalarize(first.scores);
       bestCandidateIdx = first.idx;
@@ -1658,6 +1823,7 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
                 },
           totalCalls: this.stats.totalCalls,
           stats: this.stats,
+          ...(runAdmission ? { admission: runAdmission } : {}),
         },
       });
     }

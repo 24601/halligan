@@ -11,6 +11,86 @@ import type {
   AxProgrammable,
 } from '../types.js';
 import type { AxGEPAAdapter } from './gepaAdapter.js';
+import { AxTaskDiscriminationError } from './taskDiscrimination.js';
+import {
+  type AxResolvedTrajectoryAdmissionOptions,
+  type AxTrajectoryAdmissionReport,
+  type AxTrajectoryTermination,
+  axClassifyTrajectory,
+  axSummarizeTrajectoryAdmission,
+} from './trajectoryTermination.js';
+
+/**
+ * Everything `evaluateGEPABatch` needs to classify a row's termination.
+ *
+ * `affectedKinds` are the `AxOptimizableComponent.kind` values the evaluated
+ * candidate config carries. They are handed to the host classifier as advisory
+ * context AND used by Ax to decide which rows may never be relabelled as
+ * environment failures — a candidate that carries a `program-source` component
+ * IS its evolved AST, so that AST's runtime failures are the candidate's own.
+ */
+export type AxGEPATerminationArgs = AxResolvedTrajectoryAdmissionOptions & {
+  readonly affectedKinds: readonly string[];
+};
+
+type AxRowTerminationInput = {
+  readonly exampleIndex: number;
+  readonly prediction: unknown;
+  readonly error?: string;
+  readonly failureKind?: 'runtime' | 'adapter' | 'validator';
+  readonly nonReclassifiable: boolean;
+};
+
+/**
+ * Classify one row and fold it into the batch's running admission state.
+ *
+ * The classifier is never called directly: `axClassifyTrajectory` is the
+ * enforcement wrapper that normalizes an out-of-union return value and
+ * overrides a non-reclassifiable environment failure.
+ */
+const classifyRow = (
+  termination: Readonly<AxGEPATerminationArgs>,
+  phase: string,
+  row: Readonly<AxRowTerminationInput>,
+  sink: { terminations: AxTrajectoryTermination[]; overriddenRows: number }
+): AxTrajectoryTermination => {
+  const classified = axClassifyTrajectory(termination.classifier, {
+    phase,
+    exampleIndex: row.exampleIndex,
+    prediction: row.prediction,
+    error: row.error,
+    failureKind: row.failureKind,
+    candidateKinds: termination.affectedKinds,
+    nonReclassifiable: row.nonReclassifiable,
+  });
+  sink.terminations.push(classified.termination);
+  if (classified.overridden) sink.overriddenRows += 1;
+  return classified.termination;
+};
+
+const admissionOf = (
+  termination: Readonly<AxGEPATerminationArgs>,
+  sink: Readonly<{
+    terminations: readonly AxTrajectoryTermination[];
+    overriddenRows: number;
+  }>
+): Readonly<{
+  admission: AxTrajectoryAdmissionReport;
+  admittedIndices: readonly number[];
+}> => {
+  const admittedIndices: number[] = [];
+  for (const [index, value] of sink.terminations.entries()) {
+    if (value.kind !== 'environment_failure') admittedIndices.push(index);
+  }
+  return {
+    admission: axSummarizeTrajectoryAdmission(
+      sink.terminations,
+      sink.overriddenRows,
+      termination
+    ),
+    admittedIndices,
+  };
+};
 
 export type AxGEPABatchRow = {
   input: AxExample;
@@ -18,10 +98,21 @@ export type AxGEPABatchRow = {
   scores: Record<string, number>;
   scalar: number;
   feedback?: string;
+  /** Present only when a termination classifier was supplied. */
+  termination?: AxTrajectoryTermination;
+  /** `false` only for `environment_failure` rows. Absent means admitted. */
+  admitted?: boolean;
 };
 
 export type AxGEPABatchEvaluation = {
   rows: AxGEPABatchRow[];
+  /**
+   * UNCHANGED MEANING: computed over ALL rows, exactly as before admission
+   * existed. Recomputing these over admitted rows would silently change the
+   * meaning of GEPA's accept expressions and of `skipPerfectScore`, and would
+   * put the two sides of a promotion comparison on different denominators.
+   * Admission is reported additively, in the fields below.
+   */
   avg: Record<string, number>;
   scalars: number[];
   sum: number;
@@ -30,6 +121,13 @@ export type AxGEPABatchEvaluation = {
     kind: 'runtime' | 'adapter';
     message: string;
   }[];
+  /** Present only when a termination classifier was supplied. */
+  terminations?: readonly AxTrajectoryTermination[];
+  admission?: AxTrajectoryAdmissionReport;
+  /** Indices INTO `rows` that were admitted. Only with a classifier. */
+  admittedIndices?: readonly number[];
+  /** Feedback-set indices parallel to `rows`. Only when supplied by the caller. */
+  exampleIndices?: readonly number[];
 };
 
 export type AxGEPAEvaluationState = {
@@ -213,7 +311,41 @@ export async function evaluateGEPABatch<IN, OUT extends AxGenOut>(args: {
   captureTraces?: boolean;
   captureFailures?: boolean;
   abortSignal?: AbortSignal;
+  /**
+   * Resolved admission options plus the evaluated candidate's component kinds.
+   * Absent keeps today's behaviour exactly: no classification, no admission
+   * report, no new fields on the result.
+   */
+  termination?: Readonly<AxGEPATerminationArgs>;
+  /**
+   * Feedback-set index of each entry in `set`, so a caller can key per-task
+   * statistics without re-deriving the mapping. Must be the same length as
+   * `set`.
+   */
+  exampleIndices?: readonly number[];
 }): Promise<AxGEPABatchEvaluation | undefined> {
+  if (
+    args.exampleIndices !== undefined &&
+    args.exampleIndices.length !== args.set.length
+  ) {
+    throw new AxTaskDiscriminationError(
+      'unknown_task_index',
+      `AxGEPA: exampleIndices length ${args.exampleIndices.length} does not match evaluated set length ${args.set.length}`
+    );
+  }
+  const terminationSink = args.termination
+    ? { terminations: [] as AxTrajectoryTermination[], overriddenRows: 0 }
+    : undefined;
+  /**
+   * A candidate carrying a `program-source` component IS its evolved AST, so
+   * every failure that AST produces — a budget error, a worker timeout, a
+   * revoked execution epoch, a bad tool call — is the candidate failing, and a
+   * host may not relabel any of its rows as an environment failure. Overriding
+   * only ever turns an environment failure INTO a policy failure, so a broad
+   * rule here can only make the evidence more conservative.
+   */
+  const nonReclassifiableCandidate =
+    args.termination?.affectedKinds.includes('program-source') ?? false;
   const failures:
     | Array<{
         kind: 'runtime' | 'adapter';
@@ -266,12 +398,38 @@ export async function evaluateGEPABatch<IN, OUT extends AxGenOut>(args: {
         const scalar = Number.isFinite(explicitScalar)
           ? Number(explicitScalar)
           : args.scalarize(scores);
+        // The adapter success path has no `validateConfig` and no per-row
+        // failure of its own, so the classifier sees no error and no failure
+        // kind. With the default classifier every row completes and admission
+        // is a no-op here; only a host classifier reading the adapter's own
+        // prediction can discard one.
+        const rowTermination =
+          args.termination && terminationSink
+            ? classifyRow(
+                args.termination,
+                args.phase,
+                {
+                  exampleIndex: args.exampleIndices?.[index] ?? index,
+                  prediction,
+                  nonReclassifiable: nonReclassifiableCandidate,
+                },
+                terminationSink
+              )
+            : undefined;
         rows.push({
           input: ex as AxExample,
           prediction,
           scores,
           scalar,
           feedback: normalizeGEPAMetricFeedback(evalBatch.feedback?.[index]),
+          ...(rowTermination
+            ? {
+                termination: rowTermination,
+                ...(rowTermination.kind === 'environment_failure'
+                  ? { admitted: false }
+                  : {}),
+              }
+            : {}),
         });
         args.state.totalCalls += 1;
         args.verboseLog?.(
@@ -284,6 +442,13 @@ export async function evaluateGEPABatch<IN, OUT extends AxGenOut>(args: {
         scalars: rows.map((row) => row.scalar),
         sum: rows.reduce((total, row) => total + row.scalar, 0),
         trajectories: evalBatch.trajectories ?? undefined,
+        ...(args.termination && terminationSink
+          ? {
+              terminations: terminationSink.terminations,
+              ...admissionOf(args.termination, terminationSink),
+            }
+          : {}),
+        ...(args.exampleIndices ? { exampleIndices: args.exampleIndices } : {}),
       };
     } catch (error) {
       if (args.abortSignal?.aborted) {
@@ -302,6 +467,12 @@ export async function evaluateGEPABatch<IN, OUT extends AxGenOut>(args: {
     }
   }
 
+  // The adapter path is a whole-batch try/catch that falls through to this
+  // loop, so any rows it already classified must not be counted twice.
+  if (terminationSink) {
+    terminationSink.terminations = [];
+    terminationSink.overriddenRows = 0;
+  }
   const rows: AxGEPABatchRow[] = [];
   const trajectories: Array<{
     calls: AxFunctionCallTrace[];
@@ -321,6 +492,8 @@ export async function evaluateGEPABatch<IN, OUT extends AxGenOut>(args: {
     let feedback: string | undefined;
     const calls: AxFunctionCallTrace[] = [];
     let configError: string | undefined;
+    let rowError: string | undefined;
+    let rowFailureKind: 'runtime' | 'adapter' | 'validator' | undefined;
 
     if (args.validateConfig) {
       try {
@@ -334,6 +507,8 @@ export async function evaluateGEPABatch<IN, OUT extends AxGenOut>(args: {
       prediction = { error: configError };
       scores = zeroScoreVector(args.state.observedScoreKeys);
       failedRows.add(index);
+      rowError = configError;
+      rowFailureKind = 'validator';
       if (args.captureTraces) trajectories.push({ calls, error: configError });
       args.verboseLog?.(
         `Evaluation failed during ${args.phase}; scoring this example as zero. Error: ${configError}`
@@ -378,6 +553,8 @@ export async function evaluateGEPABatch<IN, OUT extends AxGenOut>(args: {
         prediction = { error: message };
         scores = zeroScoreVector(args.state.observedScoreKeys);
         failedRows.add(index);
+        rowError = message;
+        rowFailureKind = 'runtime';
         if (args.captureTraces) trajectories.push({ calls, error: message });
         args.verboseLog?.(
           `Evaluation failed during ${args.phase}; scoring this example as zero. Error: ${message}`
@@ -386,12 +563,39 @@ export async function evaluateGEPABatch<IN, OUT extends AxGenOut>(args: {
     }
 
     const scalar = metricScalar ?? args.scalarize(scores);
+    // A `validateConfig` failure is the candidate's own config being invalid,
+    // so it is never reclassifiable — allowing it would let a host promote a
+    // candidate on exactly the subset where its config happens to parse.
+    const rowTermination =
+      args.termination && terminationSink
+        ? classifyRow(
+            args.termination,
+            args.phase,
+            {
+              exampleIndex: args.exampleIndices?.[index] ?? index,
+              prediction,
+              error: rowError,
+              failureKind: rowFailureKind,
+              nonReclassifiable:
+                configError !== undefined || nonReclassifiableCandidate,
+            },
+            terminationSink
+          )
+        : undefined;
     rows.push({
       input: ex as AxExample,
       prediction,
       scores,
       scalar,
       feedback,
+      ...(rowTermination
+        ? {
+            termination: rowTermination,
+            ...(rowTermination.kind === 'environment_failure'
+              ? { admitted: false }
+              : {}),
+          }
+        : {}),
     });
     args.verboseLog?.(
       `${args.phase}: completed ${index + 1}/${args.set.length} (score=${scalar.toFixed(3)})`
@@ -415,5 +619,12 @@ export async function evaluateGEPABatch<IN, OUT extends AxGenOut>(args: {
     sum: normalizedRows.reduce((total, row) => total + row.scalar, 0),
     trajectories: args.captureTraces ? trajectories : undefined,
     failures: failures?.length ? failures : undefined,
+    ...(args.termination && terminationSink
+      ? {
+          terminations: terminationSink.terminations,
+          ...admissionOf(args.termination, terminationSink),
+        }
+      : {}),
+    ...(args.exampleIndices ? { exampleIndices: args.exampleIndices } : {}),
   };
 }

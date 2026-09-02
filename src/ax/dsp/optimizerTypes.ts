@@ -1,4 +1,5 @@
 import type { AxOptimizationStats } from './common_types.js';
+import type { AxTrajectoryAdmissionReport } from './optimizers/trajectoryTermination.js';
 
 // Optimizer logging types
 export type AxOptimizerLoggerData =
@@ -19,6 +20,11 @@ export type AxOptimizerLoggerData =
         currentScore: number;
         bestScore: number;
         configuration: Record<string, unknown>;
+        /**
+         * GEPA only, and only when a trajectory-termination classifier was
+         * supplied. Cumulative run-level admission at the end of this round.
+         */
+        admission?: AxTrajectoryAdmissionReport;
       };
     }
   | {
@@ -41,6 +47,11 @@ export type AxOptimizerLoggerData =
         recommendations?: string[];
         performanceAssessment?: string;
         stats: AxOptimizationStats;
+        /**
+         * GEPA only, and only when a trajectory-termination classifier was
+         * supplied. Whole-run admission accounting.
+         */
+        admission?: AxTrajectoryAdmissionReport;
       };
     }
   | {
