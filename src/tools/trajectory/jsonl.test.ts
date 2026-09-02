@@ -26,7 +26,7 @@ import { AxJSONLTrajectoryStore } from './jsonl.js';
  * this number: a different count means one implementation quietly skipped part
  * of the contract, which is the whole point of shipping the kit.
  */
-const CONFORMANCE_ASSERTIONS = 73;
+const CONFORMANCE_ASSERTIONS = 78;
 
 const roots: string[] = [];
 

@@ -189,6 +189,34 @@ describe('AxInMemoryTrajectoryStore append', () => {
       store.append({ trajectoryId: 'nope', type: 'thought', source: 'm' })
     ).rejects.toMatchObject({ reason: 'unknown_trajectory' });
   });
+
+  it('freezes an appended step so a reader cannot rewrite the log', async () => {
+    const { store, trajectoryId } = await seeded();
+    const receipt = await store.append({
+      trajectoryId,
+      type: 'message',
+      source: 'human',
+      data: { content: 'original', nested: { deep: 1 } },
+    });
+    const step = (await store.getStep(trajectoryId, receipt.stepId))!;
+
+    expect(Object.isFrozen(step)).toBe(true);
+    expect(Object.isFrozen(step.data)).toBe(true);
+    expect(Object.isFrozen(step.data.nested)).toBe(true);
+    // `source` is the authority field: M2's self-trigger suppression keys on
+    // it, so a reader that can relabel a step in place can make machinery
+    // read as a thinker for every later reader in the process.
+    expect(() => {
+      (step as { source?: string }).source = 'impostor';
+    }).toThrow(TypeError);
+    expect(() => {
+      (step.data as Record<string, unknown>).content = 'REWRITTEN';
+    }).toThrow(TypeError);
+
+    const again = (await store.getStep(trajectoryId, receipt.stepId))!;
+    expect(again.source).toBe('human');
+    expect(again.data.content).toBe('original');
+  });
 });
 
 async function newStoreWithTrajectory() {

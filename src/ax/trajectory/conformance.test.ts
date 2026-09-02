@@ -10,6 +10,8 @@ import type {
   AxTrajectoryCursor,
   AxTrajectoryDrainBudget,
   AxTrajectoryDrainResult,
+  AxTrajectoryReadQuery,
+  AxTrajectoryStep,
   AxTrajectoryTailQuery,
   AxTrajectoryTailResult,
 } from './types.js';
@@ -42,7 +44,7 @@ function referenceFactory(clock: AxManualEventClock) {
  * pins the same number and additionally asserts the two stores report the
  * same count, so a store that quietly skips part of the kit is visible.
  */
-const CONFORMANCE_ASSERTIONS = 73;
+const CONFORMANCE_ASSERTIONS = 78;
 
 describe('runAxTrajectoryStoreConformance', () => {
   it('passes against the in-memory reference store', async () => {
@@ -56,6 +58,48 @@ describe('runAxTrajectoryStoreConformance', () => {
     expect(report.capability.durability).toBe('volatile');
     expect(report.capability.appendAtomicity).toBe(true);
     expect(report.capability.conformance?.schemaVersion).toBe(1);
+  });
+
+  it('rejects a store that hands out a mutable step', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const factory = referenceFactory(clock);
+
+    // The failure C-IMM could not previously see: reads hand back live,
+    // unfrozen references, so a caller can rewrite `source` -- the authority
+    // field -- for every later reader. Re-reading through the store is not a
+    // control on its own, because it returns the very object that was
+    // mutated; this stub reproduces exactly that shape.
+    await expect(
+      runAxTrajectoryStoreConformance(
+        (options) => {
+          const instance = factory(options);
+          const store = instance.store;
+          const thawed = new Map<string, AxTrajectoryStep>();
+          const thaw = (step: Readonly<AxTrajectoryStep>) => {
+            const existing = thawed.get(step.stepId);
+            if (existing) return existing;
+            const copy: AxTrajectoryStep = { ...step, data: { ...step.data } };
+            thawed.set(step.stepId, copy);
+            return copy;
+          };
+          const patched = Object.create(store) as typeof store;
+          patched.read = async (
+            query: Readonly<AxTrajectoryReadQuery>,
+            signal?: AbortSignal
+          ) => (await store.read(query, signal)).map(thaw);
+          patched.getStep = async (
+            trajectoryId: string,
+            stepId: string,
+            signal?: AbortSignal
+          ) => {
+            const step = await store.getStep(trajectoryId, stepId, signal);
+            return step ? thaw(step) : undefined;
+          };
+          return { ...instance, store: patched };
+        },
+        { clock }
+      )
+    ).rejects.toThrow('C-IMM: a returned step is frozen');
   });
 
   it('rejects a store that ignores the read budget', async () => {

@@ -198,6 +198,36 @@ export async function runAxTrajectoryStoreConformance(
         ),
       'C-IMM: no append mutates any earlier step'
     );
+    // I1 in the runtime, not only in the type system. A returned step is a
+    // live reference into the store's own index; a reader that can rewrite
+    // `source` -- the authority field self-trigger suppression keys on --
+    // relabels the record for every later reader in the process. Re-reading
+    // through the store is not enough on its own: it would compare the
+    // mutated object with itself, so the original values are captured first.
+    const immutable = before[0]!;
+    const originalIndex = immutable.data.index;
+    const originalSource = immutable.source;
+    assert(Object.isFrozen(immutable), 'C-IMM: a returned step is frozen');
+    assert(
+      Object.isFrozen(immutable.data),
+      "C-IMM: a returned step's data is frozen"
+    );
+    try {
+      (immutable.data as Record<string, unknown>).index = 'REWRITTEN';
+      (immutable as { source?: string }).source = 'impostor';
+    } catch {
+      // Strict mode throws on a write to a frozen object. Either way, the
+      // assertions below are what decide whether the store held.
+    }
+    const rewritten = (await store.getStep(id, immutable.stepId))!;
+    assert(
+      rewritten.data.index === originalIndex,
+      'C-IMM: a write to a returned step never reaches the log'
+    );
+    assert(
+      rewritten.source === originalSource,
+      "C-IMM: a returned step's source cannot be rewritten in place"
+    );
 
     // ---- C-ATOM ----------------------------------------------------------
     const atomicId = (await store.create({ slug: 'atomic' })).trajectoryId;
@@ -391,6 +421,10 @@ export async function runAxTrajectoryStoreConformance(
     assert(
       (spilledStep.data.stdout as string).length < big.length,
       'C-BLOB: the inline head is truncated'
+    );
+    assert(
+      Object.isFrozen(spilledStep.blobs) && Object.isFrozen(ref),
+      'C-BLOB: the blob refs a step carries are frozen too (I1)'
     );
     const resolved = await axResolveTrajectoryStep(spilledStep, blobs);
     assert(
