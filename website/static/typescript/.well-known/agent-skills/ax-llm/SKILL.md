@@ -351,7 +351,7 @@ never inserted as user messages automatically. See `ax-event-runtime.md`.
 
 Fetch these for full working code:
 
-- [Standard Schema (zod)](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/standard-schema.ts) — zod with f() and fn()
-- [Chat](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/chat.ts) — multi-turn conversation
-- [Marketing](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/marketing.ts) — product use case
-- [MCP Integration](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/mcp-client-memory.ts) — MCP integration
+- [Standard Schema (zod)](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/standard-schema.ts): zod with f() and fn()
+- [Chat](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/chat.ts): multi-turn conversation
+- [Marketing](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/marketing.ts): product use case
+- [MCP Integration](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/mcp-client-memory.ts): MCP integration

@@ -67,12 +67,12 @@ objects declare structured fields inline.
 - Optional goes on the **name** (`userAge?:number`), never after the type.
 - The string API is **strict**: a modifier that does not apply to its type (e.g. `min` on a boolean) is a parse error, where the fluent API silently ignores it.
 - Inside `object{ ... }`, the `!` internal marker, media types, `cache`, and `item` are rejected (they only apply at the top level).
-- In quoted values, backslashes are doubled — a regex `\d` is written `pattern "\\d+"`.
-- `AxSignature.toString()` renders every construct back to this grammar losslessly, so a signature round-trips — this is what lets a whole flow serialize its node contracts into mermaid `%%ax` directives (see the ax-flow skill).
+- In quoted values, backslashes are doubled: a regex `\d` is written `pattern "\\d+"`.
+- `AxSignature.toString()` renders every construct back to this grammar losslessly, so a signature round-trips. That is what lets a whole flow serialize its node contracts into mermaid `%%ax` directives (see the ax-flow skill).
 
 ## Signature Gallery
 
-Real-world contracts, one line each — every entry below parses with `s()` as written (`#` lines are captions, not part of the signature):
+Real-world contracts, one line each. Every entry below parses with `s()` as written (`#` lines are captions, not part of the signature):
 
 ```text
 # Support triage: several class outputs plus a capped reply draft
@@ -174,7 +174,7 @@ const sig = f()
 
 ### 3. Standard Schema (zod / valibot / arktype)
 
-`.input()` and `.output()` accept any [Standard Schema v1](https://standardschema.dev) compatible library — no wrapper, no adapter. Three shapes work everywhere:
+`.input()` and `.output()` accept any [Standard Schema v1](https://standardschema.dev) compatible library, with no wrapper and no adapter. Three shapes work everywhere:
 
 ```typescript
 import { z } from 'zod';
@@ -235,7 +235,7 @@ const sig3 = f()
 | `{ cache: true }` | Mark input field as a prefix-cache breakpoint |
 | `{ internal: true }` | Mark output field as internal scratchpad (stripped from result) |
 
-The same Standard Schema shapes work on `fn()` tools via `.arg()`, `.returns()`, and `.returnsField()` — argument types are inferred from the schema:
+The same Standard Schema shapes work on `fn()` tools via `.arg()`, `.returns()`, and `.returnsField()`. Argument types are inferred from the schema:
 
 ```typescript
 import { z } from 'zod';
@@ -400,7 +400,7 @@ Bad: `text`, `data`, `input`, `output`, `a`, `x`, `val` (too generic), `1field` 
 ## Critical Rules
 
 - The string form is constraint-complete: reach for modifier bags (`string(max 500)`, `number(min 0, max 10)`, `string(format email)`) and inline `object{ ... }` before switching to fluent/zod just for constraints. Reserve fluent/Standard Schema for zod/valibot-backed fields.
-- The string API is strict — a modifier that does not apply to its type is a parse error (the fluent API silently ignores it).
+- The string API is strict: a modifier that does not apply to its type is a parse error (the fluent API silently ignores it).
 - Use `f()` fluent builder, NOT nested `f.array(f.string())` -- those are removed.
 - Field names must be descriptive (not generic like `text`, `data`, `input`).
 - Image/file media types are input-only, top-level only; audio may also be a single top-level output.
@@ -408,14 +408,14 @@ Bad: `text`, `data`, `input`, `output`, `a`, `x`, `val` (too generic), `1field` 
 - `.cache()` / `{ cache: true }` is input-only (for prompt caching).
 - Validation errors trigger auto-retry with correction feedback.
 - `f.email()`, `f.url()`, `f.date()`, `f.datetime()` are shorthand for `f.string().email()` etc.; `f.dateRange()` and `f.datetimeRange()` return `{ start: Date; end: Date }`.
-- `z.enum()` maps to ax's `class` type — only valid on **output** fields.
-- For multimodal inputs (images, audio, files) and scripted audio outputs, use `f.image()` / `f.audio()` / `f.file()` — zod has no equivalent.
+- `z.enum()` maps to ax's `class` type, and is only valid on **output** fields.
+- For multimodal inputs (images, audio, files) and scripted audio outputs, use `f.image()` / `f.audio()` / `f.file()` (zod has no equivalent).
 
 ## Examples
 
 Fetch these for full working code:
 
-- [Standard Schema (zod)](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/standard-schema.ts) — zod with f() and fn(), all three shapes
-- [Fluent Signature](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/fluent-signature-example.ts) — native fluent f() API
-- [Structured Output](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/structured_output.ts) — structured output with validation
-- [Debug Schema](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/debug_schema.ts) — JSON schema validation
+- [Standard Schema (zod)](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/standard-schema.ts): zod with f() and fn(), all three shapes
+- [Fluent Signature](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/fluent-signature-example.ts): native fluent f() API
+- [Structured Output](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/structured_output.ts): structured output with validation
+- [Debug Schema](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/debug_schema.ts): JSON schema validation

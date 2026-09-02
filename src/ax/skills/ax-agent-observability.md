@@ -40,7 +40,7 @@ axGlobals.onUsage = (event) => usageQueue.enqueue(event);
 
 Each agent run snapshots these globals. A forward-scoped `rateLimiter`, `tracer`, or `meter` overrides agent defaults, child-generator defaults, service hooks, and globals for that invocation. Ax carries it through the distiller, executor, responder, repeated actor turns, citation repair, built-in `llmQuery`, context-map work, checkpoint/tombstone summaries, and other direct internal model calls without mutating child programs or leaking across concurrent runs.
 
-The limiter wraps model execution and its failures propagate. Tracer, meter, and usage-observer failures are fail-open. Runtime-hook spans contain metadata only—never prompts, outputs, tool arguments, or tool results—and preserve agent → internal AxGen → provider/tool parentage. External meter instruments do not replace or derive from balancer-local `getMetrics()` snapshots. Use AxAgent callbacks below when the caller needs structured agent-turn events rather than spans or metrics.
+The limiter wraps model execution and its failures propagate. Tracer, meter, and usage-observer failures are fail-open. Runtime-hook spans contain metadata only (never prompts, outputs, tool arguments, or tool results) and preserve agent → internal AxGen → provider/tool parentage. External meter instruments do not replace or derive from balancer-local `getMetrics()` snapshots. Use AxAgent callbacks below when the caller needs structured agent-turn events rather than spans or metrics.
 
 ## Centralized Usage Observer
 
@@ -203,7 +203,7 @@ Events:
 - `relevance_ranking`: emitted once per ranked domain per forward when `relevanceRanking` is enabled; carries `domain` (`'modules' | 'skills' | 'memories'`), the `shortlist` (`{ id, score }[]`, most relevant first), and `suppressed` (true when the low-confidence guard emitted no hint)
 - `field_auto_promoted`: emitted once per field per run when `autoUpgrade` keeps an oversized undeclared input value runtime-only; carries `fieldName`, `originalChars`, and `promptPreviewChars` (undefined when no inline preview was kept)
 
-To measure whether the advisory hint helps, join per forward: `relevance_ranking.shortlist` ids against what the actor then loaded — for modules the internal `discover` calls (`onFunctionCall` with `kind: 'internal'`, `name: 'discover'`, `args.request`) plus the module part of external `qualifiedName`s; for skills `onLoadedSkills` / `used(id)`; for memories `onLoadedMemories` / `used(id)`.
+To measure whether the advisory hint helps, join per forward: `relevance_ranking.shortlist` ids against what the actor then loaded: for modules the internal `discover` calls (`onFunctionCall` with `kind: 'internal'`, `name: 'discover'`, `args.request`) plus the module part of external `qualifiedName`s; for skills `onLoadedSkills` / `used(id)`; for memories `onLoadedMemories` / `used(id)`.
 
 Rules:
 

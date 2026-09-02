@@ -640,7 +640,7 @@ Provider behavior:
 - Anthropic: implicit via `cache_control` markers
 - OpenAI: explicit `prompt_cache_breakpoint` markers, **GPT-5.6+ only**. Earlier
   families cache automatically and predate the parameters, so nothing is sent to
-  them. Only the `openai` provider opts in — Azure OpenAI shares the request
+  them. Only the `openai` provider opts in. Azure OpenAI shares the request
   builder and the same model enum, so a `gpt-5.6-*` deployment sends nothing,
   and `openai-responses` does not send breakpoints either (it does report
   `cacheCreationTokens`, which is provider-wide)
@@ -667,8 +667,8 @@ per-call options. Generated language packages preserve the same
 marking only "the newest stable message" each turn un-marks what the previous
 turn marked, changing the prefix and voiding the entry that turn wrote. Ax marks
 by absolute index from the front, which is stable for an append-only
-conversation. Anything that rewrites the front of the history — dynamically added
-functions changing the system prompt, or `mem.rewindToTag` — costs a cache miss.
+conversation. Anything that rewrites the front of the history (dynamically added
+functions changing the system prompt, or `mem.rewindToTag`) costs a cache miss.
 
 **Keep caching on for the whole conversation.** The provider marks all or
 nothing, so a turn that omits `contextCache` sends the prompt unmarked and the
@@ -813,22 +813,22 @@ the event runtime sees the request.
 
 Fetch these for full working code:
 
-- [Embeddings](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/embed.ts) — embedding generation
-- [Anthropic Thinking](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/anthropic-thinking-function.ts) — extended thinking with functions
-- [Anthropic Thinking Separation](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/anthropic-thinking-separation.ts) — thinking separation
-- [Anthropic Web Search](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/anthropic-web-search.ts) — Anthropic web search
-- [OpenAI Web Search](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/openai-web-search.ts) — OpenAI web search
-- [OpenAI Responses](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/openai-responses.ts) — OpenAI responses API
-- [o3 Reasoning](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/reasoning-o3-example.ts) — o3 reasoning
-- [Gemini Context Cache](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/gemini-context-cache.ts) — Gemini context caching
-- [Gemini Files](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/gemini-file-support.ts) — Gemini file handling
-- [Grok Live Search](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/grok-live-search.ts) — Grok live search
-- [OpenAI-Compatible](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/openai-compatible.ts) — custom OpenAI-compatible base URL
-- [Vertex AI Auth](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/vertex-auth-example.ts) — Vertex AI authentication
-- [MCP Stdio](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/mcp-client-memory.ts) — MCP stdio transport
-- [MCP HTTP](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/mcp-client-pipedream.ts) — MCP HTTP transport
-- [Telemetry](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/telemetry.ts) — OpenTelemetry tracing
-- [Multi-Modal](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/multi-modal.ts) — image handling
+- [Embeddings](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/embed.ts): embedding generation
+- [Anthropic Thinking](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/anthropic-thinking-function.ts): extended thinking with functions
+- [Anthropic Thinking Separation](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/anthropic-thinking-separation.ts): thinking separation
+- [Anthropic Web Search](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/anthropic-web-search.ts): Anthropic web search
+- [OpenAI Web Search](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/openai-web-search.ts): OpenAI web search
+- [OpenAI Responses](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/openai-responses.ts): OpenAI responses API
+- [o3 Reasoning](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/reasoning-o3-example.ts): o3 reasoning
+- [Gemini Context Cache](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/gemini-context-cache.ts): Gemini context caching
+- [Gemini Files](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/gemini-file-support.ts): Gemini file handling
+- [Grok Live Search](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/grok-live-search.ts): Grok live search
+- [OpenAI-Compatible](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/openai-compatible.ts): custom OpenAI-compatible base URL
+- [Vertex AI Auth](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/vertex-auth-example.ts): Vertex AI authentication
+- [MCP Stdio](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/mcp-client-memory.ts): MCP stdio transport
+- [MCP HTTP](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/mcp-client-pipedream.ts): MCP HTTP transport
+- [Telemetry](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/telemetry.ts): OpenTelemetry tracing
+- [Multi-Modal](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/multi-modal.ts): image handling
 
 ## Do Not Generate
 

@@ -95,7 +95,7 @@ flow.n('processor', 'input:string -> output:string');
 
 ### Rich Node Contracts (String Grammar)
 
-Node signatures accept the full extended string grammar — constraint bags, class decisions, optional fields, and nested objects (full modifier table in the ax-signature skill):
+Node signatures accept the full extended string grammar (constraint bags, class decisions, optional fields, and nested objects; full modifier table in the ax-signature skill):
 
 ```typescript
 flow
@@ -453,7 +453,7 @@ const wf = flow({ mcp: [inventory], ucp: [merchant] })
 ## Mermaid Source (Author or Serialize Flows)
 
 A whole flow can be written as (or exported to) a mermaid flowchart. Pass the
-diagram string straight to `flow()` — a string argument compiles the AxFlow
+diagram string straight to `flow()`: a string argument compiles the AxFlow
 mermaid dialect into a runnable flow (an options object still constructs an
 empty builder). `String(wf)` / `wf.toString()` renders any flow back, so
 `flow(String(wf))` round-trips.
@@ -489,7 +489,7 @@ Render options and bindings:
 
 Every diagram below compiles with `flow(text)` as written (the while loop additionally needs its `conditions` binding).
 
-Linear pipeline — three nodes auto-wired by field name:
+Linear pipeline. Three nodes auto-wired by field name:
 
 ```text
 flowchart TD
@@ -500,7 +500,7 @@ flowchart TD
   extract --> summarize --> redline
 ```
 
-Decision branch — a class diamond routes to per-branch responders, then re-joins:
+Decision branch. A class diamond routes to per-branch responders, then re-joins:
 
 ```text
 flowchart TD
@@ -516,7 +516,7 @@ flowchart TD
   salesReply --> send
 ```
 
-Retry loop — a reviewer sends drafts back with a capped revise edge:
+Retry loop. A reviewer sends drafts back with a capped revise edge:
 
 ```text
 flowchart TD
@@ -529,7 +529,7 @@ flowchart TD
   review -->|revise, max 2| draft
 ```
 
-Fan-out / fan-in — two perspectives run in parallel, then a judge joins them:
+Fan-out / fan-in. Two perspectives run in parallel, then a judge joins them:
 
 ```text
 flowchart TD
@@ -542,7 +542,7 @@ flowchart TD
   proponent & skeptic --> judge
 ```
 
-While loop — repeat until a host-owned condition says stop (`flow(text, { conditions: { keepPolishing } })`):
+While loop. Repeat until a host-owned condition says stop (`flow(text, { conditions: { keepPolishing } })`):
 
 ```text
 flowchart TD
@@ -553,7 +553,7 @@ flowchart TD
   grade -->|while keepPolishing, max 5| polish
 ```
 
-Three-way branch and re-join — triage routes to one of three handlers before delivery:
+Three-way branch and re-join. Triage routes to one of three handlers before delivery:
 
 ```text
 flowchart TD
@@ -572,7 +572,7 @@ flowchart TD
   questionHandler --> send
 ```
 
-Judge panel — three independent drafts fan out, then converge on one verdict:
+Judge panel. Three independent drafts fan out, then converge on one verdict:
 
 ```text
 flowchart TD
@@ -586,7 +586,7 @@ flowchart TD
   draftA & draftB & draftC --> judge
 ```
 
-Escalation ladder — a quality gate either sends the first answer or falls back to level two:
+Escalation ladder. A quality gate either sends the first answer or falls back to level two:
 
 ```text
 flowchart TD
@@ -600,7 +600,7 @@ flowchart TD
   qualityGate -->|escalate| l2Answer --> send
 ```
 
-Itinerary planner — rich contracts stay attached to a simple linear graph:
+Itinerary planner. Rich contracts stay attached to a simple linear graph:
 
 ```text
 flowchart TD
@@ -611,7 +611,7 @@ flowchart TD
   parse --> plan --> price
 ```
 
-Fan-out with capped revision — two sections join, then review can send the assembly back twice:
+Fan-out with capped revision. Two sections join, then review can send the assembly back twice:
 
 ```text
 flowchart TD
@@ -632,14 +632,14 @@ flowchart TD
 
 Fetch these for full working code:
 
-- [Flow](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/ax-flow.ts) — complete flow usage
-- [Mermaid Flow](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/ax-flow-mermaid.ts) — author/serialize a flow as a mermaid diagram
-- [Auto-Parallel](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/ax-flow-auto-parallel.ts) — auto-parallelization
-- [Async Map](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/ax-flow-async-map.ts) — async map transforms
-- [Enhanced Demo](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/ax-flow-enhanced-demo.ts) — instance-based nodes
-- [Flow as Function](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/ax-flow-to-function.ts) — flow as callable function
-- [Fluent Builder](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/fluent-flow-example.ts) — fluent builder pattern
-- [Adaptive Provider Balancing](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/typescript/generation/adaptive-balancer.ts) — cost, deadline, reliability, and failover routing
+- [Flow](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/ax-flow.ts): complete flow usage
+- [Mermaid Flow](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/ax-flow-mermaid.ts): author/serialize a flow as a mermaid diagram
+- [Auto-Parallel](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/ax-flow-auto-parallel.ts): auto-parallelization
+- [Async Map](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/ax-flow-async-map.ts): async map transforms
+- [Enhanced Demo](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/ax-flow-enhanced-demo.ts): instance-based nodes
+- [Flow as Function](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/ax-flow-to-function.ts): flow as callable function
+- [Fluent Builder](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/fluent-flow-example.ts): fluent builder pattern
+- [Adaptive Provider Balancing](https://raw.githubusercontent.com/ax-llm/ax/refs/heads/main/src/examples/typescript/generation/adaptive-balancer.ts): cost, deadline, reliability, and failover routing
 
 ## Event-Triggered Flows
 

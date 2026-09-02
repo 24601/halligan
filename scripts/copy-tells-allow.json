@@ -32,14 +32,6 @@
     "docs/CLAUDE.md": "not yet rewritten; queued for the next anti-tell pass, tells are counted and reported, not suppressed",
     "docs/EVENT_RUNTIME.md": "not yet rewritten; queued for the next anti-tell pass, tells are counted and reported, not suppressed",
     "docs/MIND.md": "owned by another lane this week; scheduled for the second anti-tell rewrite pass",
-    "src/ax/skills/ax-agent-observability.md": "not yet rewritten; queued for the next anti-tell pass, tells are counted and reported, not suppressed",
-    "src/ax/skills/ax-agent-optimize.md": "not yet rewritten; queued for the next anti-tell pass, tells are counted and reported, not suppressed",
-    "src/ax/skills/ax-agent.md": "not yet rewritten; queued for the next anti-tell pass, tells are counted and reported, not suppressed",
-    "src/ax/skills/ax-ai.md": "not yet rewritten; queued for the next anti-tell pass, tells are counted and reported, not suppressed",
-    "src/ax/skills/ax-flow.md": "not yet rewritten; queued for the next anti-tell pass, tells are counted and reported, not suppressed",
-    "src/ax/skills/ax-gen.md": "not yet rewritten; queued for the next anti-tell pass, tells are counted and reported, not suppressed",
-    "src/ax/skills/ax-llm.md": "not yet rewritten; queued for the next anti-tell pass, tells are counted and reported, not suppressed",
-    "src/ax/skills/ax-playbook.md": "owned by another lane this week; scheduled for the second anti-tell rewrite pass",
-    "src/ax/skills/ax-signature.md": "not yet rewritten; queued for the next anti-tell pass, tells are counted and reported, not suppressed"
+    "src/ax/skills/ax-playbook.md": "owned by another lane this week; scheduled for the second anti-tell rewrite pass"
   }
 }
