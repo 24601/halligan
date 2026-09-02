@@ -23,8 +23,10 @@ describe('GEPA discriminative search evaluation', () => {
     // The exploration floor is mandatory and non-optional.
     expect(result.explorationFloorHonoured).toBe(true);
 
-    // The option's mere presence changes nothing on the uniform path.
-    expect(result.uniformIsBitIdenticalToBaseline).toBe(true);
+    // The option's mere presence changes nothing on the uniform path. This is
+    // an implicit-vs-explicit comparison WITHIN this build; the comparison
+    // against `origin/main` is `test:gepa-upstream-compatibility`.
+    expect(result.uniformOptionPresenceChangesNothing).toBe(true);
     expect(result.uniformRandDrawCount).toBe(
       result.explicitUniformRandDrawCount
     );
@@ -42,11 +44,41 @@ describe('GEPA discriminative search evaluation', () => {
       result.fixture1.seedsWhereDiscriminativeCostMore.length
     ).toBeGreaterThan(0);
 
+    // THE SECOND NEGATIVE, ALSO ASSERTED AS A NEGATIVE. The cost measurement
+    // cannot see the axis a variance-weighted design is for — the estimator's
+    // variance, i.e. how often the gate decides correctly at a fixed batch
+    // size — so the gate error rate against the full-population decision is
+    // measured directly, for both strategies, at the same batch size and the
+    // same seeds.
+    //
+    // It does not help either. On fixture 1 the discriminative gate's error
+    // rate is HIGHER, and on both fixtures a larger share of the proposals
+    // that really were improvements is thrown away. The raw error rate falls
+    // on the negative control only because that run produced fewer true
+    // improvements to miss, which is exactly why the normalized number is
+    // reported beside it. These assertions pin the measured direction: a
+    // change that actually makes the mechanism work fails here and forces the
+    // claim and the honesty note to be rewritten with it.
+    for (const fixture of [
+      result.gateQuality.fixture1,
+      result.gateQuality.negativeControl,
+    ]) {
+      expect(fixture.uniform.decisions).toBeGreaterThan(0);
+      expect(fixture.discriminative.decisions).toBeGreaterThan(0);
+      expect(fixture.uniform.decisions).toBe(fixture.discriminative.decisions);
+      expect(fixture.uniform.trulyBetterProposals).toBeGreaterThan(0);
+      expect(fixture.discriminative.trulyBetterProposals).toBeGreaterThan(0);
+      expect(
+        fixture.discriminative.falseRejectRateAmongTrulyBetter
+      ).toBeGreaterThan(fixture.uniform.falseRejectRateAmongTrulyBetter);
+    }
+    expect(result.gateQuality.fixture1.errorRateDelta).toBeGreaterThan(0);
+
     expect(result.budget).toMatchObject({
       providerCalls: 0,
       providerTokens: 0,
       costUsd: 0,
-      maxWallTimeMs: 30_000,
+      maxWallTimeMs: 10_000,
     });
     expect(result.budget.elapsedWallTimeMs).toBeLessThanOrEqual(
       result.budget.maxWallTimeMs
