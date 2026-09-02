@@ -495,6 +495,22 @@ export function beginPipelineSharedSession(
     localUsed: 0,
     localMax: maxSubAgentCalls,
   };
+  // One working-state run id per `forward()`. The distiller never uses it
+  // (its policy sets `maintainsWorkingState: false`), but both stages carry
+  // it so a standalone stage never has to invent one. Using the PROGRAM id
+  // would make the store key constant across runs, so the counter is part of
+  // the id.
+  p._workingStateForwardCount = (p._workingStateForwardCount ?? 0) + 1;
+  const workingStateRunId = `ws:${
+    (typeof p.getId === 'function' ? p.getId() : '') || 'agent'
+  }:${p._workingStateForwardCount}`;
+  distiller._workingStateRunId = workingStateRunId;
+  executor._workingStateRunId = workingStateRunId;
+  // A run that ends at the distiller (direct respond) leaves no working state,
+  // and `getWorkingState()` must say so rather than returning the last run's.
+  distiller._workingStateRun = undefined;
+  executor._workingStateRun = undefined;
+
   distiller._sharedSession = controller;
   executor._sharedSession = controller;
   distiller.llmQueryBudgetState = sharedBudget;

@@ -2,6 +2,7 @@ import type {
   ActionLogEntry,
   CheckpointSummaryState,
 } from '../contextManager.js';
+import type { AxWorkingState } from '../workingState.js';
 import type { buildActorLoopSetup } from './actorLoopSetup.js';
 import type {
   AxAgentContextStage,
@@ -40,6 +41,11 @@ export interface ActorLoopContext {
   contextStage: AxAgentContextStage;
   contextThreshold: any;
   delegatedContextSummary: any;
+  /**
+   * Verifier-gated working state for this run. Present only when the agent
+   * configured `workingState` AND this stage's policy maintains it.
+   */
+  workingState?: AxWorkingState<any>;
   mutableState: MutableActorLoopState;
   helpers: ReturnType<typeof buildActorLoopSetup>;
 }

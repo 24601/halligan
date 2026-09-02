@@ -719,6 +719,18 @@ export class AxAgent<IN extends AxGenIn, OUT extends AxGenOut>
     return this.primaryAgent.getState();
   }
 
+  /**
+   * The committed working state from the most recent `forward()` whose stage
+   * maintained it (the executor). `undefined` when `workingState` is
+   * unconfigured, or when the last run ended at the distiller (a
+   * direct-respond skip) so no stage maintained state.
+   */
+  public getWorkingState():
+    | Readonly<import('../workingState.js').AxWorkingStateDocument<any>>
+    | undefined {
+    return this.executor.getWorkingState();
+  }
+
   public setState(state?: AxAgentState): void {
     this.primaryAgent.setState(state);
   }

@@ -219,6 +219,12 @@ export class ActorAgentRLM<
   private stagePolicy!: AxAgentStagePolicy;
   public state: AxAgentState | undefined;
   public stateError: string | undefined;
+  /** Per-`forward()` working-state run, when this stage maintains one. */
+  public _workingStateRun:
+    | import('./workingState.js').AxWorkingState<any>
+    | undefined;
+  /** Per-`forward()` working-state run id, minted by the pipeline. */
+  public _workingStateRunId: string | undefined;
   private runtimeBootstrapContext: unknown = undefined;
   private llmQueryBudgetState: AxLlmQueryBudgetState | undefined;
   private baseActorDefinition = '';
@@ -457,6 +463,17 @@ export class ActorAgentRLM<
 
   public getId(): string {
     return this.program.getId();
+  }
+
+  /**
+   * The committed working state from the most recent `forward()` on this
+   * stage. `undefined` when `workingState` is unconfigured, or when this
+   * stage's policy does not maintain it (the distiller).
+   */
+  public getWorkingState():
+    | Readonly<import('./workingState.js').AxWorkingStateDocument<any>>
+    | undefined {
+    return this._workingStateRun?.current();
   }
 
   public setId(id: string) {
