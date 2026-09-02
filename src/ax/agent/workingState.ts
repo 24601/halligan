@@ -1049,6 +1049,13 @@ export type AxWorkingStateCommitContext = Readonly<{
   proposal?: 'none' | 'emitted' | 'invalid' | 'error';
   /** Optional bounded summary, retained only under `trace.summaries`. */
   summary?: string;
+  /**
+   * Resolved once, immediately before the Gamma step is built, so the
+   * completion interlock decides against the COMMITTED ledger rather than the
+   * believed one — a patch in this same turn may have just completed the last
+   * pending goal. Returning `'converted'` consumes one budget slot.
+   */
+  resolveCompletionInterlock?: () => 'converted' | 'exhausted' | undefined;
 }>;
 
 /**
@@ -2006,7 +2013,10 @@ export class AxWorkingState<S = Record<string, unknown>> {
 
     this.parkCountForRun += parked.length;
 
-    await this.emitTrace(args);
+    // The interlock is resolved here, after every commit and park for the
+    // turn has landed, so one Gamma record still describes the whole turn.
+    const completionInterlock = context.resolveCompletionInterlock?.();
+    await this.emitTrace({ ...args, completionInterlock });
 
     if (this.parkCountForRun > this.config.maxParksPerRun) {
       throw new AxWorkingStateParkBudgetError(
@@ -2035,6 +2045,7 @@ export class AxWorkingState<S = Record<string, unknown>> {
     outcome: AxWorkingStateCommitOutcome<S>['outcome'];
     proposedDigest: string | undefined;
     checkerVerdict: AxWorkingStateTraceStep['checkerVerdict'];
+    completionInterlock?: 'converted' | 'exhausted';
   }): Promise<void> {
     if (!this.config.traceEnabled || !this.config.onTrace) return;
     const { context } = args;
@@ -2066,6 +2077,9 @@ export class AxWorkingState<S = Record<string, unknown>> {
       committed: args.classified.map((entry) => entry.class),
       parked: args.parked.map((entry) => entry.reason),
       outcome: args.outcome,
+      ...(args.completionInterlock
+        ? { completionInterlock: args.completionInterlock }
+        : {}),
       ...(this.config.traceSummaries && context.summary
         ? { summary: context.summary }
         : {}),

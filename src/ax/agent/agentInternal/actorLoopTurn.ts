@@ -148,6 +148,20 @@ async function runWorkingStateTurn(
   return outcome.guidance ?? [];
 }
 
+/**
+ * Harness-authored interlock guidance: goal ids and statuses only, never
+ * model-authored prose.
+ */
+function buildCompletionInterlockGuidance(
+  pendingGoalIds: readonly string[]
+): string {
+  return (
+    'Working state still lists pending goals, so the run was not completed: ' +
+    `${pendingGoalIds.join(', ')}. ` +
+    'Either produce the tool receipt each goal expects and cite it, or mark the goal blocked with a blocker, then finish.'
+  );
+}
+
 function extractRawActorCode(
   chatLog: readonly AxChatLogEntry[],
   runtimeCodeFieldTitle: string
@@ -665,6 +679,27 @@ export async function runActorTurn<_IN extends AxGenIn>(
         )
       ),
     ];
+    // The completion interlock, when enabled, is resolved AFTER this turn's
+    // commit so it decides against the committed ledger: a patch in this same
+    // turn may have just completed the last pending goal.
+    let interlockDecision: 'converted' | 'exhausted' | undefined;
+    let interlockGoals: readonly string[] = [];
+    const resolveCompletionInterlock = ():
+      | 'converted'
+      | 'exhausted'
+      | undefined => {
+      if (workingState.completionPolicy() !== 'interlock') return undefined;
+      const payload = completionState.payload as
+        | AxAgentInternalCompletionPayload
+        | undefined;
+      if (!payload || payload.type !== 'final') return undefined;
+      const pending = workingState.pendingGoalIds();
+      if (pending.length === 0) return undefined;
+      interlockGoals = pending;
+      interlockDecision = workingState.consumeCompletionInterlock();
+      return interlockDecision;
+    };
+
     const guidanceNotes = await runWorkingStateTurn(
       workingState,
       {
@@ -677,6 +712,7 @@ export async function runActorTurn<_IN extends AxGenIn>(
         selectedSkills: (mutableState.usedSkills ?? []).map(
           (used: { id: string }) => used.id
         ),
+        resolveCompletionInterlock,
       },
       { action: actionLogCode, observation: output },
       _effectiveAbortSignal
@@ -688,6 +724,23 @@ export async function runActorTurn<_IN extends AxGenIn>(
         guidance: guidanceText,
         triggeredBy: 'working state',
       });
+    }
+
+    if (interlockDecision === 'converted') {
+      // Reuse the loop's existing `guide_agent` handling rather than
+      // inventing a completion shape: append the harness guidance, replace
+      // the payload, and let the tail branch below continue the loop. The
+      // guidance names goal ids and statuses only, never model prose.
+      appendGuidanceEntry(guidanceState.entries, {
+        turn: entryTurn,
+        guidance: buildCompletionInterlockGuidance(interlockGoals),
+        triggeredBy: 'working-state',
+      });
+      completionState.payload = {
+        type: 'guide_agent',
+        triggeredBy: 'working-state',
+        guidance: buildCompletionInterlockGuidance(interlockGoals),
+      } as AxAgentGuidancePayload;
     }
   }
 

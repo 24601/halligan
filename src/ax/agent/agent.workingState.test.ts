@@ -616,3 +616,142 @@ describe('working state turn hook', () => {
     expect(writes).not.toHaveBeenCalled();
   });
 });
+
+describe('working state completion policy', () => {
+  const pendingConfig = (
+    overrides?: Partial<AxWorkingStateConfig<any>>
+  ): AxWorkingStateConfig<any> => ({
+    stateSignature: STATE_SIGNATURE,
+    proposer: 'actor',
+    initial: { goals: { g_pick: seededGoal('g_pick') } },
+    ...overrides,
+  });
+
+  it('observe (the default) lets a final with pending goals stand', async () => {
+    // The gate constrains a side document, not the run's report. Saying so
+    // out loud is the honest form of the claim.
+    const traces: AxWorkingStateTraceStep[] = [];
+    const {
+      agent: built,
+      ai,
+      executorPrompts,
+    } = makeAgent(
+      { distiller: [DISTILL], executor: [FINAL] },
+      pendingConfig({
+        trace: true,
+        onTrace: (step) => {
+          traces.push(step);
+        },
+      })
+    );
+
+    const result = await built.forward(ai, { task: 'finish early' } as never);
+    expect(result).toBeDefined();
+    expect(built.getWorkingState()?.goals.g_pick?.status).toBe('pending');
+    expect(executorPrompts).toHaveLength(1);
+    expect(traces.every((step) => step.completionInterlock === undefined)).toBe(
+      true
+    );
+  });
+
+  it('interlock converts a final with pending goals into guidance and continues', async () => {
+    const traces: AxWorkingStateTraceStep[] = [];
+    const {
+      agent: built,
+      ai,
+      executorPrompts,
+    } = makeAgent(
+      { distiller: [DISTILL], executor: [FINAL] },
+      pendingConfig({
+        completionPolicy: 'interlock',
+        maxCompletionInterlocks: 1,
+        trace: true,
+        onTrace: (step) => {
+          traces.push(step);
+        },
+      })
+    );
+
+    await built.forward(ai, { task: 'finish early' } as never);
+
+    expect(
+      traces.some((step) => step.completionInterlock === 'converted')
+    ).toBe(true);
+    // The loop really continued: the actor was prompted again, and the
+    // harness guidance named the pending goal.
+    expect(executorPrompts.length).toBeGreaterThan(1);
+    expect(executorPrompts[1] ?? '').toContain('g_pick');
+  });
+
+  it('stops after maxCompletionInterlocks and lets the final stand', async () => {
+    const traces: AxWorkingStateTraceStep[] = [];
+    const {
+      agent: built,
+      ai,
+      executorPrompts,
+    } = makeAgent(
+      { distiller: [DISTILL], executor: [FINAL] },
+      pendingConfig({
+        completionPolicy: 'interlock',
+        maxCompletionInterlocks: 1,
+        trace: true,
+        onTrace: (step) => {
+          traces.push(step);
+        },
+      })
+    );
+
+    const result = await built.forward(ai, { task: 'finish early' } as never);
+
+    expect(
+      traces.filter((step) => step.completionInterlock === 'converted')
+    ).toHaveLength(1);
+    expect(
+      traces.some((step) => step.completionInterlock === 'exhausted')
+    ).toBe(true);
+    // Bounded: an over-strict gate cannot loop forever, and the run completes.
+    expect(result).toBeDefined();
+    expect(executorPrompts.length).toBe(2);
+  });
+
+  it('does not interlock once every goal is resolved', async () => {
+    const {
+      agent: built,
+      ai,
+      executorPrompts,
+    } = makeAgent(
+      {
+        distiller: [DISTILL],
+        executor: ['await inventory.pick({order:"42"})', FINAL],
+      },
+      pendingConfig({
+        completionPolicy: 'interlock',
+        proposer: 'on-change',
+        initial: {
+          goals: {
+            g_pick: seededGoal('g_pick', { expects: ['inventory.pick'] }),
+          },
+        },
+        proposeWith: async (input) => {
+          const ref = /^(r\d+)\s/m.exec(input.receiptRoster)?.[1];
+          if (!ref) return { statePatch: [] };
+          return {
+            statePatch: [
+              {
+                op: 'add',
+                path: '/goals/g_pick/evidence/-',
+                value: { kind: 'tool_receipt', ref },
+              },
+              { op: 'replace', path: '/goals/g_pick/status', value: 'done' },
+            ],
+          };
+        },
+      })
+    );
+
+    await built.forward(ai, { task: 'pack then finish' } as never);
+    expect(built.getWorkingState()?.goals.g_pick?.status).toBe('done');
+    // Two scripted turns and no interlock re-prompt.
+    expect(executorPrompts).toHaveLength(2);
+  });
+});
