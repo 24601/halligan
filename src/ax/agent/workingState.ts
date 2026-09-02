@@ -304,6 +304,14 @@ export type AxWorkingStateTraceStep = Readonly<{
   outcome: 'committed' | 'partially_committed' | 'unchanged' | 'rejected';
   /** Set when a completion interlock fired or was exhausted this turn. */
   completionInterlock?: 'converted' | 'exhausted';
+  /**
+   * The typed error this turn RECORDED rather than threw: a forbidden path
+   * (`working_state_forbidden_path`) or a rebase that ran out of attempts
+   * (`state_revision_conflict`). Serializable and harness-authored — `path`
+   * is the canonical pointer, never the model's text. The typed instance
+   * itself travels on `AxWorkingStateCommitOutcome.error`.
+   */
+  error?: Readonly<{ code: string; path?: string; goalId?: string }>;
   /** Optional bounded human summary; retained only when `trace.summaries`. */
   summary?: string;
   at: number;
@@ -481,6 +489,13 @@ export type AxWorkingStateCommitOutcome<S = Record<string, unknown>> =
     outcome: 'committed' | 'partially_committed' | 'unchanged' | 'rejected';
     /** Harness-generated guidance codes the actor loop renders. Never model text. */
     guidance?: readonly AxWorkingStateGuidanceNote[];
+    /**
+     * The typed error recorded for this turn. Recorded, never thrown: a
+     * forbidden path poisons the error-escalation policy if it reaches the
+     * actor turn, and a revision conflict is an in-run condition. The same
+     * failure appears on the Gamma record's `error`.
+     */
+    error?: AxWorkingStateForbiddenPathError | AxWorkingStateConflictError;
   }>;
 
 /** Serializable snapshot carried on `AxAgentState`. */
@@ -1403,11 +1418,16 @@ export class AxWorkingState<S = Record<string, unknown>> {
         outcome: 'rejected',
         proposedDigest: undefined,
         checkerVerdict: { status: 'skipped' },
-        forbiddenError: new AxWorkingStateForbiddenPathError(
+        // Recorded, not thrown: throwing here would poison the actor turn's
+        // error-escalation policy. The typed instance carries the raw pointer
+        // for the HOST's audit; only the canonical pointer reaches the trace.
+        recordedError: new AxWorkingStateForbiddenPathError(
           forbidden.op.path,
           forbidden.class,
           context.turn
         ),
+        recordedErrorPath: forbidden.canonicalPath,
+        ...(forbidden.goalId ? { recordedErrorGoalId: forbidden.goalId } : {}),
       });
       return outcome;
     }
@@ -1539,12 +1559,13 @@ export class AxWorkingState<S = Record<string, unknown>> {
       });
     }
 
-    const committed = await this.applyAndStore(
+    const stored = await this.applyAndStore(
       survivors,
       context,
       parked,
       guidance
     );
+    const committed = stored.committed;
 
     return this.finish({
       believed,
@@ -1560,6 +1581,7 @@ export class AxWorkingState<S = Record<string, unknown>> {
             : 'committed',
       proposedDigest,
       checkerVerdict,
+      ...(stored.error ? { recordedError: stored.error } : {}),
     });
   }
 
@@ -1951,7 +1973,12 @@ export class AxWorkingState<S = Record<string, unknown>> {
     context: AxWorkingStateCommitContext,
     parked: AxWorkingStateParkedDelta[],
     guidance: AxWorkingStateGuidanceNote[]
-  ): Promise<AxWorkingStateClassifiedOp[]> {
+  ): Promise<
+    Readonly<{
+      committed: AxWorkingStateClassifiedOp[];
+      error?: AxWorkingStateConflictError;
+    }>
+  > {
     let attempt = 0;
     let working = survivors;
     while (attempt < 2) {
@@ -1964,7 +1991,7 @@ export class AxWorkingState<S = Record<string, unknown>> {
         guidance.push(
           this.guidanceNote('patch_invalid', working[applied.index])
         );
-        return [];
+        return { committed: [] };
       }
       const next = this.stampTurns(
         applied.value as AxWorkingStateDocument<S>,
@@ -1986,7 +2013,9 @@ export class AxWorkingState<S = Record<string, unknown>> {
         );
         this.document = withParks;
         this.revision = envelope.revision;
-        return working.filter((entry) => entry.class !== 'guard');
+        return {
+          committed: working.filter((entry) => entry.class !== 'guard'),
+        };
       } catch (err) {
         // A host store may throw anything, so "conflict" is decided by
         // EVIDENCE rather than by the error's shape: reload and see whether
@@ -2021,13 +2050,16 @@ export class AxWorkingState<S = Record<string, unknown>> {
             guidance.push(this.guidanceNote('revision_conflict', entry));
           }
           // Recorded, not thrown: a conflict is an in-run condition, and the
-          // retry is bounded at one rebase.
-          void new AxWorkingStateConflictError(
-            this.config.storeKey,
-            this.revision,
-            context.turn
-          );
-          return [];
+          // retry is bounded at one rebase. The typed error travels out on the
+          // commit outcome and as `error` on the Gamma record.
+          return {
+            committed: [],
+            error: new AxWorkingStateConflictError(
+              this.config.storeKey,
+              this.revision,
+              context.turn
+            ),
+          };
         }
         this.revision = reloaded.revision;
         if (isRecord(reloaded.state)) {
@@ -2048,11 +2080,11 @@ export class AxWorkingState<S = Record<string, unknown>> {
           (entry) => entry.kernelVerdict === 'admissible'
         );
         if (working.filter((entry) => entry.class !== 'guard').length === 0) {
-          return [];
+          return { committed: [] };
         }
       }
     }
-    return [];
+    return { committed: [] };
   }
 
   private stampTurns(
@@ -2107,7 +2139,12 @@ export class AxWorkingState<S = Record<string, unknown>> {
     outcome: AxWorkingStateCommitOutcome<S>['outcome'];
     proposedDigest: string | undefined;
     checkerVerdict: AxWorkingStateTraceStep['checkerVerdict'];
-    forbiddenError?: AxWorkingStateForbiddenPathError;
+    /** Recorded, never thrown. Surfaced on the outcome and the Gamma record. */
+    recordedError?:
+      | AxWorkingStateForbiddenPathError
+      | AxWorkingStateConflictError;
+    recordedErrorPath?: string;
+    recordedErrorGoalId?: string;
   }): Promise<AxWorkingStateCommitOutcome<S>> {
     const { context, parked, guidance } = args;
 
@@ -2164,6 +2201,7 @@ export class AxWorkingState<S = Record<string, unknown>> {
       parked,
       outcome: args.outcome,
       ...(guidance.length > 0 ? { guidance } : {}),
+      ...(args.recordedError ? { error: args.recordedError } : {}),
     };
   }
 
@@ -2176,6 +2214,11 @@ export class AxWorkingState<S = Record<string, unknown>> {
     proposedDigest: string | undefined;
     checkerVerdict: AxWorkingStateTraceStep['checkerVerdict'];
     completionInterlock?: 'converted' | 'exhausted';
+    recordedError?:
+      | AxWorkingStateForbiddenPathError
+      | AxWorkingStateConflictError;
+    recordedErrorPath?: string;
+    recordedErrorGoalId?: string;
   }): Promise<void> {
     if (!this.config.traceEnabled || !this.config.onTrace) return;
     const { context } = args;
@@ -2209,6 +2252,20 @@ export class AxWorkingState<S = Record<string, unknown>> {
       outcome: args.outcome,
       ...(args.completionInterlock
         ? { completionInterlock: args.completionInterlock }
+        : {}),
+      ...(args.recordedError
+        ? {
+            error: {
+              code: args.recordedError.code,
+              // The canonical pointer, never the model's own path text.
+              ...(args.recordedErrorPath
+                ? { path: args.recordedErrorPath }
+                : {}),
+              ...(args.recordedErrorGoalId
+                ? { goalId: args.recordedErrorGoalId }
+                : {}),
+            },
+          }
         : {}),
       ...(this.config.traceSummaries && context.summary
         ? { summary: context.summary }

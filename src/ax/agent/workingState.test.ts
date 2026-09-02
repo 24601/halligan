@@ -12,6 +12,8 @@ import {
   type AxWorkingState,
   type AxWorkingStateCheckerPolicy,
   type AxWorkingStateConfig,
+  AxWorkingStateConflictError,
+  AxWorkingStateForbiddenPathError,
   type AxWorkingStateGoal,
   AxWorkingStateParkBudgetError,
   AxWorkingStateSchemaError,
@@ -345,6 +347,33 @@ describe('AxWorkingState classification table', () => {
     expect(outcome.guidance?.[0]?.code).toBe('forbidden_path');
     expect(state.current().goals.g!.goal).toBe('do g');
     expect(state.current().schemaVersion).toBe(1);
+    // Recorded, not thrown: the error is an OBSERVABLE on the outcome, and it
+    // carries the raw pointer for the host's audit.
+    expect(outcome.error).toBeInstanceOf(AxWorkingStateForbiddenPathError);
+    expect(outcome.error?.code).toBe('working_state_forbidden_path');
+    expect(
+      (outcome.error as AxWorkingStateForbiddenPathError | undefined)?.path
+    ).toBe('/schemaVersion');
+  });
+
+  it('records the forbidden-path error on the gamma record with the canonical pointer', async () => {
+    const traces: AxWorkingStateTraceStep[] = [];
+    const state = await makeState({
+      initial: { goals: { g: goal('g') } },
+      trace: true,
+      onTrace: (step) => {
+        traces.push(step);
+      },
+    });
+    await state.commit(
+      patch([{ op: 'replace', path: '/goals/g/createdTurn', value: 99 }]),
+      TURN
+    );
+    expect(traces[0]?.error).toEqual({
+      code: 'working_state_forbidden_path',
+      path: '/goals/g/<reserved>',
+      goalId: 'g',
+    });
   });
 
   it('forbids a wholesale replace of /goals or /facts', async () => {
@@ -1128,6 +1157,49 @@ describe('AxWorkingState parks, budgets and store', () => {
     expect(outcome.parked.map((entry) => entry.reason)).toEqual([
       'revision_conflict',
     ]);
+    // Recorded, not thrown: the typed error is an observable, not a rumour.
+    expect(outcome.error).toBeInstanceOf(AxWorkingStateConflictError);
+    expect(outcome.error?.code).toBe('state_revision_conflict');
+  });
+
+  it('records the conflict error on the gamma record too', async () => {
+    const inner = new AxInMemoryProgramStateStore();
+    let conflicts = 0;
+    const store: AxProgramStateStore = {
+      load: (key) => inner.load(key),
+      compareAndSet: async (key, expected, state, fence) => {
+        conflicts += 1;
+        if (conflicts <= 2) {
+          await inner.compareAndSet(
+            key,
+            (await inner.load(key))?.revision,
+            state,
+            fence
+          );
+          throw new Error('revision mismatch');
+        }
+        return inner.compareAndSet(key, expected, state, fence);
+      },
+      delete: (key) => inner.delete(key),
+    };
+    const traces: AxWorkingStateTraceStep[] = [];
+    const state = await axWorkingState<Facts>(
+      {
+        stateSignature: STATE_SIGNATURE,
+        store,
+        clock: new AxManualEventClock(0),
+        trace: true,
+        onTrace: (step) => {
+          traces.push(step);
+        },
+      },
+      { runId: 'ws:test:1', stage: 'executor' }
+    );
+    await state.commit(
+      patch([{ op: 'add', path: '/facts/shipped', value: true }]),
+      TURN
+    );
+    expect(traces[0]?.error).toEqual({ code: 'state_revision_conflict' });
   });
 
   it('throws AxWorkingStateStoreError with phase commit when the store fails without moving', async () => {
