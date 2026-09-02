@@ -36,6 +36,27 @@ export type AxSha256Digest = string & { readonly [axDigestBrand]: 'sha256' };
 
 export type AxDigestStrength = 'checksum' | 'correlation' | 'identity';
 
+/**
+ * Total order over UTF-16 code units — the ONLY ordering allowed to decide the
+ * byte sequence that goes into an identity digest.
+ *
+ * `String.prototype.localeCompare` resolves collation from the host process's
+ * default locale (Node derives it from `LC_ALL`/`LANG` through ICU), so a
+ * digest whose array members were locale-sorted is a function of the input AND
+ * the environment: under `da-DK` "aal" sorts after "abc", and even under
+ * `en-US` ICU root collation puts "exec.aB" before "exec.ab" where code-unit
+ * order is the reverse. Two hosts then compute two different identities for the
+ * same value, which silently breaks digest equality, ledger idempotency, and
+ * every artifact that has already frozen one of the two.
+ *
+ * This is the same order `axEventCanonicalJson` (`../../event/util.ts`) uses
+ * for object keys — a bare `.sort()`, i.e. code-unit — so array order and key
+ * order inside one canonical document agree.
+ */
+export function axCompareCodeUnits(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 const FNV1A64_PATTERN = /^fnv1a64:[0-9a-f]{16}$/;
 const SHA256_64_PATTERN = /^sha256-64:[0-9a-f]{16}$/;
 const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/;

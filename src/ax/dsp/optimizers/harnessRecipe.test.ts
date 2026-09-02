@@ -73,6 +73,43 @@ describe('axHarnessRecipe', () => {
     expect(forward.version).toBe(axHarnessRecipeVersion);
   });
 
+  it('orders bindings by code unit, so the digest is locale-independent', async () => {
+    // REGRESSION for a locale-dependent identity. `bindings` is an ARRAY, so
+    // its order is part of the canonical JSON and therefore part of the digest.
+    // `localeCompare` resolves collation from the process locale, so a digest
+    // sorted that way is a function of the input AND of `LANG`.
+    //
+    // Both pairs below are collation traps:
+    //   - `exec.aB` vs `exec.ab`: ICU root collation (what a default `en-US`
+    //     Node returns) orders `ab` BEFORE `aB`; code-unit order is the
+    //     reverse, because 'B' (0x42) < 'b' (0x62). This pair fails under the
+    //     locale CI actually runs in, not only under an exotic one.
+    //   - `aal.dispatch` vs `abc.dispatch`: Danish collation treats `aa` as
+    //     `å` and sorts it after `z`.
+    expect('exec.aB'.localeCompare('exec.ab')).toBe(1);
+    const recipe = await axHarnessRecipe({
+      boundModelId: 'gpt-test',
+      bindings: [
+        { port: 'exec.ab', atomId: 'atom-ab', version: '1' },
+        { port: 'abc.dispatch', atomId: 'atom-abc', version: '1' },
+        { port: 'exec.aB', atomId: 'atom-aB', version: '1' },
+        { port: 'aal.dispatch', atomId: 'atom-aal', version: '1' },
+      ],
+    });
+    expect(recipe.bindings.map((atom) => atom.port)).toEqual([
+      'aal.dispatch',
+      'abc.dispatch',
+      'exec.aB',
+      'exec.ab',
+    ]);
+    // FROZEN. A reintroduced `localeCompare` reorders the array above and
+    // changes these bytes. Do not regenerate this constant to make a failure
+    // go away: it is the identity a stale-candidate refusal keys on.
+    expect(recipe.digest).toBe(
+      'sha256:b0c4b6bf95d3f0b69c924c5fd2d48c057f1077a99bf689a8b957e15f7b85a35f'
+    );
+  });
+
   it('digests exactly the canonical bindings plus the bound model id', async () => {
     // The reuse claim is executable: this is `axEventCanonicalJson` and
     // WebCrypto, not a second serializer and not a truncated hash.

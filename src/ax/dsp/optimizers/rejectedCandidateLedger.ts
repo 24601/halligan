@@ -4,6 +4,7 @@ import {
   type AxSha256Digest,
   type AxSha256Digest64,
   axAssertDigestStrength,
+  axCompareCodeUnits,
   axSha256Digest,
 } from './digests.js';
 import type { AxHarnessStamp } from './harnessRecipe.js';
@@ -336,7 +337,14 @@ export async function axRejectedCandidateDigest(
         afterFingerprint: entry.afterFingerprint as string,
       };
     })
-    .sort((left, right) => left.componentId.localeCompare(right.componentId));
+    // Code-unit order, never `localeCompare`: `componentDelta` is an array, so
+    // its order is part of the canonical JSON this key is hashed from, and a
+    // locale-sensitive comparison would make the ledger's primary key depend
+    // on the host's `LANG` — two processes would stop deduplicating the same
+    // rejected candidate. See `axCompareCodeUnits`.
+    .sort((left, right) =>
+      axCompareCodeUnits(left.componentId, right.componentId)
+    );
   return await axSha256Digest(
     axEventCanonicalJson({
       componentDelta,

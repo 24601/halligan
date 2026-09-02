@@ -990,6 +990,7 @@ import {
   type AxSha256Digest,
   type AxSha256Digest64,
   axAssertDigestStrength,
+  axCompareCodeUnits,
   axDigestStrength,
   axFnv1a64Digest,
   axIsDigestStrengthError,
@@ -2130,6 +2131,7 @@ export { axCloneCausalCandidateEvidenceManifest };
 export { axCodeRuntimeProtocol };
 export { axCodeRuntimeProtocolVersion };
 export { axCollectGrantRequirements };
+export { axCompareCodeUnits };
 export { axComputeInclusionProbabilities };
 export { axConcatBase64 };
 export { axCreateCausalCandidateEvidenceManifest };

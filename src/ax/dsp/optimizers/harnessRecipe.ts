@@ -1,5 +1,9 @@
 import { axEventCanonicalJson } from '../../event/util.js';
-import { type AxSha256Digest, axSha256Digest } from './digests.js';
+import {
+  type AxSha256Digest,
+  axCompareCodeUnits,
+  axSha256Digest,
+} from './digests.js';
 
 /**
  * Named sockets *around* a program.
@@ -188,11 +192,15 @@ export async function axHarnessRecipe(
     );
   }
   // Sorting before digesting is what makes the digest independent of the order
-  // a host happened to list its sockets in.
+  // a host happened to list its sockets in. The comparison is by UTF-16 code
+  // unit and NEVER `localeCompare`: `bindings` is an array, so its order is
+  // part of the canonical JSON and therefore part of the digest, and a
+  // locale-sensitive comparison would make the identity depend on the host's
+  // `LANG`. See `axCompareCodeUnits`.
   bindings.sort((left, right) =>
     left.port === right.port
-      ? left.atomId.localeCompare(right.atomId)
-      : left.port.localeCompare(right.port)
+      ? axCompareCodeUnits(left.atomId, right.atomId)
+      : axCompareCodeUnits(left.port, right.port)
   );
 
   // `boundModelId` is INSIDE the digest: the same binding set tuned against a

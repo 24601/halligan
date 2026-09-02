@@ -279,6 +279,43 @@ describe('axRejectedCandidateDigest', () => {
     expect(changed).not.toBe(a);
   });
 
+  it('orders the component delta by code unit, so the key is locale-independent', async () => {
+    // REGRESSION: this digest is the ledger's PRIMARY KEY. `componentDelta` is
+    // an array, so its order is hashed. Sorted with `localeCompare` the key
+    // depends on the process locale, and two hosts with different `LANG` stop
+    // deduplicating the same rejected candidate — `record`'s documented
+    // "idempotent by candidateDigest" quietly stops holding.
+    //
+    // `exec.aB` before `exec.ab` is code-unit order and the REVERSE of what
+    // ICU root collation (a default `en-US` Node) returns, so this fails under
+    // the locale CI runs in.
+    expect('exec.aB'.localeCompare('exec.ab')).toBe(1);
+    const key = await axRejectedCandidateDigest({
+      componentDelta: [
+        {
+          componentId: 'exec.ab',
+          afterFingerprint: 'sha256-64:0000000000000001' as AxSha256Digest64,
+        },
+        {
+          componentId: 'abc.dispatch',
+          afterFingerprint: 'sha256-64:0000000000000002' as AxSha256Digest64,
+        },
+        {
+          componentId: 'exec.aB',
+          afterFingerprint: 'sha256-64:0000000000000003' as AxSha256Digest64,
+        },
+        {
+          componentId: 'aal.dispatch',
+          afterFingerprint: 'sha256-64:0000000000000004' as AxSha256Digest64,
+        },
+      ],
+    });
+    // FROZEN. A reintroduced locale-sensitive comparison changes these bytes.
+    expect(key).toBe(
+      'sha256:5cc0b53b22b925f8c8bbe5a74dab359a63291ccd1ec094b0cb8ee96001fae95d'
+    );
+  });
+
   it('separates candidates bound to different harnesses', async () => {
     const componentDelta = [
       { componentId: 'root::instruction', afterFingerprint: fingerprint('a') },

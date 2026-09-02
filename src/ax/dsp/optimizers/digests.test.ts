@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
+import { axEventCanonicalJson } from '../../event/util.js';
 import { sha256 } from '../../util/crypto.js';
 import {
   axAssertDigestStrength,
+  axCompareCodeUnits,
   axDigestStrength,
   axFnv1a64Digest,
   axIsDigestStrengthError,
@@ -220,5 +222,34 @@ describe('optimizer digests', () => {
     }
     // ...and the async one still does.
     expect(axDigestStrength(await axSha256Digest('probe'))).toBe('identity');
+  });
+});
+
+describe('axCompareCodeUnits', () => {
+  it('orders by UTF-16 code unit and disagrees with the host collation', () => {
+    // The whole reason this helper exists: ICU root collation (what a default
+    // `en-US` Node returns from `localeCompare`) puts 'ab' before 'aB', while
+    // code units put 'aB' first because 'B' (0x42) < 'b' (0x62). An identity
+    // digest sorted the collation way is a function of `LANG`, not of its
+    // input. The `localeCompare` assertion is here so this test documents the
+    // disagreement rather than asserting one side of it in isolation.
+    expect('exec.aB'.localeCompare('exec.ab')).toBe(1);
+    expect(axCompareCodeUnits('exec.aB', 'exec.ab')).toBe(-1);
+    expect(axCompareCodeUnits('exec.ab', 'exec.aB')).toBe(1);
+    expect(axCompareCodeUnits('aal', 'abc')).toBe(-1);
+    expect(axCompareCodeUnits('same', 'same')).toBe(0);
+  });
+
+  it('is the same order axEventCanonicalJson uses for object keys', () => {
+    // Array order and key order inside one canonical document must agree, or a
+    // digest is internally inconsistent about what "sorted" means.
+    const keys = ['exec.ab', 'exec.aB', 'abc', 'aal', 'Z', 'a'];
+    expect([...keys].sort(axCompareCodeUnits)).toEqual([...keys].sort());
+    const canonical = axEventCanonicalJson(
+      Object.fromEntries(keys.map((key) => [key, 0]))
+    );
+    expect(
+      Object.keys(JSON.parse(canonical) as Record<string, number>)
+    ).toEqual([...keys].sort(axCompareCodeUnits));
   });
 });
