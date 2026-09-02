@@ -26,9 +26,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  CROSS_TARGET_EXCLUDED_SUITES,
   conformanceRoot,
   DEFAULT_TARGETS,
-  ENGINE_ONLY_SUITES,
   loadOrPrepareRunners,
 } from './axir-perturb-check.mjs';
 
@@ -108,7 +108,7 @@ function discoverCases() {
   const suites = readdirSync(conformanceRoot, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name)
-    .filter((name) => !ENGINE_ONLY_SUITES.has(name))
+    .filter((name) => !CROSS_TARGET_EXCLUDED_SUITES.has(name))
     .sort();
   const cases = [];
   for (const suite of suites) {

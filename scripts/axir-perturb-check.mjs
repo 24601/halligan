@@ -32,12 +32,26 @@ const PREPARED_RUNNER_MANIFEST = '.axir-perturb-runner.json';
 // not in this harness. Mirrors conformanceSuitePaths, which also omits them.
 export const ENGINE_ONLY_SUITES = new Set(['axagent-real']);
 
+// TypeScript-only suites: their fixture kinds are consumed by the TypeScript
+// runtime and are deliberately absent from conformanceSuitePaths in
+// tools/axir/internal/axir/verify.go, so the five generated targets have no
+// handler for them and abort with an unknown-fixture-kind error. Keep this in
+// sync with that allow-list: a suite becomes cross-target only once every
+// generated runner implements its fixture kind.
+export const TS_ONLY_SUITES = new Set(['axmind']);
+
+// Suites the five generated targets cannot run in this harness.
+export const CROSS_TARGET_EXCLUDED_SUITES = new Set([
+  ...ENGINE_ONLY_SUITES,
+  ...TS_ONLY_SUITES,
+]);
+
 // One representative fixture per suite: the alphabetically first .json file.
 export function sampleFixtures(root = conformanceRoot) {
   const suites = readdirSync(root, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name)
-    .filter((name) => !ENGINE_ONLY_SUITES.has(name))
+    .filter((name) => !CROSS_TARGET_EXCLUDED_SUITES.has(name))
     .sort();
   const sample = [];
   for (const suite of suites) {
