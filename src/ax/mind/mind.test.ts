@@ -1,23 +1,32 @@
 import { describe, expect, it } from 'vitest';
 
 import { AxAgentSessionHost } from '../agent/retainedSessions.js';
+import { AxMockAIService } from '../ai/mock/api.js';
 import type { AxAIService } from '../ai/types.js';
 import { AxSignature } from '../dsp/sig.js';
 import type { AxProgrammable } from '../dsp/types.js';
+import { AxInMemoryEventStore } from '../event/memoryStore.js';
 import { AxManualEventClock } from '../event/types.js';
+import { axEventId } from '../event/util.js';
 import { AxInMemoryTrajectoryStore } from '../trajectory/memoryStore.js';
 import { axTrajectoryTypeRegistry } from '../trajectory/registry.js';
-import type {
-  AxTrajectoryStep,
-  AxTrajectoryStore,
+import type { AxTrajectoryRollupStore } from '../trajectory/rollups.js';
+import {
+  AxTrajectoryQueryError,
+  AxTrajectoryRollupError,
+  type AxTrajectoryStep,
+  type AxTrajectoryStore,
 } from '../trajectory/types.js';
 import { AxMind, type AxMindOptions, mind } from './mind.js';
+import { axMindMonolith, axMindResponder } from './thinkers.js';
 import {
   AxInMemoryMindOwnershipStore,
   type AxMindDiagnostic,
+  type AxMindEffectLedger,
   type AxMindThinker,
   axDefaultMindSubscription,
   axIsMindBudgetExceededError,
+  axIsMindChatError,
   axIsMindConfigurationError,
   axMindStaticArtifacts,
 } from './types.js';
@@ -847,6 +856,859 @@ describe('AxMind health and shutdown', () => {
     expect(request?.projection).toBeDefined();
     expect(request?.artifacts).toMatchObject({ revision: 'rev-1' });
     expect(Array.isArray(request?.signals)).toBe(true);
+    await instance.close({ drain: false, timeoutMs: 200 });
+  });
+});
+
+/**
+ * A probe whose usage ACCUMULATES across runs, the way every real `AxProgram`'s
+ * does: `getUsage()` reports everything since the last `resetUsage()`, and the
+ * runtime reuses one program per thinker for the mind's whole life.
+ */
+function accumulatingProgram(perCall: number): ProbeProgram {
+  let total = 0;
+  const program = probeProgram(() => {
+    total += perCall;
+    return { reply: 'ok' };
+  });
+  (program as unknown as { getUsage: () => unknown }).getUsage = () => [
+    {
+      ai: 'probe',
+      model: 'probe',
+      tokens: {
+        promptTokens: total,
+        completionTokens: 0,
+        totalTokens: total,
+      },
+    },
+  ];
+  return program;
+}
+
+const FAST_PACER = Object.freeze({
+  baseMs: 1,
+  factor: 1,
+  capMs: 10,
+  hold: 50,
+  thoughtCapMs: 5,
+});
+
+async function errorSteps(
+  store: AxTrajectoryStore
+): Promise<readonly Readonly<AxTrajectoryStep>[]> {
+  return (await typesIn(store)).filter((step) => step.type === 'error');
+}
+
+describe('AxMind per-step budgets', () => {
+  it('caps the tokens ONE step spends, never the thinker`s lifetime total', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const store = await seed(clock);
+    // Four hundred a wake under a thousand-token cap. A lifetime counter
+    // crosses the cap on wake three and never comes back down, so the mind
+    // errors on every wake forever; a per-step budget never trips at all.
+    const program = accumulatingProgram(400);
+    const instance = mind(
+      baseOptions(store, [
+        thinkerWith('monolith', program, {
+          budget: {
+            maxWallClockMs: 5_000,
+            maxTokens: 1_000,
+            maxSubRuns: 2,
+            maxDepth: 1,
+          },
+          pacer: FAST_PACER,
+        }),
+      ])
+    );
+    await instance.start();
+    await settle(clock, 5, 80);
+    expect(program.calls.length).toBeGreaterThan(6);
+    expect(await errorSteps(store)).toHaveLength(0);
+    expect(instance.health().thinkers[0]?.consecutiveErrors).toBe(0);
+    await instance.close({ drain: false, timeoutMs: 200 });
+  });
+
+  it('still refuses ONE step that spends over the cap', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const store = await seed(clock);
+    // The negative half: the dimension is real, not merely unreachable.
+    const program = accumulatingProgram(1_500);
+    const instance = mind(
+      baseOptions(store, [
+        thinkerWith('monolith', program, {
+          budget: {
+            maxWallClockMs: 5_000,
+            maxTokens: 1_000,
+            maxSubRuns: 2,
+            maxDepth: 1,
+          },
+          pacer: FAST_PACER,
+        }),
+      ])
+    );
+    await instance.start();
+    await settle(clock, 5, 40);
+    const errors = await errorSteps(store);
+    expect(errors.length).toBeGreaterThan(0);
+    expect(String(errors[0]?.data.content)).toMatch(/tokens over 1000/);
+    await instance.close({ drain: false, timeoutMs: 200 });
+  });
+});
+
+describe('AxMind step settlement', () => {
+  it('counts work a thinker does in its own sink, and never calls that wake idle', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const store = await seed(clock);
+    const program = probeProgram();
+    let writes = 0;
+    const thinker = thinkerWith('worker', program, {
+      subscription: { ...axDefaultMindSubscription, watchdogMs: 0 },
+      sinks: [
+        {
+          id: 'worker.effect',
+          write: async () => {
+            writes++;
+            await instance.append({
+              trajectoryId: '',
+              type: 'action',
+              source: 'worker',
+              launchedBy: 'worker',
+              data: { content: 'answered from the sink' },
+            });
+          },
+        },
+      ],
+    });
+    // The sink closes over `instance`, which the factory below returns: a
+    // closure body is evaluated when it runs, not when it is written.
+    const instance = mind(baseOptions(store, [thinker]));
+    await instance.start();
+    await settle(clock, 5, 40);
+    expect(writes).toBeGreaterThan(0);
+    const steps = await typesIn(store);
+    // The whole claim in two assertions: the sink's work is in the log, and
+    // the mind did NOT write "nothing to do right now" beside it. An `idle`
+    // step here is false, narrative, and uncorrectable (I1).
+    expect(steps.some((step) => step.type === 'action')).toBe(true);
+    expect(steps.filter((step) => step.type === 'idle')).toHaveLength(0);
+    const paces = steps.filter((step) => step.type === 'mind-wake');
+    expect(paces.length).toBeGreaterThan(0);
+    expect(paces.map((step) => step.data.outcome)).toContain('visible');
+    expect(paces.every((step) => step.data.outcome !== 'empty')).toBe(true);
+    // And the share nudge counts a reply as sharing.
+    expect(instance.health().thinkers[0]?.lastOutcome).toBe('visible');
+    await instance.close({ drain: false, timeoutMs: 200 });
+  });
+
+  it('keeps settling when one of a thinker`s own sinks fails', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const store = await seed(clock);
+    const program = probeProgram();
+    const thinker = thinkerWith('worker', program, {
+      subscription: { ...axDefaultMindSubscription, watchdogMs: 0 },
+      sinks: [
+        // A broken sink FIRST. The runtime dead-letters it and moves to the
+        // next one, so the mind's trailing settle still gets its turn -- the
+        // ladder does not depend on every host sink succeeding.
+        {
+          id: 'worker.broken',
+          write: async () => {
+            throw new Error('the sink is unreachable');
+          },
+        },
+        {
+          id: 'worker.effect',
+          write: async () => {
+            await instance.append({
+              trajectoryId: '',
+              type: 'action',
+              source: 'worker',
+              launchedBy: 'worker',
+              data: { content: 'answered anyway' },
+            });
+          },
+        },
+      ],
+    });
+    const instance = mind(
+      baseOptions(store, [thinker], { event: { maxAttempts: 1 } })
+    );
+    await instance.start();
+    await settle(clock, 5, 40);
+    const steps = await typesIn(store);
+    expect(steps.some((step) => step.type === 'action')).toBe(true);
+    expect(steps.filter((step) => step.type === 'mind-wake').length).toBe(1);
+    expect((await instance.deadLetters()).length).toBeGreaterThan(0);
+    await instance.close({ drain: false, timeoutMs: 200 });
+  });
+
+  it('settles a delivery that never reached its program, on the tick, and re-arms', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const store = await seed(clock);
+    const diagnostics: AxMindDiagnostic[] = [];
+    const thinker = thinkerWith('worker', probeProgram(), {
+      subscription: { ...axDefaultMindSubscription, watchdogMs: 0 },
+      pacer: FAST_PACER,
+      budget: {
+        maxWallClockMs: 20,
+        maxTokens: 1_000,
+        maxSubRuns: 2,
+        maxDepth: 1,
+      },
+    });
+    const instance = mind(
+      baseOptions(store, [thinker], {
+        onDiagnostic: (one) => diagnostics.push(one),
+        event: { maxAttempts: 1 },
+      })
+    );
+    await instance.start();
+    await settle(clock, 5, 10);
+    // The mind's OWN target, driven the way the runtime drives it: the
+    // assembler writes the in-flight record, and then the delivery goes away
+    // -- an abort between assembly and forward, a lost lease, a shutdown.
+    // Nothing else in the mind can notice, which is why the tick has to.
+    const target = instance.routes()[0]?.target;
+    expect(target?.mapInput).toBeDefined();
+    await target?.mapInput?.(
+      {
+        event: {
+          specversion: '1.0',
+          id: 'synthetic-wake',
+          source: 'ax://mind/mind-under-test',
+          type: 'ax.mind.wake',
+          subject: 'thinker:worker',
+          data: { thinker: 'worker' },
+          extensions: { stepsource: 'mind-tick' },
+        },
+        trust: 'trusted',
+      } as never,
+      { eventContext: { deliveryId: 'abandoned-delivery' } } as never
+    );
+    await settle(clock, 20, 60);
+    // The in-flight record is released and one wake is re-armed, so a mind
+    // whose runs die between assembly and forward degrades to a delay rather
+    // than leaking a step record and going silent.
+    expect(
+      diagnostics.filter((one) => one.code === 'liveness-fallback-armed').length
+    ).toBeGreaterThan(0);
+    const errors = await errorSteps(store);
+    expect(errors.length).toBeGreaterThan(0);
+    expect(
+      errors.some((step) =>
+        String(step.data.content).includes('never settled delivery')
+      )
+    ).toBe(true);
+    await instance.close({ drain: false, timeoutMs: 200 });
+  });
+});
+
+describe('AxMind rate fuse recovery', () => {
+  it('un-parks with exactly one re-evaluation, with no watchdog to help', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const store = await seed(clock);
+    const program = probeProgram();
+    const instance = mind(
+      baseOptions(store, [
+        thinkerWith('monolith', program, {
+          // No watchdog at all: the fuse's own re-evaluation is the ONLY
+          // liveness layer left, which is what makes this test about the fuse.
+          subscription: { ...axDefaultMindSubscription, watchdogMs: 0 },
+          pacer: { ...FAST_PACER, maxWakesPerHour: 3 },
+        }),
+      ])
+    );
+    await instance.start();
+    await settle(clock, 5, 60);
+    expect(instance.getPacerState('monolith')?.parked).toBe('rate_fuse');
+    const parkedAfter = program.calls.length;
+    expect(parkedAfter).toBeGreaterThan(1);
+    // Nothing wakes while the trailing hour is still full.
+    await settle(clock, 5, 40);
+    expect(program.calls.length).toBe(parkedAfter);
+    // Drain it. Clearing `parked` alone is not enough: the fuse's decision is
+    // `unchanged`, so the kept `wakeAt` is the one this thinker was already
+    // dispatched for, and the pace duty is edge triggered on that pair.
+    clock.advanceBy(3_600_000);
+    let unparked = false;
+    for (let round = 0; round < 30 && !unparked; round++) {
+      await settle(clock, 2, 4);
+      unparked = instance.getPacerState('monolith')?.parked === undefined;
+    }
+    expect(unparked).toBe(true);
+    // The liveness claim, not the state field: the mind actually woke again.
+    expect(program.calls.length).toBeGreaterThan(parkedAfter);
+    await instance.close({ drain: false, timeoutMs: 200 });
+  });
+});
+
+describe('AxMind projection dead-letters', () => {
+  const budget = {
+    maxWallClockMs: 5_000,
+    maxTokens: 1_000,
+    maxSubRuns: 2,
+    maxDepth: 1,
+  } as const;
+
+  it('dead-letters a rollup meta conflict before any model call, and wakes again', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const store = await seed(clock);
+    const diagnostics: AxMindDiagnostic[] = [];
+    const program = probeProgram();
+    const rollups = {
+      loadMeta: async () => {
+        throw new AxTrajectoryRollupError(
+          'the sealed block disagrees with the meta',
+          'meta_conflict'
+        );
+      },
+      saveMeta: async () => undefined,
+      getBlock: async () => undefined,
+      putBlock: async () => undefined,
+    } as unknown as AxTrajectoryRollupStore;
+    const instance = mind(
+      baseOptions(
+        store,
+        [
+          thinkerWith('monolith', program, {
+            subscription: { ...axDefaultMindSubscription, watchdogMs: 0 },
+            pacer: FAST_PACER,
+            budget,
+          }),
+        ],
+        { rollups, onDiagnostic: (one) => diagnostics.push(one) }
+      )
+    );
+    await instance.start();
+    await settle(clock, 5, 60);
+    // The whole claim in one number: zero model calls, ever.
+    expect(program.calls).toHaveLength(0);
+    const failures = diagnostics.filter(
+      (one) => one.code === 'context-assembly-failed'
+    );
+    // And the mind is not dead: the bootstrap wake dead-lettered, and the
+    // liveness fallback armed the next one, repeatedly.
+    expect(failures.length).toBeGreaterThan(2);
+    expect(
+      diagnostics.filter((one) => one.code === 'liveness-fallback-armed').length
+    ).toBeGreaterThan(0);
+    // Bounded, not a hot loop: the fallback delay is the thinker's own cap.
+    expect(failures.length).toBeLessThan(300);
+    await instance.close({ drain: false, timeoutMs: 200 });
+  });
+
+  it('dead-letters an unsupported type set before any model call, and wakes again', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const store = await seed(clock);
+    const diagnostics: AxMindDiagnostic[] = [];
+    const program = probeProgram();
+    // A log with a real tail: the projection reads it with an explicit type
+    // set, which is the read `unsupported_types` comes out of.
+    for (let index = 0; index < 6; index++) {
+      await store.append({
+        trajectoryId: TRAJECTORY,
+        type: 'observation',
+        source: 'system',
+        data: { content: `seeded ${index}` },
+      });
+    }
+    let live = false;
+    const failing: AxTrajectoryStore = Object.create(store);
+    failing.tailBackward = async (request, signal) => {
+      if (live && request.types?.length) {
+        throw new AxTrajectoryQueryError(
+          'no narrative type survives the requested set',
+          'unsupported_types'
+        );
+      }
+      return store.tailBackward(request, signal);
+    };
+    const instance = mind(
+      baseOptions(
+        failing,
+        [
+          thinkerWith('monolith', program, {
+            subscription: { ...axDefaultMindSubscription, watchdogMs: 0 },
+            pacer: FAST_PACER,
+            budget,
+          }),
+        ],
+        { onDiagnostic: (one) => diagnostics.push(one) }
+      )
+    );
+    await instance.start();
+    live = true;
+    await settle(clock, 5, 60);
+    expect(program.calls).toHaveLength(0);
+    expect(
+      diagnostics.filter((one) => one.code === 'context-assembly-failed').length
+    ).toBeGreaterThan(2);
+    await instance.close({ drain: false, timeoutMs: 200 });
+  });
+});
+
+/**
+ * A host adapter over the REAL `AxInMemoryEventStore` effect state machine,
+ * including its fencing. This is the seam `AxMindOptions.effectLedger` names,
+ * and the shipped `axMindResponder` cannot send a single message without one.
+ */
+async function hostLedger(
+  clock: AxManualEventClock
+): Promise<AxMindEffectLedger> {
+  const store = new AxInMemoryEventStore({ clock });
+  await store.enqueue({
+    ingress: {
+      event: {
+        specversion: '1.0',
+        id: axEventId('ledger-lease'),
+        source: 'ax://mind/test',
+        type: 'ax.mind.wake',
+      },
+      trust: 'trusted',
+    },
+    deliveries: [
+      {
+        routeId: 'ledger',
+        action: 'wake',
+        targetId: 'ledger',
+        instanceKey: 'ledger',
+        sizeBytes: 0,
+      },
+    ],
+    acceptedAt: clock.now(),
+  });
+  const delivery = await store.claim('ledger-worker', clock.now(), 3_600_000);
+  if (!delivery) throw new Error('the ledger lease could not be claimed');
+  const fence = {
+    deliveryId: delivery.id,
+    fencingToken: delivery.fencingToken ?? 0,
+  };
+  const runId = axEventId('run');
+  return {
+    declareEffect: (intent) =>
+      store.declareEffect(
+        {
+          ...structuredClone(intent),
+          id: axEventId('effect'),
+          deliveryId: delivery.id,
+          runId,
+          identityScope: 'test',
+          createdAt: clock.now(),
+        },
+        fence
+      ),
+    markEffectDispatched: (effectId, version) =>
+      store.transitionEffect(
+        effectId,
+        version,
+        { type: 'dispatched', at: clock.now() },
+        fence
+      ),
+    settleEffect: (effectId, version, settlement) =>
+      store.transitionEffect(
+        effectId,
+        version,
+        { type: 'settled', at: clock.now(), settlement },
+        fence
+      ),
+    listEffects: () => store.listEffects(delivery.id),
+  };
+}
+
+/** The responder's own signature, answered by a mock provider. */
+function respondingAI(decision: 'reply' | 'no-reply'): AxAIService {
+  return new AxMockAIService<string>({
+    name: 'mock-responder',
+    chatResponse: async () => ({
+      results: [
+        {
+          index: 0,
+          content:
+            decision === 'reply'
+              ? 'Decision: reply\nReply: I am here.'
+              : 'Decision: no-reply',
+          finishReason: 'stop' as const,
+        },
+      ],
+      modelUsage: {
+        ai: 'mock-responder',
+        model: 'mock',
+        tokens: { promptTokens: 20, completionTokens: 8, totalTokens: 28 },
+      },
+    }),
+  }) as unknown as AxAIService;
+}
+
+describe('the shipped thinkers, inside a mind', () => {
+  it('replies exactly once per inbound message and records the wake as visible', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const store = await seed(clock);
+    const sent: Array<Readonly<{ to: string; content: string }>> = [];
+    const effectLedger = await hostLedger(clock);
+    const instance = mind(
+      baseOptions(store, [axMindResponder({ ai: respondingAI('reply') })], {
+        effectLedger,
+        transport: {
+          id: 'test-transport',
+          selfName: 'mind',
+          send: async (message) => {
+            sent.push({ to: message.to, content: message.content });
+            return { externalId: `ext-${sent.length}`, at: clock.now() };
+          },
+        },
+      })
+    );
+    await instance.start();
+    await settle(clock, 5, 20);
+    await instance.receive({ from: 'ada', to: 'mind', content: 'are you up?' });
+    await settle(clock, 5, 120);
+    await instance.receive({ from: 'ada', to: 'mind', content: 'still?' });
+    await settle(clock, 5, 120);
+
+    // Exactly one outbound per inbound, through the REAL sink, the REAL chat
+    // and the REAL idempotency ledger -- the path no other test in this lane
+    // ever executed.
+    expect(sent).toHaveLength(2);
+    expect(sent.every((one) => one.to === 'ada')).toBe(true);
+    const steps = await typesIn(store);
+    const outbound = steps.filter(
+      (step) => step.type === 'message' && step.source === 'responder'
+    );
+    expect(outbound).toHaveLength(2);
+    const inbound = steps.filter(
+      (step) => step.type === 'message' && step.source === 'chat'
+    );
+    expect(new Set(outbound.map((step) => step.data.replyTo))).toEqual(
+      new Set(inbound.map((step) => step.stepId))
+    );
+    // B2 at the shipped level: the reply is written from the sink, so a probe
+    // that brackets `forward` alone records the answering wake as `idle` and
+    // stamps `empty` on it. Only the bootstrap wake -- which genuinely had
+    // nothing to answer -- may be idle here.
+    const idles = steps.filter((step) => step.type === 'idle');
+    expect(idles).toHaveLength(1);
+    expect(idles[0]?.data.wakeClass).toBe('bootstrap');
+    const reactive = steps.filter(
+      (step) => step.type === 'mind-wake' && step.data.wakeClass === 'reactive'
+    );
+    expect(reactive).toHaveLength(2);
+    expect(reactive.every((step) => step.data.outcome === 'visible')).toBe(
+      true
+    );
+    await instance.close({ drain: false, timeoutMs: 200 });
+  });
+
+  it('records a decline instead of dropping the message silently', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const store = await seed(clock);
+    const sent: unknown[] = [];
+    const effectLedger = await hostLedger(clock);
+    const instance = mind(
+      baseOptions(store, [axMindResponder({ ai: respondingAI('no-reply') })], {
+        effectLedger,
+        transport: {
+          id: 'test-transport',
+          selfName: 'mind',
+          send: async () => {
+            sent.push(1);
+            return { externalId: 'ext-1', at: clock.now() };
+          },
+        },
+      })
+    );
+    await instance.start();
+    await settle(clock, 5, 20);
+    const trigger = await instance.receive({
+      from: 'ada',
+      to: 'mind',
+      content: 'no need to answer',
+    });
+    await settle(clock, 5, 60);
+    expect(sent).toHaveLength(0);
+    const steps = await typesIn(store);
+    // M12: a decline is a RECORDED decision, not a silent drop, and it sticks
+    // across redelivery because it is in the log.
+    const declines = steps.filter(
+      (step) => step.type === 'observation' && step.data.decision === 'no-reply'
+    );
+    expect(declines).toHaveLength(1);
+    expect(declines[0]?.triggerStep).toBe(trigger.stepId);
+    await instance.close({ drain: false, timeoutMs: 200 });
+  });
+});
+
+describe('AxMind inbound refusals and reconciliation', () => {
+  it('refuses self-addressed inbound as a CHAT refusal, explains in band, and stays alive', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const store = await seed(clock);
+    const instance = mind(
+      baseOptions(store, [thinkerWith('monolith', probeProgram())], {
+        transport: {
+          id: 'test-transport',
+          selfName: 'mind',
+          send: async () => ({ externalId: 'ext-1', at: clock.now() }),
+        },
+      })
+    );
+    await instance.start();
+    await settle(clock, 5, 20);
+    let thrown: unknown;
+    try {
+      await instance.receive({
+        from: 'mind',
+        to: 'ada',
+        content: 'talking to myself',
+      });
+    } catch (error) {
+      thrown = error;
+    }
+    // M13 names ONE error for self-addressed traffic in both directions. A
+    // host guarding inbound with axIsMindChatError used to miss this entirely,
+    // and the reason it saw said a source had failed.
+    expect(axIsMindChatError(thrown)).toBe(true);
+    expect((thrown as { reason: string }).reason).toBe('self_addressed');
+    const steps = await typesIn(store);
+    const refusals = steps.filter(
+      (step) => step.data.refused === 'self_addressed'
+    );
+    expect(refusals).toHaveLength(1);
+    expect(String(refusals[0]?.data.content)).toMatch(/own identity/);
+    // Nothing was accepted as a message, and the mind still takes real mail.
+    expect(steps.filter((step) => step.type === 'message')).toHaveLength(0);
+    const accepted = await instance.receive({
+      from: 'ada',
+      to: 'mind',
+      content: 'hello',
+    });
+    expect(accepted.type).toBe('message');
+    await instance.close({ drain: false, timeoutMs: 200 });
+  });
+
+  it('reconciles a settled send the crash left out of the log (C10)', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const store = await seed(clock);
+    const diagnostics: AxMindDiagnostic[] = [];
+    const effectLedger = await hostLedger(clock);
+    // A send that LEFT the process and settled, with no message step behind
+    // it: the shape a crash between the transport and the append leaves.
+    const declared = await effectLedger.declareEffect({
+      operation: 'mind.chat.send',
+      idempotencyKey: 'ax.mind.chat:reconciled',
+      replaySafety: 'unknown',
+      metadata: {
+        to: 'ada',
+        trajectoryId: TRAJECTORY,
+        content: 'the message that got out',
+      },
+    });
+    const dispatched = await effectLedger.markEffectDispatched(
+      declared.id,
+      declared.version
+    );
+    await effectLedger.settleEffect(dispatched.id, dispatched.version, {
+      status: 'succeeded',
+      externalId: 'ext-crash',
+    });
+    const instance = mind(
+      baseOptions(store, [thinkerWith('monolith', probeProgram())], {
+        effectLedger,
+        onDiagnostic: (one) => diagnostics.push(one),
+        transport: {
+          id: 'test-transport',
+          selfName: 'mind',
+          send: async () => ({ externalId: 'ext-1', at: clock.now() }),
+        },
+      })
+    );
+    // reconcile() runs inside start(); the log converges to the ledger there.
+    await instance.start();
+    const steps = await typesIn(store);
+    const recovered = steps.filter(
+      (step) => step.type === 'message' && step.source === 'monolith'
+    );
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0]?.data.content).toBe('the message that got out');
+    expect(recovered[0]?.data.reconciled).toBe(declared.id);
+    expect(
+      diagnostics.some((one) => one.code === 'effect-step-reconciled')
+    ).toBe(true);
+    // Idempotent: a second reconcile does not append the message twice.
+    await instance.reconcile();
+    const again = (await typesIn(store)).filter(
+      (step) => step.type === 'message' && step.source === 'monolith'
+    );
+    expect(again).toHaveLength(1);
+    await instance.close({ drain: false, timeoutMs: 200 });
+  });
+
+  it('refuses a mind with an effect-aware thinker and no ledger', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const store = await seed(clock);
+    const instance = mind(
+      baseOptions(store, [
+        thinkerWith('monolith', probeProgram(), {
+          retrySafety: 'effect-aware',
+        }),
+      ])
+    );
+    await expect(instance.start()).rejects.toThrow(/no effect ledger/);
+  });
+});
+
+describe('AxMind sub-run ownership', () => {
+  const cappedThinker = (name: string, maxSubRuns: number) =>
+    thinkerWith(name, probeProgram(), {
+      // NARROW subscriptions on purpose. Two thinkers that both subscribe to
+      // every narrative type wake each other on their own `idle` steps and
+      // never stop; the shipped pair avoids it because the responder listens
+      // for `message` only. docs/MIND.md says so under "Two thinkers".
+      subscription: {
+        ...axDefaultMindSubscription,
+        types: ['message'],
+        watchdogMs: 0,
+      },
+      budget: {
+        maxWallClockMs: 5_000,
+        maxTokens: 1_000,
+        maxSubRuns,
+        maxDepth: 2,
+      },
+    });
+
+  it('charges the NAMED thinker`s cap, never whichever ran first', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const store = await seed(clock);
+    const instance = mind(
+      baseOptions(store, [cappedThinker('a', 8), cappedThinker('b', 0)])
+    );
+    await instance.start();
+    await settle(clock, 5, 20);
+    const request = { registrationKey: 'child', input: {} } as const;
+    // B's cap is zero, so B's sub-run is refused -- and A's, with the same
+    // mind and the same call, is not. Insertion order used to decide this.
+    let refused: unknown;
+    try {
+      await instance.subRun({ ...request, thinker: 'b' });
+    } catch (error) {
+      refused = error;
+    }
+    expect(axIsMindBudgetExceededError(refused)).toBe(true);
+    expect((refused as { dimension: string }).dimension).toBe('subRuns');
+    const result = await instance.subRun({ ...request, thinker: 'a' });
+    // No session host is configured, so the child fails -- and still MERGES
+    // BACK (I10), which is what proves the cap let it through.
+    expect(result.outcome).toBe('failed');
+    expect(result.mergeStepId).toBeDefined();
+    await expect(
+      instance.subRun({ ...request, thinker: 'nobody' })
+    ).rejects.toThrow(/no thinker named nobody/);
+    await instance.close({ drain: false, timeoutMs: 200 });
+  });
+});
+
+describe('AxMind self-suppression', () => {
+  it('reports the wake it suppressed, which nothing else can see', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const store = await seed(clock);
+    const diagnostics: AxMindDiagnostic[] = [];
+    const program = probeProgram(async () => {
+      await instance.append({
+        trajectoryId: '',
+        type: 'thought',
+        source: 'monolith',
+        launchedBy: 'monolith',
+        data: { content: 'talking to myself' },
+      });
+      return { reply: 'ok' };
+    });
+    const instance = mind(
+      baseOptions(
+        store,
+        [
+          thinkerWith('monolith', program, {
+            subscription: { ...axDefaultMindSubscription, watchdogMs: 0 },
+          }),
+        ],
+        { onDiagnostic: (one) => diagnostics.push(one) }
+      )
+    );
+    await instance.start();
+    await settle(clock, 5, 40);
+    // A suppressed wake creates NO delivery and NO step: without the
+    // diagnostic there is nowhere a host can see the decision at all.
+    const suppressed = diagnostics.filter(
+      (one) => one.code === 'wake-suppressed-self'
+    );
+    expect(suppressed.length).toBeGreaterThan(0);
+    expect(suppressed[0]?.thinker).toBe('monolith');
+    expect(suppressed[0]?.at).toBeGreaterThan(0);
+    // And the suppression is real: one bootstrap call, no self-triggered loop.
+    expect(program.calls).toHaveLength(1);
+    await instance.close({ drain: false, timeoutMs: 200 });
+  });
+});
+
+describe('the shipped pair, in one mind', () => {
+  it('runs a monolith beside a responder without waking each other forever', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const store = await seed(clock);
+    const effectLedger = await hostLedger(clock);
+    const reflecting = new AxMockAIService<string>({
+      name: 'mock-monolith',
+      features: { functions: true },
+      chatResponse: async () => ({
+        results: [
+          {
+            index: 0,
+            content: 'Reflection: nothing needs doing right now.',
+            finishReason: 'stop' as const,
+          },
+        ],
+        modelUsage: {
+          ai: 'mock-monolith',
+          model: 'mock',
+          tokens: { promptTokens: 30, completionTokens: 9, totalTokens: 39 },
+        },
+      }),
+    }) as unknown as AxAIService;
+    const instance = mind(
+      baseOptions(
+        store,
+        [
+          axMindMonolith({
+            ai: reflecting,
+            subscription: { watchdogMs: 0 },
+            pacer: FAST_PACER,
+          }),
+          axMindResponder({ ai: respondingAI('reply') }),
+        ],
+        {
+          effectLedger,
+          transport: {
+            id: 'test-transport',
+            selfName: 'mind',
+            send: async () => ({ externalId: 'ext', at: clock.now() }),
+          },
+        }
+      )
+    );
+    await instance.start();
+    await settle(clock, 5, 120);
+    const steps = await typesIn(store);
+    // The shipped pair is safe because the responder listens for `message`
+    // ONLY. Two thinkers that both take the default (every narrative type)
+    // subscription wake each other on their own `idle` steps forever, which
+    // is a live token-burning runaway -- docs/MIND.md says so, and this is
+    // the assertion that would catch the shipped pair growing into it.
+    expect(steps.length).toBeLessThan(400);
+    const responderWakes = steps.filter(
+      (step) => step.type === 'mind-wake' && step.launchedBy === 'responder'
+    );
+    expect(responderWakes).toHaveLength(1); // its bootstrap wake, and no more
+    const monolithWakes = steps.filter(
+      (step) => step.type === 'mind-wake' && step.launchedBy === 'monolith'
+    );
+    expect(monolithWakes.length).toBeGreaterThan(1); // it is the paced one
     await instance.close({ drain: false, timeoutMs: 200 });
   });
 });

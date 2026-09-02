@@ -66,34 +66,53 @@ import { describe, expect, it } from 'vitest';
  *   `axMindResponder`, `AxMindDeterministicProgram` and goal rendering; the
  *   monolith's function menu (`axMindTools`, RFC 6.5's whole model-owned
  *   list) and the prompt assembly both land here too.
- * Measured at this raise: types 571, pacer 284, health 138, routes 222,
- * sources 594, chat 768, salience 163, skills 134, context 138, step 137,
- * subruns 121, thinkers 469, mind 1_261, index 168.
+ * The adversarial review of PR #101 raised four more. Every one is a guard the
+ * review proved was missing, plus the comment naming the failure it closes:
+ *
+ * - `mind.ts` 1_300 -> 1_450: the settle is no longer a single call inside
+ *   `forward`. It is now an idempotent, delivery-keyed `settleDelivery` reached
+ *   from three places (the run, the trailing `mind-settle` sink, the tick's
+ *   reaper), plus `armLivenessFallback` (M7 layer (b), which was a comment and
+ *   not code), `reapAbandonedSteps` (the bound on the in-flight map) and
+ *   `resolveSubRunOwner` (a sub-run charged the wrong thinker's cap).
+ * - `step.ts` 160 -> 180: the trailing `mind-settle` sink, which is what makes
+ *   a reply written from a thinker's own sink count as work.
+ * - `routes.ts` 250 -> 270: the `wake-suppressed-self` diagnostic. A suppressed
+ *   wake creates no delivery and no step, so without it the mind's decision not
+ *   to trigger on its own writing is invisible everywhere.
+ * - `subruns.ts` 140 -> 150: the bound on an unsummarized merge content, and
+ *   the poll ceiling reported in milliseconds like every other `wallClock`.
+ *
+ * Measured at this raise: types 596, pacer 284, health 138, routes 254,
+ * sources 594, chat 768, salience 163, skills 134, context 138, step 166,
+ * subruns 140, thinkers 518, mind 1_415, index 164 -- 5_472 in total.
  */
 const CAPS: readonly (readonly [string, number])[] = [
   ['src/ax/mind/types.ts', 600], // raised from 430, then 480
   ['src/ax/mind/pacer.ts', 300], // raised from 200, then 270
   ['src/ax/mind/health.ts', 150], // raised from 130
-  ['src/ax/mind/routes.ts', 250],
+  ['src/ax/mind/routes.ts', 270], // raised from 250
   ['src/ax/mind/sources.ts', 610], // raised from 330, then 560
   ['src/ax/mind/chat.ts', 800], // raised from 280, then 680
   ['src/ax/mind/salience.ts', 180], // raised from 130
   ['src/ax/mind/skills.ts', 150],
   ['src/ax/mind/context.ts', 160], // new: not in RFC 5.1
-  ['src/ax/mind/step.ts', 160], // new: not in RFC 5.1
-  ['src/ax/mind/subruns.ts', 140], // new: not in RFC 5.1
+  ['src/ax/mind/step.ts', 180], // new: not in RFC 5.1, then raised from 160
+  ['src/ax/mind/subruns.ts', 150], // new: not in RFC 5.1, then raised from 140
   ['src/ax/mind/thinkers.ts', 560], // raised from 380
-  ['src/ax/mind/mind.ts', 1_300], // raised from 600
+  ['src/ax/mind/mind.ts', 1_450], // raised from 600, then 1_300
   ['src/ax/mind/index.ts', 175], // raised from 90, then 120, then 130
 ];
 
 /**
- * Directory ceiling for the whole subsystem. RFC 5.1 estimated 2,970 against
- * a 3,050 ceiling; the measured total with every file the RFC assigns to this
- * directory is higher for the per-file reasons above. Raising it again needs
- * the same treatment: a reason per file, here and in docs/MIND.md.
+ * Directory ceiling for the whole subsystem. RFC 5.1 estimated 2,970 against a
+ * 3,050 ceiling and RFC 11's definition of done restates that number; the
+ * measured total with every file the RFC assigns to this directory is
+ * SUBSTANTIALLY higher, for the per-file reasons above, and the PR body says so
+ * rather than letting the estimate stand. Raising it again needs the same
+ * treatment: a reason per file, here and in docs/MIND.md.
  */
-const MIND_DIRECTORY_CAP = 5_335;
+const MIND_DIRECTORY_CAP = 5_650;
 
 // vitest runs this workspace with cwd = src/ax, so the repo root is derived
 // from this file rather than from the process.
