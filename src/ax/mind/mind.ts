@@ -26,10 +26,7 @@ import {
   axTrajectoryContextBudget,
 } from '../trajectory/projection.js';
 import { axTrajectoryTypeRegistry } from '../trajectory/registry.js';
-import type {
-  AxTrajectoryRollupStore,
-  AxTrajectorySummarizer,
-} from '../trajectory/rollups.js';
+import type { AxTrajectoryRollupStore } from '../trajectory/rollups.js';
 import type {
   AxTrajectoryAppendRequest,
   AxTrajectoryStep,
@@ -150,7 +147,6 @@ export interface AxMindOptions {
   readonly clock?: AxEventClock;
   readonly registry?: AxTrajectoryTypeRegistry;
   readonly rollups?: AxTrajectoryRollupStore;
-  readonly summarizer?: AxTrajectorySummarizer;
   readonly transport?: AxMindChatTransport;
   readonly pacer?: Readonly<AxMindPacerConfig>;
   readonly health?: Readonly<AxMindHealthThresholds>;

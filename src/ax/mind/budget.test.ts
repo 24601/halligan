@@ -124,9 +124,26 @@ import { describe, expect, it } from 'vitest';
  * Measured at this raise: types 623, pacer 284, health 138, routes 321,
  * sources 594, chat 785, salience 163, skills 134, context 138, step 168,
  * subruns 140, thinkers 540, mind 1_473, index 174 -- 5_675 in total.
+ *
+ * The budget pass of 2026-09-02 LOWERS three caps rather than raising any. It
+ * is a ratchet, so the new numbers are the measured ones with no headroom:
+ *
+ * - `thinkers.ts` 560 -> 514. `AxMindDeterministicProgram` hand-wrote the
+ *   tunable and usable halves of `AxProgrammable` as empty methods; it now
+ *   extends `AxProgram`, which already defines every one of them with the same
+ *   empty semantics, and keeps only `forward` and `streamingForward`.
+ * - `types.ts` 630 -> 619. `AxMindThinker.inputSignature` was inert: the mind
+ *   always sets `mapInput` on a thinker target, and `validateEventTarget`
+ *   only consults `inputSignature` for declarative input plans, which that
+ *   choice makes unreachable. `AxMindLivenessError`'s `pacer_parked` reason
+ *   was never thrown or asserted anywhere.
+ * - `mind.ts` 1_490 -> 1_469. `AxMindOptions.summarizer` was declared and
+ *   never read: `axProjectTrajectory` takes no summarizer, so a host that
+ *   passed one got silence.
+ * - The DIRECTORY ceiling 5_700 -> 5_641, the measured total.
  */
 const CAPS: readonly (readonly [string, number])[] = [
-  ['src/ax/mind/types.ts', 630], // raised from 430, 480, 600, then 615
+  ['src/ax/mind/types.ts', 619], // 430, 480, 600, 615, 630, then LOWERED
   ['src/ax/mind/pacer.ts', 300], // raised from 200, then 270
   ['src/ax/mind/health.ts', 150], // raised from 130
   ['src/ax/mind/routes.ts', 330], // raised from 250, 270, then 320
@@ -137,8 +154,8 @@ const CAPS: readonly (readonly [string, number])[] = [
   ['src/ax/mind/context.ts', 160], // new: not in RFC 5.1
   ['src/ax/mind/step.ts', 180], // new: not in RFC 5.1, then raised from 160
   ['src/ax/mind/subruns.ts', 150], // new: not in RFC 5.1, then raised from 140
-  ['src/ax/mind/thinkers.ts', 560], // raised from 380
-  ['src/ax/mind/mind.ts', 1_490], // raised from 600, 1_300, then 1_450
+  ['src/ax/mind/thinkers.ts', 514], // raised from 380 to 560, then LOWERED
+  ['src/ax/mind/mind.ts', 1_469], // 600, 1_300, 1_450, 1_490, then LOWERED
   ['src/ax/mind/index.ts', 175], // raised from 90, then 120, then 130
 ];
 
@@ -147,10 +164,12 @@ const CAPS: readonly (readonly [string, number])[] = [
  * 3,050 ceiling and RFC 11's definition of done restates that number; the
  * measured total with every file the RFC assigns to this directory is
  * SUBSTANTIALLY higher, for the per-file reasons above, and the PR body says so
- * rather than letting the estimate stand. Raising it again needs the same
- * treatment: a reason per file, here and in docs/MIND.md.
+ * rather than letting the estimate stand. The ceiling is set to the MEASURED
+ * total with no headroom, so any growth has to argue for itself. Raising it
+ * needs the same treatment as before: a reason per file, here and in
+ * docs/MIND.md, whose "Size budget" section carries the justified remainder.
  */
-const MIND_DIRECTORY_CAP = 5_700;
+const MIND_DIRECTORY_CAP = 5_641;
 
 // vitest runs this workspace with cwd = src/ax, so the repo root is derived
 // from this file rather than from the process.

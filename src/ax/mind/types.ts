@@ -1,6 +1,5 @@
 import type { AxAgentCatalogSkill } from '../agent/agentInternal/skillsTypes.js';
 import type { AxAIService } from '../ai/types.js';
-import type { AxSignature } from '../dsp/sig.js';
 import type { AxProgramForwardOptions, AxProgrammable } from '../dsp/types.js';
 import type { AxEventContext, AxEventSink } from '../event/types.js';
 import type { AxTrajectoryProjection } from '../trajectory/projection.js';
@@ -104,8 +103,6 @@ export interface AxMindThinker<IN = any, OUT = any> {
       mind: AxMind;
     }>
   ) => AxProgrammable<IN, OUT> | Promise<AxProgrammable<IN, OUT>>;
-  /** Required with createProgram when declarative input plans are used. */
-  readonly inputSignature?: Readonly<AxSignature>;
   /** Builds IN from the projection. Throwing dead-letters BEFORE any model call. */
   readonly context: AxMindContextAssembler<IN>;
   /** Classifies the run's durable effect for pacing. Defaults to the work probe. */
@@ -585,7 +582,6 @@ export class AxMindLivenessError extends Error {
      */
     readonly reason:
       | 'stalled'
-      | 'pacer_parked'
       | 'source_failed'
       | 'close_from_inside'
       | 'closing',
