@@ -1535,7 +1535,7 @@ describe('AxGEPA trajectory admission', () => {
   });
 
   it('aborts a candidate instead of rejecting it when too few child rows were admitted', async () => {
-    const { result } = await runOptimizer({
+    const { result, events } = await runOptimizer({
       examples: [{ i: 0 }, { i: 1 }, { i: 2 }, { i: 3 }],
       forward: (instruction) => {
         if (instruction === 'better') throw new Error('provider 429');
@@ -1552,6 +1552,16 @@ describe('AxGEPA trajectory admission', () => {
       reason: 'insufficient_admitted_rows',
       disposition: 'aborted',
     });
+
+    // An aborted round is the common case under a flaky provider, and lineage
+    // is opt-in — so if the abort path skipped the publisher, the cumulative
+    // discard rate would be invisible in the event stream for exactly the
+    // rounds in which it is climbing.
+    const rounds = events.filter((e) => e.name === 'RoundProgress');
+    expect(rounds).toHaveLength(1);
+    expect(rounds[0].value.configuration.decision).toBe('aborted');
+    expect(rounds[0].value.round).toBe(1);
+    expect(rounds[0].value.admission.discardedRows).toBeGreaterThan(0);
   });
 
   it('ends the run and publishes no best score above the run discard ceiling', async () => {

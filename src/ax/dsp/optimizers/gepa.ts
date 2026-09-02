@@ -1765,107 +1765,14 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       );
       mutationFailures?.push(...evaluationFailures!(childMiniEval));
 
-      // GATE 1 (reflective mutation). Parent and child are two separate
-      // evaluations of the same minibatch, so they can discard different rows.
-      // `sum` is a raw total: comparing each side's own admitted total means
-      // dropping k rows from the parent lowers the parent's number while
-      // leaving the child's untouched, and the child gets promoted for it.
-      // Intersecting first gives both sides the same denominator by
-      // construction. With no classifier both `admittedIndices` are absent and
-      // the comparison below is the untouched
-      // `childMiniEval.sum > parentMiniEval.sum + t`.
-      const pairedMinibatchIndices =
-        parentMiniEval.admittedIndices && childMiniEval.admittedIndices
-          ? axPairedAdmittedIndices(
-              parentMiniEval.admittedIndices,
-              childMiniEval.admittedIndices
-            )
-          : undefined;
-      // Never accepted, never rejected: an inconclusive batch is not evidence
-      // either way, and treating it as a rejection would let a flaky provider
-      // exhaust `earlyStoppingTrials`.
-      //
-      // An EMPTY intersection is the same situation and is checked separately,
-      // because both sides can clear `minAdmittedFraction` individually and
-      // still share no row — disjoint discards leave nothing to compare, and a
-      // comparison of 0 against 0 is not a rejection, it is no evidence.
-      if (
-        childMiniEval.admission?.inconclusive ||
-        pairedMinibatchIndices?.length === 0
-      ) {
-        verboseLog(
-          `Iteration ${t + 1}: child minibatch inconclusive (${childMiniEval.admission?.admittedRows ?? 0}/${childMiniEval.admission?.evaluatedRows ?? 0} rows admitted, ${pairedMinibatchIndices?.length ?? 0} paired with the parent); aborting the candidate`
-        );
-        recordCandidate?.(() => {
-          const delta = buildGEPACandidateComponentDelta(
-            candidates[parentIdx]!.cfg,
-            proposedCfg,
-            lineageOptions!
-          );
-          return {
-            id: mutationCandidateId!,
-            parentIds: [candidates[parentIdx]!.id!],
-            round: t + 1,
-            strategy,
-            componentDelta: delta.delta,
-            omittedComponentCount: delta.omittedComponentCount,
-            evaluations: mutationEvaluations!,
-            metricCallsAtDecision: this.stats.totalCalls,
-            metricCallBudget: rolloutBudgetPareto,
-            decision: 'aborted',
-            reason: 'insufficient_admitted_rows',
-            disposition: 'aborted',
-            failures: mutationFailures!.length ? mutationFailures : undefined,
-          };
-        });
-        if (admissionCeilingFired) break;
-        continue;
-      }
-      if (admissionCeilingFired) break;
-
-      const parentComparisonSum = pairedMinibatchIndices
-        ? sumOverIndices(pairedMinibatchIndices, parentMiniEval.scalars)
-        : parentMiniEval.sum;
-      const childComparisonSum = pairedMinibatchIndices
-        ? sumOverIndices(pairedMinibatchIndices, childMiniEval.scalars)
-        : childMiniEval.sum;
-      const pairedComparisonRowIndices: readonly number[] =
-        pairedMinibatchIndices ?? miniIndices.map((_, rowIndex) => rowIndex);
-      /**
-       * Under `'discriminative'` the batch is a πps sample, so a raw sum is a
-       * biased estimate of the population difference: the easy tasks are
-       * deliberately under-drawn. The Hájek/IPW paired difference weights each
-       * row by `1/π` and is compared on a PER-EXAMPLE MEAN scale, not a sum.
-       * With the
-       * default `minImprovementThreshold` of 0 both scales mean "child beat
-       * parent", so the default degrades gracefully; a caller who set a
-       * non-zero sum-scale threshold must divide it by the batch size.
-       */
-      const ipwEstimate =
-        draw && pairedComparisonRowIndices.length > 0
-          ? axIpwPairedDifference(
-              pairedComparisonRowIndices.map((rowIndex) => ({
-                index: miniIndices[rowIndex]!,
-                value: parentMiniEval.scalars[rowIndex] ?? 0,
-              })),
-              pairedComparisonRowIndices.map((rowIndex) => ({
-                index: miniIndices[rowIndex]!,
-                value: childMiniEval.scalars[rowIndex] ?? 0,
-              })),
-              draw.inclusions
-            )
-          : undefined;
-      if (draw && !announcedEstimator) {
-        announcedEstimator = true;
-        verboseLog(
-          `Discriminative minibatch active: gate=reflective_mutation estimator=ipw_hajek scale=per_example_mean; minImprovementThreshold=${this.minImprovementThreshold} is compared against a mean difference, not a sum`
-        );
-      }
-      const accepted = ipwEstimate
-        ? ipwEstimate.estimate > this.minImprovementThreshold
-        : childComparisonSum >
-          parentComparisonSum + this.minImprovementThreshold;
-
+      // Hoisted ABOVE the gate on purpose. An aborted candidate is the common
+      // case under a flaky provider and it is the case a reader most needs to
+      // see, but the abort paths below `continue`, so with the round counter
+      // and the publisher defined after them an aborted round emitted no
+      // RoundProgress, evaluated no checkpoint, and left `currentRound` behind.
+      // Nothing here is observable without a classifier: the abort branch is
+      // unreachable, and no code between the old and new position reads
+      // `this.currentRound`.
       this.currentRound = t + 1;
       const serializableCompileOptions = (() => {
         const { abortSignal: _abortSignal, ...rest } = (options ??
@@ -1939,6 +1846,111 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
             : undefined
         );
       };
+
+      // GATE 1 (reflective mutation). Parent and child are two separate
+      // evaluations of the same minibatch, so they can discard different rows.
+      // `sum` is a raw total: comparing each side's own admitted total means
+      // dropping k rows from the parent lowers the parent's number while
+      // leaving the child's untouched, and the child gets promoted for it.
+      // Intersecting first gives both sides the same denominator by
+      // construction. With no classifier both `admittedIndices` are absent and
+      // the comparison below is the untouched
+      // `childMiniEval.sum > parentMiniEval.sum + t`.
+      const pairedMinibatchIndices =
+        parentMiniEval.admittedIndices && childMiniEval.admittedIndices
+          ? axPairedAdmittedIndices(
+              parentMiniEval.admittedIndices,
+              childMiniEval.admittedIndices
+            )
+          : undefined;
+      // Never accepted, never rejected: an inconclusive batch is not evidence
+      // either way, and treating it as a rejection would let a flaky provider
+      // exhaust `earlyStoppingTrials`.
+      //
+      // An EMPTY intersection is the same situation and is checked separately,
+      // because both sides can clear `minAdmittedFraction` individually and
+      // still share no row — disjoint discards leave nothing to compare, and a
+      // comparison of 0 against 0 is not a rejection, it is no evidence.
+      if (
+        childMiniEval.admission?.inconclusive ||
+        pairedMinibatchIndices?.length === 0
+      ) {
+        verboseLog(
+          `Iteration ${t + 1}: child minibatch inconclusive (${childMiniEval.admission?.admittedRows ?? 0}/${childMiniEval.admission?.evaluatedRows ?? 0} rows admitted, ${pairedMinibatchIndices?.length ?? 0} paired with the parent); aborting the candidate`
+        );
+        recordCandidate?.(() => {
+          const delta = buildGEPACandidateComponentDelta(
+            candidates[parentIdx]!.cfg,
+            proposedCfg,
+            lineageOptions!
+          );
+          return {
+            id: mutationCandidateId!,
+            parentIds: [candidates[parentIdx]!.id!],
+            round: t + 1,
+            strategy,
+            componentDelta: delta.delta,
+            omittedComponentCount: delta.omittedComponentCount,
+            evaluations: mutationEvaluations!,
+            metricCallsAtDecision: this.stats.totalCalls,
+            metricCallBudget: rolloutBudgetPareto,
+            decision: 'aborted',
+            reason: 'insufficient_admitted_rows',
+            disposition: 'aborted',
+            failures: mutationFailures!.length ? mutationFailures : undefined,
+          };
+        });
+        // An aborted round still leaves a RoundProgress behind, carrying the
+        // cumulative admission that ended it. Lineage is opt-in; without this
+        // an aborted round is invisible in the event stream entirely.
+        await publishDecision('aborted');
+        if (admissionCeilingFired) break;
+        continue;
+      }
+      if (admissionCeilingFired) break;
+
+      const parentComparisonSum = pairedMinibatchIndices
+        ? sumOverIndices(pairedMinibatchIndices, parentMiniEval.scalars)
+        : parentMiniEval.sum;
+      const childComparisonSum = pairedMinibatchIndices
+        ? sumOverIndices(pairedMinibatchIndices, childMiniEval.scalars)
+        : childMiniEval.sum;
+      const pairedComparisonRowIndices: readonly number[] =
+        pairedMinibatchIndices ?? miniIndices.map((_, rowIndex) => rowIndex);
+      /**
+       * Under `'discriminative'` the batch is a πps sample, so a raw sum is a
+       * biased estimate of the population difference: the easy tasks are
+       * deliberately under-drawn. The Hájek/IPW paired difference weights each
+       * row by `1/π` and is compared on a PER-EXAMPLE MEAN scale, not a sum.
+       * With the
+       * default `minImprovementThreshold` of 0 both scales mean "child beat
+       * parent", so the default degrades gracefully; a caller who set a
+       * non-zero sum-scale threshold must divide it by the batch size.
+       */
+      const ipwEstimate =
+        draw && pairedComparisonRowIndices.length > 0
+          ? axIpwPairedDifference(
+              pairedComparisonRowIndices.map((rowIndex) => ({
+                index: miniIndices[rowIndex]!,
+                value: parentMiniEval.scalars[rowIndex] ?? 0,
+              })),
+              pairedComparisonRowIndices.map((rowIndex) => ({
+                index: miniIndices[rowIndex]!,
+                value: childMiniEval.scalars[rowIndex] ?? 0,
+              })),
+              draw.inclusions
+            )
+          : undefined;
+      if (draw && !announcedEstimator) {
+        announcedEstimator = true;
+        verboseLog(
+          `Discriminative minibatch active: gate=reflective_mutation estimator=ipw_hajek scale=per_example_mean; minImprovementThreshold=${this.minImprovementThreshold} is compared against a mean difference, not a sum`
+        );
+      }
+      const accepted = ipwEstimate
+        ? ipwEstimate.estimate > this.minImprovementThreshold
+        : childComparisonSum >
+          parentComparisonSum + this.minImprovementThreshold;
 
       if (!accepted) {
         for (const groupTarget of targetGroup) {
