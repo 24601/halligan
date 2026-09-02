@@ -5,6 +5,7 @@ import {
   type AxEvidenceRequirement,
   type AxGuardEvaluation,
   type AxGuardFailure,
+  type AxGuardOp,
   axCollectGrantRequirements,
   axEvaluateGuards,
   axIsEvidenceRequirement,
@@ -75,6 +76,15 @@ void evaluation.allow;
 
 const failure: Readonly<AxGuardFailure> | undefined = evaluation.failures[0];
 void failure;
+
+// The failure operator is the closed six plus the normalized `'unknown'`, so an
+// exhaustive switch is writable and no host string can widen it.
+const failureOp: AxGuardOp | 'unknown' | undefined = failure?.op;
+void failureOp;
+
+// @ts-expect-error a host-declared operator string is never echoed into `op`.
+const echoedOp: 'SECRET-OPERATOR' = failure?.op as AxGuardFailure['op'];
+void echoedOp;
 
 // A failure carries op, kind, and code only — there is no value channel.
 // @ts-expect-error

@@ -155,6 +155,15 @@ export function evidenceRequirementKey(
   ]);
 }
 
+const GUARD_OPS: ReadonlySet<string> = new Set<AxGuardOp>([
+  'eq',
+  'ne',
+  'in',
+  'notIn',
+  'contains',
+  'fresh',
+]);
+
 function failure(
   kind: unknown,
   op: unknown,
@@ -162,10 +171,13 @@ function failure(
 ): Readonly<AxGuardFailure> {
   return Object.freeze({
     kind: typeof kind === 'string' ? kind : '',
-    // A malformed requirement echoes its declared operator string, or
-    // `'unknown'` when none was declared. This is host-authored text; it is
-    // never an observation value, source ID, or resource ID.
-    op: (typeof op === 'string' ? op : 'unknown') as AxGuardOp,
+    // Normalized rather than echoed: a malformed requirement's declared
+    // operator is arbitrary host text, and this field — plus the audit event's
+    // `failedPredicateKind` derived from it — is public API a consumer may
+    // switch on exhaustively.
+    op: (typeof op === 'string' && GUARD_OPS.has(op)
+      ? op
+      : 'unknown') as AxGuardFailure['op'],
     code,
   });
 }

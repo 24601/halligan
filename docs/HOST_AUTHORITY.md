@@ -190,6 +190,12 @@ redaction-by-construction: it is exactly `"<op>:<kind>"` of the first failed
 requirement — host-authored labels only. It never carries an observation value,
 a source ID, a claim, a resource ID, or a receipt reason.
 
+`AxGuardFailure.op` is one of the six operators or the literal `'unknown'`: a
+requirement naming an operator outside the six is normalized rather than echoed,
+so both the failure union and the audit label stay a closed vocabulary a
+consumer can switch on. The `kind` half is host-authored and is truncated so the
+whole label stays within 240 characters.
+
 Guards are **not** re-evaluated after the host returns its receipt. The receipt
 is the authority and is already bound to the request context that carried this
 evidence; re-evaluating would open a time-of-check window on the host's own

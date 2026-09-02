@@ -94,7 +94,13 @@ export type AxGuardFailureCode =
 /** Diagnosable without disclosing: op + kind + code, never a value. */
 export interface AxGuardFailure {
   readonly kind: string;
-  readonly op: AxGuardOp;
+  /**
+   * The declared operator, or the literal `'unknown'` when a requirement named
+   * an operator outside the closed six. A host string is never echoed here, so
+   * an exhaustive `switch` over this field — and the `failedPredicateKind`
+   * audit label derived from it — stays inside a known vocabulary.
+   */
+  readonly op: AxGuardOp | 'unknown';
   readonly code: AxGuardFailureCode;
 }
 

@@ -11,7 +11,6 @@ import type {
   AxEvidenceObservation,
   AxEvidenceRequirement,
   AxGuardEvaluationContext,
-  AxGuardOp,
   AxResourceScope,
 } from './types.js';
 
@@ -278,9 +277,27 @@ describe('Ax evidence guard evaluation', () => {
     );
     expect(result.failures[0]).toEqual({
       kind: 'session.mfa',
-      op: 'sameAs' as AxGuardOp,
+      op: 'unknown',
       code: 'malformed_requirement',
     });
+    // The declared operator is arbitrary host text and is normalized, never
+    // echoed: `op` is public API a consumer may switch on exhaustively, and
+    // the audit event's failedPredicateKind is derived from it.
+    const echoed = evaluate(
+      [
+        {
+          kind: 'session.mfa',
+          trustedSources: ['idp-a'],
+          match: {
+            op: 'SECRET-OPERATOR' as unknown as 'eq',
+            value: 'x',
+          },
+        },
+      ],
+      [observation()]
+    );
+    expect(echoed.failures[0]?.op).toBe('unknown');
+    expect(JSON.stringify(echoed.failures)).not.toContain('SECRET-OPERATOR');
   });
 
   it('denies a fresh requirement with no maxAgeMs', () => {
