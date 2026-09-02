@@ -928,6 +928,29 @@ import {
   axIsEvidenceRequirement,
   axIsGuardPredicateFailure,
 } from './authority/evidence.js';
+import {
+  type AxSkillAuthoritySnapshot,
+  type AxSkillPreconditionCheck,
+  type AxSkillPreconditionFailure,
+  type AxSkillPreconditionFailureKind,
+  type AxSkillPreconditionOutcome,
+  type AxSkillPreconditionPolicy,
+  type AxSkillProvenance,
+  type AxSkillProvenanceAuthorization,
+  type AxSkillProvenanceEffectRef,
+  type AxSkillProvenanceSource,
+  type AxSkillVerifierDecision,
+  type AxSkillVerifierVerdict,
+  axExtractSkillProvenance,
+  axIsSkillAuthoritySnapshot,
+  axIsSkillPreconditionPolicy,
+  axIsSkillProvenance,
+  axRecheckSkillProvenance,
+  axSkillAdvisoryAnnotation,
+  axSkillPreconditionExecutableDefaults,
+  axSkillPreconditionGuidanceDefaults,
+  axSkillProvenanceDigest,
+} from './authority/skillProvenance.js';
 import type {
   AxActor,
   AxAuthorityClaim,
@@ -2561,6 +2584,7 @@ export { axEventSizeBytes };
 export { axExceedsRunDiscardCeiling };
 export { axExecutableSkillRef };
 export { axExtendAxIRRuntimeCapabilities };
+export { axExtractSkillProvenance };
 export { axFailOpenSpan };
 export { axFetchJsonSpeech };
 export { axFetchMultipartTranscription };
@@ -2615,6 +2639,9 @@ export { axIsRejectedCandidateExpired };
 export { axIsRejectedCandidateLedgerError };
 export { axIsSha256Digest };
 export { axIsSha256Digest64 };
+export { axIsSkillAuthoritySnapshot };
+export { axIsSkillPreconditionPolicy };
+export { axIsSkillProvenance };
 export { axIsTaskDiscriminationError };
 export { axIsTrajectoryAppendError };
 export { axIsTrajectoryBlobError };
@@ -2719,6 +2746,7 @@ export { axProgramSourceVersion };
 export { axProjectTrajectory };
 export { axReactCanonicalJSON };
 export { axReactSerializeHistory };
+export { axRecheckSkillProvenance };
 export { axRecordMindSalience };
 export { axRecoverMindPacerState };
 export { axRejectedCandidateDigest };
@@ -2766,6 +2794,10 @@ export { axShouldUseGeminiLiveAudio };
 export { axShouldUseGrokRealtime };
 export { axShouldUseOpenAIRealtime };
 export { axSignUCPRequest };
+export { axSkillAdvisoryAnnotation };
+export { axSkillPreconditionExecutableDefaults };
+export { axSkillPreconditionGuidanceDefaults };
+export { axSkillProvenanceDigest };
 export { axSnapshotAuthority };
 export { axSpanAttributes };
 export { axSpanEvents };
@@ -4012,6 +4044,18 @@ export type { AxSha256Digest64 };
 export type { AxSharedSessionPhase };
 export type { AxSignatureConfig };
 export type { AxSignatureInput };
+export type { AxSkillAuthoritySnapshot };
+export type { AxSkillPreconditionCheck };
+export type { AxSkillPreconditionFailure };
+export type { AxSkillPreconditionFailureKind };
+export type { AxSkillPreconditionOutcome };
+export type { AxSkillPreconditionPolicy };
+export type { AxSkillProvenance };
+export type { AxSkillProvenanceAuthorization };
+export type { AxSkillProvenanceEffectRef };
+export type { AxSkillProvenanceSource };
+export type { AxSkillVerifierDecision };
+export type { AxSkillVerifierVerdict };
 export type { AxSpeechConfig };
 export type { AxSpeechRequest };
 export type { AxSpeechResponse };
