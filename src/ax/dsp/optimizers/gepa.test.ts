@@ -7,7 +7,11 @@ import {
 import { ax } from '../template.js';
 import { AxGEPA } from './gepa.js';
 import { axHarnessRecipe } from './harnessRecipe.js';
-import { AxInMemoryRejectedCandidateLedger } from './rejectedCandidateLedger.js';
+import {
+  AX_REJECTED_LEDGER_REF_MAX_DIGESTS,
+  AxInMemoryRejectedCandidateLedger,
+  axRejectedCandidatePrior,
+} from './rejectedCandidateLedger.js';
 import type { AxTrajectoryTerminationClassifier } from './trajectoryTermination.js';
 
 const createSingleRootProgram = (
@@ -3161,6 +3165,162 @@ describe('rejected-candidate ledger wiring', () => {
     // Refused BEFORE anything ran: permanent negative memory is a caller bug,
     // not a degraded store, so it fails loudly and for free.
     expect(forwardCalls).toBe(0);
+  });
+
+  /**
+   * One round whose CHILD rollouts all fail, so the batch is aborted for
+   * `insufficient_admitted_rows` before any comparison is computed.
+   */
+  const runAborting = async (ledger: Record<string, unknown>) => {
+    const optimizer = new AxGEPA({
+      studentAI: {} as AxAIService,
+      teacherAI: {} as AxAIService,
+      numTrials: 1,
+      minibatch: false,
+      mergeMax: 0,
+      minImprovementThreshold: 0,
+    } as any);
+    (optimizer as any).reflectTargetInstruction = async () => 'worse';
+    const program = createSingleRootProgram(
+      'task',
+      async (instruction: string) => {
+        if (instruction === 'worse') throw new Error('provider 429');
+        return { score: 0.5 };
+      }
+    );
+    const classifier: AxTrajectoryTerminationClassifier = (input) =>
+      input.error === undefined
+        ? { kind: 'completed' }
+        : { kind: 'environment_failure', cause: 'transport' };
+    return await optimizer.compile(
+      program as any,
+      [{ question: 'q1' }, { question: 'q2' }, { question: 'q3' }] as any,
+      async ({ prediction }: any) => prediction.score,
+      {
+        maxMetricCalls: 60,
+        skipPerfectScore: false,
+        candidateLineage: true,
+        trajectoryTermination: { classifier },
+        rejectedCandidateLedger: ledger,
+      } as any
+    );
+  };
+
+  it('records no score pair and no observed delta for a candidate aborted before the comparison', async () => {
+    const clock = makeClock();
+    const store = new AxInMemoryRejectedCandidateLedger({ clock });
+    const result = await runAborting({
+      store,
+      storeId: 'test-store',
+      clock,
+      expiresWhen: [{ kind: 'after_ms', ttlMs: 60_000 }],
+    });
+    const records = result.optimizedProgram?.candidateLineage?.records ?? [];
+    expect(
+      records.some(
+        (record: any) =>
+          record.decision === 'aborted' &&
+          record.reason === 'insufficient_admitted_rows'
+      )
+    ).toBe(true);
+
+    const [aborted] = await store.list({ now: clock.now() });
+    expect(aborted).toBeDefined();
+    // The abort produced NO comparable numbers. A `parentScore: 0,
+    // childScore: 0` pair would record a measured delta of zero for an
+    // evaluation that never ran, and a later reader could not tell that from a
+    // real tie (§12/M1).
+    expect(Object.hasOwn(aborted!.gateReading, 'parentScore')).toBe(false);
+    expect(Object.hasOwn(aborted!.gateReading, 'childScore')).toBe(false);
+    expect(aborted!.observedDeltas).toEqual([]);
+    expect(aborted!.gateReading.admittedRows).toBe(0);
+    // ...and the rendered prior says so rather than printing a hole.
+    const prior = axRejectedCandidatePrior([aborted!]);
+    expect(prior?.content).toContain('comparison: none');
+    expect(prior?.content).not.toContain('parent: undefined');
+
+    // CONTROL: a candidate that was actually COMPARED and lost carries both
+    // scores and one observed delta, so the absence above is a claim about
+    // this entry, not a field the writer never fills.
+    const rejectedClock = makeClock();
+    const rejectedStore = new AxInMemoryRejectedCandidateLedger({
+      clock: rejectedClock,
+    });
+    await runRejecting({
+      store: rejectedStore,
+      storeId: 'test-store',
+      clock: rejectedClock,
+      expiresWhen: [{ kind: 'after_ms', ttlMs: 60_000 }],
+    });
+    const [compared] = await rejectedStore.list({ now: rejectedClock.now() });
+    expect(typeof compared?.gateReading.parentScore).toBe('number');
+    expect(typeof compared?.gateReading.childScore).toBe('number');
+    expect(compared?.observedDeltas).toEqual([
+      { metric: 'scalar', split: 'held_in', delta: -2 },
+    ]);
+  });
+
+  it('keeps the most recent digests when the artifact ref hits its cap', async () => {
+    // The cap is a MEMORY bound, and `normalizeRef` keeps the tail. A clamp
+    // that dropped the newest digests would pin a run's first attempts and
+    // omit everything it learned afterwards (§12/M2).
+    const clock = makeClock();
+    const store = new AxInMemoryRejectedCandidateLedger({ clock });
+    const seen: string[] = [];
+    const recordingStore = {
+      capabilities: store.capabilities,
+      record: async (entry: any, signal?: AbortSignal) => {
+        seen.push(entry.candidateDigest);
+        return await store.record(entry, signal);
+      },
+      list: store.list.bind(store),
+      purgeExpired: store.purgeExpired.bind(store),
+    };
+    const rounds = AX_REJECTED_LEDGER_REF_MAX_DIGESTS + 3;
+    const optimizer = new AxGEPA({
+      studentAI: {} as AxAIService,
+      teacherAI: {} as AxAIService,
+      numTrials: rounds,
+      minibatch: false,
+      mergeMax: 0,
+      earlyStoppingTrials: rounds + 1,
+      minImprovementThreshold: 0,
+    } as any);
+    let proposal = 0;
+    (optimizer as any).reflectTargetInstruction = async () => {
+      proposal += 1;
+      return `worse-${proposal}`;
+    };
+    const program = createSingleRootProgram('task', async (instruction) => ({
+      score: instruction === 'task' ? 1 : 0,
+    }));
+    const result = await optimizer.compile(
+      program as any,
+      [{ question: 'q1' }, { question: 'q2' }] as any,
+      async ({ prediction }: any) => prediction.score,
+      {
+        maxMetricCalls: 4 * rounds + 8,
+        skipPerfectScore: false,
+        rejectedCandidateLedger: {
+          store: recordingStore,
+          storeId: 'test-store',
+          clock,
+          expiresWhen: [{ kind: 'after_ms', ttlMs: 600_000 }],
+        },
+      } as any
+    );
+    expect(seen.length).toBeGreaterThan(AX_REJECTED_LEDGER_REF_MAX_DIGESTS);
+    const ref = (result.optimizedProgram as any)?.rejectedCandidateLedgerRef;
+    expect(ref.entryDigests).toHaveLength(AX_REJECTED_LEDGER_REF_MAX_DIGESTS);
+    expect(ref.omittedDigestCount).toBe(
+      seen.length - AX_REJECTED_LEDGER_REF_MAX_DIGESTS
+    );
+    // The retained set is the TAIL of the write order, not its head.
+    expect([...ref.entryDigests]).toEqual(
+      seen.slice(seen.length - AX_REJECTED_LEDGER_REF_MAX_DIGESTS)
+    );
+    expect(ref.entryDigests).not.toContain(seen[0]);
+    expect(ref.entryDigests).toContain(seen[seen.length - 1]);
   });
 
   it('writes no ledger ref and offers no prior when the option is omitted', async () => {

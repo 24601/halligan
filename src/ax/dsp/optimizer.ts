@@ -982,7 +982,17 @@ export class AxOptimizedProgramImpl<OUT = any>
       );
     }
     if (config.rejectedCandidateLedgerRef) {
-      this.rejectedCandidateLedgerRef = config.rejectedCandidateLedgerRef;
+      // Through the SAME helper the union path uses, so a ref arriving from
+      // `axDeserializeOptimizedProgram` is held to the bounds a ref written by
+      // GEPA is: identity-strength members, deduplicated, clamped to
+      // `AX_REJECTED_LEDGER_REF_MAX_DIGESTS`, frozen. A plain assignment let a
+      // hand-edited artifact carry arbitrary strings, unbounded length and a
+      // mutable array into the one artifact field this constructor did not
+      // validate (§12/M3).
+      this.rejectedCandidateLedgerRef = axMergeRejectedCandidateLedgerRefs(
+        undefined,
+        config.rejectedCandidateLedgerRef
+      );
     }
     if (config.causalCandidateEvidence && !config.causalEvidenceVerifier) {
       throw new Error('causal evidence verifier is required');

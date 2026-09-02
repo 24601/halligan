@@ -20,6 +20,7 @@ import {
   axIsCausalAttributionRequiredError,
 } from './causalCandidateEvidence.js';
 import type { AxGEPACandidateLineageManifest } from './gepaLineage.js';
+import { AX_REJECTED_LEDGER_REF_MAX_DIGESTS } from './rejectedCandidateLedger.js';
 
 const componentId = 'answerer::instruction';
 const programSourceComponentId = 'source-program::program-source';
@@ -1608,6 +1609,79 @@ describe('causal candidate evidence version 4', () => {
     expect(() =>
       axReplaceOptimizedProgramSnapshot(current, divergent, verify)
     ).toThrow('divergent causal evidence history');
+  });
+
+  it('holds a deserialized ledger ref to the same bounds as one GEPA wrote', () => {
+    // §12/M3. `axDeserializeOptimizedProgram` reaches this constructor with
+    // whatever the JSON said. A plain assignment carried arbitrary strings,
+    // unbounded length and a mutable array into the artifact — every bound the
+    // ref has was enforced only on the union and GEPA write paths.
+    const oversized = Array.from(
+      { length: AX_REJECTED_LEDGER_REF_MAX_DIGESTS + 44 },
+      (_, index) => `sha256:${index.toString(16).padStart(64, '0')}`
+    );
+    const program = new AxOptimizedProgramImpl({
+      bestScore: 0.5,
+      stats: {} as any,
+      optimizerType: 'GEPA',
+      optimizationTime: 1,
+      totalRounds: 1,
+      converged: true,
+      rejectedCandidateLedgerRef: {
+        storeId: 'store-1',
+        entryDigests: [...oversized, ...oversized.slice(0, 3)] as any,
+        omittedDigestCount: 0,
+      },
+    });
+    const ref = program.rejectedCandidateLedgerRef!;
+    // Deduplicated, clamped to the cap, oldest dropped, and counted.
+    expect(ref.entryDigests).toHaveLength(AX_REJECTED_LEDGER_REF_MAX_DIGESTS);
+    expect(ref.omittedDigestCount).toBe(44);
+    expect(ref.entryDigests).not.toContain(oversized[0]);
+    expect(ref.entryDigests).toContain(oversized[oversized.length - 1]);
+    expect(Object.isFrozen(ref.entryDigests)).toBe(true);
+    // A member that is not an identity digest can never resolve in the store,
+    // so it is refused rather than silently carried.
+    expect(
+      () =>
+        new AxOptimizedProgramImpl({
+          bestScore: 0.5,
+          stats: {} as any,
+          optimizerType: 'GEPA',
+          optimizationTime: 1,
+          totalRounds: 1,
+          converged: true,
+          rejectedCandidateLedgerRef: {
+            storeId: 'store-1',
+            entryDigests: ['fnv1a64:cbf29ce484222325'] as any,
+            omittedDigestCount: 0,
+          },
+        })
+    ).toThrow('invalid_digest');
+    // CONTROL: a well-formed ref survives a serialize/deserialize round trip
+    // unchanged, so the bounds above refuse bad input rather than every input.
+    const roundTripped = axDeserializeOptimizedProgram(
+      axSerializeOptimizedProgram(
+        new AxOptimizedProgramImpl({
+          bestScore: 0.5,
+          stats: {} as any,
+          optimizerType: 'GEPA',
+          optimizationTime: 1,
+          totalRounds: 1,
+          converged: true,
+          rejectedCandidateLedgerRef: {
+            storeId: 'store-1',
+            entryDigests: [digest('1'), digest('2')] as any,
+            omittedDigestCount: 2,
+          },
+        })
+      )
+    );
+    expect(roundTripped.rejectedCandidateLedgerRef).toEqual({
+      storeId: 'store-1',
+      entryDigests: [digest('1'), digest('2')],
+      omittedDigestCount: 2,
+    });
   });
 
   it('refuses a ledger-ref union across different stores', () => {

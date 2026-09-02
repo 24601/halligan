@@ -975,8 +975,16 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
         mutation?: AxMutationAnnotation;
         gate: 'reflective_mutation' | 'system_merge';
         estimator: 'sum' | 'ipw_hajek';
-        parentScore: number;
-        childScore: number;
+        /**
+         * BOTH OMITTED when the gate made no comparison — an abort for
+         * `insufficient_admitted_rows` has no comparable numbers, and a
+         * fabricated `0`/`0` pair would be indistinguishable from a real
+         * measurement of zero (§12/M1).
+         */
+        parentScore?: number;
+        childScore?: number;
+        /** A paired difference, when the instrument estimated one. */
+        differenceEstimate?: number;
         stderr?: number;
         admission?: Readonly<AxTrajectoryAdmissionReport>;
         onFailure?: (failure: AxGEPACandidateFailure) => void;
@@ -1021,6 +1029,20 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
               )}`
           ),
         ].join('; ');
+        const observedDelta =
+          args.parentScore !== undefined && args.childScore !== undefined
+            ? {
+                metric: 'scalar',
+                split: 'held_in' as const,
+                delta: args.childScore - args.parentScore,
+              }
+            : args.differenceEstimate !== undefined
+              ? {
+                  metric: 'scalar',
+                  split: 'held_in' as const,
+                  delta: args.differenceEstimate,
+                }
+              : undefined;
         const entry = axRejectedCandidateLedgerEntry({
           candidateDigest: await axRejectedCandidateDigest({
             componentDelta,
@@ -1035,16 +1057,20 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
           // about a candidate, it evaluates one. An empty array says that,
           // where a fabricated prediction would not.
           predictedDeltas: [],
-          observedDeltas: [
-            {
-              metric: 'scalar',
-              split: 'held_in',
-              delta: args.childScore - args.parentScore,
-            },
-          ],
+          // An OBSERVED delta needs an observation. A batch aborted for
+          // insufficient admitted rows produced none, and an empty array says
+          // that where a `0` would claim a measurement.
+          observedDeltas: observedDelta === undefined ? [] : [observedDelta],
           gateReading: {
-            parentScore: args.parentScore,
-            childScore: args.childScore,
+            ...(args.parentScore === undefined
+              ? {}
+              : { parentScore: args.parentScore }),
+            ...(args.childScore === undefined
+              ? {}
+              : { childScore: args.childScore }),
+            ...(args.differenceEstimate === undefined
+              ? {}
+              : { differenceEstimate: args.differenceEstimate }),
             threshold: this.minImprovementThreshold,
             estimator: args.estimator,
             ...(args.stderr === undefined ? {} : { stderr: args.stderr }),
@@ -1059,12 +1085,20 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
         // A SET: `record` is idempotent by digest, so re-proposing the same
         // text supersedes one entry rather than creating a second, and the
         // artifact's pointer set must say the same thing the store does.
-        if (
-          ledgerEntryDigests.has(entry.candidateDigest) ||
-          ledgerEntryDigests.size < AX_REJECTED_LEDGER_REF_MAX_DIGESTS
-        ) {
-          ledgerEntryDigests.add(entry.candidateDigest);
-        } else {
+        //
+        // OLDEST-FIRST eviction, so this path and `normalizeRef` (which keeps
+        // the tail) agree about which half a cap drops. Dropping the NEWEST
+        // digests is the wrong half for a recency-shaped negative memory: a
+        // run that rejects more than the cap would pin its first attempts and
+        // silently omit everything it learned afterwards (§12/M2). Re-adding
+        // an existing digest refreshes its position, matching `record`'s
+        // supersede-by-digest semantics.
+        ledgerEntryDigests.delete(entry.candidateDigest);
+        ledgerEntryDigests.add(entry.candidateDigest);
+        while (ledgerEntryDigests.size > AX_REJECTED_LEDGER_REF_MAX_DIGESTS) {
+          const oldest = ledgerEntryDigests.values().next().value;
+          if (oldest === undefined) break;
+          ledgerEntryDigests.delete(oldest);
           omittedLedgerDigestCount += 1;
         }
       } catch (error) {
@@ -1893,8 +1927,8 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
               mutation: mergeAnnotation,
               gate: 'system_merge',
               estimator: 'sum',
-              parentScore: 0,
-              childScore: 0,
+              // NO SCORE PAIR: the merge was aborted before the comparison,
+              // so there is nothing measured to report (§12/M1).
               admission: mergeEval.admission,
               onFailure: (failure) => mergeFailures?.push(failure),
             });
@@ -1980,8 +2014,8 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
               mutation: mergeAnnotation,
               gate: 'system_merge',
               estimator: 'sum',
-              parentScore: 0,
-              childScore: 0,
+              // NO SCORE PAIR: the merge was aborted before the comparison,
+              // so there is nothing measured to report (§12/M1).
               admission: mergeEval.admission,
               onFailure: (failure) => mergeFailures?.push(failure),
             });
@@ -2667,8 +2701,8 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
           mutation: candidateAnnotation,
           gate: 'reflective_mutation',
           estimator: 'sum',
-          parentScore: 0,
-          childScore: 0,
+          // NO SCORE PAIR: the batch was aborted before the comparison, so
+          // there is nothing measured to report (§12/M1).
           admission: childMiniEval.admission,
           onFailure: (failure) => mutationFailures?.push(failure),
         });
@@ -2775,8 +2809,16 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
           // The estimator the gate ACTUALLY used, so a ledger reader can tell
           // a sum comparison from an IPW one rather than assuming.
           estimator: ipwEstimate ? 'ipw_hajek' : 'sum',
-          parentScore: ipwEstimate ? 0 : parentComparisonSum,
-          childScore: ipwEstimate ? ipwEstimate.estimate : childComparisonSum,
+          // The IPW estimator produces a PAIRED DIFFERENCE, not two scores.
+          // Reporting its estimate as a `childScore` against a placeholder
+          // `parentScore: 0` made the arithmetic come out right and the two
+          // fields a lie (§12/M1).
+          ...(ipwEstimate
+            ? { differenceEstimate: ipwEstimate.estimate }
+            : {
+                parentScore: parentComparisonSum,
+                childScore: childComparisonSum,
+              }),
           ...(ipwEstimate?.stderr === undefined
             ? {}
             : { stderr: ipwEstimate.stderr }),
@@ -3023,7 +3065,9 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       ledgerOptions && ledgerEntryDigests.size > 0
         ? // Normalized through the same helper asymmetric rollback unions with,
           // so the artifact's ref is validated and clamped by one code path
-          // rather than two that can disagree.
+          // rather than two that can disagree. The in-run memory bound above
+          // evicts oldest-first for the same reason: `normalizeRef` keeps the
+          // tail, so both paths drop the same half.
           axMergeRejectedCandidateLedgerRefs(undefined, {
             storeId: ledgerOptions.storeId,
             entryDigests: [...ledgerEntryDigests],

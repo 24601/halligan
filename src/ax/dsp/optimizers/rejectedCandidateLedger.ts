@@ -53,8 +53,23 @@ export type AxRejectedCandidateExpiry =
   | Readonly<{ kind: 'after_ms'; ttlMs: number }>;
 
 export interface AxRejectedCandidateGateReading {
-  readonly parentScore: number;
-  readonly childScore: number;
+  /**
+   * The two scores the gate compared. BOTH ABSENT when no comparison was made
+   * — an abort for `insufficient_admitted_rows` produced no comparable numbers
+   * at all, and `parentScore: 0, childScore: 0` would record a measured delta
+   * of 0 for an evaluation that never ran. Absent and zero are different
+   * claims, exactly as `cost.costUsd` is `undefined` rather than 0 when
+   * unknown. A half pair is refused: one score is not a comparison.
+   */
+  readonly parentScore?: number;
+  readonly childScore?: number;
+  /**
+   * A PAIRED DIFFERENCE, when the instrument estimated one instead of two
+   * scores. Under `estimator: 'ipw_hajek'` the gate estimates the mean
+   * per-example difference directly and there is no "parent score" to report,
+   * so the pair is absent and this field carries the reading.
+   */
+  readonly differenceEstimate?: number;
   readonly threshold: number;
   readonly estimator: 'sum' | 'ipw_hajek';
   readonly stderr?: number;
@@ -261,13 +276,7 @@ export function axRejectedCandidateLedgerEntry(
       message: `entry.gateReading.estimator must be 'sum' or 'ipw_hajek', received ${JSON.stringify(gateReading.estimator)}`,
     });
   }
-  for (const field of [
-    'parentScore',
-    'childScore',
-    'threshold',
-    'admittedRows',
-    'discardedRows',
-  ] as const) {
+  for (const field of ['threshold', 'admittedRows', 'discardedRows'] as const) {
     if (!Number.isFinite(gateReading[field])) {
       throw new AxRejectedCandidateLedgerError({
         code: 'invalid_gate_reading',
@@ -275,13 +284,34 @@ export function axRejectedCandidateLedgerEntry(
       });
     }
   }
+  for (const field of [
+    'parentScore',
+    'childScore',
+    'differenceEstimate',
+    'stderr',
+  ] as const) {
+    if (
+      gateReading[field] !== undefined &&
+      !Number.isFinite(gateReading[field])
+    ) {
+      throw new AxRejectedCandidateLedgerError({
+        code: 'invalid_gate_reading',
+        message: `entry.gateReading.${field} must be a finite number when present, received ${String(gateReading[field])}`,
+      });
+    }
+  }
+  // Half a pair is not a comparison. Either both scores are present, or the
+  // reading says no comparison was made — a lone `childScore` would read as a
+  // measurement against an implied zero, which is the fabrication this pair
+  // was made optional to remove.
   if (
-    gateReading.stderr !== undefined &&
-    !Number.isFinite(gateReading.stderr)
+    (gateReading.parentScore === undefined) !==
+    (gateReading.childScore === undefined)
   ) {
     throw new AxRejectedCandidateLedgerError({
       code: 'invalid_gate_reading',
-      message: `entry.gateReading.stderr must be a finite number when present, received ${String(gateReading.stderr)}`,
+      message:
+        'entry.gateReading must carry both parentScore and childScore or neither: one score is not a comparison',
     });
   }
 
@@ -308,7 +338,27 @@ export function axRejectedCandidateLedgerEntry(
     ...(input.mutation === undefined ? {} : { mutation: input.mutation }),
     predictedDeltas: boundedDeltas(input.predictedDeltas),
     observedDeltas: boundedDeltas(input.observedDeltas),
-    gateReading: Object.freeze({ ...gateReading }),
+    // Rebuilt rather than spread, so an optional field passed as an explicit
+    // `undefined` is OMITTED rather than serialized as a present-but-null key.
+    gateReading: Object.freeze({
+      ...(gateReading.parentScore === undefined
+        ? {}
+        : { parentScore: gateReading.parentScore }),
+      ...(gateReading.childScore === undefined
+        ? {}
+        : { childScore: gateReading.childScore }),
+      ...(gateReading.differenceEstimate === undefined
+        ? {}
+        : { differenceEstimate: gateReading.differenceEstimate }),
+      threshold: gateReading.threshold,
+      estimator: gateReading.estimator,
+      ...(gateReading.stderr === undefined
+        ? {}
+        : { stderr: gateReading.stderr }),
+      admittedRows: gateReading.admittedRows,
+      discardedRows: gateReading.discardedRows,
+      gate: gateReading.gate,
+    }),
     ...(input.harness === undefined ? {} : { harness: input.harness }),
     expiresWhen: Object.freeze(
       expiresWhen.map((clause) => Object.freeze({ ...clause }))
@@ -692,8 +742,17 @@ export function axRejectedCandidatePrior(
 
   const lines: string[] = [PRIOR_BEGIN, PRIOR_CONTRACT, PRIOR_TRUST, ''];
   for (const entry of retained) {
+    const reading = entry.gateReading;
+    // A reading with no score pair says so. Rendering `parent: undefined`
+    // would hand the proposer a number-shaped hole to read as zero.
+    const comparison =
+      reading.parentScore !== undefined && reading.childScore !== undefined
+        ? `parent: ${reading.parentScore}; child: ${reading.childScore}`
+        : reading.differenceEstimate !== undefined
+          ? `difference: ${reading.differenceEstimate}`
+          : 'comparison: none';
     lines.push(
-      `- surfaces: ${JSON.stringify(entry.implicatedSurfaces)}; classes: ${JSON.stringify(entry.componentClasses)}; gate: ${JSON.stringify(entry.gateReading.gate)}; estimator: ${JSON.stringify(entry.gateReading.estimator)}; parent: ${entry.gateReading.parentScore}; child: ${entry.gateReading.childScore}`
+      `- surfaces: ${JSON.stringify(entry.implicatedSurfaces)}; classes: ${JSON.stringify(entry.componentClasses)}; gate: ${JSON.stringify(entry.gateReading.gate)}; estimator: ${JSON.stringify(entry.gateReading.estimator)}; ${comparison}`
     );
     // Every diagnosis is JSON-quoted, so a diagnosis containing an END marker
     // or an imperative sentence cannot break out of this block.
