@@ -126,6 +126,13 @@
       "description": "This skill helps an LLM generate correct playbook code using @ax-llm/ax. Use when the user asks about playbook(), AxPlaybook, context playbooks, evolving context, ACE / Agentic Context Engineering, agent.playbook(), or growing/applying task knowledge offline and online with evolve() and update().",
       "url": "ax-playbook/SKILL.md",
       "digest": "sha256:7b5c09497696222f6477794c34308973b409f65a84d8c00c7059bcfee021ffa5"
+    },
+    {
+      "name": "ax-trajectory",
+      "type": "skill-md",
+      "description": "Use AxTrajectoryStore to keep an append-only agent life log with digest-verified blob spill, fork/merge, durable per-consumer cursors, a bounded filtered backward tail, and tiered-rollup context projection. Use when the user asks about AxTrajectoryStore, AxTrajectoryStep, axProjectTrajectory, rollups, drill-down, AxJSONLTrajectoryStore, or runAxTrajectoryStoreConformance.",
+      "url": "ax-trajectory/SKILL.md",
+      "digest": "sha256:9467e8fd1aa9c7b81df4e79d1fb7f65a663ff3db371455cfc8d3ce3bad463370"
     }
   ]
 }

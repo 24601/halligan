@@ -807,11 +807,14 @@ import {
   AxInMemoryTrajectoryStore,
   AxTrajectoryAppendError,
   type AxTrajectoryAppendReceipt,
+  type AxTrajectoryProjection,
   type AxTrajectoryStep,
   type AxTrajectoryStore,
   type AxTrajectoryStoreConformanceReport,
   type AxTrajectoryTailResult,
+  axProjectTrajectory,
   axResolveTrajectoryStep,
+  axTrajectoryContextBudget,
   axTrajectoryTypeRegistry,
   runAxTrajectoryStoreConformance,
 } from './index.js';
@@ -822,11 +825,19 @@ void axTrajectoryTypeRegistry();
 void runAxTrajectoryStoreConformance;
 void axResolveTrajectoryStep;
 void AxTrajectoryAppendError;
+void axProjectTrajectory;
+const trajectoryBudget: number = axTrajectoryContextBudget({
+  contextWindowTokens: 500_000,
+});
+void trajectoryBudget;
 
 declare const trajectoryReceipt: AxTrajectoryAppendReceipt;
 declare const trajectoryStep: AxTrajectoryStep;
 declare const trajectoryTail: AxTrajectoryTailResult;
 declare const trajectoryConformance: AxTrajectoryStoreConformanceReport;
+declare const trajectoryProjection: AxTrajectoryProjection;
+const trajectoryRender: string = trajectoryProjection.render;
+void trajectoryRender;
 const trajectorySeq: number = trajectoryReceipt.seq;
 const trajectoryType: string = trajectoryStep.type;
 const trajectoryExhausted: boolean = trajectoryTail.exhausted;

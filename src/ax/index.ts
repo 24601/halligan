@@ -1964,11 +1964,47 @@ import {
   type AxInMemoryTrajectoryStoreOptions,
 } from './trajectory/memoryStore.js';
 import {
+  type AxTrajectoryContextBudgetOptions,
+  type AxTrajectoryProjection,
+  type AxTrajectoryProjectionOptions,
+  type AxTrajectoryProjectionSection,
+  axProjectTrajectory,
+  axRenderTrajectoryProjection,
+  axResolveTrajectoryCitations,
+  axTrajectoryContextBudget,
+  axTrajectoryDefaultBudgetTokens,
+  axTrajectoryDefaultFanout,
+  axTrajectoryDescentBudget,
+  axTrajectoryMinRecentSteps,
+  axTrajectoryRecentSize,
+  axTrajectoryScanPageSteps,
+  axTrajectoryTokensPerStep,
+} from './trajectory/projection.js';
+import {
   type AxTrajectoryTypeRegistryOptions,
   axDefaultTrajectoryTypes,
   axTrajectoryTypeRegistry,
   axTrajectoryUnknownDescriptor,
 } from './trajectory/registry.js';
+import {
+  type AxDeterministicTrajectorySummarizerOptions,
+  AxInMemoryTrajectoryRollupStore,
+  type AxTrajectoryBuildRollupsOptions,
+  type AxTrajectoryBuildRollupsResult,
+  type AxTrajectoryProgramSummarizerOptions,
+  type AxTrajectoryRollupBlock,
+  type AxTrajectoryRollupMeta,
+  type AxTrajectoryRollupStore,
+  type AxTrajectorySummarizer,
+  type AxTrajectorySummarizerRequest,
+  type AxTrajectorySummarizerResult,
+  axBuildTrajectoryRollups,
+  axDeterministicTrajectorySummarizer,
+  axTrajectoryMaxSummaryBytes,
+  axTrajectoryMaxThemes,
+  axTrajectoryProgramSummarizer,
+  axTrajectoryRollupSignature,
+} from './trajectory/rollups.js';
 import {
   type AxTrajectoryResolveOptions,
   type AxTrajectorySpillPolicy,
@@ -2208,6 +2244,7 @@ export { AxInMemoryLearningStore };
 export { AxInMemoryProgramStateStore };
 export { AxInMemoryRejectedCandidateLedger };
 export { AxInMemoryTrajectoryBlobStore };
+export { AxInMemoryTrajectoryRollupStore };
 export { AxInMemoryTrajectoryStore };
 export { AxInteractionTimeline };
 export { AxInteractionTimelineDefaults };
@@ -2340,6 +2377,7 @@ export { axBuildDistillerDefinition };
 export { axBuildExecutorDefinition };
 export { axBuildMutationDepthHistogram };
 export { axBuildResponderDefinition };
+export { axBuildTrajectoryRollups };
 export { axCanonicalizeCausalCandidateEvidenceManifest };
 export { axCheckMetricsHealth };
 export { axClassifyAxServiceTermination };
@@ -2379,6 +2417,7 @@ export { axDefaultTrajectoryTermination };
 export { axDefaultTrajectoryTypes };
 export { axDemandEventObserver };
 export { axDeserializeOptimizedProgram };
+export { axDeterministicTrajectorySummarizer };
 export { axDigestStrength };
 export { axEmitUsageEvent };
 export { axErasePreferenceEvidence };
@@ -2520,11 +2559,13 @@ export { axProcessContentForProvider };
 export { axProgramSourceDefaultNodeResourceLimits };
 export { axProgramSourceRuntimeProtocol };
 export { axProgramSourceVersion };
+export { axProjectTrajectory };
 export { axReactCanonicalJSON };
 export { axReactSerializeHistory };
 export { axRejectedCandidateDigest };
 export { axRejectedCandidateLedgerEntry };
 export { axRejectedCandidatePrior };
+export { axRenderTrajectoryProjection };
 export { axRenewPreferenceEvidence };
 export { axReplaceOptimizedProgramSnapshot };
 export { axReportRuntimeCapabilityContradictions };
@@ -2539,6 +2580,7 @@ export { axResolveOpenAIRealtimeAudioConfig };
 export { axResolveServiceTier };
 export { axResolveTaskDiscriminationOptions };
 export { axResolveTrajectoryAdmissionOptions };
+export { axResolveTrajectoryCitations };
 export { axResolveTrajectoryStep };
 export { axResolveTrajectorySteps };
 export { axRetractPreferenceEvidence };
@@ -2572,12 +2614,24 @@ export { axStartActiveSpanFailOpen };
 export { axStartSpanFailOpen };
 export { axSummarizeTrajectoryAdmission };
 export { axTrajectoryCompactData };
+export { axTrajectoryContextBudget };
+export { axTrajectoryDefaultBudgetTokens };
+export { axTrajectoryDefaultFanout };
+export { axTrajectoryDescentBudget };
 export { axTrajectoryId };
 export { axTrajectoryInlineBytes };
 export { axTrajectoryInvalidFieldPath };
 export { axTrajectoryMaxStepIds };
+export { axTrajectoryMaxSummaryBytes };
+export { axTrajectoryMaxThemes };
+export { axTrajectoryMinRecentSteps };
+export { axTrajectoryProgramSummarizer };
+export { axTrajectoryRecentSize };
+export { axTrajectoryRollupSignature };
+export { axTrajectoryScanPageSteps };
 export { axTrajectoryStepBytes };
 export { axTrajectoryStepFingerprint };
+export { axTrajectoryTokensPerStep };
 export { axTrajectoryTruncateUtf8 };
 export { axTrajectoryTypeRegistry };
 export { axTrajectoryUnknownDescriptor };
@@ -3146,6 +3200,7 @@ export type { AxDemandReceipt };
 export type { AxDemandRecord };
 export type { AxDemandScope };
 export type { AxDemandStore };
+export type { AxDeterministicTrajectorySummarizerOptions };
 export type { AxDigestStrength };
 export type { AxDiscoveryTurnSummary };
 export type { AxDockerContainer };
@@ -3794,6 +3849,9 @@ export type { AxTrajectoryAppendRequest };
 export type { AxTrajectoryBlobPutRequest };
 export type { AxTrajectoryBlobRef };
 export type { AxTrajectoryBlobStore };
+export type { AxTrajectoryBuildRollupsOptions };
+export type { AxTrajectoryBuildRollupsResult };
+export type { AxTrajectoryContextBudgetOptions };
 export type { AxTrajectoryCreateRequest };
 export type { AxTrajectoryCursor };
 export type { AxTrajectoryDrainBudget };
@@ -3806,8 +3864,15 @@ export type { AxTrajectoryLogEntry };
 export type { AxTrajectoryLogOptions };
 export type { AxTrajectoryMergeRequest };
 export type { AxTrajectoryPreparedStep };
+export type { AxTrajectoryProgramSummarizerOptions };
+export type { AxTrajectoryProjection };
+export type { AxTrajectoryProjectionOptions };
+export type { AxTrajectoryProjectionSection };
 export type { AxTrajectoryReadQuery };
 export type { AxTrajectoryResolveOptions };
+export type { AxTrajectoryRollupBlock };
+export type { AxTrajectoryRollupMeta };
+export type { AxTrajectoryRollupStore };
 export type { AxTrajectorySpillPolicy };
 export type { AxTrajectorySpillRequest };
 export type { AxTrajectorySpillResult };
@@ -3822,6 +3887,9 @@ export type { AxTrajectoryStoreConformanceFactory };
 export type { AxTrajectoryStoreConformanceFactoryOptions };
 export type { AxTrajectoryStoreConformanceInstance };
 export type { AxTrajectoryStoreConformanceReport };
+export type { AxTrajectorySummarizer };
+export type { AxTrajectorySummarizerRequest };
+export type { AxTrajectorySummarizerResult };
 export type { AxTrajectoryTailQuery };
 export type { AxTrajectoryTailResult };
 export type { AxTrajectoryTermination };

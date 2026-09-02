@@ -61,6 +61,7 @@ Use the skill files in `src/ax/skills/` as the primary subsystem documentation:
 - `src/ax/skills/ax-flow.md` - workflows and orchestration
 - `src/ax/skills/ax-mcp.md` - native MCP clients, transports, auth, catalogs, tasks, subscriptions, and Ax integration
 - `src/ax/skills/ax-event-runtime.md` - event ingestion, wake/resume, continuations, stores, and sinks
+- `src/ax/skills/ax-trajectory.md` - append-only agent life log, blob spill, cursors, fork/merge, tiered projection
 - `src/ax/skills/ax-gepa.md` - Pareto optimization
 - `src/ax/skills/ax-learn.md` - self-improving agent patterns
 

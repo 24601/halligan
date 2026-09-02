@@ -371,3 +371,11 @@ Goodhart
 unconfigured
 codegen
 workingstate
+rollups
+metas
+rescan
+wakeup
+unbuildable
+seqs
+drillable
+straddle
