@@ -885,6 +885,25 @@ function accumulatingProgram(perCall: number): ProbeProgram {
   return program;
 }
 
+/**
+ * Advances event time until a condition holds, or gives up after a bounded
+ * number of passes. A fixed round count is a wall-clock assumption in
+ * disguise: the same 80 rounds that are generous on a laptop are not on a
+ * loaded CI runner, and the ASSERTIONS below are what must stay strict.
+ */
+async function pumpUntil(
+  clock: AxManualEventClock,
+  done: () => boolean | Promise<boolean>,
+  options: Readonly<{ stepMs?: number; rounds?: number; passes?: number }> = {}
+): Promise<void> {
+  const passes = options.passes ?? 40;
+  for (let pass = 0; pass < passes; pass++) {
+    if (await done()) return;
+    await settle(clock, options.stepMs ?? 5, options.rounds ?? 20);
+  }
+  await done();
+}
+
 const FAST_PACER = Object.freeze({
   baseMs: 1,
   factor: 1,
@@ -921,7 +940,7 @@ describe('AxMind per-step budgets', () => {
       ])
     );
     await instance.start();
-    await settle(clock, 5, 80);
+    await pumpUntil(clock, () => program.calls.length >= 8);
     expect(program.calls.length).toBeGreaterThan(6);
     expect(await errorSteps(store)).toHaveLength(0);
     expect(instance.health().thinkers[0]?.consecutiveErrors).toBe(0);
@@ -947,7 +966,7 @@ describe('AxMind per-step budgets', () => {
       ])
     );
     await instance.start();
-    await settle(clock, 5, 40);
+    await pumpUntil(clock, async () => (await errorSteps(store)).length > 0);
     const errors = await errorSteps(store);
     expect(errors.length).toBeGreaterThan(0);
     expect(String(errors[0]?.data.content)).toMatch(/tokens over 1000/);
@@ -983,7 +1002,7 @@ describe('AxMind step settlement', () => {
     // closure body is evaluated when it runs, not when it is written.
     const instance = mind(baseOptions(store, [thinker]));
     await instance.start();
-    await settle(clock, 5, 40);
+    await pumpUntil(clock, () => writes > 0);
     expect(writes).toBeGreaterThan(0);
     const steps = await typesIn(store);
     // The whole claim in two assertions: the sink's work is in the log, and
@@ -1034,7 +1053,9 @@ describe('AxMind step settlement', () => {
       baseOptions(store, [thinker], { event: { maxAttempts: 1 } })
     );
     await instance.start();
-    await settle(clock, 5, 40);
+    await pumpUntil(clock, async () =>
+      (await typesIn(store)).some((step) => step.type === 'action')
+    );
     const steps = await typesIn(store);
     expect(steps.some((step) => step.type === 'action')).toBe(true);
     expect(steps.filter((step) => step.type === 'mind-wake').length).toBe(1);
@@ -1085,7 +1106,11 @@ describe('AxMind step settlement', () => {
       } as never,
       { eventContext: { deliveryId: 'abandoned-delivery' } } as never
     );
-    await settle(clock, 20, 60);
+    await pumpUntil(
+      clock,
+      () => diagnostics.some((one) => one.code === 'liveness-fallback-armed'),
+      { stepMs: 20, rounds: 20 }
+    );
     // The in-flight record is released and one wake is re-armed, so a mind
     // whose runs die between assembly and forward degrades to a delay rather
     // than leaking a step record and going silent.
@@ -1119,7 +1144,10 @@ describe('AxMind rate fuse recovery', () => {
       ])
     );
     await instance.start();
-    await settle(clock, 5, 60);
+    await pumpUntil(
+      clock,
+      () => instance.getPacerState('monolith')?.parked === 'rate_fuse'
+    );
     expect(instance.getPacerState('monolith')?.parked).toBe('rate_fuse');
     const parkedAfter = program.calls.length;
     expect(parkedAfter).toBeGreaterThan(1);
@@ -1180,7 +1208,12 @@ describe('AxMind projection dead-letters', () => {
       )
     );
     await instance.start();
-    await settle(clock, 5, 60);
+    await pumpUntil(
+      clock,
+      () =>
+        diagnostics.filter((one) => one.code === 'context-assembly-failed')
+          .length > 2
+    );
     // The whole claim in one number: zero model calls, ever.
     expect(program.calls).toHaveLength(0);
     const failures = diagnostics.filter(
@@ -1238,7 +1271,12 @@ describe('AxMind projection dead-letters', () => {
     );
     await instance.start();
     live = true;
-    await settle(clock, 5, 60);
+    await pumpUntil(
+      clock,
+      () =>
+        diagnostics.filter((one) => one.code === 'context-assembly-failed')
+          .length > 2
+    );
     expect(program.calls).toHaveLength(0);
     expect(
       diagnostics.filter((one) => one.code === 'context-assembly-failed').length
@@ -1361,9 +1399,9 @@ describe('the shipped thinkers, inside a mind', () => {
     await instance.start();
     await settle(clock, 5, 20);
     await instance.receive({ from: 'ada', to: 'mind', content: 'are you up?' });
-    await settle(clock, 5, 120);
+    await pumpUntil(clock, () => sent.length >= 1);
     await instance.receive({ from: 'ada', to: 'mind', content: 'still?' });
-    await settle(clock, 5, 120);
+    await pumpUntil(clock, () => sent.length >= 2);
 
     // Exactly one outbound per inbound, through the REAL sink, the REAL chat
     // and the REAL idempotency ledger -- the path no other test in this lane
@@ -1423,7 +1461,9 @@ describe('the shipped thinkers, inside a mind', () => {
       to: 'mind',
       content: 'no need to answer',
     });
-    await settle(clock, 5, 60);
+    await pumpUntil(clock, async () =>
+      (await typesIn(store)).some((step) => step.data.decision === 'no-reply')
+    );
     expect(sent).toHaveLength(0);
     const steps = await typesIn(store);
     // M12: a decline is a RECORDED decision, not a silent drop, and it sticks
@@ -1633,7 +1673,9 @@ describe('AxMind self-suppression', () => {
       )
     );
     await instance.start();
-    await settle(clock, 5, 40);
+    await pumpUntil(clock, () =>
+      diagnostics.some((one) => one.code === 'wake-suppressed-self')
+    );
     // A suppressed wake creates NO delivery and NO step: without the
     // diagnostic there is nowhere a host can see the decision at all.
     const suppressed = diagnostics.filter(
@@ -1693,22 +1735,24 @@ describe('the shipped pair, in one mind', () => {
       )
     );
     await instance.start();
-    await settle(clock, 5, 120);
+    const wakesOf = async (thinker: string) =>
+      (await typesIn(store)).filter(
+        (step) => step.type === 'mind-wake' && step.launchedBy === thinker
+      ).length;
+    await pumpUntil(clock, async () => (await wakesOf('monolith')) >= 3);
     const steps = await typesIn(store);
+    const monolithWakes = await wakesOf('monolith');
+    const responderWakes = await wakesOf('responder');
     // The shipped pair is safe because the responder listens for `message`
     // ONLY. Two thinkers that both take the default (every narrative type)
     // subscription wake each other on their own `idle` steps forever, which
     // is a live token-burning runaway -- docs/MIND.md says so, and this is
-    // the assertion that would catch the shipped pair growing into it.
-    expect(steps.length).toBeLessThan(400);
-    const responderWakes = steps.filter(
-      (step) => step.type === 'mind-wake' && step.launchedBy === 'responder'
-    );
-    expect(responderWakes).toHaveLength(1); // its bootstrap wake, and no more
-    const monolithWakes = steps.filter(
-      (step) => step.type === 'mind-wake' && step.launchedBy === 'monolith'
-    );
-    expect(monolithWakes.length).toBeGreaterThan(1); // it is the paced one
+    // the assertion that would catch the shipped pair growing into it. The
+    // paced monolith advances; the responder wakes ONCE, for its bootstrap,
+    // and the log grows with the pacer rather than with the pair.
+    expect(monolithWakes).toBeGreaterThanOrEqual(3);
+    expect(responderWakes).toBe(1);
+    expect(steps.length).toBeLessThanOrEqual(monolithWakes * 4 + 20);
     await instance.close({ drain: false, timeoutMs: 200 });
   });
 });
