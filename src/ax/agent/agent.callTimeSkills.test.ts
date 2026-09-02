@@ -81,17 +81,26 @@ function makeAdjustFn(): {
 }
 
 /** An UNBOUND tool in the same run, so every negative has a positive control. */
-const pickFn: AxAgentFunction = {
-  name: 'pick',
-  description: 'Pick a line on an order',
-  namespace: 'inventory',
-  parameters: {
-    type: 'object',
-    properties: { order: { type: 'string', description: 'order id' } },
-    required: ['order'],
-  },
-  func: async () => ({ picked: 3 }),
-};
+function makePickFn(): { fn: AxAgentFunction; calls: { order: string }[] } {
+  const calls: { order: string }[] = [];
+  return {
+    calls,
+    fn: {
+      name: 'pick',
+      description: 'Pick a line on an order',
+      namespace: 'inventory',
+      parameters: {
+        type: 'object',
+        properties: { order: { type: 'string', description: 'order id' } },
+        required: ['order'],
+      },
+      func: async (args) => {
+        calls.push(args as { order: string });
+        return { picked: 3 };
+      },
+    },
+  };
+}
 
 /**
  * An evaluating runtime that captures the tool globals it was handed and —
@@ -106,12 +115,28 @@ const pickFn: AxAgentFunction = {
  * the speculation arm would silently test nothing.
  */
 function createRuntime(
-  options?: Readonly<{ speculate?: boolean }>
-): AxCodeRuntime & { globals: () => Record<string, unknown> } {
+  options?: Readonly<{ speculate?: boolean; deterministic?: readonly string[] }>
+): AxCodeRuntime & {
+  globals: () => Record<string, unknown>;
+  launched: () => readonly string[];
+} {
   const captured: Record<string, unknown> = {};
   const speculate = options?.speculate === true;
+  const deterministic = new Set(options?.deterministic ?? []);
+  /**
+   * Qualified names this harness actually drove down the speculation path.
+   *
+   * The POSITIVE CONTROL for the [T4] behavioural test: every end-state
+   * assertion there ("the tool did not run", "only the unbound callable
+   * minted") holds identically if the harness silently stopped speculating —
+   * a rename in `jsRuntimeHostFunction.ts` would do it, and an earlier version
+   * of this harness did exactly that and passed with the guard removed.
+   * Asserting this list turns that state back into a failure.
+   */
+  const launched: string[] = [];
 
   const wrapSpeculating = (
+    name: string,
     fn: (...args: unknown[]) => Promise<unknown>
   ): ((...args: unknown[]) => Promise<unknown>) => {
     return async (...args: unknown[]) => {
@@ -119,22 +144,34 @@ function createRuntime(
       // No adapter ⇒ the ordinary logical path. With one, the runtime launches
       // the physical call BEFORE the logical call is committed.
       if (!adapter) return fn(...args);
+      launched.push(name);
       const controller = new AbortController();
       const launch = await adapter.launch(args, controller.signal);
-      return adapter.commit(args, launch);
+      const committed = await adapter.commit(args, launch);
+      if (deterministic.has(name)) {
+        // A `deterministic: true` allowlist entry lets the runtime satisfy a
+        // repeated logical call from the SAME physical launch, so
+        // `functionCallRecorder` and the receipt sink fire twice for one
+        // environment change (RFC §7.7).
+        await adapter.commit(args, launch);
+      }
+      return committed;
     };
   };
 
-  const speculateScope = (value: unknown): unknown => {
+  const speculateScope = (value: unknown, path: string): unknown => {
     if (typeof value === 'function') {
-      return wrapSpeculating(value as (...a: unknown[]) => Promise<unknown>);
+      return wrapSpeculating(
+        path,
+        value as (...a: unknown[]) => Promise<unknown>
+      );
     }
     if (value && typeof value === 'object' && !Array.isArray(value)) {
       const out: Record<string, unknown> = {};
       for (const [key, entry] of Object.entries(
         value as Record<string, unknown>
       )) {
-        out[key] = speculateScope(entry);
+        out[key] = speculateScope(entry, path ? `${path}.${key}` : key);
       }
       return out;
     }
@@ -148,12 +185,15 @@ function createRuntime(
     Object.assign(captured, values);
     Object.assign(
       scope,
-      speculate ? (speculateScope(values) as Record<string, unknown>) : values
+      speculate
+        ? (speculateScope(values, '') as Record<string, unknown>)
+        : values
     );
   };
 
   return {
     globals: () => captured,
+    launched: () => launched,
     getUsageInstructions: () => '',
     createSession(globals): AxCodeSession {
       const scope: Record<string, unknown> = {};
@@ -202,8 +242,9 @@ function makeAgent(
   const { ai, executorPrompts } = axCreateScriptedMock(script);
   const codeRuntime = runtime ?? createRuntime();
   const adjust = makeAdjustFn();
+  const pick = makePickFn();
   const built = agent('task:string -> answer:string', {
-    functions: [adjust.fn, pickFn],
+    functions: [adjust.fn, pick.fn],
     runtime: codeRuntime,
     skillsCatalog: catalog,
     maxTurns: 6,
@@ -214,6 +255,7 @@ function makeAgent(
     agent: built,
     executorPrompts,
     adjustCalls: adjust.calls,
+    pickCalls: pick.calls,
     runtime: codeRuntime,
   };
 }
@@ -247,7 +289,7 @@ describe('call-time skill injection: configuration at the agent boundary', () =>
   it('throws at construction on an unresolvable skill id', () => {
     expect(() =>
       agent('task:string -> answer:string', {
-        functions: [pickFn],
+        functions: [makePickFn().fn],
         skillsCatalog: catalog,
         callTimeSkills: [{ qualifiedName: PICK, skill: 'no-such-skill' }],
       })
@@ -257,7 +299,7 @@ describe('call-time skill injection: configuration at the agent boundary', () =>
   it('throws at construction on a when predicate with no working state', () => {
     expect(() =>
       agent('task:string -> answer:string', {
-        functions: [pickFn],
+        functions: [makePickFn().fn],
         skillsCatalog: catalog,
         callTimeSkills: [
           { qualifiedName: PICK, skill: 'stock-adjustment', when: () => true },
@@ -797,10 +839,50 @@ describe('call-time skill injection: the speculation interlock', () => {
     await built.forward(ai, { task: 'adjust' } as never);
 
     expect(adjustCalls).toHaveLength(0);
-    // The unbound callable really did travel the speculation path in the same
-    // run, so the negative above is not an artefact of speculation being off.
+    // The POSITIVE CONTROL for the premise the negative rests on: the harness
+    // really did launch and commit through the adapter for the unbound
+    // callable in the same run. Without this the whole test passes when the
+    // harness quietly stops speculating, which is exactly the state an earlier
+    // version of it was in.
+    expect(runtime.launched()).toContain(PICK);
+    expect(runtime.launched()).not.toContain(ADJUST);
     const receipts = built.getState()?.workingState?.receipts ?? [];
     expect(receipts.map((receipt) => receipt.qualifiedName)).toEqual([PICK]);
+  });
+
+  it('collapses a deterministic speculation replay into one receipt', async () => {
+    // §7.7's other speculation fact: a `deterministic: true` allowlist entry
+    // lets the runtime satisfy a repeated logical call from one physical
+    // launch, so the recorder and the receipt sink fire TWICE for one
+    // environment change. Under-counting evidence is the safe direction, so
+    // the fingerprint dedupe collapses them rather than minting two receipts a
+    // goal could be completed against.
+    const runtime = createRuntime({ speculate: true, deterministic: [PICK] });
+    const {
+      agent: built,
+      ai,
+      pickCalls,
+    } = makeAgent(
+      {
+        distiller: [DISTILL],
+        executor: ['await inventory.pick({order:"42"})', FINAL],
+      },
+      { workingState: workingStateConfig() },
+      runtime
+    );
+
+    await built.forward(ai, { task: 'pick' } as never);
+
+    expect(runtime.launched()).toContain(PICK);
+    // One physical effect...
+    expect(pickCalls).toHaveLength(1);
+    const receipts = built.getState()?.workingState?.receipts ?? [];
+    // ...reported as two logical calls, collapsed into one receipt. The
+    // counter-metric is `observations`: the dedupe must not silently discard
+    // the second observation, or a real repeat would be invisible too.
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0]?.qualifiedName).toBe(PICK);
+    expect(receipts[0]?.observations).toBe(2);
   });
 });
 
