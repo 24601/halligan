@@ -62,9 +62,13 @@ import { describe, expect, it } from 'vitest';
  *   seam RFC 3.4 C4 is about, and it belongs on its own page.
  * - `subruns.ts` (new, 140): fork -> run -> merge, with the depth and spend
  *   caps and the always-merge-back guarantee (I10).
+ * - `thinkers.ts` 380 -> 560: RFC 4.15 assigns it `axMindMonolith`,
+ *   `axMindResponder`, `AxMindDeterministicProgram` and goal rendering; the
+ *   monolith's function menu (`axMindTools`, RFC 6.5's whole model-owned
+ *   list) and the prompt assembly both land here too.
  * Measured at this raise: types 571, pacer 284, health 138, routes 222,
  * sources 594, chat 768, salience 163, skills 134, context 138, step 137,
- * subruns 121, mind 1_190, index 146.
+ * subruns 121, thinkers 448, mind 1_195, index 175.
  */
 const CAPS: readonly (readonly [string, number])[] = [
   ['src/ax/mind/types.ts', 600], // raised from 430, then 480
@@ -78,6 +82,7 @@ const CAPS: readonly (readonly [string, number])[] = [
   ['src/ax/mind/context.ts', 160], // new: not in RFC 5.1
   ['src/ax/mind/step.ts', 160], // new: not in RFC 5.1
   ['src/ax/mind/subruns.ts', 140], // new: not in RFC 5.1
+  ['src/ax/mind/thinkers.ts', 560], // raised from 380
   ['src/ax/mind/mind.ts', 1_250], // raised from 600
   ['src/ax/mind/index.ts', 175], // raised from 90, then 120, then 130
 ];
@@ -88,7 +93,7 @@ const CAPS: readonly (readonly [string, number])[] = [
  * directory is higher for the per-file reasons above. Raising it again needs
  * the same treatment: a reason per file, here and in docs/MIND.md.
  */
-const MIND_DIRECTORY_CAP = 4_725;
+const MIND_DIRECTORY_CAP = 5_285;
 
 // vitest runs this workspace with cwd = src/ax, so the repo root is derived
 // from this file rather than from the process.

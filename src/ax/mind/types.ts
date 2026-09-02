@@ -9,6 +9,7 @@ import type {
   AxTrajectoryStepClass,
   AxTrajectoryStore,
 } from '../trajectory/types.js';
+import type { AxMind } from './mind.js';
 
 export type AxMindThinkerKind = 'monolith' | 'responder' | 'auxiliary';
 
@@ -76,8 +77,18 @@ export interface AxMindThinker<IN = any, OUT = any> {
   readonly subscription: Readonly<AxMindSubscription>;
   readonly ai: Readonly<AxAIService>;
   readonly program?: AxProgrammable<IN, OUT>;
+  /**
+   * The mind hands ITSELF to the factory. That is how a thinker's tools reach
+   * a runtime that did not exist when the thinker record was built, without a
+   * global and without a two-step host dance -- and it is what RFC 4.15 means
+   * by "host tools installed on every thinker program".
+   */
   readonly createProgram?: (
-    instance: Readonly<{ thinker: string; instanceKey: string }>
+    instance: Readonly<{
+      thinker: string;
+      instanceKey: string;
+      mind: AxMind;
+    }>
   ) => AxProgrammable<IN, OUT> | Promise<AxProgrammable<IN, OUT>>;
   /** Required with createProgram when declarative input plans are used. */
   readonly inputSignature?: Readonly<AxSignature>;

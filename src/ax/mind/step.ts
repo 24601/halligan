@@ -16,6 +16,7 @@ import type {
   AxEventIngress,
   AxEventTarget,
 } from '../event/types.js';
+import type { AxMind } from './mind.js';
 import type { AxMindThinker } from './types.js';
 
 /** Runs one thinker step around the thinker's own program. */
@@ -114,7 +115,11 @@ export class AxMindStepProgram implements AxProgrammable<any, any> {
  */
 export function axMindThinkerTarget(
   thinker: Readonly<AxMindThinker<any, any>>,
-  hooks: Readonly<{ run: AxMindStepRunner; assemble: AxMindStepAssembler }>
+  hooks: Readonly<{
+    run: AxMindStepRunner;
+    assemble: AxMindStepAssembler;
+    mind: () => AxMind;
+  }>
 ): AxEventTarget<any, any> {
   const wrap = (inner: AxProgrammable<any, any>) =>
     new AxMindStepProgram(hooks.run, thinker, inner);
@@ -129,6 +134,7 @@ export function axMindThinkerTarget(
               await thinker.createProgram!({
                 thinker: thinker.name,
                 instanceKey: instance.instanceKey,
+                mind: hooks.mind(),
               })
             ),
         }

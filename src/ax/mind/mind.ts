@@ -129,6 +129,15 @@ export const axMindReservedNames: readonly string[] = Object.freeze([
   'used',
 ]);
 
+/**
+ * `trajectoryId` is optional and always overridden: the mind writes to ITS
+ * trajectory and nowhere else, so a caller cannot address another life by
+ * accident, and a thinker tool does not have to know the id at all.
+ */
+export type AxMindAppendRequest = Readonly<
+  Omit<AxTrajectoryAppendRequest, 'trajectoryId'> & { trajectoryId?: string }
+>;
+
 export interface AxMindOptions {
   readonly id?: string;
   readonly trajectoryId: string;
@@ -294,6 +303,7 @@ export class AxMind {
           this.runThinkerStep(one, inner, ai, values, forwardOptions),
         assemble: (_one, ingress, eventContext) =>
           this.assembleContext(runtime, ingress, eventContext),
+        mind: () => this,
       });
       (runtime as { target: AxEventTarget<any, any> }).target = target;
       targets[thinker.name] = target;
@@ -541,9 +551,14 @@ export class AxMind {
     this.diagnose('wake-gap-noted', text);
   }
 
+  /** The artifacts in force right now. Re-read only by reloadArtifacts(). */
+  currentArtifacts(): Readonly<AxMindArtifacts> {
+    return this.artifacts;
+  }
+
   /** Host ingress and the ONLY write path. */
   async append(
-    request: Readonly<AxTrajectoryAppendRequest>,
+    request: Readonly<AxMindAppendRequest>,
     signal?: AbortSignal
   ): Promise<Readonly<AxTrajectoryStep>> {
     const descriptor = this.registry.describe(request.type);

@@ -2144,6 +2144,7 @@ import {
 } from './mind/health.js';
 import {
   AxMind,
+  type AxMindAppendRequest,
   type AxMindOptions,
   axMindInboundSource,
   axMindReservedNames,
@@ -2199,12 +2200,29 @@ import {
   axMindTickDue,
 } from './mind/sources.js';
 import {
+  type AxMindStepAssembler,
+  AxMindStepProgram,
+  type AxMindStepRunner,
+  axMindThinkerTarget,
+} from './mind/step.js';
+import {
   type AxMindSubRunOptions,
   type AxMindSubRunRequest,
   type AxMindSubRunResult,
   axMindMaxSubRunPolls,
   axMindSubRun,
 } from './mind/subruns.js';
+import {
+  AxMindDeterministicProgram,
+  type AxMindMonolithOptions,
+  type AxMindResponderOptions,
+  axMindMonolith,
+  axMindRenderContext,
+  axMindRenderGoals,
+  axMindRenderSignals,
+  axMindResponder,
+  axMindTools,
+} from './mind/thinkers.js';
 import {
   AxInMemoryMindOwnershipStore,
   type AxMindArtifactChange,
@@ -2607,7 +2625,9 @@ export { AxMind };
 export { AxMindBudgetExceededError };
 export { AxMindChatError };
 export { AxMindConfigurationError };
+export { AxMindDeterministicProgram };
 export { AxMindLivenessError };
+export { AxMindStepProgram };
 export { AxMindTickEventSource };
 export { AxMockAIService };
 export { AxMultiServiceRouter };
@@ -2923,13 +2943,18 @@ export { axMindHealthState };
 export { axMindInboundSource };
 export { axMindInferReplyTo };
 export { axMindMaxSubRunPolls };
+export { axMindMonolith };
 export { axMindPaceDelay };
 export { axMindPaceStepData };
 export { axMindPaceStepType };
 export { axMindPacerFuse };
 export { axMindPendingClass };
 export { axMindReconcileChatSends };
+export { axMindRenderContext };
+export { axMindRenderGoals };
+export { axMindRenderSignals };
 export { axMindReservedNames };
+export { axMindResponder };
 export { axMindRoutingSignals };
 export { axMindSalienceBuffer };
 export { axMindSalienceGuidance };
@@ -2943,7 +2968,9 @@ export { axMindSubRun };
 export { axMindSubscribedStepTypes };
 export { axMindSyntheticTrigger };
 export { axMindThinkerSubject };
+export { axMindThinkerTarget };
 export { axMindTickDue };
+export { axMindTools };
 export { axMindVisibleStepTypes };
 export { axMindWakeClass };
 export { axMindWakeOutcomeOf };
@@ -4143,6 +4170,7 @@ export type { AxMetricFn };
 export type { AxMetricFnArgs };
 export type { AxMetricResult };
 export type { AxMetricsConfig };
+export type { AxMindAppendRequest };
 export type { AxMindArtifactChange };
 export type { AxMindArtifactReceipt };
 export type { AxMindArtifactSource };
@@ -4162,6 +4190,7 @@ export type { AxMindHealth };
 export type { AxMindHealthInput };
 export type { AxMindHealthState };
 export type { AxMindHealthThresholds };
+export type { AxMindMonolithOptions };
 export type { AxMindOptions };
 export type { AxMindOwnershipStore };
 export type { AxMindPaceDecision };
@@ -4171,6 +4200,7 @@ export type { AxMindReplyDecision };
 export type { AxMindReplyResolution };
 export type { AxMindReplyState };
 export type { AxMindReplyStateOptions };
+export type { AxMindResponderOptions };
 export type { AxMindRoutingSignal };
 export type { AxMindRoutingSignalInput };
 export type { AxMindSalienceBuffer };
@@ -4180,7 +4210,9 @@ export type { AxMindSendReceipt };
 export type { AxMindSkill };
 export type { AxMindSkillEnvironment };
 export type { AxMindSkillSelection };
+export type { AxMindStepAssembler };
 export type { AxMindStepResult };
+export type { AxMindStepRunner };
 export type { AxMindSubRunOptions };
 export type { AxMindSubRunRequest };
 export type { AxMindSubRunResult };

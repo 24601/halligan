@@ -85,11 +85,29 @@ export {
   axMindTickDue,
 } from './sources.js';
 export type {
+  AxMindStepAssembler,
+  AxMindStepRunner,
+} from './step.js';
+export { AxMindStepProgram, axMindThinkerTarget } from './step.js';
+export type {
   AxMindSubRunOptions,
   AxMindSubRunRequest,
   AxMindSubRunResult,
 } from './subruns.js';
 export { axMindMaxSubRunPolls, axMindSubRun } from './subruns.js';
+export type {
+  AxMindMonolithOptions,
+  AxMindResponderOptions,
+} from './thinkers.js';
+export {
+  AxMindDeterministicProgram,
+  axMindMonolith,
+  axMindRenderContext,
+  axMindRenderGoals,
+  axMindRenderSignals,
+  axMindResponder,
+  axMindTools,
+} from './thinkers.js';
 export type {
   AxMindArtifactChange,
   AxMindArtifactReceipt,
