@@ -10,6 +10,7 @@ import {
   normalizeChangelogDashes,
   parseReleaseArguments,
   parseRemoteTagTarget,
+  publicationWorkflows,
   publishFetchArguments,
   releaseBranchName,
   releaseVersionFromSubject,
@@ -145,6 +146,27 @@ describe('protected-main release workflow', () => {
     expect(manifest.scripts['release:publish']).toBe(
       'node scripts/release.mjs publish'
     );
+  });
+
+  it('dispatches both publication workflows out of dry-run mode', () => {
+    expect(publicationWorkflows.map(({ file }) => file)).toEqual([
+      'npm-publish.yml',
+      'package-publish.yml',
+    ]);
+    for (const { file, fields } of publicationWorkflows) {
+      expect(fields, file).toEqual(['--raw-field', 'dry_run=false']);
+      const workflow = readFileSync(
+        path.join(repoRoot, '.github', 'workflows', file),
+        'utf8'
+      );
+      expect(workflow, file).toContain('dry_run:');
+      expect(workflow, file).toContain("vars.HALLIGAN_PUBLISH == 'true'");
+      expect(workflow, file).toContain('scripts/apply-halligan-identity.mjs');
+      // Every publish job runs the identity script before it uploads anything.
+      expect(workflow, file).toContain(
+        'node scripts/apply-halligan-identity.mjs --verify'
+      );
+    }
   });
 
   it('publishes merged release commits after successful main CI', () => {

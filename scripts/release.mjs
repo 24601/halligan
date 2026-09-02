@@ -15,11 +15,23 @@ const releaseManifests = [
   'src/aws-bedrock/package.json',
   'src/tools/package.json',
 ];
+// Halligan identities: this fork publishes its own package names, never
+// upstream's. The mapping lives in release/halligan-identity.json and is applied
+// at publish time by scripts/apply-halligan-identity.mjs inside the publication
+// workflows, never in a commit. This script only tags and dispatches; it does
+// not rename anything. See the "Halligan Package Identities" section of
+// docs/RELEASE.md, including the one-time registry steps only the account owner
+// can perform and how to flip the HALLIGAN_PUBLISH repository variable.
 const stableVersionPattern = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 const releaseSubjectPattern =
   /^chore: release v((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))(?: \(#\d+\))?$/;
-const publicationWorkflows = [
-  { file: 'npm-publish.yml', fields: [] },
+// Both publication workflows default their `dry_run` input to true so a manual
+// dispatch rehearses by default. A real release must opt out explicitly.
+export const publicationWorkflows = [
+  {
+    file: 'npm-publish.yml',
+    fields: ['--raw-field', 'dry_run=false'],
+  },
   {
     file: 'package-publish.yml',
     fields: ['--raw-field', 'dry_run=false'],
