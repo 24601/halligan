@@ -35,10 +35,12 @@ axllm
 axrejected
 backticked
 behaviour
+behaviourally
 bootstrapper
 Buena
 camelcasefield
 Cand
+canonicalizer
 chatbots
 chatcmpl
 checkpointable
@@ -180,6 +182,7 @@ PKCE
 plugh
 postbuild
 prefs
+provenanced
 psychographics
 PUNCT
 qsig
@@ -193,6 +196,7 @@ reentrancy
 reka
 Renderable
 replayers
+requestable
 rerank
 reranker
 retryable
@@ -256,8 +260,13 @@ typetest
 typetests
 ulaw
 unawaited
+undeclarable
+unexpressible
+ungated
 unminified
+unprovenanced
 unranked
+unrequested
 unscored
 unstub
 unvalidated

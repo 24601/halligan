@@ -155,6 +155,13 @@ commit only on host-checker support and harness-minted tool receipts. It is off
 by default and adds nothing to the prompt when unconfigured. The normative
 contract is [`docs/AGENT_WORKING_STATE.md`](./AGENT_WORKING_STATE.md).
 
+Learned artifacts — ACE bullets, executable skill artifacts, and catalog skills
+— can carry the authority facts of the trajectory they were distilled from and
+have them re-checked against current host authority at retrieval time. The same
+contract covers the optimizer-only visibility tier for ACE guidance and
+per-skill cost accounting; see
+[`docs/SKILL_PROVENANCE.md`](./SKILL_PROVENANCE.md).
+
 ## AxFlow
 
 AxFlow is an Ax program graph, not a generic workflow engine. Flow nodes call
