@@ -1,6 +1,6 @@
 ---
 name: ax-agent-state
-description: This skill helps an LLM generate correct verifier-gated working state and skillState memory-mode code using @ax-llm/ax. Use when the user asks about AxWorkingState, goal ledgers, actorMemoryMode, statePatch, state checkers, tool receipts, parked deltas, or long-horizon agent state.
+description: This skill helps an LLM generate correct verifier-gated working state, skillState memory-mode and call-time skill injection code using @ax-llm/ax. Use when the user asks about AxWorkingState, goal ledgers, actorMemoryMode, statePatch, state checkers, tool receipts, parked deltas, callTimeSkills, or long-horizon agent state.
 version: "24.0.17"
 ---
 
@@ -69,6 +69,10 @@ const inventoryAgent = agent('task:string -> answer:string', {
 - `actorMemoryMode: 'skillState'` requires BOTH `workingState` and
   `skillState`. It discards the transcript: anything the run needs later must
   be written into the state document.
+- Call-time skill injection is opt-in per EXACT callable and budgeted. An
+  intercepted call does not execute, requests no authorization, fires no
+  `onFunctionCall`, records no function call and mints NO receipt — so it can
+  never support a goal completion.
 
 ## Canonical Pattern
 
@@ -260,6 +264,55 @@ const agentWithSkillState = agent('task:string -> answer:string', {
 - `onTransition` is awaited with no timeout: a sink that can block should bound
   itself.
 
+## Call-Time Skill Injection
+
+Bind one exact callable to one skill. When the actor drafts a call to it, the
+harness does not execute it: it returns a frozen not-executed marker, loads the
+skill through the ordinary Loaded Skills channel, appends harness guidance to
+the trusted guidance log, and the model re-drafts on the next turn.
+
+```ts
+const shipper = agent('task:string -> answer:string', {
+  functions: [adjustTool, pickTool],
+  skillsCatalog: [
+    { id: 'stock-adjustment', name: 'Stock adjustment', content: guide },
+  ],
+  workingState: { stateSignature: 'orderId:string, shipped:boolean' },
+  callTimeSkills: [
+    {
+      // EXACT namespaced callable. No globs.
+      qualifiedName: 'inventory.adjustStock',
+      // A catalog id, or an inline { name, content } skill.
+      skill: 'stock-adjustment',
+      // Injections allowed for this callable in one run. Default 1.
+      maxInjections: 1,
+      // Optional: only intercept when the committed state says the call is
+      // state-changing. Requires `workingState`.
+      when: (state) => state.facts.shipped !== true,
+    },
+  ],
+});
+```
+
+- **A nudge, not a gate.** Past `maxInjections` the tool executes normally. The
+  budget is what stops an unhelpful skill trapping the actor in a re-draft
+  loop.
+- **Nothing observable happens for an intercepted call.** No authorization
+  request, no `onFunctionCall`, no recorder record, no receipt. Read the marker
+  with `axIsCallTimeSkillNotExecuted(value)`; it carries `qualifiedName`,
+  `skillId` and the guidance copy.
+- **A bound callable gets no runtime speculation adapter.** That is what stops
+  the JS runtime's speculation path executing the call behind the
+  interception's back, and it is why binding a callable changes how it is
+  dispatched even on turns that are not intercepted.
+- The guidance is harness-authored and names only the callable and the skill
+  id. Model text never reaches the guidance log.
+- Gamma records the intercepted turn with `action.executed: false`.
+- A binding naming a callable the run does not register throws
+  `unknown_bound_callable` at run start; an unresolvable skill id, a glob, a
+  duplicate binding, `maxInjections < 1` and a `when` without `workingState`
+  all throw at construction.
+
 ## Trace (Gamma)
 
 One record per actor turn under `trace: true`. Digests only — never raw
@@ -319,6 +372,11 @@ expect(outcome.parked[0]?.reason).toBe('no_supporting_receipt');
   `skillState.skill`; construction throws.
 - Do NOT make `statePatch` or `rationale` required outputs, and do NOT expect
   the rationale text to survive the turn.
+- Do NOT bind a callable with a glob, bind the same callable twice, or expect
+  an intercepted call to appear in `onFunctionCall`, the recorder or the
+  receipt roster.
+- Do NOT treat call-time skill injection as an authorization or safety gate.
+  It is one budgeted nudge; past the budget the tool runs.
 - Do NOT reach for `skillState` on a short run, or on a task whose progress no
   tool receipt witnesses: it removes the transcript, so anything not written
   into the state is gone.

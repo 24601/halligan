@@ -603,7 +603,7 @@ describe('call-time skill injection: the speculation interlock', () => {
   });
 
   it('a bound callable in a speculation-driving runtime still does not execute', async () => {
-    // The behavioural form of the same guard: this runtime WOULD launch and
+    // The behaviour-level form of the same guard: this runtime WOULD launch and
     // commit the physical call if an adapter existed, bypassing the logical
     // path where the interception lives.
     const runtime = createRuntime({ speculate: true });

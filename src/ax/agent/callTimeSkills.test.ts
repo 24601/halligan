@@ -323,7 +323,7 @@ describe('axIsCallTimeSkillNotExecuted', () => {
     expect(axIsCallTimeSkillNotExecuted(foreign)).toBe(true);
   });
 
-  it('rejects look-alikes, primitives and partial shapes', () => {
+  it('rejects near misses, primitives and partial shapes', () => {
     expect(axIsCallTimeSkillNotExecuted(undefined)).toBe(false);
     expect(axIsCallTimeSkillNotExecuted(null)).toBe(false);
     expect(axIsCallTimeSkillNotExecuted('skill_injected')).toBe(false);
