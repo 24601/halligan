@@ -385,7 +385,7 @@ export class AxInMemoryLearningStore implements AxLearningStore {
     // An append is a nomination. Only promoteRelease moves the head, so the
     // stored row is always written non-current whatever the caller passed, and
     // it carries no promotion timestamp.
-    const { promotedAt: _unpromoted, ...rest } = release;
+    const { promotedAt: _discardedPromotion, ...rest } = release;
     const appended: AxLearningRelease = Object.freeze({
       ...rest,
       current: false,

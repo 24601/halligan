@@ -369,18 +369,21 @@ describe('the reducer: never reasons', () => {
   it('an acknowledged batch refuses to train its sources again', () => {
     const start = feed(engine(), interaction('a'), report('r1', ['a'])).state;
     const built = axLearningEngineBuildBatch(start, 1);
-    const acked = axLearningEngineAcknowledge(built.state, built.batch.batchId);
-    expect(acked.consumedIds).toEqual(['a', 'r1']);
+    const acknowledged = axLearningEngineAcknowledge(
+      built.state,
+      built.batch.batchId
+    );
+    expect(acknowledged.consumedIds).toEqual(['a', 'r1']);
 
     // A new report naming the same exchange is terminal, whatever order the
     // records replay in.
-    const replay = feed(acked.state, report('r2', ['a']));
+    const replay = feed(acknowledged.state, report('r2', ['a']));
     expect(replay.decisions[0]).toEqual({
       outcome: 'never',
       reason: 'already-trained-source',
     });
     const replayReversed = feed(
-      acked.state,
+      acknowledged.state,
       report('r3', ['a', 'b']),
       interaction('b')
     );
@@ -523,11 +526,14 @@ describe('the reducer: batching', () => {
     expect(second.state).toBe(first.state);
     expect(axLearningEngineReady(first.state)).toBe(true);
 
-    const acked = axLearningEngineAcknowledge(first.state, first.batch.batchId);
-    expect(acked.state.pendingBatchId).toBeUndefined();
-    expect(axLearningEngineReady(acked.state)).toBe(false);
+    const acknowledged = axLearningEngineAcknowledge(
+      first.state,
+      first.batch.batchId
+    );
+    expect(acknowledged.state.pendingBatchId).toBeUndefined();
+    expect(axLearningEngineReady(acknowledged.state)).toBe(false);
     expect(() =>
-      axLearningEngineAcknowledge(acked.state, first.batch.batchId)
+      axLearningEngineAcknowledge(acknowledged.state, first.batch.batchId)
     ).toThrow(/no pending batch/);
   });
 

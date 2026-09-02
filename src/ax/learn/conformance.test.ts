@@ -103,7 +103,7 @@ describe('runAxLearningStoreConformance', () => {
   });
 
   it('runs both cross-instance halves against a shared multi-writer backing', async () => {
-    // One shared state, two façades that advertise multi-writer: the suite
+    // One shared state, two facades that advertise multi-writer: the suite
     // must then exercise the CAS races rather than skip them.
     const shared = new Map<string, AxInMemoryLearningStore>();
     const factory = (options: { databaseKey: string }): AxLearningStore => {
