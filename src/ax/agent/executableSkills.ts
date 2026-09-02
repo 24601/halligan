@@ -1,3 +1,16 @@
+import type {
+  AxSkillAuthoritySnapshot,
+  AxSkillPreconditionCheck,
+  AxSkillPreconditionPolicy,
+  AxSkillProvenance,
+} from '../authority/skillProvenance.js';
+import {
+  axIsSkillAuthoritySnapshot,
+  axIsSkillPreconditionPolicy,
+  axIsSkillProvenance,
+  axRecheckSkillProvenance,
+  axSkillPreconditionExecutableDefaults,
+} from '../authority/skillProvenance.js';
 import type { AxAgentFunction } from './agentInternal/agentStateTypes.js';
 import { rankDocuments } from './agentInternal/relevanceRanker.js';
 
@@ -76,13 +89,22 @@ export type AxExecutableSkillArtifact = {
   requirements?: AxExecutableSkillRequirements;
   /** Explicitly receiptless or bound to host-verified receipt records. */
   verification: AxExecutableSkillVerification;
-  /** Informational lineage; never establishes admission or authority. */
+  /**
+   * Informational lineage; never establishes admission or authority. For the
+   * authority facts that DO gate admission, see `authorityProvenance` below.
+   */
   provenance?: Readonly<{
     source: string;
     createdAt?: string;
     createdBy?: string;
     derivedFrom?: readonly AxExecutableSkillRef[];
   }>;
+  /**
+   * Authority facts of the trajectory this artifact was distilled from. Unlike
+   * `provenance` above, this DOES gate admission, through the retrieval-time
+   * re-check against `AxExecutableSkillContext.authoritySnapshot`.
+   */
+  authorityProvenance?: AxSkillProvenance;
   knownFailureModes?: readonly string[];
   lifecycle?: AxExecutableSkillLifecycle;
   expiresAt?: string;
@@ -104,6 +126,16 @@ export type AxExecutableSkillContext = {
   verifiedReceipts?: readonly AxExecutableSkillVerificationReceipt[];
   /** Canonical ISO timestamp, required for deterministic fail-closed checks. */
   now: string;
+  /**
+   * Current host authority for the retrieval-time re-check. Absent means no
+   * re-check. Validated structurally: the artifact key allowlist is shallow.
+   */
+  authoritySnapshot?: Readonly<AxSkillAuthoritySnapshot>;
+  /**
+   * Defaults to `axSkillPreconditionExecutableDefaults` (park). A `'downgrade'`
+   * entry is coerced to `'park'`: an executable artifact has no advisory mode.
+   */
+  preconditionPolicy?: Readonly<AxSkillPreconditionPolicy>;
   /** Trusted registry lookup. Returned functions are snapshotted and frozen. */
   resolveFunction: (
     functionRef: string,
@@ -130,6 +162,7 @@ export type AxExecutableSkillExclusionReason =
   | 'missing_capability'
   | 'missing_authority'
   | 'missing_verification_receipt'
+  | 'provenance_precondition_failed'
   | 'unresolved_function';
 
 export type AxExecutableSkillInspection = {
@@ -139,6 +172,8 @@ export type AxExecutableSkillInspection = {
   selected: boolean;
   reasons: readonly AxExecutableSkillExclusionReason[];
   matchedVerifierReceiptRef?: string;
+  /** Outcome and failure COUNTS of the retrieval-time re-check. Never values. */
+  provenance?: AxSkillPreconditionCheck;
 };
 
 export type AxSelectedExecutableSkill = Readonly<{
@@ -337,6 +372,7 @@ function isValidArtifact(value: unknown): value is AxExecutableSkillArtifact {
       'requirements',
       'verification',
       'provenance',
+      'authorityProvenance',
       'knownFailureModes',
       'lifecycle',
       'expiresAt',
@@ -350,6 +386,8 @@ function isValidArtifact(value: unknown): value is AxExecutableSkillArtifact {
     !isBoundedString(artifact.functionRef) ||
     !isRequirements(artifact.requirements) ||
     !isVerification(artifact.verification) ||
+    (artifact.authorityProvenance !== undefined &&
+      !axIsSkillProvenance(artifact.authorityProvenance)) ||
     (lifecycle !== undefined &&
       lifecycle !== 'active' &&
       lifecycle !== 'inactive' &&
@@ -423,6 +461,8 @@ function isValidContext(value: unknown): value is AxExecutableSkillContext {
       'grantedAuthorities',
       'verifiedReceipts',
       'now',
+      'authoritySnapshot',
+      'preconditionPolicy',
       'resolveFunction',
     ]) &&
     Array.isArray(context.admittedArtifacts) &&
@@ -449,6 +489,10 @@ function isValidContext(value: unknown): value is AxExecutableSkillContext {
           )
         ).size === context.verifiedReceipts.length)) &&
     isCanonicalDate(context.now) &&
+    (context.authoritySnapshot === undefined ||
+      axIsSkillAuthoritySnapshot(context.authoritySnapshot)) &&
+    (context.preconditionPolicy === undefined ||
+      axIsSkillPreconditionPolicy(context.preconditionPolicy)) &&
     typeof context.resolveFunction === 'function'
   );
 }
@@ -467,6 +511,25 @@ function isValidOptions(
         (options.topK as number) >= 0 &&
         (options.topK as number) <= MAX_TOP_K))
   );
+}
+
+/**
+ * An executable artifact has no advisory mode: it either runs or it does not.
+ * A host policy that says `'downgrade'` is coerced to `'park'` rather than
+ * silently admitting the artifact.
+ */
+function executablePreconditionPolicy(
+  policy: Readonly<AxSkillPreconditionPolicy> | undefined
+): Readonly<AxSkillPreconditionPolicy> {
+  if (!policy) return axSkillPreconditionExecutableDefaults;
+  const coerced: Record<string, 'park' | 'drop'> = {};
+  for (const [kind, outcome] of Object.entries(policy)) {
+    coerced[kind] = outcome === 'drop' ? 'drop' : 'park';
+  }
+  return {
+    ...axSkillPreconditionExecutableDefaults,
+    ...coerced,
+  } as Readonly<AxSkillPreconditionPolicy>;
 }
 
 function missingAny(
@@ -812,6 +875,10 @@ export function axSelectExecutableSkills(
     (contextSnapshot.grantedAuthorities ?? []).map(authorityKey)
   );
   const now = Date.parse(contextSnapshot.now);
+  const authoritySnapshot = contextSnapshot.authoritySnapshot;
+  const preconditionPolicy = executablePreconditionPolicy(
+    contextSnapshot.preconditionPolicy
+  );
   const refCounts = new Map<string, number>();
   for (const value of catalogSnapshot) {
     if (!isValidArtifact(value)) continue;
@@ -877,6 +944,22 @@ export function axSelectExecutableSkills(
     if (value.verification.mode === 'required' && !receipt)
       appendOwn(reasons, 'missing_verification_receipt');
 
+    // The re-check runs before any function is resolved, so a parked artifact
+    // never reaches `resolveFunction`. `context.now` is the authoritative clock
+    // on this path; `authoritySnapshot.now` is ignored here.
+    let provenanceCheck: AxSkillPreconditionCheck | undefined;
+    if (authoritySnapshot && value.authorityProvenance !== undefined) {
+      provenanceCheck = axRecheckSkillProvenance(
+        value.authorityProvenance,
+        authoritySnapshot,
+        preconditionPolicy,
+        contextSnapshot.now
+      );
+      if (provenanceCheck.outcome !== 'admit') {
+        appendOwn(reasons, 'provenance_precondition_failed');
+      }
+    }
+
     const entry: AxExecutableSkillInspection = {
       ref,
       name: value.name,
@@ -884,6 +967,7 @@ export function axSelectExecutableSkills(
       selected: false,
       reasons: [...new Set(reasons)],
       ...(receipt ? { matchedVerifierReceiptRef: receipt.ref } : {}),
+      ...(provenanceCheck ? { provenance: provenanceCheck } : {}),
     };
     appendOwn(inspection, entry);
     appendOwn(valid, { artifact: value, inspection: entry, receipt });
