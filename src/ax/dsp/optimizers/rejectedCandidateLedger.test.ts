@@ -542,6 +542,17 @@ describe('axRejectedCandidatePrior', () => {
   it('renders the prior outside the trusted reference channel', () => {
     const block = axRejectedCandidatePrior([entry()])!;
     expect(block.name).toBe('rejected-candidate-prior');
+    // The runtime half of B9. The type-level half lives in the `.test-d.ts`:
+    // `description` is a required OBJECT, which is what makes the block
+    // unassignable to `AxGEPAOptimizationReference` (whose `description` is
+    // `string | undefined`). A host that ignores types and spreads the block
+    // into the trusted channel still ships a non-string `description`, so the
+    // trusted renderer's `JSON.stringify` shows the untrusted label.
+    expect(block.description).toEqual({
+      trust: 'untrusted',
+      channel: 'rejected-candidate-prior',
+    });
+    expect(typeof block.description).not.toBe('string');
     expect(block.content).toContain('BEGIN UNTRUSTED REJECTED-CANDIDATE PRIOR');
     expect(block.content).toContain('END UNTRUSTED REJECTED-CANDIDATE PRIOR');
     // Never the trusted developer-guidance framing.

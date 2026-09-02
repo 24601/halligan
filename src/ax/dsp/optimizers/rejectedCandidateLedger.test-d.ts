@@ -1,6 +1,7 @@
 import type { AxEventClock } from '../../event/types.js';
 import type { Equal, Expect } from '../../util/typetest.js';
 import type { AxSha256Digest } from './digests.js';
+import type { AxGEPAOptimizationReference } from './gepaReflection.js';
 import type {
   AxGEPARejectedPriorBlock,
   AxInMemoryRejectedCandidateLedger,
@@ -78,25 +79,34 @@ entry.expiresWhen.push({ kind: 'after_ms', ttlMs: 1 });
  * B9's type-level guard.
  *
  * The rejected-candidate prior is its own block type. It must NOT be assignable
- * to anything shaped like a trusted optimization reference, because that
- * channel is documented as developer-selected guidance and is rendered inside
- * TRUSTED markers — and `diagnosis` is model-authored text. If these two ever
- * become structurally interchangeable, a proposer can write text the harness
- * then frames back to it as developer guidance.
+ * to `AxGEPAOptimizationReference`, because that channel is documented as
+ * trusted developer-selected guidance, is rendered inside TRUSTED markers, and
+ * `GEPA_PROPOSAL_CONTRACT` tells the model to use it "as general guidance" —
+ * while `diagnosis` is model-authored text. If these two are structurally
+ * interchangeable, the wiring commit can write `references: [priorBlock]` and
+ * a proposer gets its own text framed back to it as developer guidance.
+ *
+ * The assertion below is the firewall itself, not a description of one:
+ * `AxGEPARejectedPriorBlock.description` is a required object where
+ * `AxGEPAOptimizationReference.description` is `string | undefined`, which is
+ * what makes this assignment fail. Deleting that member makes the
+ * `@ts-expect-error` unused and this file stops compiling.
  */
-type TrustedOptimizationReferenceShape = {
-  readonly name: string;
-  readonly content: string;
-};
 declare const prior: AxGEPARejectedPriorBlock;
-// The block is deliberately NOT a bare {name, content} record: it carries its
-// own literal `name` and the counts a reader needs to know what was omitted.
-type _priorIsDistinct = Expect<
+// @ts-expect-error the untrusted prior block is not a trusted optimization reference
+const _priorIsNotATrustedReference: AxGEPAOptimizationReference = prior;
+// ...and not by accident of a missing member: every member the trusted channel
+// reads is present, so `description` is doing the work.
+type _priorHasName = Expect<
+  Equal<'name' extends keyof AxGEPARejectedPriorBlock ? true : false, true>
+>;
+type _priorHasContent = Expect<
+  Equal<AxGEPARejectedPriorBlock['content'], string>
+>;
+type _priorDescriptionIsNotAString = Expect<
   Equal<
-    AxGEPARejectedPriorBlock extends TrustedOptimizationReferenceShape
-      ? keyof AxGEPARejectedPriorBlock
-      : never,
-    'name' | 'content' | 'entryCount' | 'omittedCount'
+    AxGEPARejectedPriorBlock['description'] extends string ? true : false,
+    false
   >
 >;
 type _priorNameIsPinned = Expect<

@@ -574,10 +574,37 @@ export class AxInMemoryRejectedCandidateLedger
  */
 export interface AxGEPARejectedPriorBlock {
   readonly name: 'rejected-candidate-prior';
+  /**
+   * The untrusted-channel label. REQUIRED, and deliberately NOT a string.
+   *
+   * TypeScript is structural, so an extra member cannot make one object type
+   * unassignable to another: `{name, content, entryCount, omittedCount}` is
+   * assignable to `AxGEPAOptimizationReference` no matter how many fields it
+   * adds. Only an INCOMPATIBLE shared member closes that hole, and
+   * `AxGEPAOptimizationReference` (`gepaReflection.ts`) declares
+   * `description?: string`. Declaring `description` here as a required object
+   * is therefore what makes `const x: AxGEPAOptimizationReference = block` a
+   * compile error — B9's type-level firewall, pinned by the
+   * `// @ts-expect-error` in `rejectedCandidateLedger.test-d.ts`.
+   *
+   * The cleaner fix is to brand `AxGEPAOptimizationReference` nominally, but
+   * that is a source-breaking change to a public type in `gepaReflection.ts`,
+   * which this PR must leave byte-identical (INV-L1). If that brand ever
+   * lands, this member can become a plain string.
+   */
+  readonly description: Readonly<{
+    trust: 'untrusted';
+    channel: 'rejected-candidate-prior';
+  }>;
   readonly content: string;
   readonly entryCount: number;
   readonly omittedCount: number;
 }
+
+const PRIOR_UNTRUSTED_LABEL = Object.freeze({
+  trust: 'untrusted',
+  channel: 'rejected-candidate-prior',
+} as const);
 
 const PRIOR_BEGIN = '--- BEGIN UNTRUSTED REJECTED-CANDIDATE PRIOR ---';
 const PRIOR_END = '--- END UNTRUSTED REJECTED-CANDIDATE PRIOR ---';
@@ -628,6 +655,7 @@ export function axRejectedCandidatePrior(
   }
   return Object.freeze({
     name: 'rejected-candidate-prior' as const,
+    description: PRIOR_UNTRUSTED_LABEL,
     content,
     entryCount: retained.length,
     omittedCount,
