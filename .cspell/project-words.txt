@@ -261,6 +261,7 @@ Typesafe
 typetest
 typetests
 ulaw
+unaddressable
 unawaited
 undeclarable
 unexpressible
