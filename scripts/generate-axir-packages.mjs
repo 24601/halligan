@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { syncSmokeLockfiles } from './lib/smoke-lockfiles.mjs';
+
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, '..');
 const rootAxir = path.join(repoRoot, 'ir', 'axcore', 'root.axir');
@@ -46,6 +48,14 @@ try {
     });
     console.log(`generated packages/${target}`);
   }
+
+  // packages/rust is a path dependency of every Rust smoke crate, so a version
+  // bump here invalidates their committed Cargo.lock files. Refresh them now so
+  // the bump and the lock update are committed together; otherwise the next
+  // smoke build rewrites them and dirties a clean checkout.
+  const { version, stale } = await syncSmokeLockfiles({ repoRoot });
+  for (const lock of stale)
+    console.log(`refreshed ${lock} to axllm ${version}`);
 } finally {
   await rm(stageRoot, { recursive: true, force: true });
 }

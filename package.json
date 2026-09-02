@@ -30,7 +30,7 @@
     "test:skillstate-conformance": "vitest run scripts/skill-state-conformance.test.ts",
     "agent:workingstate:eval": "node --import=tsx scripts/eval-working-state.ts",
     "test:release-workflow": "vitest run scripts/release.test.js",
-    "test:axir:tools": "vitest run scripts/axir-backlog.test.js scripts/axir-conformance-sync.test.js scripts/axir-perturb-check.test.js scripts/ci-scope.test.js scripts/prepare-axir-perturb-runners.test.js scripts/test-generated-examples.test.js",
+    "test:axir:tools": "vitest run scripts/axir-backlog.test.js scripts/axir-conformance-sync.test.js scripts/axir-perturb-check.test.js scripts/ci-scope.test.js scripts/prepare-axir-perturb-runners.test.js scripts/test-generated-examples.test.js scripts/smoke-lockfiles.test.mjs",
     "test:axir": "node scripts/test-axir.mjs",
     "test:axir:packages": "npm run axir:check-packages",
     "test:examples:generated": "node scripts/test-generated-examples.mjs",

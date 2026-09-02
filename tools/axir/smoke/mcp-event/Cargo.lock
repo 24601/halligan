@@ -27,7 +27,7 @@ dependencies = [
 
 [[package]]
 name = "axllm"
-version = "24.0.8"
+version = "24.0.17"
 dependencies = [
  "regex",
  "reqwest",
