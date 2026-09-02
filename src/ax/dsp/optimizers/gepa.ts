@@ -647,6 +647,23 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
         ? (msg: string) => console.log(`[GEPA] ${msg}`)
         : (_msg: string) => {};
 
+    // Stated rather than silently ignored: an option that does nothing is worse
+    // than an option that refuses, and these are the two shapes where the
+    // sampler is reachable in the type system but inert at runtime.
+    if (discriminationOptions && !this.minibatch) {
+      verboseLog(
+        "minibatchStrategy: 'discriminative' was requested but minibatch is off, so every round already evaluates the whole feedback set and there is nothing to sample; the strategy is inert and no discrimination summary is emitted"
+      );
+    }
+    if (
+      discriminativeEnabled &&
+      this.minibatchSize > effectiveFeedbackSet.length
+    ) {
+      verboseLog(
+        `minibatchSize ${this.minibatchSize} exceeds the ${effectiveFeedbackSet.length}-task feedback set; the discriminative sampler draws DISTINCT tasks, so it uses ${effectiveFeedbackSet.length} where the uniform sampler pads with repeats`
+      );
+    }
+
     const gepaAdapter = (options as any)?.gepaAdapter as
       | AxGEPAAdapter
       | undefined;
