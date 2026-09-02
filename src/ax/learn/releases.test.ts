@@ -138,6 +138,23 @@ describe('AxLearningSurface — seeding', () => {
 });
 
 describe('AxLearningSurface — publish is a nomination', () => {
+  it('refuses a gate decision that is not persistable', async () => {
+    // The decision is written verbatim onto a durable chain, so it is held to
+    // the same floor as a record's payload. A custom selector returning a
+    // `Date` would otherwise store fine in memory and fail on a real store,
+    // after the nomination the host was told had landed.
+    const { surface } = await makeSurface();
+    const rogue = {
+      ...GATE,
+      metrics: { ...GATE.metrics, decidedAt: new Date() },
+    } as unknown as Readonly<AxHarnessGateDecision>;
+    await expect(
+      surface.publish({ entries: NEXT, gate: rogue })
+    ).rejects.toThrow(/AxHarnessGateDecision/);
+    // Nothing was appended.
+    expect(await surface.releases()).toHaveLength(1);
+  });
+
   it('appends current:false and does NOT move the head', async () => {
     const { surface } = await makeSurface();
     const headBefore = await surface.currentTree();

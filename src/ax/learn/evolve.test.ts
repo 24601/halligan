@@ -636,6 +636,25 @@ describe(
       expect(await h.surface.releases()).toHaveLength(1);
     });
 
+    it('throws when the selector names no evaluator', async () => {
+      // `evaluator` / `evaluatorVersion` are persisted beside `policy` on the
+      // chain, so they are held to the same floor.
+      const h = await harness();
+      const anonymous: AxHarnessSelector = (_candidate, evaluation) => ({
+        outcome: 'select',
+        evaluator: '   ',
+        evaluatorVersion: '1',
+        policy: 'custom',
+        policyVersion: '1',
+        reason: 'nameless',
+        metrics: evaluation.metrics,
+      });
+      await expect(evolve(h, { selection: anonymous })).rejects.toThrow(
+        /non-empty evaluator/
+      );
+      expect(await h.surface.releases()).toHaveLength(1);
+    });
+
     it('throws when the selector names no policy', async () => {
       const h = await harness();
       const nameless: AxHarnessSelector = (_candidate, evaluation) => ({
@@ -824,6 +843,26 @@ describe(
     });
   }
 );
+
+describe('axHarnessEvolve — the step number', { timeout: SLOW }, () => {
+  it('derives step from the chain tail, so it matches the release it rides on', async () => {
+    // The head does not move on a nomination. Deriving `step` from the head
+    // made two consecutive steps both report the same number while the chain
+    // counted on, so the manifest and the release it travelled with disagreed.
+    const h = await harness();
+    const first = await evolve(h);
+    expect(first.status).toBe('nominated');
+    expect(first.release?.step).toBe(2);
+    expect(first.manifest.step).toBe(2);
+
+    // The nomination is still un-promoted: the head is release 1.
+    expect((await h.surface.currentTree())?.step).toBe(1);
+    const second = await evolve(h);
+    expect(second.status).toBe('nominated');
+    expect(second.release?.step).toBe(3);
+    expect(second.manifest.step).toBe(3);
+  });
+});
 
 describe('axHarnessEvolve — abort hygiene', { timeout: SLOW }, () => {
   it('leaves no listener on the caller signal across settled and aborted steps', async () => {

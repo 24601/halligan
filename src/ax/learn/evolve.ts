@@ -514,7 +514,14 @@ export const axHarnessEvolve = async <
     );
   }
   const currentEntries = axAdmitHarnessTree(current.entries);
-  const step = current.step + 1;
+  // The step number is derived from the chain TAIL, not from the promoted
+  // head, because that is what `AxLearningSurface.publish` does
+  // (`releases.ts:160`). Deriving it from the head made the manifest and the
+  // gate metrics disagree with the release they travel on the moment an
+  // un-promoted nomination sat on the chain, and let two consecutive evolve
+  // steps both report `step: 2`.
+  const chain = await surface.releases(abortSignal);
+  const step = (chain.at(-1)?.step ?? 0) + 1;
 
   const budget: AxAgentEvalBudget = { remaining: maxMetricCalls };
   const learn = agent.getLearn?.();
@@ -563,7 +570,6 @@ export const axHarnessEvolve = async <
   let preReleaseId: string | undefined;
   let preParentReleaseId: string | undefined;
   if (preInstallation) {
-    const chain = await surface.releases(abortSignal);
     const preRelease = chain.find(
       (release) => release.releaseId === preInstallation.releaseId
     );
@@ -944,15 +950,20 @@ export const axHarnessEvolve = async <
         'axHarnessEvolve: the selector returned metrics it did not receive; a policy may not fabricate its own measurements.'
       );
     }
-    if (
-      typeof decision.policy !== 'string' ||
-      decision.policy.trim().length === 0 ||
-      typeof decision.policyVersion !== 'string' ||
-      decision.policyVersion.trim().length === 0
-    ) {
-      throw new Error(
-        'axHarnessEvolve: the selector must name a non-empty policy and policyVersion.'
-      );
+    // Both identity pairs are checked, not just the policy: `evaluator` and
+    // `evaluatorVersion` are persisted on the chain beside `policy`, and a
+    // decision log whose evaluator is `''` is not a decision log.
+    for (const [field, value] of [
+      ['policy', decision.policy],
+      ['policyVersion', decision.policyVersion],
+      ['evaluator', decision.evaluator],
+      ['evaluatorVersion', decision.evaluatorVersion],
+    ] as const) {
+      if (typeof value !== 'string' || value.trim().length === 0) {
+        throw new Error(
+          `axHarnessEvolve: the selector must name a non-empty ${field}; every one of them is persisted on the release chain.`
+        );
+      }
     }
 
     // ---- Steps 13-14: nominate, or reject ---------------------------------

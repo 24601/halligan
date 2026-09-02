@@ -17,6 +17,7 @@
 
 import { type AxEventClock, AxSystemEventClock } from '../event/types.js';
 import { randomUUID } from '../util/crypto.js';
+import { axAssertPersistableValue } from '../util/persistable.js';
 
 import { axAdmitHarnessTree, axHarnessContentId } from './tree.js';
 import {
@@ -148,6 +149,13 @@ export class AxLearningSurface {
   ): Promise<Readonly<AxLearningRelease>> {
     this.requireCompareAndSet('publish');
     const entries = axAdmitHarnessTree(args.entries);
+    // The gate decision is written verbatim onto a durable chain, so it is
+    // held to the same persistability floor as a record's payload. A custom
+    // selector returning a `Date`, a function or a cycle in `reason` / `policy`
+    // would otherwise store fine in memory and fail on a real store.
+    axAssertPersistableValue(args.gate, 'gate', {
+      label: 'AxHarnessGateDecision',
+    });
     const contentId = await axHarnessContentId(entries);
     const chain = await this.store.releases(this.scenario, signal);
     const tail = chain.at(-1);
