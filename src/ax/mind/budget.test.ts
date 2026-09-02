@@ -105,8 +105,10 @@ import { describe, expect, it } from 'vitest';
  *   the shipped total on main was already 5_516 before this pass touched
  *   anything.
  *
- * The adversarial review of PR #103 raises two of those again, and lowers
- * `mind.ts`'s measured total by dropping a parameter:
+ * The adversarial review of PR #103 raises two of those again. `mind.ts` stays
+ * at 1_490: `settleDelivery` lost its signal parameter, and the comment saying
+ * which two signals the settle must NOT take costs back what the parameter
+ * saved:
  *
  * - `types.ts` 615 -> 630: the `closing` member of `AxMindLivenessError`'s
  *   closed union with the comment that says why an ordinary host shutdown
@@ -121,7 +123,7 @@ import { describe, expect, it } from 'vitest';
  *
  * Measured at this raise: types 623, pacer 284, health 138, routes 321,
  * sources 594, chat 785, salience 163, skills 134, context 138, step 168,
- * subruns 140, thinkers 540, mind 1_468, index 174 -- 5_670 in total.
+ * subruns 140, thinkers 540, mind 1_473, index 174 -- 5_675 in total.
  */
 const CAPS: readonly (readonly [string, number])[] = [
   ['src/ax/mind/types.ts', 630], // raised from 430, 480, 600, then 615
