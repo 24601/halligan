@@ -116,8 +116,7 @@ evaluates them against host-supplied `AxEvidenceObservation` facts **after** a
 grant has matched and **before** the host authorizer is called. A guard denial
 therefore costs zero host calls and produces exactly one audit event.
 
-Guards are mechanism the host authors policy with. Ax evaluates them; Ax does
-not compile, infer, generate, or extend them. **The operators are mechanism the
+**The operators are mechanism the
 host authors policy with. Ax does not compile, infer, or extend policy, and
 will not grow a policy language. Adding a seventh operator requires a named
 host requirement recorded in this document.** There are no wildcards, roles,
@@ -179,7 +178,8 @@ requirement declared on one grant therefore also constrains a sibling grant that
 matched the same operation and resource and declared nothing. This is coherent
 with receipt binding, which already demands the receipt echo every eligible
 grant ID, and it is the fail-closed direction. Requirements are deduped by a
-canonical key over the kind, the trusted-source set, `maxAgeMs`, and the match.
+canonical key over the kind, the trusted-source set, `maxAgeMs`, and the match,
+in which `in` / `notIn` members compare as a set rather than a sequence.
 
 ### Denial and audit
 

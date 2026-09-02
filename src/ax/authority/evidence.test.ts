@@ -235,6 +235,27 @@ describe('Ax evidence guard evaluation', () => {
     }
   });
 
+  it('accepts a null-prototype record as an authority value', () => {
+    // captureValue accepts Object.create(null) records, so the evaluator must
+    // not reject the same host datum as malformed.
+    const value = Object.assign(Object.create(null), { level: 'strong' });
+    const result = evaluate(
+      [requirement({ match: { op: 'eq', value: { level: 'strong' } } })],
+      [observation({ value })]
+    );
+    expect(result.allow).toBe(true);
+    expect(
+      axIsEvidenceRequirement({
+        kind: 'session.mfa',
+        trustedSources: ['idp-a'],
+        match: Object.assign(Object.create(null), {
+          op: 'eq',
+          value: Object.assign(Object.create(null), { level: 'strong' }),
+        }),
+      })
+    ).toBe(true);
+  });
+
   it('compares object and array values canonically, not by reference', () => {
     // Canonicalization sorts object keys, so key order is not a difference.
     const allowed = evaluate(
@@ -434,6 +455,33 @@ describe('axCollectGrantRequirements', () => {
     expect(
       axCollectGrantRequirements([grant({ id: 'g1' }), grant({ id: 'g2' })])
     ).toEqual([]);
+  });
+
+  it('treats in/notIn members as a set, not a sequence', () => {
+    // Reordering a set literal is not a different requirement, so it must not
+    // dedupe as two, and must not read as dropping the parent's requirement
+    // under attenuation.
+    const collected = axCollectGrantRequirements([
+      grant({
+        id: 'g1',
+        requirements: [
+          requirement({ match: { op: 'in', values: ['strong', 'hardware'] } }),
+          requirement({ match: { op: 'in', values: ['hardware', 'strong'] } }),
+        ],
+      }),
+      grant({
+        id: 'g2',
+        requirements: [
+          // A different member set is still a different requirement.
+          requirement({ match: { op: 'in', values: ['strong'] } }),
+          // A different operator over the same members is too.
+          requirement({
+            match: { op: 'notIn', values: ['hardware', 'strong'] },
+          }),
+        ],
+      }),
+    ]);
+    expect(collected).toHaveLength(3);
   });
 
   it('treats trustedSources as a set but maxAgeMs as significant', () => {

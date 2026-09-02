@@ -110,7 +110,15 @@ export interface AxGuardEvaluation {
 }
 
 export interface AxGuardEvaluationContext {
+  /**
+   * Carried for caller diagnostics only. Guard resolution is by fact `kind`,
+   * trusted source, lease epoch, and freshness; neither the operation nor the
+   * resource participates in it. Resource scoping happens earlier, in grant
+   * matching, and `axCollectGrantRequirements` is what makes the requirement
+   * set resource-specific.
+   */
   readonly operation: string;
+  /** Carried for caller diagnostics only. See `operation`. */
   readonly resource: Readonly<AxResourceScope>;
   readonly requirements: readonly Readonly<AxEvidenceRequirement>[];
   readonly evidence: readonly Readonly<AxEvidenceObservation>[];

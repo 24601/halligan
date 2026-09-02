@@ -37,7 +37,11 @@ function isAuthorityValue(value: unknown, depth = 0): boolean {
     return value.every((entry) => isAuthorityValue(entry, depth + 1));
   }
   if (!isRecord(value)) return false;
-  if (Object.getPrototypeOf(value) !== Object.prototype) return false;
+  // Parity with `captureValue`, which accepts a null-prototype record: a host
+  // using `Object.create(null)` must not have its observations captured and its
+  // requirements rejected as malformed.
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return false;
   return Object.values(value).every((entry) =>
     isAuthorityValue(entry, depth + 1)
   );
@@ -49,7 +53,9 @@ function isAuthorityValue(value: unknown, depth = 0): boolean {
  * guard algebra performs.
  */
 function canonicalValue(value: unknown, depth = 0): string {
-  if (depth > MAX_VALUE_DEPTH) return '"[ax:depth]"';
+  // Both sentinels start with `<`, which canonical JSON never produces, so no
+  // authored value can canonicalize to one and compare equal by accident.
+  if (depth > MAX_VALUE_DEPTH) return '<ax:depth>';
   if (value === null) return 'null';
   if (typeof value === 'string') return JSON.stringify(value);
   if (typeof value === 'boolean') return value ? 'true' : 'false';
@@ -59,7 +65,7 @@ function canonicalValue(value: unknown, depth = 0): string {
   if (Array.isArray(value)) {
     return `[${value.map((entry) => canonicalValue(entry, depth + 1)).join(',')}]`;
   }
-  if (!isRecord(value)) return '"[ax:non-value]"';
+  if (!isRecord(value)) return '<ax:non-value>';
   const entries = Object.entries(value)
     .filter(([, entry]) => entry !== undefined)
     .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
@@ -139,20 +145,39 @@ function isEvidenceObservation(
 }
 
 /**
+ * Canonical identity of a match. `in` and `notIn` are set membership, so member
+ * order is not part of the requirement's identity; every other operator
+ * compares positionally because its shape has no set in it.
+ */
+function canonicalMatch(match: unknown): string {
+  if (
+    isRecord(match) &&
+    (match.op === 'in' || match.op === 'notIn') &&
+    Array.isArray(match.values)
+  ) {
+    return canonicalValue({
+      op: match.op,
+      values: match.values.map((entry) => canonicalValue(entry)).sort(),
+    });
+  }
+  return canonicalValue(match ?? null);
+}
+
+/**
  * Canonical identity of a requirement, used for dedupe in
  * `axCollectGrantRequirements` and for the attenuation superset rule.
- * `trustedSources` is compared as a set; everything else positionally.
+ * `trustedSources` and `in`/`notIn` members are compared as sets; everything
+ * else positionally.
  */
 export function evidenceRequirementKey(
   requirement: Readonly<AxEvidenceRequirement>
 ): string {
   const sources = [...(requirement?.trustedSources ?? [])].sort();
-  return canonicalValue([
+  return `${canonicalValue([
     requirement?.kind ?? null,
     sources,
     requirement?.maxAgeMs ?? null,
-    requirement?.match ?? null,
-  ]);
+  ])}|${canonicalMatch(requirement?.match)}`;
 }
 
 const GUARD_OPS: ReadonlySet<string> = new Set<AxGuardOp>([
