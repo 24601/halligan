@@ -1943,6 +1943,44 @@
       "completedAt": null,
       "completedByCommit": null,
       "verification": null
+    },
+    {
+      "id": "axir-2026-09-02-agent-promotion-gate-extracted-to-playbookevolve-gate-ts-for-reu",
+      "status": "open",
+      "title": "Agent promotion gate extracted to playbookEvolve/gate.ts for reuse by the learning surface",
+      "createdAt": "2026-09-02",
+      "sourcePR": 86,
+      "sourceCommit": "774efdb70f373efb343c3a76523bbe490d954f11",
+      "tsPaths": ["src/ax/agent/agentInternal/playbookEvolve/gate.ts"],
+      "portableSurface": "axagent",
+      "impact": "Behaviour-preserving refactor: the evolve() acceptance decision (revalComplete/gainOk/heldOutOk/accept) and its human-readable reason move to the pure evaluateAgentPromotionGate; the retention computation, sequence counter, anchors and receipt assembly stay in playbookEvolve.ts. playbookEvolve.test.ts and playbookEvolveUnits.test.ts pass unmodified. The gate is internal (internalExportNames) and reached through evolve() and the coming axHarnessEvolve, so any AxIR migration of axagent promotion semantics now has one function to port instead of an inline expression.",
+      "suggestedAxirWork": [
+        "Add or update the TS-derived conformance fixture.",
+        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
+        "Run npm run axir:conformance:check and npm run test:axir."
+      ],
+      "completedAt": null,
+      "completedByCommit": null,
+      "verification": null
+    },
+    {
+      "id": "axir-2026-09-02-learning-surface-part-1-interaction-report-records-persistabilit",
+      "status": "open",
+      "title": "Learning surface part 1: interaction/report records, persistability check, store port with append+CAS release chain, store conformance, report schema, eligibility reducer",
+      "createdAt": "2026-09-02",
+      "sourcePR": 86,
+      "sourceCommit": "774efdb70f373efb343c3a76523bbe490d954f11",
+      "tsPaths": ["src/ax/learn/types.ts"],
+      "portableSurface": "axoptimize",
+      "impact": "New portable TS behaviour under a new src/ax/learn/ root: record and report schemas with fail-closed JSON-persistability validation, the train/wait/never eligibility reducer with named counted reasons and a stable-until-acknowledged batch, floor-not-ceiling report-schema validation, and a store port whose release chain moves by separate append-CAS and promote-CAS. Not yet expressible in AxIR; generated packages are unaffected until migrated. Harness tree, installer, release surface and axHarnessEvolve land in the follow-up PR.",
+      "suggestedAxirWork": [
+        "Add or update the TS-derived conformance fixture.",
+        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
+        "Run npm run axir:conformance:check and npm run test:axir."
+      ],
+      "completedAt": null,
+      "completedByCommit": null,
+      "verification": null
     }
   ],
   "nonPortableExemptions": [
