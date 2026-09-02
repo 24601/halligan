@@ -26,6 +26,12 @@ import {
   formatBubbledActorTurnOutput,
   validateActorTurnCodePolicy,
 } from '../runtime.js';
+import { axValidateStatePatch } from '../statePatch.js';
+import type {
+  AxWorkingState,
+  AxWorkingStateCommitContext,
+  AxWorkingStateGuidanceNote,
+} from '../workingState.js';
 import type { ActorLoopContext } from './actorLoopContext.js';
 import {
   appendDiscoveryTurnSummary,
@@ -58,6 +64,101 @@ function buildMultipleCodeBlocksPolicyGuidance(
   return (
     `Your previous ${runtimeCodeFieldTitle} value contained multiple fenced code blocks, so none of them were executed. ` +
     `On this turn, put every executable statement in one ${runtimeCodeFieldTitle} value with at most one fence.`
+  );
+}
+
+/**
+ * Render harness-owned guidance for the trusted guidance channel. Only an enum
+ * code, the op KIND, a sanitized bounded pointer, the goal id and the expected
+ * callables ever appear — `guidanceLog` is the highest-authority prompt region
+ * and must never launder model-authored text into it.
+ */
+function buildWorkingStateGuidance(
+  notes: readonly AxWorkingStateGuidanceNote[]
+): string | undefined {
+  if (notes.length === 0) return undefined;
+  const lines = notes.map((note) => {
+    const goal = note.goalId ? ` for goal ${note.goalId}` : '';
+    const expects =
+      note.expects && note.expects.length > 0
+        ? ` (expected receipts from: ${note.expects.join(', ')})`
+        : '';
+    return `- ${note.code}: ${note.opKind} at ${note.path}${goal}${expects}`;
+  });
+  return [
+    'Working state did not apply part of your last proposal:',
+    ...lines,
+    'A goal becomes done only by citing a receipt ref from the read-only Receipt Roster in the same patch.',
+  ].join('\n');
+}
+
+/**
+ * Run one working-state turn: mint nothing (receipts are already drained),
+ * decide whether to propose, validate the untrusted patch document, commit
+ * through the kernel, and route harness guidance into the trusted channel.
+ */
+async function runWorkingStateTurn(
+  workingState: AxWorkingState<any>,
+  context: AxWorkingStateCommitContext,
+  proposerInput: Readonly<{ action: string; observation: string }>,
+  signal: AbortSignal | undefined
+): Promise<readonly AxWorkingStateGuidanceNote[]> {
+  const mode = workingState.proposerMode();
+  const changed =
+    (context.receiptRefs?.length ?? 0) > 0 || context.isError === true;
+  const shouldPropose =
+    mode === 'every-turn' || (mode === 'on-change' && changed);
+  if (!shouldPropose) {
+    // `on-change` makes the added model cost proportional to ENVIRONMENT
+    // change, not to turn count: a pure-inspection turn costs nothing extra.
+    await workingState.recordNonCommit(context, 'none');
+    return [];
+  }
+
+  let proposal: Awaited<ReturnType<typeof workingState.propose>>;
+  try {
+    proposal = await workingState.propose(
+      {
+        stateContract: workingState.stateContract(),
+        workingState: workingState.renderWritable(),
+        receiptRoster: workingState.renderReadOnly(),
+        action: proposerInput.action,
+        observation: proposerInput.observation,
+        isError: context.isError,
+        turn: context.turn,
+      },
+      signal
+    );
+  } catch {
+    // A flaky proposer must never corrupt state or fail the turn.
+    await workingState.recordNonCommit(context, 'proposer_error');
+    return [];
+  }
+
+  const validation = axValidateStatePatch(proposal.statePatch);
+  if (validation.status !== 'valid') {
+    const rejected = await workingState.recordNonCommit(
+      context,
+      'patch_invalid'
+    );
+    return rejected.guidance ?? [];
+  }
+
+  const outcome = await workingState.commit(validation.patch, context, signal);
+  return outcome.guidance ?? [];
+}
+
+/**
+ * Harness-authored interlock guidance: goal ids and statuses only, never
+ * model-authored prose.
+ */
+function buildCompletionInterlockGuidance(
+  pendingGoalIds: readonly string[]
+): string {
+  return (
+    'Working state still lists pending goals, so the run was not completed: ' +
+    `${pendingGoalIds.join(', ')}. ` +
+    'Either produce the tool receipt each goal expects and cite it, or mark the goal blocked with a blocker, then finish.'
   );
 }
 
@@ -144,6 +245,8 @@ export async function runActorTurn<_IN extends AxGenIn>(
     contextStage,
     contextThreshold,
     mutableState,
+    workingState,
+    workingStateObservations,
     helpers,
   } = ctx;
 
@@ -172,6 +275,16 @@ export async function runActorTurn<_IN extends AxGenIn>(
   }
   if (await refreshCheckpointSummary(actionLogEntries.length)) {
     resetActorModelErrorState();
+  }
+
+  // Refresh the working-state prompt regions BEFORE the prompt is measured or
+  // sent, so the measured characters are the sent characters by construction.
+  if (workingState) {
+    s._workingStatePromptValues = {
+      stateContract: workingState.stateContract(),
+      workingState: workingState.renderWritable(),
+      receiptRoster: workingState.renderReadOnly(),
+    };
   }
 
   let actionLogParts = renderActionLogParts();
@@ -536,6 +649,100 @@ export async function runActorTurn<_IN extends AxGenIn>(
       return calls.length > 0 ? { _functionCalls: calls } : {};
     })(),
   });
+
+  // Working state, when configured, mints this turn's receipts from the
+  // dispatches the harness observed. Nothing here can run for a default agent:
+  // `workingState` is undefined and the observation buffer does not exist.
+  const mintedReceiptRefs: string[] = [];
+  if (workingState && workingStateObservations) {
+    const observed = workingStateObservations.splice(
+      0,
+      workingStateObservations.length
+    );
+    for (const observation of observed) {
+      const receipt = await workingState.recordReceipt({
+        qualifiedName: observation.qualifiedName,
+        arguments: observation.arguments,
+        result: observation.result,
+        turn: entryTurn,
+        at: observation.at,
+      });
+      if (!mintedReceiptRefs.includes(receipt.ref)) {
+        mintedReceiptRefs.push(receipt.ref);
+      }
+    }
+
+    const turnCalls = [
+      ...new Set(
+        (functionCallRecords?.slice(functionCallStartIndex) ?? []).map(
+          (record) => record.qualifiedName
+        )
+      ),
+    ];
+    // The completion interlock, when enabled, is resolved AFTER this turn's
+    // commit so it decides against the committed ledger: a patch in this same
+    // turn may have just completed the last pending goal.
+    let interlockDecision: 'converted' | 'exhausted' | undefined;
+    let interlockGoals: readonly string[] = [];
+    const resolveCompletionInterlock = ():
+      | 'converted'
+      | 'exhausted'
+      | undefined => {
+      if (workingState.completionPolicy() !== 'interlock') return undefined;
+      const payload = completionState.payload as
+        | AxAgentInternalCompletionPayload
+        | undefined;
+      if (!payload || payload.type !== 'final') return undefined;
+      const pending = workingState.pendingGoalIds();
+      if (pending.length === 0) return undefined;
+      interlockGoals = pending;
+      interlockDecision = workingState.consumeCompletionInterlock();
+      return interlockDecision;
+    };
+
+    const guidanceNotes = await runWorkingStateTurn(
+      workingState,
+      {
+        action: actionLogCode,
+        observation: output,
+        turn: entryTurn,
+        isError,
+        receiptRefs: mintedReceiptRefs,
+        calls: turnCalls,
+        selectedSkills: (mutableState.usedSkills ?? []).map(
+          (used: { id: string }) => used.id
+        ),
+        resolveCompletionInterlock,
+      },
+      { action: actionLogCode, observation: output },
+      _effectiveAbortSignal
+    );
+    const guidanceText = buildWorkingStateGuidance(guidanceNotes);
+    if (guidanceText) {
+      appendGuidanceEntry(guidanceState.entries, {
+        turn: entryTurn,
+        guidance: guidanceText,
+        triggeredBy: 'working state',
+      });
+    }
+
+    if (interlockDecision === 'converted') {
+      // Reuse the loop's existing `guide_agent` handling rather than
+      // inventing a completion shape: append the harness guidance, replace
+      // the payload, and let the tail branch below continue the loop. The
+      // guidance names goal ids and statuses only, never model prose.
+      appendGuidanceEntry(guidanceState.entries, {
+        turn: entryTurn,
+        guidance: buildCompletionInterlockGuidance(interlockGoals),
+        triggeredBy: 'working-state',
+      });
+      completionState.payload = {
+        type: 'guide_agent',
+        triggeredBy: 'working-state',
+        guidance: buildCompletionInterlockGuidance(interlockGoals),
+      } as AxAgentGuidancePayload;
+    }
+  }
 
   if (actorTurnCallback) {
     await actorTurnCallback({

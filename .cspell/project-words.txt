@@ -367,3 +367,7 @@ BYID
 axmind
 replayable
 persistability
+Goodhart
+unconfigured
+codegen
+workingstate

@@ -189,6 +189,12 @@ export type AxAgentState = {
   actorModelState?: AxAgentStateExecutorModelState;
   /** Logical MCP references only; never credentials, sessions, or transports. */
   mcp?: import('../../mcp/execution.js').AxMCPContinuationState;
+  /**
+   * Present only when `workingState` was configured AND this stage maintained
+   * it (the executor). Optional, so `version` stays `1` and every snapshot
+   * written before this field existed still loads unchanged.
+   */
+  workingState?: import('../workingState.js').AxAgentStateWorkingState;
 };
 
 export class AxAgentClarificationError extends Error {

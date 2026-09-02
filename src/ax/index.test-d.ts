@@ -1055,3 +1055,82 @@ void harnessGate.metrics.taskSetDigest;
 
 void axReportSchema({ score: { type: 'number', min: 0, max: 1 } });
 void axAssertPersistableValue({ ok: true }, 'payload');
+
+// --- Verifier-gated working state ------------------------------------------
+// Every symbol below must be reachable from the generated barrel; the
+// benchmark scaffolding must NOT be.
+
+import {
+  type AxStatePatchOp,
+  type AxWorkingStateCheckerPolicy,
+  type AxWorkingStateDocument,
+  type AxWorkingStateTraceStep,
+  axIsWorkingStateError,
+  axWorkingState,
+} from './index.js';
+
+type WorkingStateFacts = { shipped: boolean };
+
+const workingStateDocument: AxWorkingStateDocument<WorkingStateFacts> = {
+  schemaVersion: 1,
+  goals: {
+    g_ship: {
+      id: 'g_ship',
+      goal: 'Ship order 42',
+      status: 'pending',
+      evidence: [],
+      expects: ['shipping.dispatch'],
+      createdTurn: 0,
+      updatedTurn: 0,
+    },
+  },
+  facts: { shipped: false },
+  parked: [],
+};
+const shippedFact: boolean = workingStateDocument.facts.shipped;
+void shippedFact;
+
+const workingStateChecker: AxWorkingStateCheckerPolicy<WorkingStateFacts> = {
+  id: 'ship-guard',
+  check: ({ proposedState }) =>
+    proposedState.facts.shipped
+      ? { status: 'pass' }
+      : { status: 'fail', failure: { code: 'not_shipped' } },
+};
+void workingStateChecker;
+
+const removeStatePatchOp: AxStatePatchOp = {
+  op: 'remove',
+  path: '/goals/g_ship',
+};
+void removeStatePatchOp;
+
+declare const workingStateTraceStep: AxWorkingStateTraceStep;
+const workingStateTurn: number = workingStateTraceStep.turn;
+void workingStateTurn;
+
+void axWorkingState<WorkingStateFacts>(
+  { stateSignature: 'shipped:boolean' },
+  { runId: 'ws:x:1', stage: 'executor' }
+);
+void axIsWorkingStateError(new Error('x'));
+
+// Benchmark scaffolding and harness plumbing must stay internal: these names
+// are listed in `internalExportNames`, so the generated barrel does not carry
+// them. A `keyof typeof import(...)` test cannot express this — a type-only
+// export never appears in a module's `keyof`, so that form passes whatever the
+// barrel exports. The assertion here is the resolution failure itself: if the
+// barrel ever exported one of these names, its `@ts-expect-error` would have
+// nothing to suppress and this file would stop compiling.
+type BenchRowIsNotPublic =
+  // @ts-expect-error the package root must not export the benchmark row type
+  import('./index.js').AxWorkingStateBenchRow;
+const benchRowIsNotPublic: BenchRowIsNotPublic | undefined = undefined;
+void benchRowIsNotPublic;
+
+type ReceiptBindingIsNotPublic =
+  // @ts-expect-error the package root must not export the receipt sink contract
+  import('./index.js').AxAgentToolReceiptBinding;
+const receiptBindingIsNotPublic: ReceiptBindingIsNotPublic | undefined =
+  undefined;
+void receiptBindingIsNotPublic;

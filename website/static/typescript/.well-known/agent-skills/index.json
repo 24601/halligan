@@ -114,6 +114,13 @@
       "digest": "sha256:0ee7f053c19eb73bfa342c9c95128eb6d6bbb70771546644f0d32d72ca49f741"
     },
     {
+      "name": "ax-agent-state",
+      "type": "skill-md",
+      "description": "This skill helps an LLM generate correct verifier-gated working state code using @ax-llm/ax. Use when the user asks about AxWorkingState, goal ledgers, statePatch, state checkers, tool receipts, parked deltas, or long-horizon agent state.",
+      "url": "ax-agent-state/SKILL.md",
+      "digest": "sha256:2364038dbe0e1cb5acc986b08e4f081c41957de1ed986dd7cf4398e69636bf90"
+    },
+    {
       "name": "ax-playbook",
       "type": "skill-md",
       "description": "This skill helps an LLM generate correct playbook code using @ax-llm/ax. Use when the user asks about playbook(), AxPlaybook, context playbooks, evolving context, ACE / Agentic Context Engineering, agent.playbook(), or growing/applying task knowledge offline and online with evolve() and update().",

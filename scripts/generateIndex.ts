@@ -73,6 +73,27 @@ const internalExportNames = new Set([
   'AxInternalEmbedRequest',
   'AxInternalSpeechRequest',
   'AxInternalTranscriptionRequest',
+  // Working-state benchmark helpers. `benchmarks/` is scanned like any other
+  // directory, and these are measurement scaffolding, not public API.
+  'AxWorkingStateArm',
+  'AxWorkingStateBenchRow',
+  'AxWorkingStatePromptMeter',
+  'AxWorkingStateScenarioResult',
+  'axWorkingStatePromptOverhead',
+  // Test-only offline harness for the working-state loop tests.
+  'AxWorkingStateScript',
+  'axCreateEvaluatingRuntime',
+  'axCreateScriptedMock',
+  'axWorkingStateHarnessUsage',
+  // Working-state harness plumbing: the sink contract between the dispatch
+  // site and the loop, and the config gate the agent constructor runs. Not
+  // public API — hosts configure receipts through `AxWorkingStateConfig`.
+  'AxAgentToolReceiptBinding',
+  'AxAgentToolReceiptObservation',
+  'axValidateWorkingStateConfig',
+  // Bare lowercase pointer parser shared by statePatch.ts and workingState.ts.
+  // Listed deliberately: it is module plumbing, not public API.
+  'parseStatePatchPointer',
   'AxMutableDiscoveryPromptState',
   'AxMutableSkillsPromptState',
   'AxNormalizedAgentEvalDataset',

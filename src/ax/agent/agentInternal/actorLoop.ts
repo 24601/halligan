@@ -20,6 +20,11 @@ import {
   mergeRuntimeStateProvenance,
   runtimeStateProvenanceFromRecord,
 } from '../state.js';
+import {
+  type AxWorkingState,
+  type AxWorkingStateConfig,
+  axWorkingState,
+} from '../workingState.js';
 import type {
   ActorLoopContext,
   MutableActorLoopState,
@@ -34,6 +39,7 @@ import {
   rankCatalogMemories,
 } from './memoriesHelpers.js';
 import { buildModuleRankInputs, rankModules } from './relevanceRanker.js';
+import type { AxAgentToolReceiptObservation } from './runtimeGlobals.js';
 import type { AxAgentSharedRuntimeSession } from './sharedSession.js';
 import {
   ingestSkillResults,
@@ -111,6 +117,50 @@ export async function runActorLoop<IN extends AxGenIn>(
     });
   }
   const stagePolicy = resolveStagePolicy(s.options?.stageVariant);
+
+  // Verifier-gated working state is opt-in and executor-only: a stage that
+  // cannot execute a tool can mint no receipt, so a ledger it maintained
+  // would be evidence-free. Constructing it here (rather than per stage)
+  // also keeps one store key per `forward()`.
+  const workingStateConfig = s.options?.workingState as
+    | AxWorkingStateConfig<any>
+    | undefined;
+  let workingState: AxWorkingState<any> | undefined;
+  if (workingStateConfig && stagePolicy.maintainsWorkingState) {
+    const runId =
+      workingStateConfig.runIdFactory?.() ??
+      s._workingStateRunId ??
+      `ws:${(typeof s.getId === 'function' ? s.getId() : '') || 'agent'}:1`;
+    workingState = await axWorkingState(workingStateConfig, {
+      runId,
+      stage: contextStage,
+      ai,
+      ...(s.state?.workingState ? { restored: s.state.workingState } : {}),
+    });
+    s._workingStateRun = workingState;
+  }
+
+  // The receipt sink lives on the stage the way `_activeAuthority` does, so
+  // `buildRuntimeGlobals` can bind it per registration site without another
+  // positional parameter. It is cleared when working state is off, so the
+  // default path allocates nothing and observes nothing.
+  const workingStateObservations: AxAgentToolReceiptObservation[] = [];
+  if (workingState) {
+    const ws = workingState;
+    s._workingStateReceiptSink = (
+      observation: AxAgentToolReceiptObservation
+    ) => {
+      // `receiptSources` is the tightest available Goodhart control and is
+      // applied before an observation ever becomes evidence.
+      if (!ws.receiptEligibleSource(observation.qualifiedName)) return;
+      workingStateObservations.push(observation);
+    };
+    s._workingStateClockNow = () => ws.now();
+  } else {
+    s._workingStateReceiptSink = undefined;
+    s._workingStateClockNow = undefined;
+  }
+
   // Forward-time preset skills are executor-ingested — except for a static
   // direct-respond agent, whose runs may end at the distiller: the distiller
   // ingests them there so respond-only runs still see call-time skills.
@@ -380,6 +430,7 @@ export async function runActorLoop<IN extends AxGenIn>(
     contextStage,
     contextThreshold,
     delegatedContextSummary,
+    ...(workingState ? { workingState, workingStateObservations } : {}),
     mutableState,
     helpers,
   };
@@ -552,6 +603,9 @@ export async function runActorLoop<IN extends AxGenIn>(
           }
         : undefined;
       nextState.mcp = options?._mcpExecutionContext?.getContinuationState();
+      if (workingState) {
+        nextState.workingState = workingState.snapshot();
+      }
       s.state = nextState;
       s.stateError = undefined;
     } catch (err) {

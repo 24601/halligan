@@ -214,6 +214,19 @@ export type AxAgentOptions<IN extends AxGenIn = AxGenIn> = Omit<
   contextFields?: readonly AxContextFieldInput[];
 
   /**
+   * Verifier-gated typed working state. Off by default. When set, a goal
+   * ledger and host fact space are maintained beside the transcript on the
+   * stage whose policy sets `maintainsWorkingState` (the executor); only
+   * checker-supported deltas commit, and a goal flips to `done` only on a
+   * structured tool receipt minted at the dispatch site, never on model
+   * self-report. Read the committed document with `getWorkingState()`.
+   *
+   * Working state does NOT gate the run's report unless
+   * `completionPolicy: 'interlock'` is set.
+   */
+  workingState?: import('../workingState.js').AxWorkingStateConfig<any>;
+
+  /**
    * Optional persistent context map for recurring long-context work.
    * When configured, Ax injects the map into the distiller prompt and updates
    * it once after each successful completed run. Use `onUpdate` to persist the

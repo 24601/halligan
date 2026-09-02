@@ -172,9 +172,18 @@ export function getFunction(self: any): AxFunction {
   };
 
   const namespace = s.agentIdentity?.namespace as string | undefined;
+  // Every agent-derived callable carries the internal marker BY CONSTRUCTION,
+  // whatever route it takes into `functions: [...]`. Receipt ineligibility is
+  // structural rather than route-dependent: a child agent's return value is
+  // its own `final()` payload, i.e. another model's self-report, and promoting
+  // that to environment evidence is exactly what the receipt gate forbids.
+  // `normalizeAgentFunctionCollection` stamps the same marker for an
+  // `AxAgentic` passed directly; this covers `functions: [child.getFunction()]`
+  // and any `AxFunctionProvider` that wraps one.
   return {
     ...funcMeta,
     ...(namespace ? { namespace } : {}),
     func: wrappedFunc,
-  };
+    _kind: 'internal',
+  } as AxFunction;
 }

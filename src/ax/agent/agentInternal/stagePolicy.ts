@@ -68,6 +68,14 @@ export interface AxAgentStagePolicy {
    * runtime-only input value plus bare alias.
    */
   readonly receivesFallbackEvidence: boolean;
+  /**
+   * Maintains the verifier-gated working state for the run. Executor-only:
+   * the distiller has `executesTools: false`, so it can mint no receipt and
+   * can support no `done` — a ledger it maintained would be evidence-free by
+   * construction. Both stages would otherwise resolve the same store key and
+   * conflict.
+   */
+  readonly maintainsWorkingState: boolean;
 }
 
 const DISTILLER_POLICY: AxAgentStagePolicy = {
@@ -85,6 +93,7 @@ const DISTILLER_POLICY: AxAgentStagePolicy = {
   exportsSharedBindings: false,
   inheritsPhase1ReservedNames: false,
   receivesFallbackEvidence: false,
+  maintainsWorkingState: false,
 };
 
 const EXECUTOR_POLICY: AxAgentStagePolicy = {
@@ -102,6 +111,7 @@ const EXECUTOR_POLICY: AxAgentStagePolicy = {
   exportsSharedBindings: true,
   inheritsPhase1ReservedNames: true,
   receivesFallbackEvidence: true,
+  maintainsWorkingState: true,
 };
 
 /**

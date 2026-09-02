@@ -397,11 +397,57 @@ import {
   type AxRuntimePrimitiveStage,
   axRuntimePrimitives,
 } from './agent/runtimePrimitives.js';
+import {
+  type AxStatePatch,
+  type AxStatePatchApplyResult,
+  type AxStatePatchInvalidCode,
+  type AxStatePatchOp,
+  type AxStatePatchValidation,
+  axApplyStatePatch,
+  axValidateStatePatch,
+} from './agent/statePatch.js';
 import type {
   AxSynthesizerInit,
   AxSynthesizerOptions,
   AxSynthesizerRole,
 } from './agent/synthesizer.js';
+import {
+  type AxAgentStateWorkingState,
+  AxWorkingState,
+  type AxWorkingStateCheckContext,
+  type AxWorkingStateChecker,
+  type AxWorkingStateCheckerPolicy,
+  type AxWorkingStateClassifiedOp,
+  type AxWorkingStateCommitContext,
+  type AxWorkingStateCommitOutcome,
+  type AxWorkingStateConfig,
+  AxWorkingStateConflictError,
+  type AxWorkingStateDeltaClass,
+  type AxWorkingStateDocument,
+  AxWorkingStateError,
+  type AxWorkingStateEvidenceRef,
+  AxWorkingStateForbiddenPathError,
+  type AxWorkingStateGoal,
+  type AxWorkingStateGoalStatus,
+  type AxWorkingStateGuidanceNote,
+  AxWorkingStateParkBudgetError,
+  type AxWorkingStateParkedDelta,
+  type AxWorkingStateParkReason,
+  type AxWorkingStateProposal,
+  type AxWorkingStateProposer,
+  type AxWorkingStateProposerInput,
+  type AxWorkingStateProposerMode,
+  type AxWorkingStateReceipt,
+  AxWorkingStateSchemaError,
+  AxWorkingStateStoreError,
+  type AxWorkingStateTraceSink,
+  type AxWorkingStateTraceStep,
+  axIsWorkingStateError,
+  axWorkingState,
+  axWorkingStateFingerprint,
+  axWorkingStateReceiptFingerprint,
+  axWorkingStateTraceDigest,
+} from './agent/workingState.js';
 import {
   AxAIAnthropic,
   type AxAIAnthropicArgs,
@@ -2237,6 +2283,13 @@ export { AxUCPHTTPMessageVerifier };
 export { AxUCPSchemaValidationError };
 export { AxUCPSchemaValidator };
 export { AxUCPWebhookEventSource };
+export { AxWorkingState };
+export { AxWorkingStateConflictError };
+export { AxWorkingStateError };
+export { AxWorkingStateForbiddenPathError };
+export { AxWorkingStateParkBudgetError };
+export { AxWorkingStateSchemaError };
+export { AxWorkingStateStoreError };
 export { agent };
 export { ai };
 export { ax };
@@ -2269,6 +2322,7 @@ export { axAnalyzeRequestRequirements };
 export { axApplyEventEffectTransition };
 export { axApplyMCPAuthentication };
 export { axApplyOpenAIChatAudioRequest };
+export { axApplyStatePatch };
 export { axAssertDigestStrength };
 export { axAssertHarnessStampFresh };
 export { axAssertPersistableValue };
@@ -2401,6 +2455,7 @@ export { axIsTrajectoryAppendError };
 export { axIsTrajectoryBlobError };
 export { axIsTrajectoryCursorError };
 export { axIsTrajectoryQueryError };
+export { axIsWorkingStateError };
 export { axKnownComponentKinds };
 export { axLearningEligibility };
 export { axLearningEngineAcknowledge };
@@ -2539,8 +2594,13 @@ export { axValidateEventEnvelope };
 export { axValidateGeminiLiveAudioInput };
 export { axValidateMutationAnnotation };
 export { axValidateProviderCapabilities };
+export { axValidateStatePatch };
 export { axVisualPerceptualDigest };
 export { axWorkerRuntime };
+export { axWorkingState };
+export { axWorkingStateFingerprint };
+export { axWorkingStateReceiptFingerprint };
+export { axWorkingStateTraceDigest };
 export { bestOfN };
 export { eventInput };
 export { eventPath };
@@ -2969,6 +3029,7 @@ export type { AxAgentStateActionLogEntry };
 export type { AxAgentStateCheckpointState };
 export type { AxAgentStateExecutorModelState };
 export type { AxAgentStateRuntimeEntry };
+export type { AxAgentStateWorkingState };
 export type { AxAgentStreamingForwardOptions };
 export type { AxAgentStructuredClarification };
 export type { AxAgentTestCompletionPayload };
@@ -3694,6 +3755,11 @@ export type { AxSpeechRequest };
 export type { AxSpeechResponse };
 export type { AxStageDefinitionBuildOptions };
 export type { AxStageOptions };
+export type { AxStatePatch };
+export type { AxStatePatchApplyResult };
+export type { AxStatePatchInvalidCode };
+export type { AxStatePatchOp };
+export type { AxStatePatchValidation };
 export type { AxStepContext };
 export type { AxStepHooks };
 export type { AxStepUsage };
@@ -3812,3 +3878,25 @@ export type { AxVisualObservation };
 export type { AxVisualObservationInteractionEvent };
 export type { AxVisualPerceptualInput };
 export type { AxWorkerRuntimeConfig };
+export type { AxWorkingStateCheckContext };
+export type { AxWorkingStateChecker };
+export type { AxWorkingStateCheckerPolicy };
+export type { AxWorkingStateClassifiedOp };
+export type { AxWorkingStateCommitContext };
+export type { AxWorkingStateCommitOutcome };
+export type { AxWorkingStateConfig };
+export type { AxWorkingStateDeltaClass };
+export type { AxWorkingStateDocument };
+export type { AxWorkingStateEvidenceRef };
+export type { AxWorkingStateGoal };
+export type { AxWorkingStateGoalStatus };
+export type { AxWorkingStateGuidanceNote };
+export type { AxWorkingStateParkReason };
+export type { AxWorkingStateParkedDelta };
+export type { AxWorkingStateProposal };
+export type { AxWorkingStateProposer };
+export type { AxWorkingStateProposerInput };
+export type { AxWorkingStateProposerMode };
+export type { AxWorkingStateReceipt };
+export type { AxWorkingStateTraceSink };
+export type { AxWorkingStateTraceStep };
