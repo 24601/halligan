@@ -56,6 +56,15 @@ export interface AxMindReplyStateOptions {
   readonly triggerSeq: number;
   readonly triggerFrom: string;
   readonly selfName: string;
+  /**
+   * REQUIRED, and the unforgeable half of "did we already answer this".
+   * `data.from` on an inbound step is written from the remote party's
+   * identity, so a correspondent who can make it equal `selfName` could
+   * otherwise mark their own message answered and silence the mind forever.
+   * A step is ours only when the HOST-STAMPED writer identity says so; the
+   * mind runtime passes every thinker name, never just the asking one.
+   */
+  readonly selfSources: readonly string[];
   readonly now: number;
   readonly claimTtlMs?: number;
   /** Settled send keys, so the log converges to the ledger (crash C10). */
@@ -82,6 +91,8 @@ export function axResolveMindReplyState(
   const ttl = options.claimTtlMs ?? DEFAULT_CLAIM_TTL_MS;
   const after = steps.filter((step) => step.seq > options.triggerSeq);
   const ours = (step: Readonly<AxTrajectoryStep>) =>
+    step.source !== undefined &&
+    options.selfSources.includes(step.source) &&
     text(step.data.from) === options.selfName;
   const decision = (value: AxMindReplyDecision) =>
     after.find(
@@ -170,20 +181,29 @@ export function axResolveMindReplyState(
  */
 export function axMindInferReplyTo(
   steps: readonly Readonly<AxTrajectoryStep>[],
-  options: Readonly<{ to: string; selfName: string }>
+  options: Readonly<{
+    to: string;
+    selfName: string;
+    /** As in `AxMindReplyStateOptions`: outbound-ness is host-stamped. */
+    selfSources: readonly string[];
+  }>
 ): string | undefined {
+  const ours = (step: Readonly<AxTrajectoryStep>) =>
+    step.source !== undefined &&
+    options.selfSources.includes(step.source) &&
+    text(step.data.from) === options.selfName;
   const answered = new Set(
     steps
-      .filter(
-        (step) =>
-          step.type === 'message' && text(step.data.from) === options.selfName
-      )
+      .filter((step) => step.type === 'message' && ours(step))
       .map((step) => text(step.data.replyTo))
       .filter((value): value is string => Boolean(value))
   );
   const inbound = steps.filter(
     (step) =>
       step.type === 'message' &&
+      // A step this mind wrote is never its own antecedent, whatever `from`
+      // claims: inference must not be steerable by message content either.
+      !ours(step) &&
       text(step.data.from) === options.to &&
       text(step.data.to) === options.selfName &&
       !answered.has(step.stepId)
@@ -197,6 +217,12 @@ export interface AxMindChatOptions {
   readonly clock: AxEventClock;
   /** Writer identity for outbound steps: the thinker that composed them. */
   readonly sender: string;
+  /**
+   * EVERY writer identity this mind stamps on its own steps, so the positional
+   * net still sees a sibling thinker's reply. Defaults to `[sender]`; the
+   * runtime that owns the thinker table passes them all.
+   */
+  readonly selfSources?: readonly string[];
   readonly transport?: AxMindChatTransport;
   /** The delivery's effect ledger, reached through `extra.eventContext`. */
   readonly effects?: () => AxMindEffectLedger | undefined;
@@ -241,6 +267,7 @@ export const axMindChat = (
   } = options;
   const identityScope = options.identityScope ?? trajectoryId;
   const selfName = transport?.selfName ?? sender;
+  const selfSources = options.selfSources ?? [sender];
 
   const diagnose = (
     code: AxMindDiagnostic['code'],
@@ -339,6 +366,7 @@ export const axMindChat = (
       triggerSeq: step.seq,
       triggerFrom: from,
       selfName,
+      selfSources,
       now: clock.now(),
       claimTtlMs,
       settledSendKeys: keys,
@@ -502,7 +530,11 @@ export const axMindChat = (
       );
       const replyTo =
         message.replyTo ??
-        axMindInferReplyTo(scan.steps, { to: message.to, selfName });
+        axMindInferReplyTo(scan.steps, {
+          to: message.to,
+          selfName,
+          selfSources,
+        });
       if (!replyTo) {
         // Answering nothing: send it unstamped rather than invent an
         // antecedent for it.
@@ -608,6 +640,7 @@ export async function axMindReconcileChatSends(
   const effects = options.effects?.();
   if (!effects) return [];
   const selfName = options.transport?.selfName ?? options.sender;
+  const selfSources = options.selfSources ?? [options.sender];
   const tail = await options.store.tailBackward(
     {
       trajectoryId: options.trajectoryId,
@@ -630,6 +663,8 @@ export async function axMindReconcileChatSends(
     if (!to) continue;
     const present = tail.steps.some(
       (step) =>
+        step.source !== undefined &&
+        selfSources.includes(step.source) &&
         text(step.data.from) === selfName &&
         text(step.data.to) === to &&
         (replyTo
