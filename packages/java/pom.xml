@@ -67,7 +67,10 @@
     `release` profile: builds the sources + javadoc jars, GPG-signs every
     artifact, and publishes to the Maven Central Portal. Kept out of the default
     build so a plain `mvn install` (repo runner / local consumer) needs no GPG key.
-    CI activates it with `mvn -Prelease deploy` (see .github/workflows/package-publish.yml).
+    The Halligan fork does not activate it: .github/workflows/package-publish.yml
+    runs a plain `mvn -B -ntp -DskipTests deploy` against GitHub Packages, which
+    needs no GPG key and no Sonatype account. That artifact therefore ships
+    classes only, with no sources or javadoc jars.
   -->
   <profiles>
     <profile>

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "comment": "Halligan is a fork of ax-llm/ax and publishes its own packages, never upstream's. Source metadata in this repository deliberately keeps upstream's names (@ax-llm/ax, axllm, dev.axllm:ax) so upstream syncs stay cheap textual merges. Published identity is applied at publish time, in the CI checkout only, by scripts/apply-halligan-identity.mjs reading this file. Never commit the applied (rewritten) state. Import-level identity never changes: the Python import package stays axllm, the Rust library target stays axllm, the Java package stays dev.axllm.ax, so `import axllm`, `use axllm::...` and `dev.axllm.ax.*` keep working for consumers of the fork. npm intra-workspace dependencies are rewritten from the same npm.workspaces map: any dependencies or peerDependencies key that is itself a mapped workspace name is renamed to its published name, with the version range left untouched. Publish-time identity is not only names: the metadata section below carries the fork's repository, homepage, issues, author and description prefix, which the same script writes into every published manifest so the registry pages point at 24601/halligan rather than upstream.",
+  "comment": "Halligan is a fork of ax-llm/ax and publishes its own packages, never upstream's. Source metadata in this repository deliberately keeps upstream's names (@ax-llm/ax, axllm, dev.axllm:ax) so upstream syncs stay cheap textual merges. Published identity is applied at publish time, in the CI checkout only, by scripts/apply-halligan-identity.mjs reading this file. Never commit the applied state. The rewrite runs in two stages. The source stage (before build) renames npm manifests, the import specifiers that reference them, the workspace READMEs, the shipped skill docs, and the CLI banner, and replaces the node_modules links so esbuild still externalises the core instead of bundling it. The dist stage (after build, before publish) fixes up each built dist/package.json, notably the bin name. Import-level identity never changes: the Python import package stays axllm, the Rust library target stays axllm, the Java package stays dev.axllm.ax, so `import axllm`, `use axllm::...` and `dev.axllm.ax.*` keep working for consumers of the fork. The metadata section carries the fork's repository, homepage, issues, author and description prefix, which the same script writes into every published manifest so the registry pages point at 24601/halligan rather than upstream.",
   "metadata": {
     "owner": "24601",
     "repository_url": "https://github.com/24601/halligan",
@@ -16,14 +16,30 @@
   },
   "npm": {
     "registry": "https://registry.npmjs.org",
-    "publish_from": "each workspace's dist/ directory, written by scripts/postbuild.js from the rewritten workspace package.json",
-    "ordering_note": "Run npm ci BEFORE applying identity. The rewrite intentionally does not touch package-lock.json, so a later npm ci would fail on the name mismatch. Nothing after the rewrite installs.",
+    "publish_from": "each workspace's dist/ directory, written by scripts/postbuild.js from the rewritten workspace package.json, then fixed up by the dist stage",
+    "ordering_note": "Run npm ci BEFORE applying identity. The rewrite intentionally does not touch package-lock.json, so a later npm ci would fail on the name mismatch. The publish sequence is: npm ci, apply the source stage, build every workspace, apply the dist stage, verify, then publish each dist directory directly.",
     "workspaces": {
       "@ax-llm/ax": "halligan",
       "@ax-llm/ax-tools": "halligan-tools",
       "@ax-llm/ax-ai-sdk-provider": "halligan-ai-sdk-provider",
       "@ax-llm/ax-ai-aws-bedrock": "halligan-aws-bedrock"
-    }
+    },
+    "dependency_fields": [
+      "dependencies",
+      "peerDependencies",
+      "optionalDependencies",
+      "devDependencies"
+    ],
+    "bin": {
+      "ax": "halligan"
+    },
+    "core_workspace": "@ax-llm/ax",
+    "bundling_markers": [
+      "api.openai.com",
+      "generativelanguage",
+      "Signature validation"
+    ],
+    "workspace_globs_note": "Publishable workspaces are discovered from the root package.json workspaces globs, not from a list in the script. A non-private workspace that has a publish script and no mapping here is a hard error."
   },
   "pypi": {
     "manifest": "packages/python/pyproject.toml",

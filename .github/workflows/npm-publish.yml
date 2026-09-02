@@ -32,19 +32,33 @@ jobs:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
       - run: npm ci
-      # The fork publishes its own names. The rewrite runs AFTER npm ci on
-      # purpose: it deliberately leaves package-lock.json on upstream's names,
-      # so any install after this step would fail on the mismatch. Nothing
-      # installs after it. --verify asserts the packed names and the rewritten
-      # intra-workspace dependencies before anything is uploaded.
-      - name: Apply Halligan package identities
-        run: node scripts/apply-halligan-identity.mjs --verify --allow-dirty
-      # Authentication is the NPM_TOKEN repository secret. Once a trusted
-      # publisher is configured for each name on npmjs.com, npm OIDC can replace
-      # the token and this env block can be dropped; provenance is signed from
-      # the workflow's OIDC identity either way.
+      # Source stage. It runs AFTER npm ci on purpose: the rewrite deliberately
+      # leaves package-lock.json on upstream's names, so any install after this
+      # step would fail on the mismatch. Nothing installs after it. This renames
+      # the manifests, the import specifiers that reference them, the shipped
+      # docs and the CLI banner, and replaces the node_modules links, so esbuild
+      # keeps externalising the core instead of inlining it into every dependent.
+      - name: Apply Halligan package identities (source stage)
+        run: node scripts/apply-halligan-identity.mjs --allow-dirty
+      - name: Build workspaces
+        run: npm run build --workspaces --if-present
+      # Dist stage. scripts/postbuild.js writes each dist/package.json and sets
+      # bin unconditionally, so the bin name is remapped after the build.
+      - name: Apply Halligan package identities (dist stage)
+        run: node scripts/apply-halligan-identity.mjs --dist --allow-dirty
+      # Gate: packs each dist directory, asserts the published names, asserts
+      # every mapped dependency is still an external import, and asserts no
+      # dependent carries a bundled copy of the core or an upstream install line.
+      - name: Verify Halligan package identities
+        run: node scripts/apply-halligan-identity.mjs --verify
+      # Publish each dist directly rather than through the workspace `publish`
+      # script, which would rebuild and undo the dist stage.
       - name: Publish npm workspaces
         if: env.DRY_RUN != 'true'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm run publish --workspaces --if-present -- --provenance --access public
+        run: |
+          node scripts/apply-halligan-identity.mjs --list-dists | while read -r dist; do
+            echo "publishing $dist"
+            (cd "$dist" && npm publish --provenance --access public)
+          done

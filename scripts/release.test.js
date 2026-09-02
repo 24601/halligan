@@ -161,8 +161,10 @@ describe('protected-main release workflow', () => {
       );
       expect(workflow, file).toContain('dry_run:');
       expect(workflow, file).toContain("vars.HALLIGAN_PUBLISH == 'true'");
+      expect(workflow, file).toContain('scripts/apply-halligan-identity.mjs');
+      // Every publish job runs the identity script before it uploads anything.
       expect(workflow, file).toContain(
-        'node scripts/apply-halligan-identity.mjs --verify --allow-dirty'
+        'node scripts/apply-halligan-identity.mjs --verify'
       );
     }
   });

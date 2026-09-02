@@ -41,6 +41,9 @@ it: `scripts/apply-halligan-identity.mjs`.
 | Maven | `dev.axllm:ax` on Central | `io.github.24601:halligan` on GitHub Packages |
 | Go | module `github.com/ax-llm/ax/packages/go` | no registry upload, see below |
 
+The PyPI distribution is `halligan-ax` rather than `halligan` because `halligan`
+is already taken on PyPI; the npm and crates.io names were both free.
+
 Import-level identity never changes. The Python import package stays `axllm`,
 the Rust library target stays `axllm` (via an explicit `[lib] name`), and the
 Java package stays `dev.axllm.ax`, so `import axllm`, `use axllm::...`, and
@@ -56,25 +59,64 @@ published manifest: npm `repository`/`homepage`/`bugs.url`/`author`/
 are rewritten from the same map, so `halligan-tools` depends on `halligan`, not
 on `@ax-llm/ax`.
 
+### Two Stages, And Why
+
+Renaming a manifest is not enough on its own. esbuild externalises only the
+module names it finds in a manifest's dependency fields, so renaming
+`@ax-llm/ax` to `halligan` in `dependencies` while the sources still say
+`import ... from '@ax-llm/ax'` makes esbuild resolve the import through the
+workspace link and inline the whole core into every dependent. Measured, that
+takes `src/tools/dist` from 628 KB to 4408 KB. Both halves have to move
+together, which is why the source stage rewrites specifiers and links as well as
+manifests.
+
+**Source stage** (before the build): npm manifests (name, all four dependency
+fields, and the metadata block), the import specifiers in every workspace's
+sources, the shipped READMEs and `skills/*.md`, the CLI banner, the Python, Rust
+and Java manifests, and the `node_modules` links. The upstream links are
+replaced rather than kept alongside: two package names resolving to one
+directory makes TypeScript's project-root inference ambiguous (TS2209) and
+breaks the declaration build. A workspace's imports of its own name become
+relative paths for the same reason.
+
+**Dist stage** (after the build, before publish): each `dist/package.json`.
+`scripts/postbuild.js` copies the rewritten source manifest into `dist/` but
+then sets `bin` unconditionally, so `bin.ax` is remapped to `bin.halligan`
+here, after the build rather than before it.
+
 ### Using The Script
 
 ```bash
-node scripts/apply-halligan-identity.mjs --check              # print the plan, write nothing
-node scripts/apply-halligan-identity.mjs --verify --allow-dirty  # apply, then run the dry-run checks
-git checkout -- src packages                                  # always restore afterwards
+node scripts/apply-halligan-identity.mjs --check                  # print the plan, write nothing
+node scripts/apply-halligan-identity.mjs --allow-dirty            # source stage
+npm run build --workspaces --if-present
+node scripts/apply-halligan-identity.mjs --dist --allow-dirty     # dist stage
+node scripts/apply-halligan-identity.mjs --verify                 # post-build gate
+git checkout -- src packages tools                                # always restore afterwards
 ```
 
-`--check` exits non-zero if any workspace, manifest, or coordinate has no
-mapping. `--verify` applies the map and then asserts the result: `npm pack
---dry-run` per workspace with the packed name and rewritten dependencies,
-`cargo package --list` plus the crate and library names, the PyPI distribution
-name with the `axllm` import package intact, and the Maven coordinates with the
-GitHub Packages `distributionManagement` block. Missing local toolchains are
-reported as `skip` and fall back to a metadata assertion. The rewrite is
-idempotent, and it refuses to run on a dirty tree without `--allow-dirty`.
+`--check` exits non-zero if any publishable workspace, manifest, or coordinate
+has no mapping, or if any string in a rewritten manifest still names an upstream
+workspace. Publishable workspaces are discovered from the root `workspaces`
+globs, so a new one that is not in the map is a hard error rather than a package
+published under its upstream name.
 
-The applied state must never be committed. CI applies it after `npm ci` and
-before publishing; the rewrite deliberately leaves `package-lock.json` on
+`--verify` runs against the built `dist` directories, which is what actually
+ships, not against the source workspaces. Per workspace it packs `dist/` and
+asserts the packed name, asserts no upstream name or metadata survives, asserts
+the `bin` remap, asserts every mapped dependency is still an external import in
+the emitted JavaScript or declarations, asserts no dependent carries the core's
+own module graph (checked through sourcemap sources, which survives
+minification) or any core-only marker string, and asserts no shipped README or
+skill doc still tells a reader to install or import an upstream name. It then
+checks the PyPI, crates.io and Maven metadata. `--only npm` and
+`--only generated` restrict it to one half, which the generated-package jobs use
+because they never build the npm workspaces. Missing local toolchains are
+reported as `skip` and fall back to a metadata assertion.
+
+The rewrite is idempotent, and it refuses to run on a dirty tree without
+`--allow-dirty`. The applied state must never be committed. CI applies the source
+stage after `npm ci`; the rewrite deliberately leaves `package-lock.json` on
 upstream's names, so nothing may install after it.
 
 ### Enabling Publication
@@ -111,7 +153,11 @@ These cannot be done from CI and only the account owner can do them.
   `CARGO_REGISTRY_TOKEN` secret path in the workflow covers that first upload),
   then configure trusted publishing for the crate so later releases use OIDC.
 - Maven on GitHub Packages: nothing. The job authenticates with the built-in
-  `GITHUB_TOKEN` and its `packages: write` permission.
+  `GITHUB_TOKEN` and its `packages: write` permission. Note that the GitHub
+  Packages artifact ships classes only, with no sources or javadoc jars, because
+  the fork does not activate the `release` profile in `packages/java/pom.xml`
+  (that profile targets the Maven Central Portal and needs a GPG key and
+  Sonatype credentials).
 - Go: nothing to configure, and nothing is uploaded. Note that the generated
   module path is still upstream's `github.com/ax-llm/ax/packages/go`, so
   `go get github.com/24601/halligan/packages/go` does not resolve. Changing it
