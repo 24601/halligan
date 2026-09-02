@@ -7,6 +7,7 @@ import {
   axSnapshotAuthority,
   axValidateCapabilityGrant,
 } from './authority.js';
+import { axIsGuardPredicateFailure } from './evidence.js';
 import type {
   AxAuthorityContext,
   AxAuthorityDelegationOptions,
@@ -231,6 +232,30 @@ describe('Ax evidence guards at the authorization boundary', () => {
     expect(serialized).not.toContain('mdm-secret-source');
     expect(serialized).not.toContain('managed-secret-value');
     expect(serialized).not.toContain('doc-1');
+  });
+
+  it('the thrown error satisfies axIsGuardPredicateFailure and nothing else does', async () => {
+    // The structural guard is exported for cross-realm callers, so it must
+    // recognise the real error this path throws, not only a synthetic one.
+    const { authority } = harness({
+      grants: [grant({ requirements: [requirement()] })],
+      evidence: [],
+    });
+    let guardError: unknown;
+    try {
+      await axAuthorize(authority, 'document.read', resource);
+    } catch (error) {
+      guardError = error;
+    }
+    expect(axIsGuardPredicateFailure(guardError)).toBe(true);
+    let otherError: unknown;
+    try {
+      await axAuthorize(harness().authority, 'document.write', resource);
+    } catch (error) {
+      otherError = error;
+    }
+    expect((otherError as { code?: string })?.code).toBe('no_matching_grant');
+    expect(axIsGuardPredicateFailure(otherError)).toBe(false);
   });
 
   it('passes evidence and requirements into the host request context', async () => {

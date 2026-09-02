@@ -63,6 +63,17 @@ function evaluate(
   });
 }
 
+/** Full enumeration, so a determinism test cannot quietly cover a subset. */
+function permutations<T>(items: readonly T[]): T[][] {
+  if (items.length <= 1) return [[...items]];
+  const result: T[][] = [];
+  items.forEach((item, index) => {
+    const rest = [...items.slice(0, index), ...items.slice(index + 1)];
+    for (const tail of permutations(rest)) result.push([item, ...tail]);
+  });
+  return result;
+}
+
 function grant(override: Partial<AxCapabilityGrant> = {}): AxCapabilityGrant {
   return {
     version: 1,
@@ -379,7 +390,10 @@ describe('Ax evidence guard evaluation', () => {
     expect(serialized).not.toContain('idp-a');
   });
 
-  it('is deterministic across input permutations', () => {
+  it('is deterministic across every input permutation', () => {
+    // Every permutation of both inputs, enumerated rather than shuffled: a
+    // seeded shuffle over three elements silently covered only three of the
+    // six orders and never permuted the requirements at all.
     const requirements = [
       requirement({ kind: 'a', match: { op: 'eq', value: 1 } }),
       requirement({ kind: 'b', match: { op: 'eq', value: 2 } }),
@@ -390,17 +404,26 @@ describe('Ax evidence guard evaluation', () => {
       observation({ kind: 'b', value: 2 }),
       observation({ kind: 'd', value: 4 }),
     ];
-    const expected = evaluate(requirements, evidence);
-    expect(expected.failures).toHaveLength(2);
-    for (let seed = 0; seed < 20; seed++) {
-      const shuffled = [...evidence].sort(
-        (left, right) =>
-          ((left.kind.charCodeAt(0) * (seed + 3)) % 7) -
-          ((right.kind.charCodeAt(0) * (seed + 3)) % 7)
-      );
-      expect(evaluate(requirements, shuffled).failures).toEqual(
-        expected.failures
-      );
+    const evidenceOrders = permutations(evidence);
+    const requirementOrders = permutations(requirements);
+    expect(evidenceOrders).toHaveLength(6);
+    expect(requirementOrders).toHaveLength(6);
+    const baseline = evaluate(requirements, evidence);
+    expect(baseline.failures).toHaveLength(2);
+    const byKind = new Map(
+      baseline.failures.map((entry) => [entry.kind, entry])
+    );
+    for (const orderedRequirements of requirementOrders) {
+      // Independently derived: failures follow requirement order exactly, and
+      // each requirement's own failure never changes.
+      const expected = orderedRequirements
+        .map((entry) => byKind.get(entry.kind))
+        .filter((entry) => entry !== undefined);
+      for (const orderedEvidence of evidenceOrders) {
+        const result = evaluate(orderedRequirements, orderedEvidence);
+        expect(result.failures).toEqual(expected);
+        expect(result.allow).toBe(false);
+      }
     }
   });
 
