@@ -20,6 +20,104 @@ it is not a package name. The generated package sources are checked in under
 Do not publish generated packages as `axir`, `ax-go`, or other compiler/backend
 names. User-facing libraries should read as Ax libraries in each ecosystem.
 
+## Halligan Package Identities
+
+Halligan is a fork of `ax-llm/ax`. It publishes its own packages and never
+publishes upstream's. The committed source keeps upstream's names and URLs so
+upstream syncs stay cheap textual merges; the fork's published identity is
+applied at publish time, in the CI checkout only, and is never committed.
+
+One file owns the mapping: `release/halligan-identity.json`. One script applies
+it: `scripts/apply-halligan-identity.mjs`.
+
+| Ecosystem | Source (committed) | Published (fork) |
+| --- | --- | --- |
+| npm | `@ax-llm/ax` | `halligan` |
+| npm | `@ax-llm/ax-tools` | `halligan-tools` |
+| npm | `@ax-llm/ax-ai-sdk-provider` | `halligan-ai-sdk-provider` |
+| npm | `@ax-llm/ax-ai-aws-bedrock` | `halligan-aws-bedrock` |
+| PyPI | distribution `axllm` | distribution `halligan-ax` |
+| crates.io | crate `axllm` | crate `halligan`, library target `axllm` |
+| Maven | `dev.axllm:ax` on Central | `io.github.24601:halligan` on GitHub Packages |
+| Go | module `github.com/ax-llm/ax/packages/go` | no registry upload, see below |
+
+Import-level identity never changes. The Python import package stays `axllm`,
+the Rust library target stays `axllm` (via an explicit `[lib] name`), and the
+Java package stays `dev.axllm.ax`, so `import axllm`, `use axllm::...`, and
+`dev.axllm.ax.*` keep working against the fork's packages.
+
+Names are not the whole rewrite. The `metadata` block in the identity file also
+carries the fork's repository, homepage, issue tracker, author, and a
+`Halligan: ` description prefix, and the script writes those into every
+published manifest: npm `repository`/`homepage`/`bugs.url`/`author`/
+`description`, `[project.urls]` and `authors` in `pyproject.toml`,
+`repository`/`homepage`/`documentation`/`authors` in `Cargo.toml`, and
+`<url>`/`<scm>`/`<developers>` in `pom.xml`. Intra-workspace npm dependencies
+are rewritten from the same map, so `halligan-tools` depends on `halligan`, not
+on `@ax-llm/ax`.
+
+### Using The Script
+
+```bash
+node scripts/apply-halligan-identity.mjs --check              # print the plan, write nothing
+node scripts/apply-halligan-identity.mjs --verify --allow-dirty  # apply, then run the dry-run checks
+git checkout -- src packages                                  # always restore afterwards
+```
+
+`--check` exits non-zero if any workspace, manifest, or coordinate has no
+mapping. `--verify` applies the map and then asserts the result: `npm pack
+--dry-run` per workspace with the packed name and rewritten dependencies,
+`cargo package --list` plus the crate and library names, the PyPI distribution
+name with the `axllm` import package intact, and the Maven coordinates with the
+GitHub Packages `distributionManagement` block. Missing local toolchains are
+reported as `skip` and fall back to a metadata assertion. The rewrite is
+idempotent, and it refuses to run on a dirty tree without `--allow-dirty`.
+
+The applied state must never be committed. CI applies it after `npm ci` and
+before publishing; the rewrite deliberately leaves `package-lock.json` on
+upstream's names, so nothing may install after it.
+
+### Enabling Publication
+
+Every publish job is gated on the repository variable `HALLIGAN_PUBLISH`. Until
+it is set to `true`, both `npm-publish.yml` and `package-publish.yml` skip every
+job, so a release cannot publish anything by accident.
+
+```bash
+gh variable set HALLIGAN_PUBLISH --repo 24601/halligan --body true
+gh variable delete HALLIGAN_PUBLISH --repo 24601/halligan   # turn publishing back off
+```
+
+Both workflows also take a `dry_run` input on `workflow_dispatch`, defaulting to
+`true`. A dry run runs the identity script in `--verify` mode and stops before
+any upload, which is the cheapest way to rehearse a release. `scripts/release.mjs`
+dispatches both workflows with `dry_run=false` for a real release.
+
+### One-Time Steps For The Account Owner
+
+These cannot be done from CI and only the account owner can do them.
+
+- npm: the `NPM_TOKEN` repository secret is already set and is what the workflow
+  authenticates with. Optionally, after the first publish of each of `halligan`,
+  `halligan-tools`, `halligan-ai-sdk-provider`, and `halligan-aws-bedrock`,
+  configure a trusted publisher on npmjs.com for each package (repository
+  `24601/halligan`, workflow `npm-publish.yml`) and the token can be retired.
+  Provenance is signed from the workflow's OIDC identity either way.
+- PyPI: create a pending trusted publisher for the distribution `halligan-ax`
+  with owner `24601`, repository `halligan`, workflow `package-publish.yml`, and
+  no environment. Pending publishers exist precisely so the first upload of a
+  name needs no API token.
+- crates.io: sign in with GitHub, publish `halligan` once (the
+  `CARGO_REGISTRY_TOKEN` secret path in the workflow covers that first upload),
+  then configure trusted publishing for the crate so later releases use OIDC.
+- Maven on GitHub Packages: nothing. The job authenticates with the built-in
+  `GITHUB_TOKEN` and its `packages: write` permission.
+- Go: nothing to configure, and nothing is uploaded. Note that the generated
+  module path is still upstream's `github.com/ax-llm/ax/packages/go`, so
+  `go get github.com/24601/halligan/packages/go` does not resolve. Changing it
+  means changing the AxIR Go emitter rather than adding a publish-time rewrite,
+  and is tracked separately.
+
 ## Versioning
 
 Generated package metadata uses the same version as the root `@ax-llm/ax`
@@ -195,16 +293,19 @@ optimizer artifacts, and GEPA.
 Publishing runs from GitHub Actions after a GitHub Release is published, with
 manual dispatch available for retries and verification:
 
-- `.github/workflows/npm-publish.yml` publishes the npm workspaces through npm
-  trusted publishing with GitHub Actions OIDC and signed provenance.
+- `.github/workflows/npm-publish.yml` publishes the npm workspaces with signed
+  provenance from the workflow's OIDC identity, authenticating with the
+  `NPM_TOKEN` secret.
 - `.github/workflows/package-publish.yml` separately publishes generated
   packages from the same release event.
-- Current generated-package publishing covers Python/PyPI and Rust/crates.io.
-  PyPI builds and uploads the generated `axllm` wheel and source distribution;
-  Rust publishes the generated `axllm` crate.
-- Java/Maven Central, C++ release artifacts/package-manager recipes, and Go
-  module release handling are future publishing work unless added in a separate
-  release change. Go consumers resolve the module from the git tag.
+- Current generated-package publishing covers Python/PyPI, Rust/crates.io, and
+  Java on GitHub Packages. Every job applies the fork's published identity from
+  `release/halligan-identity.json` before it builds, so PyPI uploads
+  `halligan-ax`, crates.io uploads `halligan`, and Maven uploads
+  `io.github.24601:halligan`. See "Halligan Package Identities" above.
+- C++ release artifacts/package-manager recipes and Go module release handling
+  are future publishing work unless added in a separate release change. Go
+  consumers resolve the module from the git tag.
 
 CI publishing uses GitHub secrets and trusted-publishing/OIDC where configured,
 not `.env`. The repo `.env` is only for local example/provider runs and for any

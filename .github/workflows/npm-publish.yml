@@ -6,6 +6,11 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Rehearse without publishing anywhere
+        type: boolean
+        default: true
 jobs:
   build:
     # Halligan fork: publishing to upstream's npm/PyPI/crates/Maven packages is not ours to do.
@@ -15,10 +20,31 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    env:
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && 'true' || 'false' }}
     steps:
       - uses: actions/checkout@v7
+      # registry-url writes an .npmrc that reads NODE_AUTH_TOKEN, which the
+      # publish step supplies from the NPM_TOKEN repository secret. id-token
+      # write above still lets npm attach an OIDC-signed provenance statement.
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
       - run: npm ci
-      - run: npm run publish --workspaces --if-present -- --provenance --access public
+      # The fork publishes its own names. The rewrite runs AFTER npm ci on
+      # purpose: it deliberately leaves package-lock.json on upstream's names,
+      # so any install after this step would fail on the mismatch. Nothing
+      # installs after it. --verify asserts the packed names and the rewritten
+      # intra-workspace dependencies before anything is uploaded.
+      - name: Apply Halligan package identities
+        run: node scripts/apply-halligan-identity.mjs --verify --allow-dirty
+      # Authentication is the NPM_TOKEN repository secret. Once a trusted
+      # publisher is configured for each name on npmjs.com, npm OIDC can replace
+      # the token and this env block can be dropped; provenance is signed from
+      # the workflow's OIDC identity either way.
+      - name: Publish npm workspaces
+        if: env.DRY_RUN != 'true'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm run publish --workspaces --if-present -- --provenance --access public
