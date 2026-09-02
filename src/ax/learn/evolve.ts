@@ -697,6 +697,7 @@ export const axHarnessEvolve = async <
         if (!batch.complete || !batch.validEvidence) {
           observations.push({
             taskId,
+            side,
             stage: batch.validEvidence ? 'metric' : 'run',
             cause:
               batch.records.find((record) => record.error)?.error ??
@@ -718,6 +719,7 @@ export const axHarnessEvolve = async <
         if (abortSignal?.aborted) throw error;
         observations.push({
           taskId,
+          side,
           stage: 'apply',
           cause: error instanceof Error ? error.message : String(error),
         });
@@ -792,12 +794,27 @@ export const axHarnessEvolve = async <
       ...(heldOutRun?.currentScores ?? []),
     ].filter((score) => score === null).length;
 
-    // The manifest is advanced from the candidate side's observations, before
-    // the decision, because the gate metrics carry the classification and a
-    // decision cannot reference a manifest computed after it.
+    // The manifest describes the CANDIDATE, and only the candidate.
+    //
+    // Both sides are swept, and a current-side crash is real evidence — it is
+    // reported on `evaluation.observations`, tagged with its side. But it must
+    // never reach the manifest: the manifest is the one thing a proposer is
+    // told about its own previous attempts, and it travels inside the gate
+    // decision onto the release chain. Folding the baseline's failures in
+    // would make a nominated candidate ship a durable claim that it fails
+    // tasks it never failed, and would fire `fixed` spuriously the moment the
+    // two sides' crash sets differ — which is the normal case.
+    //
+    // Advancing before the selector runs is deliberate (the gate metrics carry
+    // the classification, so the decision cannot reference a manifest computed
+    // after it); RFC §7.2 step 15's "evaluated side" therefore resolves to the
+    // candidate here, and the current side travels on the evaluation instead.
+    const candidateObservations = observations.filter(
+      (observation) => observation.side === 'candidate'
+    );
     const advanced = await axAdvanceHarnessFailureManifest(
       inputManifest,
-      observations,
+      candidateObservations,
       step
     );
 

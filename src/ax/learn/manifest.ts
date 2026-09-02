@@ -16,6 +16,17 @@ export interface AxHarnessFailureObservation {
   readonly taskId: string;
   readonly stage: 'run' | 'metric' | 'apply';
   readonly cause: string;
+  /**
+   * Which tree was installed when this failure was observed.
+   *
+   * The manifest describes ONE side. An evolve step evaluates both, so the
+   * producer tags each observation and the caller decides which side to fold
+   * in — a manifest advanced from a mixed set tells the proposer the candidate
+   * is failing tasks the baseline failed. `side` is deliberately NOT part of
+   * the fingerprint: the same fault on the same task has one identity, so a
+   * fault that survives a mutation is `persisting`, not `new`.
+   */
+  readonly side?: 'current' | 'candidate';
 }
 
 export interface AxHarnessFailureEntry {
@@ -82,6 +93,10 @@ export const axHarnessFailureFingerprint = async (
  * `persisting`, and present before but not now is `fixed`. Fixed entries drop
  * out of the manifest: it describes the CURRENT failure set, and a recurrence
  * after a genuine fix is honestly new information for the proposer.
+ *
+ * Every observation passed in is folded in as given. Filtering to one `side`
+ * is the caller's job and has to happen before the call, because a manifest
+ * is a statement about a single tree.
  */
 export const axAdvanceHarnessFailureManifest = async (
   manifest: Readonly<AxHarnessFailureManifest> | undefined,

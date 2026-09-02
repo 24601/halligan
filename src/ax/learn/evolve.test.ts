@@ -492,6 +492,40 @@ describe('axHarnessEvolve — evaluation', { timeout: SLOW }, () => {
     const cause = result.manifest.entries[0]?.cause ?? '';
     expect(cause).not.toContain('/Users/x/y/z.ts');
     expect(result.decision?.metrics.failures.new.length).toBeGreaterThan(0);
+    // Every entry names a task, and the manifest describes the candidate.
+    expect(result.manifest.entries.every((entry) => entry.count > 0)).toBe(
+      true
+    );
+  });
+
+  it('never attributes a CURRENT-side failure to the candidate', async () => {
+    // The mirror of the test above, and the direction that matters most: the
+    // manifest is the only thing the proposer is told about its own previous
+    // attempts, and it rides inside the gate decision onto the release chain.
+    // A step that nominates a healthy candidate must not ship a durable claim
+    // that the candidate failed the tasks the BASELINE failed.
+    const h = await harness();
+    const target = h.a as unknown as AxHarnessInstallTarget;
+    const result = await evolve(h, {
+      metric: ({ example }: { example: Record<string, unknown> }) => {
+        if (!candidateInstalled(target)) {
+          throw new Error('the CURRENT tree exploded');
+        }
+        return ((example as { id?: string }).id ?? '').startsWith('t')
+          ? 0.9
+          : 0.6;
+      },
+    });
+
+    expect(result.status).toBe('nominated');
+    // The failures really happened and are not being hidden: they are counted
+    // on the metrics and every current-side score is null.
+    expect(result.decision?.metrics.episodeFailures).toBeGreaterThan(0);
+    expect(result.decision?.metrics.currentScores[0]).toBeNull();
+    // …but none of them is charged to the candidate.
+    expect(result.manifest.entries).toEqual([]);
+    expect(result.decision?.metrics.failures.new).toEqual([]);
+    expect(result.decision?.metrics.failures.persisting).toEqual([]);
   });
 });
 
