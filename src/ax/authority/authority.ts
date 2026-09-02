@@ -26,6 +26,14 @@ const authoritySnapshots = new WeakSet<object>();
 const DEFAULT_AUTHORIZE_TIMEOUT_MS = 30_000;
 /** Bounds the per-grant contingency list a host may declare. */
 const MAX_GRANT_REQUIREMENTS = 32;
+/**
+ * Bounds the observation set a host may attach to one authority — including the
+ * set a per-request `observeEvidence` supplier returns, which is cloned and
+ * frozen on every `axAuthorize` call and scanned once per requirement.
+ */
+const MAX_EVIDENCE_OBSERVATIONS = 64;
+/** Matches the advisory bound the rest of this subsystem's labels use. */
+const MAX_FAILED_PREDICATE_KIND = 240;
 const EMPTY_EVIDENCE: readonly Readonly<AxEvidenceObservation>[] =
   Object.freeze([]);
 
@@ -201,6 +209,9 @@ function captureObservations(
 ): readonly Readonly<AxEvidenceObservation>[] {
   if (value === undefined) return EMPTY_EVIDENCE;
   if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
+  if (value.length > MAX_EVIDENCE_OBSERVATIONS) {
+    throw new Error(`${label} exceeds ${MAX_EVIDENCE_OBSERVATIONS} entries`);
+  }
   return Object.freeze(
     Array.from(value, (entry, index) => {
       const path = `${label}[${index}]`;
@@ -795,7 +806,12 @@ export async function axAuthorize(
           // The one bounded exception to redaction-by-construction: operator
           // and fact kind, never an observation value or a source ID.
           ...(first
-            ? { failedPredicateKind: `${first.op}:${first.kind}` }
+            ? {
+                failedPredicateKind: `${first.op}:${first.kind}`.slice(
+                  0,
+                  MAX_FAILED_PREDICATE_KIND
+                ),
+              }
             : {}),
         },
         signal

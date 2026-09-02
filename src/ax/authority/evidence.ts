@@ -272,7 +272,12 @@ function evaluateRequirement(
 
 /**
  * Evaluate every requirement against the supplied observations. Pure,
- * synchronous, allocation-bounded, and deterministic for identical inputs.
+ * synchronous, and deterministic for identical inputs. Work is linear in
+ * requirements times observations and allocates one failure per failing
+ * requirement; both inputs are bounded at capture time — 32 requirements per
+ * grant and 64 observations per authority — for evidence that arrives through
+ * `axSnapshotAuthority` or `observeEvidence`. A host calling this directly owns
+ * its own bounds.
  * Ax decides mechanism only; the host still holds final authority through
  * `AxAuthorityContext.authorize`. A failure carries an operator, a fact kind,
  * and a code — never an observation value or a source ID.

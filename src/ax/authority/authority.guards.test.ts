@@ -304,6 +304,45 @@ describe('Ax evidence guards at the authorization boundary', () => {
     ).toThrow(/exceeds 32 entries/);
   });
 
+  it('bounds the observation set at snapshot time and fails closed on overflow', async () => {
+    // The requirement list is capped at 32 per grant; without a matching cap
+    // the evidence dimension is unbounded, and observeEvidence deep-clones its
+    // whole result on every authorize call.
+    const many = Array.from({ length: 65 }, (_, index) =>
+      observation({ kind: `fact.${index}` })
+    );
+    expect(() =>
+      axSnapshotAuthority({ ...harness().authority, evidence: many })
+    ).toThrow(/exceeds 64 entries/);
+    expect(() =>
+      axSnapshotAuthority({
+        ...harness().authority,
+        evidence: many.slice(0, 64),
+      })
+    ).not.toThrow();
+    // An oversized supplier result is a fail-closed deny, not a slow allow.
+    const { authority, requests } = harness({
+      grants: [grant({ requirements: [requirement()] })],
+      observeEvidence: () => [observation(), ...many],
+    });
+    expect(
+      await denialCode(axAuthorize(authority, 'document.read', resource))
+    ).toBe('guard_predicate_failed');
+    expect(requests).toHaveLength(0);
+  });
+
+  it('bounds failedPredicateKind even when the host declares a huge kind', async () => {
+    const kind = `session.${'k'.repeat(10_000)}`;
+    const { audits, authority } = harness({
+      grants: [grant({ requirements: [requirement({ kind })] })],
+      evidence: [],
+    });
+    await denialCode(axAuthorize(authority, 'document.read', resource));
+    const label = audits[0]?.failedPredicateKind ?? '';
+    expect(label.length).toBe(240);
+    expect(label.startsWith('eq:session.')).toBe(true);
+  });
+
   it('observeEvidence is called once per authorize and its result wins over evidence', async () => {
     // The freshness path: a frozen snapshot array can only age within a run,
     // so maxAgeMs is only usable with a supplier that re-observes.

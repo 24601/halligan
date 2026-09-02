@@ -201,8 +201,8 @@ export interface AxAuthorizationAuditEvent {
     | 'guard_predicate_failed';
   /**
    * Deliberate, bounded exception to redaction-by-construction: `"<op>:<kind>"`
-   * of the first failed guard. Never an observation value, source ID, claim, or
-   * resource ID.
+   * of the first failed guard, truncated to 240 characters. Never an
+   * observation value, source ID, claim, or resource ID.
    */
   failedPredicateKind?: string;
 }

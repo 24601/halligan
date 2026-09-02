@@ -208,6 +208,13 @@ decision without adding a guarantee.
 model output, prompt text, tool arguments, or an event payload. A structurally
 invalid observation throws at snapshot time rather than being silently ignored.
 
+Both dimensions of guard evaluation are bounded so a host cannot accidentally
+put unbounded work on the per-tool-call path: **32 requirements per grant** and
+**64 observations per authority**. Exceeding either throws from
+`axSnapshotAuthority` / `axValidateCapabilityGrant`; an `observeEvidence`
+supplier that returns more than 64 observations is treated like a supplier that
+threw, so its request denies fail-closed rather than paying the cost.
+
 `AxAuthorityContext.observeEvidence` is a synchronous, side-effect-free supplier
 called once per `axAuthorize` call, mirroring the existing `now?: () => number`
 idiom. When present its result replaces `evidence` for that request. This is
