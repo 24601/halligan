@@ -43,12 +43,13 @@ function harness(signal: AbortSignal) {
   const published: AxEventIngress[] = [];
   const errors: unknown[] = [];
   let failures = 0;
+  let failure: () => Error = () => new AxEventBackpressureError();
   const context: AxEventSourceContext = {
     signal,
     publish: async (ingress) => {
       if (failures > 0) {
         failures--;
-        throw new AxEventBackpressureError();
+        throw failure();
       }
       published.push(ingress);
       return {
@@ -65,8 +66,9 @@ function harness(signal: AbortSignal) {
     context,
     published,
     errors,
-    failNext: (count: number) => {
+    failNext: (count: number, error?: () => Error) => {
       failures = count;
+      failure = error ?? (() => new AxEventBackpressureError());
     },
     stepIds: () => published.map((one) => one.event.data as { stepId: string }),
   };
@@ -558,6 +560,70 @@ describe('AxMindTickEventSource', () => {
     expect(test.published.map((one) => one.event.type)).toEqual([
       axMindEventTypes.wake,
     ]);
+  });
+
+  it('a publish failure does not stop the tick', async () => {
+    const manual = new AxManualEventClock(0);
+    const controller = new AbortController();
+    const test = harness(controller.signal);
+    const states: AxMindTickDutyState[] = [
+      dutyState({ nextWakeAt: 0, watchdogMs: 0 }),
+    ];
+    const source = new AxMindTickEventSource({
+      id: 'mind-tick',
+      clock: manual,
+      intervalMs: 1_000,
+      due: () => axMindTickDue(states, manual.now(), { intervalMs: 1_000 }),
+    });
+    const handle = source.start(test.context);
+    // The tick owns the scheduled wake AND the watchdog. One throwing publish
+    // used to end the loop for the process lifetime -- a dead mind, not a
+    // delayed one.
+    test.failNext(1, () => new Error('the plane refused this publish'));
+    manual.advanceBy(1_000);
+    for (let index = 0; index < 12; index++) await Promise.resolve();
+    expect(test.published).toHaveLength(0);
+    expect(test.errors).toHaveLength(1);
+
+    manual.advanceBy(1_000);
+    for (let index = 0; index < 12; index++) await Promise.resolve();
+    expect(test.published).toHaveLength(1);
+    expect(test.published[0]!.event.type).toBe(axMindEventTypes.wake);
+    await handle.close();
+  });
+
+  it('a full inbox defers one thinker without skipping the others', async () => {
+    const manual = new AxManualEventClock(0);
+    const controller = new AbortController();
+    const test = harness(controller.signal);
+    const diagnostics: string[] = [];
+    const source = new AxMindTickEventSource({
+      id: 'mind-tick',
+      clock: manual,
+      due: () => [
+        { thinker: 'first', kind: 'wake' as const },
+        { thinker: 'second', kind: 'wake' as const },
+      ],
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic.code),
+    });
+    test.failNext(1);
+    await source.tick(test.context);
+    // Backpressure is transient and per-thinker: the thinker behind the full
+    // inbox still gets its wake in the same pass.
+    expect(
+      test.published.map(
+        (one) => (one.event.data as { thinker: string }).thinker
+      )
+    ).toEqual(['second']);
+    expect(diagnostics).toEqual(['wake-deferred-backpressure']);
+    expect(test.errors).toHaveLength(0);
+
+    await source.tick(test.context);
+    expect(
+      test.published.map(
+        (one) => (one.event.data as { thinker: string }).thinker
+      )
+    ).toEqual(['second', 'first', 'second']);
   });
 
   it('leaves no abort listeners after 25 cycles and after close', async () => {

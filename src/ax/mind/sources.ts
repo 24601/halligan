@@ -514,39 +514,64 @@ export class AxMindTickEventSource implements AxEventSource {
       if (duty.kind === 'wake' && !pace) continue;
       if (duty.kind === 'idle' && !watchdog) continue;
       const now = this.options.clock.now();
-      await context.publish(
-        {
-          event: {
-            specversion: '1.0',
-            id: axEventId(`${this.id}-${duty.kind}`),
-            source: this.eventSource,
-            type:
-              duty.kind === 'wake'
-                ? axMindEventTypes.wake
-                : axMindEventTypes.idle,
-            subject: axMindThinkerSubject(duty.thinker),
-            time: new Date(now).toISOString(),
-            data: {
-              thinker: duty.thinker,
-              ...(duty.coalesced !== undefined
-                ? { coalesced: duty.coalesced }
-                : {}),
+      try {
+        await context.publish(
+          {
+            event: {
+              specversion: '1.0',
+              id: axEventId(`${this.id}-${duty.kind}`),
+              source: this.eventSource,
+              type:
+                duty.kind === 'wake'
+                  ? axMindEventTypes.wake
+                  : axMindEventTypes.idle,
+              subject: axMindThinkerSubject(duty.thinker),
+              time: new Date(now).toISOString(),
+              data: {
+                thinker: duty.thinker,
+                ...(duty.coalesced !== undefined
+                  ? { coalesced: duty.coalesced }
+                  : {}),
+              },
+              extensions: { stepsource: 'mind-tick' },
             },
-            extensions: { stepsource: 'mind-tick' },
+            trust: 'trusted',
           },
-          trust: 'trusted',
-        },
-        signal
-      );
+          signal
+        );
+      } catch (error) {
+        // One thinker's full inbox must not skip the duties of the thinkers
+        // behind it in this pass. Nothing is queued here: the duty is derived
+        // from mind state, so it is still due on the next grid slot.
+        if (!(error instanceof AxEventBackpressureError)) throw error;
+        this.diagnose(
+          'wake-deferred-backpressure',
+          duty.thinker,
+          `${duty.kind} deferred: ${error.message}`
+        );
+        continue;
+      }
       if (duty.kind === 'idle') {
-        this.options.onDiagnostic?.({
-          code: 'watchdog-fired',
-          thinker: duty.thinker,
-          at: now,
-          message: `no activity within the watchdog window; synthesized idle for ${duty.thinker}`,
-        });
+        this.diagnose(
+          'watchdog-fired',
+          duty.thinker,
+          `no activity within the watchdog window; synthesized idle for ${duty.thinker}`
+        );
       }
     }
+  }
+
+  private diagnose(
+    code: AxMindDiagnosticCode,
+    thinker: string,
+    message: string
+  ): void {
+    this.options.onDiagnostic?.({
+      code,
+      thinker,
+      at: this.options.clock.now(),
+      message,
+    });
   }
 
   private async loop(
@@ -557,7 +582,15 @@ export class AxMindTickEventSource implements AxEventSource {
       const local = new AbortController();
       await sleepQuietly(this.options.clock, this.intervalMs, signal, local);
       if (signal.aborted) break;
-      await this.tick(context, signal);
+      try {
+        await this.tick(context, signal);
+      } catch (error) {
+        // This loop owns BOTH the scheduled wake and the watchdog. An escaping
+        // publish error used to end it for the process lifetime, which is the
+        // dead mind M6/M7 exist to design out: report the slot and take the
+        // next one, so every liveness bug stays a delay.
+        if (!signal.aborted) context.reportError(error);
+      }
     }
   }
 }
