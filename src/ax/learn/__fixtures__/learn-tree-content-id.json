@@ -90,5 +90,9 @@
       ]
     }
   ],
-  "expected": { "format": "^sha256:[0-9a-f]{64}$" }
+  "expected": {
+    "format": "^sha256:[0-9a-f]{64}$",
+    "comment": "The base digest is pinned, not only the same/different relations. Relations alone would survive a change to `axEventCanonicalJson` that invalidated every contentId already persisted on a release chain — a consumer asking `is my copy current` would start getting `no` for a tree nobody touched.",
+    "baseContentId": "sha256:d6b834949400d763619a1cf7c623540692b836b9cce8af98de6802e7085b02d7"
+  }
 }

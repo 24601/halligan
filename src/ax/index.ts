@@ -1856,6 +1856,7 @@ import {
   type AxLearningReportPayload,
   type AxLearningReportRecord,
   AxLearningReportValidationError,
+  AxLearningRollbackRefusedError,
   type AxLearningScalar,
   type AxLearningStore,
   type AxLearningStoreCapabilities,
@@ -1868,6 +1869,7 @@ import {
   axIsHarnessApplyError,
   axIsLearningRecordConflictError,
   axIsLearningReleaseConflictError,
+  axIsLearningRollbackRefusedError,
 } from './learn/types.js';
 import {
   AxMCPAppBridge,
@@ -2516,6 +2518,7 @@ export { AxLearningRecordConflictError };
 export { AxLearningRecordValidationError };
 export { AxLearningReleaseConflictError };
 export { AxLearningReportValidationError };
+export { AxLearningRollbackRefusedError };
 export { AxLearningSuppressedError };
 export { AxLearningSurface };
 export { AxMCPAppBridge };
@@ -2780,6 +2783,7 @@ export { axIsHarnessRecipeError };
 export { axIsHarnessStampStale };
 export { axIsLearningRecordConflictError };
 export { axIsLearningReleaseConflictError };
+export { axIsLearningRollbackRefusedError };
 export { axIsMindBudgetExceededError };
 export { axIsMindChatError };
 export { axIsMindConfigurationError };

@@ -240,6 +240,11 @@ describe('fixture: learn-tree-content-id', () => {
       fixture.base as unknown as AxHarnessTree
     );
     expect(base).toMatch(new RegExp(fixture.expected.format));
+    // The GOLDEN digest, not only the relations. A change to
+    // `axEventCanonicalJson` that invalidated every `contentId` already
+    // written onto a release chain keeps every same/different relation
+    // intact, and would pass a fixture that only pinned those.
+    expect(base).toBe(fixture.expected.baseContentId);
     for (const variant of fixture.variants) {
       const contentId = await axHarnessContentId(
         variant.tree as unknown as AxHarnessTree

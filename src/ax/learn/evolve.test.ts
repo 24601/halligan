@@ -848,7 +848,7 @@ describe('axHarnessEvolve — the step number', { timeout: SLOW }, () => {
   it('derives step from the chain tail, so it matches the release it rides on', async () => {
     // The head does not move on a nomination. Deriving `step` from the head
     // made two consecutive steps both report the same number while the chain
-    // counted on, so the manifest and the release it travelled with disagreed.
+    // counted on, so the manifest and the release it rode on disagreed.
     const h = await harness();
     const first = await evolve(h);
     expect(first.status).toBe('nominated');

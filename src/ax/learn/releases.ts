@@ -25,6 +25,7 @@ import {
   type AxHarnessTree,
   type AxLearningRelease,
   AxLearningReleaseConflictError,
+  AxLearningRollbackRefusedError,
   type AxLearningStore,
   type AxLearningTreeDelivery,
 } from './types.js';
@@ -224,7 +225,9 @@ export class AxLearningSurface {
       );
     }
     if (target.restorable !== true) {
-      throw new Error(
+      throw new AxLearningRollbackRefusedError(
+        this.scenario,
+        releaseId,
         `AxLearningSurface: release ${releaseId} is not restorable`
       );
     }

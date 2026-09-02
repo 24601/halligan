@@ -138,9 +138,11 @@ export {
   AxLearningRecordValidationError,
   AxLearningReleaseConflictError,
   AxLearningReportValidationError,
+  AxLearningRollbackRefusedError,
   AxLearningSuppressedError,
   axIsHarnessAdmissionError,
   axIsHarnessApplyError,
   axIsLearningRecordConflictError,
   axIsLearningReleaseConflictError,
+  axIsLearningRollbackRefusedError,
 } from './types.js';

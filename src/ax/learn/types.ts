@@ -553,6 +553,28 @@ export class AxLearningReleaseConflictError extends Error {
 }
 
 /**
+ * A rollback named a release that cannot be restored.
+ *
+ * Separate from `AxLearningReleaseConflictError`, which is about a stale CAS
+ * expectation: this one says the target itself is disqualified. Typed and
+ * guarded like every other error that crosses a host boundary, rather than a
+ * bare `Error` a caller can only match on by message.
+ */
+export class AxLearningRollbackRefusedError extends Error {
+  readonly code = 'learning_rollback_refused';
+
+  constructor(
+    readonly scenario: string,
+    readonly releaseId: string,
+    message: string,
+    options?: ErrorOptions
+  ) {
+    super(message, options);
+    this.name = 'AxLearningRollbackRefusedError';
+  }
+}
+
+/**
  * A recorded run was attempted while recording is suspended.
  *
  * Thrown BEFORE the forward is issued: a caller that asked for a receipt must
@@ -687,6 +709,17 @@ export function axIsLearningReleaseConflictError(
   }
   const operation = (error as { operation?: unknown }).operation;
   return operation === 'append' || operation === 'promote';
+}
+
+/** Structural guard; see `axIsLearningRecordConflictError`. */
+export function axIsLearningRollbackRefusedError(
+  error: unknown
+): error is AxLearningRollbackRefusedError {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { code?: unknown }).code === 'learning_rollback_refused'
+  );
 }
 
 /** Structural guard; see `axIsLearningRecordConflictError`. */

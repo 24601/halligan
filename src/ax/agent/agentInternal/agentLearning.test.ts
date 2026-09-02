@@ -51,7 +51,7 @@ const GATE: Readonly<AxHarnessGateDecision> = Object.freeze({
   }),
 });
 
-function makeAI(behaviour: 'ok' | 'throw' = 'ok') {
+function makeAI(behaviour: 'ok' | 'throw' | 'no-usage' = 'ok') {
   return new AxMockAIService({
     features: { functions: false, streaming: false },
     chatResponse: async () => {
@@ -60,11 +60,21 @@ function makeAI(behaviour: 'ok' | 'throw' = 'ok') {
         results: [
           { index: 0, content: 'Answer: fine', finishReason: 'stop' as const },
         ],
-        modelUsage: {
-          ai: 'mock-ai',
-          model: 'mock-model',
-          tokens: { promptTokens: 3, completionTokens: 4, totalTokens: 7 },
-        },
+        // A provider that reports no token counters at all — the case that
+        // used to be recorded as three honest-looking zeros.
+        ...(behaviour === 'no-usage'
+          ? {}
+          : {
+              modelUsage: {
+                ai: 'mock-ai',
+                model: 'mock-model',
+                tokens: {
+                  promptTokens: 3,
+                  completionTokens: 4,
+                  totalTokens: 7,
+                },
+              },
+            }),
       };
     },
   });
@@ -160,6 +170,33 @@ describe('AxAgentLearning.run()', () => {
     )) as AxLearningInteractionRecord;
     expect(stored.payload.model).toBe('mock-model');
     expect(stored.payload.usage?.totalTokens).toBeGreaterThan(0);
+  });
+
+  it('omits usage entirely when the provider reported no token counters', async () => {
+    // Zeros would be indistinguishable from a real zero, and a consumer
+    // summing recorded usage across a scenario could not tell "nothing was
+    // reported" from "nothing was spent".
+    const clock = new AxManualEventClock(NOW);
+    const store = new AxInMemoryLearningStore({ clock });
+    const surface = await axLearningSurface({
+      scenario: 'support',
+      store,
+      clock,
+      seed: SEED,
+      idFactory: ids('rel'),
+    });
+    const ai = makeAI('no-usage');
+    const a = agent('query:string -> answer:string', {
+      ai,
+      learning: { scenario: 'support', store, surface, clock },
+    });
+    const { receipt } = await a.learn().run(ai, { query: 'hello' });
+    const stored = (await store.get(
+      'support',
+      receipt.recordId
+    )) as AxLearningInteractionRecord;
+    expect(stored.payload.usage).toBeUndefined();
+    expect('usage' in stored.payload).toBe(false);
   });
 
   it('a bare forward() on a learning-configured agent appends nothing', async () => {

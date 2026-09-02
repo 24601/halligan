@@ -276,8 +276,8 @@ export const axInspectHarnessTree = (
 
   // The tree-level size cap is charged to every entry: an oversized tree is
   // not one entry's fault, and refusing it wholesale is what fails closed.
-  // An unsizeable tree is not "not oversized": the entry that made it
-  // unsizeable is denied `non-json-config` in the loop below.
+  // A tree that cannot be sized is not "not oversized": the entry that made
+  // it impossible to encode is denied `non-json-config` in the loop below.
   const treeBytes = canonicalByteLength(tree);
   const treeOversized = treeBytes !== undefined && treeBytes > MAX_TREE_BYTES;
 

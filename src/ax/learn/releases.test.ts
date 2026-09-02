@@ -9,7 +9,9 @@ import {
   type AxHarnessGateDecision,
   type AxHarnessTree,
   AxLearningReleaseConflictError,
+  type AxLearningRollbackRefusedError,
   type AxLearningStore,
+  axIsLearningRollbackRefusedError,
 } from './types.js';
 
 const NOW = 1_000;
@@ -295,9 +297,20 @@ describe('AxLearningSurface — rollback', () => {
       },
       'rel-1'
     );
-    await expect(surface.rollback('frozen', 'rel-1')).rejects.toThrow(
-      /not restorable/
-    );
+    // Typed and guarded like every other error that crosses a host boundary,
+    // rather than a bare `Error` a caller can only match on by message.
+    let raised: unknown;
+    try {
+      await surface.rollback('frozen', 'rel-1');
+    } catch (error) {
+      raised = error;
+    }
+    expect(axIsLearningRollbackRefusedError(raised)).toBe(true);
+    const refused = raised as AxLearningRollbackRefusedError;
+    expect(refused.code).toBe('learning_rollback_refused');
+    expect(refused.releaseId).toBe('frozen');
+    expect(refused.scenario).toBe('support');
+    expect(refused.message).toMatch(/not restorable/);
     expect((await surface.currentTree())?.releaseId).toBe('rel-1');
   });
 

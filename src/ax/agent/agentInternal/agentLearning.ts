@@ -107,23 +107,46 @@ interface LearningAgentHost<IN extends AxGenIn, OUT extends AxGenOut> {
   getUsage(): { actor: AxProgramUsage[]; responder: AxProgramUsage[] };
 }
 
-function sumTokens(entries: readonly AxProgramUsage[]): Readonly<{
-  promptTokens?: number;
-  completionTokens?: number;
-  totalTokens?: number;
-}> {
-  let prompt = 0;
-  let completion = 0;
-  let total = 0;
+/**
+ * Sum the token counters that are actually present.
+ *
+ * An absent counter stays absent rather than becoming `0`: a run against a
+ * provider that reports no usage would otherwise record three zeros
+ * indistinguishable from a real zero, and a consumer summing recorded usage
+ * across a scenario cannot tell "nothing was reported" from "nothing was
+ * spent". Returns `undefined` when no counter was reported at all, so the
+ * `usage` field is omitted rather than written empty.
+ */
+function sumTokens(entries: readonly AxProgramUsage[]):
+  | Readonly<{
+      promptTokens?: number;
+      completionTokens?: number;
+      totalTokens?: number;
+    }>
+  | undefined {
+  let prompt: number | undefined;
+  let completion: number | undefined;
+  let total: number | undefined;
   for (const entry of entries) {
-    prompt += entry.tokens?.promptTokens ?? 0;
-    completion += entry.tokens?.completionTokens ?? 0;
-    total += entry.tokens?.totalTokens ?? 0;
+    const tokens = entry.tokens;
+    if (tokens === undefined) continue;
+    if (tokens.promptTokens !== undefined) {
+      prompt = (prompt ?? 0) + tokens.promptTokens;
+    }
+    if (tokens.completionTokens !== undefined) {
+      completion = (completion ?? 0) + tokens.completionTokens;
+    }
+    if (tokens.totalTokens !== undefined) {
+      total = (total ?? 0) + tokens.totalTokens;
+    }
+  }
+  if (prompt === undefined && completion === undefined && total === undefined) {
+    return undefined;
   }
   return {
-    promptTokens: prompt,
-    completionTokens: completion,
-    totalTokens: total,
+    ...(prompt === undefined ? {} : { promptTokens: prompt }),
+    ...(completion === undefined ? {} : { completionTokens: completion }),
+    ...(total === undefined ? {} : { totalTokens: total }),
   };
 }
 
@@ -358,6 +381,7 @@ export class AxAgentLearning<
       ...usage.responder.slice(args.usageFrom.responderSeen),
     ];
     const model = fresh.at(-1)?.model;
+    const tokenUsage = sumTokens(fresh);
     const { memories: _memories, ...input } = (args.input ?? {}) as Record<
       string,
       unknown
@@ -378,7 +402,7 @@ export class AxAgentLearning<
           ? { output: args.output as never }
           : { failure: args.failure }),
         ...(model === undefined ? {} : { model }),
-        ...(fresh.length === 0 ? {} : { usage: sumTokens(fresh) }),
+        ...(tokenUsage === undefined ? {} : { usage: tokenUsage }),
         ...(this.config.tags === undefined ? {} : { tags: this.config.tags }),
       });
       const result = await this.config.store.append(record);
