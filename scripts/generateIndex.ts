@@ -49,6 +49,7 @@ const internalExportNames = new Set([
   'AxControlArmRun',
   'AxNeutralArtifact',
   'AxRestoredArtifactOutcome',
+  'AxRestoredArtifactPhase',
   'AxSnapshotHandle',
   'AxSnapshotState',
   'AxAgentPlaybookTerminationTally',

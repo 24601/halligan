@@ -42,6 +42,14 @@ export type AxAgentPlaybookSplitScore = Readonly<{
   discardedRuns: number;
   expectedRuns: number;
   complete: boolean;
+  /**
+   * Present only when the pass ran out of metric budget and stopped early; the
+   * value is the number of tasks that produced a record before the cut. It is
+   * the difference between "this split was scored badly" and "this split was
+   * never finished", and a reason that cannot tell them apart sends a reader
+   * looking at the wrong target.
+   */
+  truncatedAtTaskIndex?: number;
 }>;
 
 /**
@@ -1147,7 +1155,14 @@ export type AxAgentPlaybookEvolveErrorCode =
   | 'interval_options_invalid'
   /** An evidence option was combined with `verify: false`. */
   | 'evidence_requires_verify'
-  | 'sealed_test_invalid';
+  | 'sealed_test_invalid'
+  /**
+   * Phase 11 restored an artifact onto the handle for the sealed split and then
+   * could not put the live one back. Distinct from `control_arm_failed` because
+   * a run may configure a sealed test and no control arm at all, and an error
+   * that named the arm would assert a phase that never ran.
+   */
+  | 'sealed_test_failed';
 
 const AX_AGENT_PLAYBOOK_EVOLVE_ERROR_CODES = [
   'evidence_incomplete',
@@ -1161,6 +1176,7 @@ const AX_AGENT_PLAYBOOK_EVOLVE_ERROR_CODES = [
   'interval_options_invalid',
   'evidence_requires_verify',
   'sealed_test_invalid',
+  'sealed_test_failed',
 ] as const;
 
 /**

@@ -1,3 +1,4 @@
+import { getEventListeners } from 'node:events';
 import { describe, expect, it } from 'vitest';
 import type {
   AxACEBullet,
@@ -10,6 +11,7 @@ import {
   DEFAULT_TRANSFER_REGRESSION_FLOOR,
   transferCellKey,
   transferComparisonMade,
+  transferPassMetricCalls,
   transferReportFrom,
   transferRequiredMetricCalls,
   transferSplitsOf,
@@ -221,6 +223,7 @@ describe('transfer option validation', () => {
       trainCount: 2,
       heldOutCount: 2,
       runsPerTask: 1,
+      maxDiscardRedraws: 0,
     });
     expect(required).toBe(8);
     const error = await evolveAgentPlaybook(self as any, DATASET, {
@@ -233,6 +236,41 @@ describe('transfer option validation', () => {
     expect(error.code).toBe('budget_insufficient');
     expect(error.message).toContain('transfer needs 8 metric calls');
     expect(JSON.stringify(handle.current())).toBe(before);
+  });
+
+  it('sizes the matrix budget for the re-draws the harness may spend', () => {
+    const base = {
+      targetCount: 2,
+      splits: ['heldOut'] as const,
+      trainCount: 2,
+      heldOutCount: 2,
+      runsPerTask: 1,
+    };
+    // A discarded attempt is re-drawn from the SAME counter, so a budget that
+    // ignores `maxDiscardRedraws` truncates a pass on the first provider
+    // hiccup — in exactly the configuration bounded re-draw exists to protect.
+    expect(transferRequiredMetricCalls({ ...base, maxDiscardRedraws: 0 })).toBe(
+      8
+    );
+    expect(transferRequiredMetricCalls({ ...base, maxDiscardRedraws: 1 })).toBe(
+      16
+    );
+    expect(
+      transferPassMetricCalls({
+        taskCount: 2,
+        runsPerTask: 1,
+        maxDiscardRedraws: 1,
+      })
+    ).toBe(4);
+    // The per-pass counter is a strict fraction of the matrix total: 2 targets
+    // x 2 passes (anchor + candidate) x this.
+    expect(
+      transferPassMetricCalls({
+        taskCount: 2,
+        runsPerTask: 1,
+        maxDiscardRedraws: 1,
+      }) * 4
+    ).toBe(transferRequiredMetricCalls({ ...base, maxDiscardRedraws: 1 }));
   });
 
   it('refuses a transfer gate with no targets to read', async () => {
@@ -708,15 +746,40 @@ describe('the sealed test', () => {
           result.sealedTest?.status === 'completed'
             ? result.sealedTest.delta
             : undefined,
+        sealedBaseline:
+          result.sealedTest?.status === 'completed'
+            ? result.sealedTest.baseline.mean
+            : undefined,
+        sealedFinal:
+          result.sealedTest?.status === 'completed'
+            ? result.sealedTest.final.mean
+            : undefined,
       };
     };
     const zero = await run(0);
     const one = await run(1);
-    // The sealed reading moved from -0 to +0 ... and nothing else moved at all.
+    // The sealed reading really did move — a stub that reported a constant
+    // `delta: 0` would satisfy the deep-equal below without ever measuring
+    // anything, so the moving fact is asserted first.
+    expect(zero.sealedBaseline).toBeCloseTo(0, 9);
+    expect(one.sealedBaseline).toBeCloseTo(1, 9);
+    expect(zero.sealedFinal).toBeCloseTo(0, 9);
+    expect(one.sealedFinal).toBeCloseTo(1, 9);
+    // ... and the delta is 0 on both sides, so nothing else moved at all.
     expect(zero.sealedDelta).toBe(0);
     expect(one.sealedDelta).toBe(0);
-    const { sealedDelta: _z, ...zeroRest } = zero;
-    const { sealedDelta: _o, ...oneRest } = one;
+    const {
+      sealedDelta: _z,
+      sealedBaseline: _zb,
+      sealedFinal: _zf,
+      ...zeroRest
+    } = zero;
+    const {
+      sealedDelta: _o,
+      sealedBaseline: _ob,
+      sealedFinal: _of,
+      ...oneRest
+    } = one;
     expect(oneRest).toEqual(zeroRest);
     expect(zeroRest.applied).toBe('live');
     expect(zeroRest.accepted).toContain(true);
@@ -741,6 +804,109 @@ describe('the sealed test', () => {
     );
   });
 
+  it('refuses a delta over a split it could not finish', async () => {
+    const { self, metric } = transferFixture();
+    const sealedIds = new Set(SEALED.map((task) => task.id));
+    const result = await evolveAgentPlaybook(self as any, DATASET, {
+      metric,
+      scoreThreshold: 0,
+      prune: PRUNE,
+      sealedTest: SEALED,
+      // Every attempt at `s1` is an environment failure, so no re-draw can
+      // score it and the split is never whole. Publishing `final.mean` here
+      // would report a number for an artifact that was never evaluated.
+      classifyTermination: ({ task }: any) =>
+        String(task?.id ?? '') === 's1'
+          ? { kind: 'environment_failure', cause: 'provider_rate_limit' }
+          : undefined,
+    });
+    expect(result.sealedTest?.status).toBe('not_run');
+    if (result.sealedTest?.status !== 'not_run') {
+      throw new Error('expected not_run');
+    }
+    expect(result.sealedTest.reason).toContain('a prefix mean is not a test');
+    expect(result.sealedTest.reason).toContain('discarded');
+    expect((result.warnings ?? []).map((w) => w.code)).toContain(
+      'sealed_test_not_run'
+    );
+    // Nothing anywhere on the result publishes a sealed delta.
+    expect(JSON.stringify(result)).not.toContain('influencedNoDecision');
+    expect(sealedIds.size).toBe(2);
+  });
+
+  it('budgets the re-draw allowance so one discard cannot starve the second pass', async () => {
+    const { self, metric } = transferFixture();
+    let fired = false;
+    const result = await evolveAgentPlaybook(self as any, DATASET, {
+      metric,
+      scoreThreshold: 0,
+      prune: PRUNE,
+      sealedTest: SEALED,
+      // Exactly ONE discarded sealed attempt. Sized at `2 x |sealed| x
+      // runsPerTask` the re-draw is paid out of the FINAL pass, which then
+      // executes zero runs and reports `mean: 0` as the run's result.
+      classifyTermination: ({ task }: any) => {
+        if (fired || String(task?.id ?? '') !== 's1') return undefined;
+        fired = true;
+        return { kind: 'environment_failure', cause: 'provider_rate_limit' };
+      },
+    });
+    expect(fired).toBe(true);
+    expect(result.sealedTest?.status).toBe('completed');
+    const report = result.sealedTest!;
+    if (report.status === 'not_run') throw new Error('expected a sealed test');
+    // 2 passes x 2 sealed tasks = 4 scored attempts, PLUS the discarded one
+    // the re-draw replaced. A budget of exactly 4 pays for the re-draw out of
+    // the final pass, which then executes nothing at all.
+    expect(report.accounting.metricCalls).toBe(5);
+    expect(report.baseline.complete).toBe(true);
+    expect(report.final.complete).toBe(true);
+    expect(report.final.executedRuns).toBe(2);
+    expect(report.baseline.mean).toBeCloseTo(0.2, 9);
+    expect(report.final.mean).toBeCloseTo(0.7, 9);
+    expect(report.delta).toBeCloseTo(0.5, 9);
+  });
+
+  it('names the sealed test, not the control arm, when its restore fails', async () => {
+    const { handle, self, metric } = transferFixture();
+    const sealedIds = new Set(SEALED.map((task) => task.id));
+    let sealedStarted = false;
+    const inner = self._forwardForEvaluation;
+    self._forwardForEvaluation = async (ai: any, task: any) => {
+      if (sealedIds.has(String(task?.id ?? ''))) sealedStarted = true;
+      return await inner(ai, task);
+    };
+    const guarded = {
+      ...handle,
+      load: (snapshot: any) => {
+        const bullets = Object.values(
+          snapshot?.playbook?.sections ?? {}
+        ).flat();
+        const hasNoise = (bullets as { id: string }[]).some(
+          (bullet) => bullet.id === 'noise'
+        );
+        // Fail only the RETURN restore of the sealed test's baseline pass:
+        // the live artifact is the pruned one, which no longer has 'noise'.
+        if (sealedStarted && !hasNoise) throw new Error('load exploded');
+        return handle.load(snapshot);
+      },
+    };
+    self.getPlaybook = () => guarded;
+    const error = await evolveAgentPlaybook(self as any, DATASET, {
+      metric,
+      scoreThreshold: 0,
+      prune: PRUNE,
+      // NO control arm is configured at all.
+      sealedTest: SEALED,
+    }).catch((err) => err);
+    expect(axIsAgentPlaybookEvolveError(error)).toBe(true);
+    expect(error.code).toBe('sealed_test_failed');
+    expect(error.phase).toBe('sealed_test');
+    expect(error.message).toContain('the sealed test');
+    expect(error.message).not.toContain('control arm');
+    expect(error.playbookSnapshot).toBeDefined();
+  });
+
   it('reads the baseline artifact even after a run-level rollback', async () => {
     const { handle, self, metric, targets } = transferFixture();
     const before = JSON.stringify(handle.current());
@@ -757,5 +923,214 @@ describe('the sealed test', () => {
     // left to test and the report says that instead of reporting a zero.
     expect(result.sealedTest?.status).toBe('not_run');
     expect(JSON.stringify(handle.current())).toBe(before);
+  });
+});
+
+// --- budget, gate observability and abort (review B1/M1/M2/M5, minor 7) -----
+
+describe('the transfer matrix under re-draws, dry runs and abort', () => {
+  it('gives every cell its own budget, so one target cannot starve another', async () => {
+    const { self, metric, targets } = transferFixture();
+    let fired = false;
+    const result = await evolveAgentPlaybook(self as any, DATASET, {
+      metric,
+      scoreThreshold: 0,
+      prune: PRUNE,
+      transfer: { targets },
+      gates: { transfer: 'warn' },
+      // One discard, in the FIRST target's anchor pass. With one flat
+      // matrix-wide counter its re-draw is spent out of the LAST target's
+      // pass, which then reads as an incomplete cell and fails a required
+      // gate naming a target that was merely starved.
+      classifyTermination: ({ prediction }: any) => {
+        if (fired || String(prediction?.output?.ai ?? '') !== 'sonnet') {
+          return undefined;
+        }
+        fired = true;
+        return { kind: 'environment_failure', cause: 'provider_rate_limit' };
+      },
+    });
+    expect(fired).toBe(true);
+    const report = result.transfer;
+    if (!report || report.status === 'not_run') {
+      throw new Error(`expected a matrix, got ${report?.status}`);
+    }
+    expect(report.status).toBe('completed');
+    const cells = cellsByKey(report.cells);
+    expect(Object.keys(cells).sort()).toEqual([
+      'nano:heldOut',
+      'sonnet:heldOut',
+    ]);
+    for (const cell of report.cells) {
+      expect(cell.anchor.complete).toBe(true);
+      expect(cell.candidate.complete).toBe(true);
+      expect(cell.anchor.truncatedAtTaskIndex).toBeUndefined();
+      expect(cell.candidate.truncatedAtTaskIndex).toBeUndefined();
+    }
+    // 2 targets x 2 passes x 2 held-out tasks = 8 scored attempts, PLUS the
+    // discarded one the re-draw replaced. On one flat counter that ninth call
+    // is taken out of the last cell, which then reads as incomplete.
+    expect(report.accounting.metricCalls).toBe(9);
+    const codes = (result.warnings ?? []).map((w) => w.code);
+    expect(codes).not.toContain('transfer_unmeasured');
+  });
+
+  it('names budget exhaustion as exhaustion rather than blaming the target', () => {
+    const short = transferReportFrom({
+      floor: DEFAULT_TRANSFER_REGRESSION_FLOOR,
+      cells: [
+        {
+          targetId: 'nano',
+          split: 'heldOut',
+          anchor: {
+            mean: 0.5,
+            executedRuns: 2,
+            discardedRuns: 0,
+            expectedRuns: 2,
+            complete: true,
+          },
+          candidate: {
+            mean: 0.9,
+            executedRuns: 1,
+            discardedRuns: 0,
+            expectedRuns: 2,
+            complete: false,
+            truncatedAtTaskIndex: 1,
+          },
+          delta: 0.4,
+          interval: {
+            point: 0.4,
+            lower: 0.4,
+            upper: 0.4,
+            level: 0.95,
+            resamples: 0,
+            unit: 'task',
+            clusters: 1,
+            seed: 1,
+            direction: 'unresolved',
+          },
+          regressed: false,
+        },
+      ],
+      accounting: {} as any,
+      expectedCells: 1,
+    });
+    const verdict = transferVerdict({ report: short });
+    // A prefix mean of 0.9 would otherwise read as a large WIN for this target.
+    expect(verdict.passed).toBe(false);
+    expect(verdict.detail).toContain('ran out of its own metric budget');
+    expect(verdict.detail).toContain('transfer.maxMetricCalls');
+    expect(transferComparisonMade(short)).toBe(false);
+  });
+
+  it('reports a failing required gate on a dry run instead of going silent', async () => {
+    const { self, metric, targets } = transferFixture();
+    const gated = await evolveAgentPlaybook(self as any, DATASET, {
+      metric,
+      scoreThreshold: 0,
+      prune: PRUNE,
+      apply: false,
+      transfer: { targets },
+      gates: { transfer: 'require' },
+    });
+    // Nothing was applied, so nothing is rolled back — but the gate is not
+    // allowed to be invisible.
+    expect(gated.applied).toBe('dry_run');
+    const warning = (gated.warnings ?? []).find(
+      (w) => w.code === 'transfer_cell_regressed'
+    );
+    expect(warning).toBeDefined();
+    expect(warning?.message).toContain("The 'require' transfer gate failed");
+    expect(warning?.message).toContain('dry run');
+    // ... and it is distinguishable from having no gate at all.
+    const { self: s2, metric: m2, targets: t2 } = transferFixture();
+    const off = await evolveAgentPlaybook(s2 as any, DATASET, {
+      metric: m2,
+      scoreThreshold: 0,
+      prune: PRUNE,
+      apply: false,
+      transfer: { targets: t2 },
+    });
+    const offWarning = (off.warnings ?? []).find(
+      (w) => w.code === 'transfer_cell_regressed'
+    );
+    expect(offWarning?.message).not.toContain('transfer gate failed');
+    expect(offWarning?.message).not.toContain('dry run');
+    expect(warning?.message).not.toBe(offWarning?.message);
+  });
+
+  it('says nothing changed rather than paying to measure noise', async () => {
+    const { self, metric, targets, observations } = transferFixture();
+    const result = await evolveAgentPlaybook(self as any, DATASET, {
+      metric,
+      // No prune and no accepted proposal: the final artifact IS the baseline.
+      scoreThreshold: 0,
+      transfer: { targets },
+      gates: { transfer: 'warn' },
+    });
+    expect(result.outcomes.filter((o) => o.accepted)).toHaveLength(0);
+    expect(result.transfer?.status).toBe('not_run');
+    if (result.transfer?.status !== 'not_run')
+      throw new Error('expected not_run');
+    expect(result.transfer.reason).toContain('no artifact change');
+    // The anchor pass ran (phase 3, before any mutation) and the candidate
+    // pass did NOT: the caller's own services are never charged to measure
+    // run-to-run noise.
+    const targetCalls = observations.filter((o) => o.ai !== 'primary');
+    expect(targetCalls).toHaveLength(4);
+    expect(targetCalls.every((o) => o.noise)).toBe(true);
+  });
+
+  it('rethrows an abort from the anchor pass, the candidate pass and the sealed test', async () => {
+    for (const [marker, phase] of [
+      ['anchor pass', 'transfer'],
+      ['candidate pass', 'transfer'],
+      ['sealed task(s)', 'sealed_test'],
+    ] as const) {
+      const { self, metric, targets } = transferFixture();
+      const controller = new AbortController();
+      await expect(
+        evolveAgentPlaybook(self as any, DATASET, {
+          metric,
+          scoreThreshold: 0,
+          prune: PRUNE,
+          transfer: { targets },
+          gates: { transfer: 'warn' },
+          sealedTest: SEALED,
+          abortSignal: controller.signal,
+          onProgress: (event: any) => {
+            if (
+              event.phase === phase &&
+              String(event.message).includes(marker)
+            ) {
+              controller.abort();
+            }
+          },
+        })
+      ).rejects.toThrow('aborted');
+      // An abort is never laundered into a soft `not_run` reason string.
+      expect(getEventListeners(controller.signal, 'abort').length).toBe(0);
+    }
+  });
+
+  it('surfaces a typed evidence error from a transfer pass under its own code', async () => {
+    const { self, metric, targets } = transferFixture();
+    const error = await evolveAgentPlaybook(self as any, DATASET, {
+      metric,
+      scoreThreshold: 0,
+      prune: PRUNE,
+      transfer: { targets },
+      // Throws only on a TARGET's attempt, so the throw happens inside the
+      // transfer anchor pass. Folded into a `not_run` reason string its `code`
+      // and `phase` are gone and a fail-closed throw reads as a soft warning.
+      classifyTermination: ({ prediction }: any) => {
+        if (String(prediction?.output?.ai ?? 'primary') !== 'primary') {
+          throw new Error('classifier blew up on a target');
+        }
+        return undefined;
+      },
+    }).catch((err) => err);
+    expect(axIsAgentPlaybookEvolveError(error)).toBe(true);
+    expect(error.code).toBe('classifier_invalid');
   });
 });

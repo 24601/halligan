@@ -410,7 +410,10 @@ export const AX_PLAYBOOK_EVIDENCE_SEED_PROBE: Archetype = {
   expect: { applied: 'live', differs: false },
 };
 
-/** Every attempt of `t2` is an environment failure. 3 of 10 on the split. */
+/**
+ * Every attempt of `t2` is an environment failure: 2 of the split's 6 attempts
+ * (3 tasks x 2 runs), so the reported discard rate is 1/3.
+ */
 const DISCARD_TASKS = new Set(['t2']);
 
 // ---------------------------------------------------------------------------
@@ -637,8 +640,6 @@ export async function evaluatePlaybookEvidence() {
         : undefined,
     maxDiscardRedraws: 0,
   });
-  const discardRates = termination.result.records.length > 0 ? [] : [];
-  void discardRates;
   const terminationSplit = termination.result.outcomes
     .map((outcome) => outcome.evidence?.termination)
     .find((report) => report !== undefined);

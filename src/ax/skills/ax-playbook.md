@@ -529,6 +529,7 @@ result.applied;          // 'live' | 'dry_run' | 'rolled_back'
 
 - Resampling draws **tasks** with replacement, not attempts: repeats of one task are not independent samples.
 - `direction: 'unresolved'` whenever the interval contains zero. It is never rounded to the side the point estimate fell on.
+- `interval_unresolved` covers **both** unresolved cases: an interval that was computed and contains zero, and one that could not be computed at all because no task could be paired between the two passes (the control arm and the sealed test both emit it, `scope` naming which). The report still carries an `interval` field, reading `clusters: 0, resamples: 0`, so an uncomputed comparison never sits on a receipt shaped exactly like a real paired bootstrap.
 - The band is the smallest delta distinguishable from run-to-run noise on an artifact that did not change. A point delta inside it emits `delta_within_variance_band`.
 - `gates.interval: 'require'` without a `varianceBand` is **rejected at option validation**: a required gate must not silently degrade to "excludes zero".
 - On a 12-task split, tight thresholds produce **both** false accepts and false rejects. Widen the split before tightening the gate.
@@ -586,9 +587,12 @@ Three bases, and only one can gate:
 - **Never emit an average.** `AxAgentPlaybookTransferReport` has no mean field and a type test bans adding one. Averages hide catastrophic cells: a matrix whose cells are `+0.50` and `-0.36` averages to a win and contains a target that got materially worse.
 - One cell per `(target, split)`, each with its own anchor, candidate, delta, interval and model identity. `regressedCells` lists `${targetId}:${split}` for every cell past the floor.
 - The anchor is the **target's own** reading of the unevolved artifact, taken before any mutation. Borrowing the primary model's baseline would attribute the model gap to the playbook.
-- `target.id` is caller-owned. Ax never derives a cell label from the service.
-- Largest budget multiplier in the API: `|targets| x sum(splits) x runsPerTask x 2`, from its own counter, failing closed before mutation when `transfer.maxMetricCalls` cannot pay for it.
-- Fails closed on a matrix it cannot read: a missing cell, an incomplete pass, or a pair it could not align.
+- `target.id` is caller-owned. Ax never derives a cell label from the service. `target.evaluatorId` is **caller-side metadata only**: it is validated as a string and Ax never reads it — it appears on no cell, no receipt and no accounting row. Use it to tag your own records; do not expect it back.
+- Largest budget multiplier in the API: `|targets| x sum(splits) x runsPerTask x (1 + maxDiscardRedraws) x 2`, failing closed before mutation when `transfer.maxMetricCalls` cannot pay for it. Each `(target, split)` pass draws from **its own** sub-budget, so one target's re-draws can never truncate another's pass and be reported as that target regressing.
+- Fails closed on a matrix it cannot read: a missing cell, an incomplete pass, or a pair it could not align. A pass that ran out of its own budget says so, and names the budget rather than the target.
+- When the run produced no artifact change the matrix is `not_run` with that reason: the candidate pass would score the same artifact the anchors already scored and charge the caller's own services to measure run-to-run noise.
+- A non-`off` gate that fails without rolling anything back — a dry run, or a run that accepted nothing — still says so, on the same warning, with the reason nothing was rolled back. A failing gate is never indistinguishable from `gates.transfer: 'off'`.
+- After a run-level rollback `result.transfer` is returned **unchanged**, describing the artifact that was withdrawn. It is a record of what was measured, not of what is live; `applied`, `playbookSnapshot` and every receipt are the fields that moved.
 
 ### Trajectory termination
 
@@ -628,6 +632,7 @@ Three bases, and only one can gate:
 - `promotionDigest` is **receipt metadata, not consent**. It identifies what was promoted; it authorizes nothing.
 - No `promotionAuthority` configured stays permissive but is never silent: `promotion_without_receipt`.
 - A promoted candidate rescinded by a run-level gate moves all five together: `promotion.status = 'promoted_then_rolled_back'`, `evidence.decision = 'superseded'`, `applied = 'rolled_back'`, `playbookSnapshot = undefined`, plus `promotion_rolled_back`.
+- `onProgress` emits a `'promotion'` phase per nomination carrying the decision: the status, plus the denial code and reason, the blocking veto ids, or the granted receipt id. A promotion that was denied is visible while the run is still going, not only afterwards on the result.
 - Hosts supplying a veto or an authority run `runAxAgentPlaybookEvidenceConformance` first. It makes **real** host calls — two veto invocations and one genuine `axAuthorize` against the live `AxAuthorityContext` — so pre-grant `axPlaybookEvidenceConformanceOperation` on `axPlaybookEvidenceConformanceResource` before calling it, or the kit's own request is denied and it asserts nothing.
 
 ### Held-out is a selection split
@@ -649,7 +654,13 @@ result.sealedTest;   // { status: 'completed', baseline, final, delta, interval,
   the final artifact. `influencedNoDecision` is a literal `true`: there is no
   inhabitant of the report in which it influenced anything, and no gate reads
   it. When the run produced no artifact change it reports `not_run` with the
-  reason rather than reporting run-to-run noise.
+  reason rather than reporting run-to-run noise, and when either pass could not
+  finish the whole split — budget exhausted, or every attempt at a task
+  discarded — it reports `not_run` too: a prefix mean is not a test number, and
+  a pass that scored nothing has a mean of `0` that would otherwise publish as
+  the run's delta. Either way `sealed_test_not_run` fires and no delta exists.
+  A restore that fails around phase 11 throws `sealed_test_failed` in phase
+  `sealed_test`, never the control arm's error.
 
 - The `held_out_reused_for_selection` warning and its family-wise error rate go in the PR's Evaluation section verbatim, alongside the sealed-test delta — or an explicit statement that no sealed test was run.
 

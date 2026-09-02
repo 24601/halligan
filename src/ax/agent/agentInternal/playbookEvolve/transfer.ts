@@ -24,7 +24,10 @@
 import type { AxAIService } from '../../../ai/types.js';
 import type { AxGenIn, AxGenOut } from '../../../dsp/types.js';
 import type { AxAgentEvalTask } from '../agentOptimizeTypes.js';
-import type { AxAgentEvalBatchResult } from './evalHarness.js';
+import type {
+  AxAgentEvalBatchResult,
+  AxAgentEvalBudget,
+} from './evalHarness.js';
 import type {
   AxAgentPlaybookComputeAccounting,
   AxAgentPlaybookModelIdentity,
@@ -154,10 +157,25 @@ export function validateTransferOptions(
 }
 
 /**
+ * What ONE (target, split) pass may spend. A discarded attempt is re-drawn from
+ * the same counter (`evalHarness`'s re-draw loop), so a pass budgeted at exactly
+ * `tasks x runsPerTask` is cut short by the first environment failure — and a
+ * cut-short pass carries a mean over a PREFIX of the split, which is the
+ * fail-open reading `unmeasuredReason` exists to refuse.
+ */
+export function transferPassMetricCalls(args: {
+  taskCount: number;
+  runsPerTask: number;
+  maxDiscardRedraws: number;
+}): number {
+  return args.taskCount * args.runsPerTask * (1 + args.maxDiscardRedraws);
+}
+
+/**
  * The full cost of the matrix: anchor pass (phase 3) plus candidate pass
- * (phase 8), for every target and every split. Read before any mutation so an
- * insufficient `maxMetricCalls` fails closed instead of producing half a
- * matrix.
+ * (phase 8), for every target and every split, INCLUDING the re-draws the
+ * harness is allowed to spend. Read before any mutation so an insufficient
+ * `maxMetricCalls` fails closed instead of producing half a matrix.
  */
 export function transferRequiredMetricCalls(args: {
   targetCount: number;
@@ -165,13 +183,19 @@ export function transferRequiredMetricCalls(args: {
   trainCount: number;
   heldOutCount: number;
   runsPerTask: number;
+  maxDiscardRedraws: number;
 }): number {
   const perPass = args.splits.reduce(
     (sum, split) =>
-      sum + (split === 'current' ? args.trainCount : args.heldOutCount),
+      sum +
+      transferPassMetricCalls({
+        taskCount: split === 'current' ? args.trainCount : args.heldOutCount,
+        runsPerTask: args.runsPerTask,
+        maxDiscardRedraws: args.maxDiscardRedraws,
+      }),
     0
   );
-  return perPass * args.runsPerTask * args.targetCount * 2;
+  return perPass * args.targetCount * 2;
 }
 
 export function splitScoreOfBatch(
@@ -183,6 +207,11 @@ export function splitScoreOfBatch(
     discardedRuns: batch.discardedRuns,
     expectedRuns: batch.expectedRuns,
     complete: batch.complete,
+    // Carried through so an exhausted pass can be named as exhausted rather
+    // than blamed on the target whose cell happens to be read first.
+    ...(batch.truncatedAtTaskIndex !== undefined
+      ? { truncatedAtTaskIndex: batch.truncatedAtTaskIndex }
+      : {}),
   };
 }
 
@@ -203,6 +232,12 @@ export type AxTransferEvaluate<
   ai: Readonly<AxAIService>;
   split: AxTransferSplit;
   tasks: readonly AxAgentEvalTask<IN>[];
+  /**
+   * This pass's OWN counter. One flat matrix-wide budget let an early target's
+   * re-draws truncate a later target's pass, so a required gate rolled the run
+   * back naming the starved target rather than the one that actually failed.
+   */
+  budget: AxAgentEvalBudget;
 }) => Promise<AxAgentEvalBatchResult<IN, OUT>>;
 
 /**
@@ -213,6 +248,11 @@ export type AxTransferEvaluate<
  * Sequential on purpose: `_forwardForEvaluation` saves and restores agent state
  * around every call, so concurrent target evaluations on one agent instance
  * would interleave those save/restore pairs.
+ *
+ * Every (target, split) gets its OWN sub-budget, sized with the re-draw
+ * allowance. A single shared counter is the fail-open shape: one target's
+ * provider hiccup spends the re-draws and the NEXT target's pass is silently
+ * truncated, so the report names a target that was merely starved.
  */
 export async function runTransferPass<
   IN extends AxGenIn,
@@ -221,17 +261,27 @@ export async function runTransferPass<
   targets: readonly AxAgentPlaybookTransferTarget[];
   splits: readonly AxTransferSplit[];
   tasksFor: (split: AxTransferSplit) => readonly AxAgentEvalTask<IN>[];
+  runsPerTask: number;
+  maxDiscardRedraws: number;
   evaluate: AxTransferEvaluate<IN, OUT>;
 }): Promise<readonly AxTransferPass[]> {
   const passes: AxTransferPass[] = [];
   for (const target of args.targets) {
     for (const split of args.splits) {
       const tasks = args.tasksFor(split);
+      const budget: AxAgentEvalBudget = {
+        remaining: transferPassMetricCalls({
+          taskCount: tasks.length,
+          runsPerTask: args.runsPerTask,
+          maxDiscardRedraws: args.maxDiscardRedraws,
+        }),
+      };
       const batch = await args.evaluate({
         target,
         ai: target.ai,
         split,
         tasks,
+        budget,
       });
       const model = modelIdentityOf(batch.usage);
       passes.push({
@@ -352,6 +402,19 @@ export function transferReportFrom(args: {
  * mean that happens to be high would let a regressing target PASS. So an
  * incomplete cell is named, not silently accepted.
  */
+/**
+ * Why a pass is incomplete, in the words a reader can act on. Budget exhaustion
+ * and a scored-but-short split are different failures with different remedies
+ * (raise `transfer.maxMetricCalls` vs look at the target), and a reason that
+ * merges them sends the reader to the wrong place.
+ */
+function incompletenessOf(score: Readonly<AxAgentPlaybookSplitScore>): string {
+  const counts = `${score.executedRuns}/${score.expectedRuns} run(s), ${score.discardedRuns} discarded`;
+  return score.truncatedAtTaskIndex !== undefined
+    ? ` (${counts}); it ran out of its own metric budget after ${score.truncatedAtTaskIndex} task(s), so raise transfer.maxMetricCalls or lower runsPerTask/maxDiscardRedraws rather than reading this target as worse`
+    : ` (${counts})`;
+}
+
 function unmeasuredReason(
   report: Readonly<
     Extract<AxAgentPlaybookTransferReport, { status: 'partial' | 'completed' }>
@@ -363,10 +426,10 @@ function unmeasuredReason(
   for (const cell of report.cells) {
     const key = transferCellKey(cell.targetId, cell.split);
     if (!cell.anchor.complete) {
-      return `transfer cell ${key} has an incomplete anchor pass (${cell.anchor.executedRuns}/${cell.anchor.expectedRuns} run(s), ${cell.anchor.discardedRuns} discarded)`;
+      return `transfer cell ${key} has an incomplete anchor pass${incompletenessOf(cell.anchor)}`;
     }
     if (!cell.candidate.complete) {
-      return `transfer cell ${key} has an incomplete candidate pass (${cell.candidate.executedRuns}/${cell.candidate.expectedRuns} run(s), ${cell.candidate.discardedRuns} discarded)`;
+      return `transfer cell ${key} has an incomplete candidate pass${incompletenessOf(cell.candidate)}`;
     }
     if (cell.interval.clusters === 0) {
       return `transfer cell ${key} could not pair a single task between its anchor and candidate passes, so its interval was never computed`;

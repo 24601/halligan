@@ -159,6 +159,13 @@ artifact is put back either way.
   reproduces the same interval. `intervalOptions.seed` overrides it.
 - **`unresolved`** is reported whenever the interval contains zero. It is never
   rounded to the side the point estimate fell on.
+- **`interval_unresolved`** covers both unresolved cases: an interval that was
+  computed and contains zero, and one that could not be computed at all because
+  no task could be paired between the two passes. The control arm and the sealed
+  test both emit it, with `scope` naming which. The report still carries an
+  `interval` field, reading `clusters: 0, resamples: 0`, so an uncomputed
+  comparison never sits on a receipt shaped exactly like a real paired
+  bootstrap.
 - **The variance band** is the spread of re-runs of an artifact that did not
   change: the smallest delta distinguishable from run-to-run noise. A required
   interval gate without a band is rejected at option validation rather than
@@ -192,7 +199,16 @@ Three responses, in increasing cost:
    has no branch that reads it. When the final artifact's digest equals the
    baseline's — nothing accepted, or the accepted set rolled back — the report
    is `not_run` with that reason rather than a delta that measures run-to-run
-   noise.
+   noise. So is a pass that could not finish the whole split — the metric budget
+   ran out, or every attempt at one sealed task was discarded. A prefix mean is
+   not a test number, and a pass that scored nothing at all has a `mean` of `0`
+   that would otherwise be published as the run's `delta`. Both refusals fire
+   `sealed_test_not_run`, and no delta is produced. The sealed budget is sized
+   at `2 x |sealed| x runsPerTask x (1 + maxDiscardRedraws)` precisely because
+   a discarded attempt is re-drawn from the same counter.
+   A restore failure around phase 11 throws `sealed_test_failed` in phase
+   `sealed_test` — never `control_arm_failed`, which would name a phase a run
+   configuring only `sealedTest` never ran.
 
 A held-out delta from `evolve()` is a **selection** number and must not be
 reported as a test number. If a PR claims an improvement, the sealed-test delta
@@ -259,7 +275,13 @@ to a win and contains a target that got materially worse.
   phase 3 before any mutation. Borrowing the primary model's baseline would
   attribute the model gap to the playbook.
 - `target.id` is caller-owned; Ax never derives a cell label from
-  `AxAIService.getId()`.
+  `AxAIService.getId()`. `target.evaluatorId` is validated as a string and then
+  never read by Ax: it is caller-side metadata, present on no cell, no receipt
+  and no accounting row.
+- Each `(target, split)` pass draws from **its own** sub-budget, sized
+  `|split| x runsPerTask x (1 + maxDiscardRedraws)`. On one flat matrix-wide
+  counter an early target's re-draws truncate a later target's pass, and the
+  fail-closed reason then names a target that was merely starved.
 - `regressedCells` lists `${targetId}:${split}` for every cell whose delta is
   below `-regressionFloor` (default `0.02`). A delta exactly at the floor is the
   tolerance the caller declared, not a regression.
@@ -269,7 +291,20 @@ to a win and contains a target that got materially worse.
   by task.
 - `transfer_cell_regressed` is emitted whatever the gate mode is, including
   `off`. A measured regression on another backbone is a finding, not a gate
-  artifact.
+  artifact. When a non-`off` gate failed on it and rolled nothing back — a dry
+  run, or a run that accepted nothing — the same warning carries the gate's
+  verdict and the reason nothing was rolled back, so a failing gate is never
+  indistinguishable from `gates.transfer: 'off'`. Only an unreadable matrix
+  falls through to `transfer_unmeasured`, and `transfer_not_run` is then
+  suppressed rather than restating the same fact under a second code.
+- When the final artifact's digest equals the baseline's the whole matrix is
+  `not_run` with that reason: the candidate pass would re-score the artifact the
+  anchors already scored, on services the caller owns and the run's budget never
+  paid for.
+- After a run-level rollback `result.transfer` is returned **unchanged**. It
+  describes the artifact that was withdrawn — a record of what was measured, not
+  of what is live. The five fields that move together are listed under
+  *Promotion authority*; `transfer` is deliberately not one of them.
 
 ## Pruning, and the mutation primitive
 
@@ -295,6 +330,10 @@ ceiling**, not every prunable bullet.
 - `promotionDigest` is **receipt metadata, not consent**. It identifies what was
   promoted; it authorizes nothing.
 - All five denial codes are recorded, not thrown, including `cancelled`.
+- `onProgress` emits a `'promotion'` phase per nomination carrying the decision:
+  the status, plus the denial code and reason, the blocking veto ids, or the
+  granted receipt id. The decision is observable while the run is still going,
+  not only afterwards on the result.
 - A promoted candidate rescinded by a run-level gate moves five things together:
   `promotion.status = 'promoted_then_rolled_back'`,
   `evidence.decision = 'superseded'`, `applied = 'rolled_back'`,

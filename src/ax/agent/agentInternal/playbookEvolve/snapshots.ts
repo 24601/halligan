@@ -31,6 +31,10 @@
 
 import type { AxPlaybookSnapshot } from '../../../dsp/playbook.js';
 import { canonicalDigest } from './canonical.js';
+import type {
+  AxAgentPlaybookComputePhaseName,
+  AxAgentPlaybookEvolveErrorCode,
+} from './playbookEvidenceTypes.js';
 import { AxAgentPlaybookEvolveError } from './playbookEvidenceTypes.js';
 
 /** The slice of a playbook handle the state machine needs. */
@@ -81,6 +85,45 @@ export type AxRestoredArtifactOutcome<T> =
    */
   | Readonly<{ status: 'restore_failed'; reason: string; cause: unknown }>;
 
+/**
+ * The phases that bracket their work in a restore. Two, on purpose: the control
+ * arm (phase 9) runs on the UNEVOLVED artifact, the sealed test (phase 11) runs
+ * on both the baseline and the final one. Each owns its own failure identity so
+ * a run that configured only the sealed test can never be handed an error whose
+ * `code`, `phase` and prose name a control arm that never ran.
+ */
+export type AxRestoredArtifactPhase = 'control_arm' | 'sealed_test';
+
+type AxRestoreFailureIdentity = Readonly<{
+  code: AxAgentPlaybookEvolveErrorCode;
+  phase: AxAgentPlaybookComputePhaseName;
+  /** Names the phase in prose: "… could not be restored after <label>". */
+  label: string;
+  /** Names what failed to load INTO, in the `restore_failed` reason. */
+  restoreTarget: string;
+  /** Names what the return restore puts back, in the digest assertion. */
+  returnLabel: string;
+}>;
+
+const RESTORE_FAILURE_IDENTITY: Readonly<
+  Record<AxRestoredArtifactPhase, AxRestoreFailureIdentity>
+> = {
+  control_arm: {
+    code: 'control_arm_failed',
+    phase: 'control_arm',
+    label: 'the control arm',
+    restoreTarget: 'the unevolved playbook',
+    returnLabel: 'evolved',
+  },
+  sealed_test: {
+    code: 'sealed_test_failed',
+    phase: 'sealed_test',
+    label: 'the sealed test',
+    restoreTarget: 'the playbook the sealed split had to score',
+    returnLabel: 'live',
+  },
+};
+
 function digestOf(handle: AxSnapshotHandle): string {
   const state = handle.getState?.();
   if (!state) {
@@ -116,20 +159,34 @@ function loadAndVerify(
  *  - the restore into `restoreTo` lands but its digest does not match → the
  *    artifact HAS been mutated, so the return restore runs before
  *    `restore_failed` is reported.
- *  - the return restore fails twice → `control_arm_failed`, with an
- *    `AggregateError` cause, both digests named, and `evolvedSnapshot` carried
+ *  - the return restore fails twice → a thrown `AxAgentPlaybookEvolveError`, with
+ *    an `AggregateError` cause, both digests named, and `evolvedSnapshot` carried
  *    ON THE ERROR. This path leaves the agent in the baseline state while the
  *    result would have described the evolved one, which is strictly worse than
  *    the pre-evidence failure mode; the snapshot rides along so the caller can
  *    recover with a single `getPlaybook()?.load(...)`.
+ *
+ * The `phase` argument decides the error's identity. Two phases borrow this
+ * mechanism — the control arm (phase 9) and the sealed test (phase 11) — and a
+ * run that configured only one of them must never be handed an error whose
+ * `code`, `phase` and message name the other. A public error identity is a
+ * report, and this subsystem's thesis is that a report never asserts something
+ * that did not happen.
  */
 export async function withRestoredArtifact<T>(args: {
   handle: AxSnapshotHandle;
   restoreTo: AxSnapshotState;
   returnTo: AxSnapshotState;
   run: () => Promise<T>;
+  /**
+   * Which phase borrowed the mechanism. Decides the thrown error's `code`,
+   * `phase` and prose; defaults to the control arm, the original caller.
+   */
+  phase?: AxRestoredArtifactPhase;
 }): Promise<AxRestoredArtifactOutcome<T>> {
   const { handle, restoreTo, returnTo } = args;
+  const phase = args.phase ?? 'control_arm';
+  const identity = RESTORE_FAILURE_IDENTITY[phase];
   let mutated = false;
   try {
     handle.load?.(restoreTo.snapshot);
@@ -137,16 +194,16 @@ export async function withRestoredArtifact<T>(args: {
     const observed = digestOf(handle);
     if (observed !== restoreTo.digest) {
       throw new Error(
-        `the baseline artifact digest after load is ${observed}, not the captured ${restoreTo.digest}; the restore was partial`
+        `the restored artifact digest after load is ${observed}, not the captured ${restoreTo.digest}; the restore was partial`
       );
     }
   } catch (error) {
     if (mutated) {
-      returnOrThrow(handle, restoreTo, returnTo, []);
+      returnOrThrow(handle, restoreTo, returnTo, [], identity);
     }
     return {
       status: 'restore_failed',
-      reason: `the unevolved playbook could not be restored: ${messageOf(error)}`,
+      reason: `${identity.restoreTarget} could not be restored: ${messageOf(error)}`,
       cause: error,
     };
   }
@@ -155,10 +212,10 @@ export async function withRestoredArtifact<T>(args: {
   try {
     value = await args.run();
   } catch (error) {
-    returnOrThrow(handle, restoreTo, returnTo, [error]);
+    returnOrThrow(handle, restoreTo, returnTo, [error], identity);
     throw error;
   }
-  returnOrThrow(handle, restoreTo, returnTo, []);
+  returnOrThrow(handle, restoreTo, returnTo, [], identity);
   return { status: 'ran', value };
 }
 
@@ -166,7 +223,8 @@ function returnOrThrow(
   handle: AxSnapshotHandle,
   restoreTo: AxSnapshotState,
   returnTo: AxSnapshotState,
-  priorErrors: readonly unknown[]
+  priorErrors: readonly unknown[],
+  identity: AxRestoreFailureIdentity
 ): void {
   const errors: unknown[] = [...priorErrors];
   // Two attempts, not a loop: a restore that fails twice is not going to
@@ -174,20 +232,20 @@ function returnOrThrow(
   // artifact behind a hang.
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      loadAndVerify(handle, returnTo, 'evolved');
+      loadAndVerify(handle, returnTo, identity.returnLabel);
       return;
     } catch (error) {
       errors.push(error);
     }
   }
   throw new AxAgentPlaybookEvolveError(
-    'control_arm_failed',
-    'control_arm',
-    `the evolved playbook could not be restored after the control arm, in two attempts. The agent is left in the BASELINE state (${restoreTo.digest}) while the run describes the EVOLVED one (${returnTo.digest}); recover with one getPlaybook()?.load(...) from the playbookSnapshot carried on this error.`,
+    identity.code,
+    identity.phase,
+    `the live playbook could not be restored after ${identity.label}, in two attempts. The agent is left in the RESTORED state (${restoreTo.digest}) while the run describes the live one (${returnTo.digest}); recover with one getPlaybook()?.load(...) from the playbookSnapshot carried on this error.`,
     {
       cause: new AggregateError(
         errors,
-        'AxAgent.playbook().evolve(): control-arm restore failed.'
+        `AxAgent.playbook().evolve(): ${identity.label} restore failed.`
       ),
       playbookSnapshot: returnTo.snapshot,
     }
