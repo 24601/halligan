@@ -7,6 +7,13 @@ export {
   axMindReconcileChatSends,
   axResolveMindReplyState,
 } from './chat.js';
+export type { AxMindRoutingSignalInput } from './context.js';
+export {
+  axMindCirclingThoughts,
+  axMindRoutingSignals,
+  axMindSyntheticTrigger,
+  axMindWakeClass,
+} from './context.js';
 export type { AxMindHealthInput } from './health.js';
 export {
   axMindHealth,
@@ -15,6 +22,13 @@ export {
   axMindStalledThreshold,
   axMindStoreDurability,
 } from './health.js';
+export type { AxMindOptions } from './mind.js';
+export {
+  AxMind,
+  axMindInboundSource,
+  axMindReservedNames,
+  mind,
+} from './mind.js';
 export {
   axMindPaceDelay,
   axMindPacerFuse,
@@ -71,10 +85,48 @@ export {
   axMindTickDue,
 } from './sources.js';
 export type {
+  AxMindStepAssembler,
+  AxMindStepRunner,
+  AxMindStepSettler,
+} from './step.js';
+export { AxMindStepProgram, axMindThinkerTarget } from './step.js';
+export type {
+  AxMindSubRunOptions,
+  AxMindSubRunRequest,
+  AxMindSubRunResult,
+} from './subruns.js';
+export {
+  axMindMaxSubRunPolls,
+  axMindSubRun,
+  axMindSubRunSummaryBytes,
+} from './subruns.js';
+export type {
+  AxMindMonolithOptions,
+  AxMindResponderOptions,
+} from './thinkers.js';
+export {
+  AxMindDeterministicProgram,
+  axMindMonolith,
+  axMindQuote,
+  axMindQuotedNameBytes,
+  axMindQuotedTextBytes,
+  axMindRememberBounded,
+  axMindRenderContext,
+  axMindRenderGoals,
+  axMindRenderSignals,
+  axMindResponder,
+  axMindTools,
+} from './thinkers.js';
+export type {
+  AxMindArtifactChange,
+  AxMindArtifactReceipt,
+  AxMindArtifactSource,
   AxMindArtifacts,
   AxMindChat,
   AxMindChatMessage,
   AxMindChatTransport,
+  AxMindContextAssembler,
+  AxMindContextRequest,
   AxMindDiagnostic,
   AxMindDiagnosticCode,
   AxMindEffectLedger,
@@ -105,6 +157,7 @@ export type {
   AxMindWorkProbe,
 } from './types.js';
 export {
+  AxInMemoryMindOwnershipStore,
   AxMindBudgetExceededError,
   AxMindChatError,
   AxMindConfigurationError,
@@ -116,4 +169,5 @@ export {
   axIsMindBudgetExceededError,
   axIsMindChatError,
   axIsMindConfigurationError,
+  axMindStaticArtifacts,
 } from './types.js';

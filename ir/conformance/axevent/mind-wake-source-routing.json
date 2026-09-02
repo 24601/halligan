@@ -1,0 +1,70 @@
+{
+  "name": "a mind's wake routes select on the producer identity and the event type",
+  "kind": "event",
+  "operation": "routing",
+  "note": "The portable half of AxMind's wake routing. Core IR's event_route_commands (ir/axcore/event.axir:112-165) matches on `sources` and `types` only, so this fixture pins exactly that: every mind source publishes under one logical producer identity (ax://mind/<id>) and the four mind event types are distinct. Subject matching, extension matching and the negative self-suppression predicate are TypeScript-only and are pinned in src/ax/mind/routes.test.ts; a fixture claiming to cover them would be a fixture nothing runs. Registering the gap is filed in the AxIR backlog.",
+  "event": {
+    "specversion": "1.0",
+    "id": "wake-1",
+    "source": "ax://mind/ada",
+    "type": "ax.mind.wake",
+    "subject": "mind:monolith"
+  },
+  "identity_scope": "tenant:ada",
+  "trust": "trusted",
+  "routes": [
+    {
+      "id": "mind.wake.monolith.signals",
+      "action": "wake",
+      "targetId": "monolith",
+      "match": {
+        "sources": ["ax://mind/ada"],
+        "types": [
+          "ax.trajectory.step",
+          "ax.mind.wake",
+          "ax.mind.idle",
+          "ax.mind.bootstrap"
+        ]
+      }
+    },
+    {
+      "id": "mind.wake.monolith.steps",
+      "action": "wake",
+      "targetId": "monolith",
+      "match": {
+        "sources": ["ax://mind/ada"],
+        "types": ["ax.trajectory.step"]
+      }
+    },
+    {
+      "id": "another-mind",
+      "action": "wake",
+      "targetId": "monolith",
+      "match": {
+        "sources": ["ax://mind/bob"],
+        "types": ["ax.mind.wake"]
+      }
+    },
+    {
+      "id": "any-source-observer",
+      "action": "observe",
+      "match": { "types": ["ax.mind.wake"] }
+    }
+  ],
+  "expected": [
+    {
+      "routeId": "mind.wake.monolith.signals",
+      "action": "wake",
+      "targetId": "monolith",
+      "instanceKey": "mind:monolith",
+      "idempotencyKey": "mind.wake.monolith.signals:wake-1"
+    },
+    {
+      "routeId": "any-source-observer",
+      "action": "observe",
+      "targetId": null,
+      "instanceKey": "mind:monolith",
+      "idempotencyKey": "any-source-observer:wake-1"
+    }
+  ]
+}

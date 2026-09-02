@@ -1,0 +1,170 @@
+{
+  "name": "the dispatch decision table, evaluated in order, first drop or defer wins",
+  "kind": "mind",
+  "operation": "dispatch_decisions",
+  "note": "TypeScript-consumed in v1: conformanceSuitePaths in tools/axir/internal/axir/verify.go is a hardcoded directory list and does not include axmind, so the five generated targets do not read this file. It is run by src/ax/mind/fixtures.test.ts. Registering the suite is filed in the AxIR backlog.",
+  "trajectoryId": "traj-dispatch",
+  "thinker": "monolith",
+  "cases": [
+    {
+      "row": 1,
+      "name": "a step from a different trajectory is dropped",
+      "append": {
+        "type": "message",
+        "source": "chat",
+        "trajectoryId": "another-life"
+      },
+      "subscription": {},
+      "expected": {
+        "action": "drop",
+        "reason": "the step belongs to another trajectory"
+      }
+    },
+    {
+      "row": 2,
+      "name": "a wakeable:false type is never published",
+      "append": {
+        "type": "feedback",
+        "launchedBy": "monolith"
+      },
+      "subscription": {},
+      "expected": {
+        "action": "drop",
+        "reason": "the registry declares feedback wakeable:false"
+      }
+    },
+    {
+      "row": 3,
+      "name": "a type outside the subscription is dropped",
+      "append": {
+        "type": "thought",
+        "source": "chat"
+      },
+      "subscription": {
+        "types": ["message"]
+      },
+      "expected": {
+        "action": "drop",
+        "reason": "thought is not in the subscribed type list"
+      }
+    },
+    {
+      "row": 4,
+      "name": "a self-sourced step is suppressed by the route predicate",
+      "append": {
+        "type": "observation",
+        "source": "monolith"
+      },
+      "subscription": {
+        "triggerSelf": false
+      },
+      "expected": {
+        "action": "publish",
+        "authorized": false,
+        "reason": "the source field says the thinker wrote it, so authorize returns false and no delivery is created"
+      }
+    },
+    {
+      "row": 4,
+      "name": "an EXTERNAL writer of the same type still wakes the thinker",
+      "append": {
+        "type": "observation",
+        "source": "chat"
+      },
+      "subscription": {
+        "triggerSelf": false
+      },
+      "expected": {
+        "action": "publish",
+        "authorized": true,
+        "reason": "suppression is by the step's source field, never by process identity"
+      }
+    },
+    {
+      "row": 5,
+      "name": "the thinker's own error step never re-triggers it, even under triggerSelf",
+      "append": {
+        "type": "error",
+        "source": "monolith"
+      },
+      "subscription": {
+        "triggerSelf": true
+      },
+      "expected": {
+        "action": "publish",
+        "authorized": false,
+        "reason": "the registry marks error neverRetriggersSelf and the route builder cannot override it"
+      }
+    },
+    {
+      "row": 6,
+      "name": "at the admission bound the cursor is HELD and nothing is dropped",
+      "append": {
+        "type": "message",
+        "source": "chat"
+      },
+      "subscription": {
+        "maxInFlight": 1
+      },
+      "inFlight": 1,
+      "expected": {
+        "action": "defer",
+        "diagnostic": "wake-deferred-backpressure",
+        "deliveredOnNextPass": true,
+        "reason": "the append-only log IS the backlog; a deferral holds a cursor rather than dropping a wake"
+      }
+    },
+    {
+      "row": 7,
+      "name": "consecutive wake signals coalesce to the newest with a visible count",
+      "appendMany": {
+        "type": "manual-trigger",
+        "count": 5
+      },
+      "subscription": {
+        "types": ["manual-trigger"]
+      },
+      "expected": {
+        "action": "publish",
+        "authorized": true,
+        "published": 1,
+        "coalesced": 5,
+        "reason": "wakeSignal types coalesce last-wins; queueing them just builds a backlog of stale wakeups"
+      }
+    },
+    {
+      "row": 8,
+      "name": "payload types queue strictly and every one is delivered",
+      "appendMany": {
+        "type": "message",
+        "count": 3,
+        "source": "chat"
+      },
+      "subscription": {
+        "types": ["message"]
+      },
+      "expected": {
+        "action": "publish",
+        "authorized": true,
+        "published": 3,
+        "reason": "each payload carries a distinct message and deserves its own wake"
+      }
+    },
+    {
+      "row": 10,
+      "name": "backpressure is a deferral, not a loss",
+      "append": {
+        "type": "message",
+        "source": "chat"
+      },
+      "subscription": {},
+      "backpressure": 1,
+      "expected": {
+        "action": "defer",
+        "diagnostic": "wake-deferred-backpressure",
+        "deliveredOnNextPass": true,
+        "reason": "AxEventBackpressureError holds the cursor exactly as the admission bound does"
+      }
+    }
+  ]
+}

@@ -232,7 +232,7 @@ A rollup meta sealed past the end of the log it is loaded for throws
 was never lived.
 
 A mind's context assembler is the primary consumer of this API — see
-`ax-mind.md` (lane A3, not yet in the tree), which will link back here.
+`ax-mind.md`, which links back here.
 
 ## Node-Only JSONL Store
 

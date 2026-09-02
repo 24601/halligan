@@ -1,0 +1,77 @@
+{
+  "name": "the staircase emits tiers descending and blocks ascending, and descends through a straddling coarse block",
+  "kind": "mind",
+  "operation": "projection_staircase",
+  "note": "TypeScript-consumed in v1: conformanceSuitePaths in tools/axir/internal/axir/verify.go is a hardcoded directory list and does not include axmind, so the five generated targets do not read this file. It is run by src/ax/mind/fixtures.test.ts. Registering the suite is filed in the AxIR backlog.",
+  "log": {
+    "description": "A log of `preEnable` narrative steps appended BEFORE rollups were enabled, then `after` steps appended with rollups on. Every step is an `observation` from `host`.",
+    "narrativeType": "observation",
+    "source": "host"
+  },
+  "cases": [
+    {
+      "name": "a fully covered log emits one coarse block, then finer ones, oldest first",
+      "preEnable": 0,
+      "after": 45,
+      "fanout": 3,
+      "recentSteps": 5,
+      "sealRollups": true,
+      "expected": {
+        "life": ["3:0-27", "2:27-36", "1:36-39"],
+        "recentSteps": 6,
+        "coverage": {
+          "fromIndex": 0,
+          "toIndex": 45,
+          "gaps": []
+        },
+        "reason": "tiers DESCEND and blocks ASCEND inside a tier, which is chronological by construction. A naive reverse of a flat segment list flips block order inside a tier and scrambles chronology under an 'oldest first' header."
+      }
+    },
+    {
+      "name": "a coarse block straddling the enable marker is DESCENDED INTO, not skipped",
+      "preEnable": 10,
+      "after": 32,
+      "fanout": 3,
+      "recentSteps": 5,
+      "sealRollups": true,
+      "expected": {
+        "life": ["gap:0-9:pre-enable", "2:9-18", "2:18-27", "2:27-36"],
+        "recentSteps": 6,
+        "coverage": {
+          "fromIndex": 0,
+          "toIndex": 42,
+          "gaps": [
+            {
+              "from": 0,
+              "to": 9
+            }
+          ]
+        },
+        "reason": "tier 3 [0,27) can never seal because its oldest child is pre-enable. Skipping the segment would silently drop every summary that WAS built the moment the raw boundary crossed a fanout^k boundary; descending finds tier 2 [9,18) and [18,27) and reports the pre-enable half as a gap."
+      }
+    },
+    {
+      "name": "with no rollups at all the projection degrades to a gap plus the raw tail",
+      "preEnable": 0,
+      "after": 45,
+      "fanout": 3,
+      "recentSteps": 5,
+      "sealRollups": false,
+      "expected": {
+        "life": ["gap:0-39:missing"],
+        "recentSteps": 6,
+        "coverage": {
+          "fromIndex": 0,
+          "toIndex": 45,
+          "gaps": [
+            {
+              "from": 0,
+              "to": 39
+            }
+          ]
+        },
+        "reason": "recency plus fetch-by-id is the load-bearing core; tiers are an optimisation, and losing every block degrades speed, not correctness."
+      }
+    }
+  ]
+}

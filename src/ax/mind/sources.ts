@@ -149,6 +149,16 @@ export class AxTrajectoryEventSource implements AxEventSource {
     this.waiter?.abort();
   }
 
+  /**
+   * One consumer's durable position as a step `seq`, for the mind's lag-based
+   * health. Undefined before the cursor is loaded: an unknown position is not
+   * the same claim as "caught up at -1".
+   */
+  cursorSeq(thinker: string): number | undefined {
+    const state = this.states.find((one) => one.consumer.thinker === thinker);
+    return state?.loaded && state.cursor ? state.cursor.seq - 1 : undefined;
+  }
+
   /** Drains every consumer once. Exposed so a test drives passes explicitly. */
   async drain(
     context: Readonly<AxEventSourceContext>,

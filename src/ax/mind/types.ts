@@ -3,10 +3,13 @@ import type { AxAIService } from '../ai/types.js';
 import type { AxSignature } from '../dsp/sig.js';
 import type { AxProgramForwardOptions, AxProgrammable } from '../dsp/types.js';
 import type { AxEventContext, AxEventSink } from '../event/types.js';
+import type { AxTrajectoryProjection } from '../trajectory/projection.js';
 import type {
   AxTrajectoryStep,
   AxTrajectoryStepClass,
+  AxTrajectoryStore,
 } from '../trajectory/types.js';
+import type { AxMind } from './mind.js';
 
 export type AxMindThinkerKind = 'monolith' | 'responder' | 'auxiliary';
 
@@ -33,15 +36,40 @@ export const axDefaultMindSubscription: Readonly<AxMindSubscription> =
     maxInFlight: 4,
   } as const);
 
+export interface AxMindContextRequest {
+  readonly mindId: string;
+  readonly thinker: string;
+  readonly trajectoryId: string;
+  readonly wakeClass: AxMindWakeClass;
+  /**
+   * What caused this wake. A trajectory append is the step itself; a paced,
+   * watchdog or bootstrap wake has no step behind it, so the runtime hands a
+   * SYNTHESIZED record (negative `seq`, the wake's own type) rather than
+   * pretending some unrelated newest step was the trigger.
+   */
+  readonly trigger: Readonly<AxTrajectoryStep>;
+  readonly store: AxTrajectoryStore;
+  readonly projection: Readonly<AxTrajectoryProjection>;
+  readonly artifacts: Readonly<AxMindArtifacts>;
+  /** Deterministic routing signals. Hints, never rules. */
+  readonly signals: readonly Readonly<AxMindRoutingSignal>[];
+  readonly budgetTokens: number;
+  readonly signal: AbortSignal;
+  readonly eventContext: Readonly<AxEventContext>;
+}
+
+export type AxMindContextAssembler<IN = any> = (
+  request: Readonly<AxMindContextRequest>
+) => IN | Promise<IN>;
+
 /**
  * A thinker is AxEventTarget-shaped, on purpose: it composes as a flow node,
  * an event target, and an optimize()/GEPA subject for free. `ai` is required
  * and exactly one of program/createProgram must be supplied, because
  * validateEventTarget (event/mapping.ts) enforces both.
  *
- * The `context` assembler lands with the projection it reads
- * (`AxTrajectoryProjection`, lane A2) in the runtime commit; nothing in the
- * pacing, routing, source, chat, salience or skill machinery needs it.
+ * `context` runs in `mapInput` position, so a throw dead-letters the delivery
+ * BEFORE any model call (M19): a broken projection never spends a token.
  */
 export interface AxMindThinker<IN = any, OUT = any> {
   readonly name: string;
@@ -49,11 +77,23 @@ export interface AxMindThinker<IN = any, OUT = any> {
   readonly subscription: Readonly<AxMindSubscription>;
   readonly ai: Readonly<AxAIService>;
   readonly program?: AxProgrammable<IN, OUT>;
+  /**
+   * The mind hands ITSELF to the factory. That is how a thinker's tools reach
+   * a runtime that did not exist when the thinker record was built, without a
+   * global and without a two-step host dance -- and it is what RFC 4.15 means
+   * by "host tools installed on every thinker program".
+   */
   readonly createProgram?: (
-    instance: Readonly<{ thinker: string; instanceKey: string }>
+    instance: Readonly<{
+      thinker: string;
+      instanceKey: string;
+      mind: AxMind;
+    }>
   ) => AxProgrammable<IN, OUT> | Promise<AxProgrammable<IN, OUT>>;
   /** Required with createProgram when declarative input plans are used. */
   readonly inputSignature?: Readonly<AxSignature>;
+  /** Builds IN from the projection. Throwing dead-letters BEFORE any model call. */
+  readonly context: AxMindContextAssembler<IN>;
   /** Classifies the run's durable effect for pacing. Defaults to the work probe. */
   readonly classify?: (
     result: Readonly<AxMindStepResult<OUT>>
@@ -190,6 +230,44 @@ export interface AxMindOwnershipStore {
   ): Promise<Readonly<{ revision: number }>>;
 }
 
+/**
+ * The default lease guard: process-local, so it catches a second owner inside
+ * one process and NOTHING else. A host that runs two processes over one
+ * trajectory must supply a durable store; this one would let both of them
+ * believe they won.
+ */
+export class AxInMemoryMindOwnershipStore implements AxMindOwnershipStore {
+  private readonly owners = new Map<
+    string,
+    { ownerId: string; revision: number }
+  >();
+
+  async load(mindId: string, signal?: AbortSignal) {
+    signal?.throwIfAborted();
+    const found = this.owners.get(mindId);
+    return found ? Object.freeze({ ...found }) : undefined;
+  }
+
+  async compareAndSet(
+    mindId: string,
+    expectedRevision: number | undefined,
+    ownerId: string,
+    signal?: AbortSignal
+  ): Promise<Readonly<{ revision: number }>> {
+    signal?.throwIfAborted();
+    const current = this.owners.get(mindId);
+    if (current?.revision !== expectedRevision) {
+      throw new AxMindLivenessError(
+        `AxMind ${mindId} is owned by ${current?.ownerId ?? 'nobody'} at revision ${current?.revision ?? 'none'}; ${ownerId} expected ${expectedRevision ?? 'none'}`,
+        'source_failed'
+      );
+    }
+    const revision = (current?.revision ?? 0) + 1;
+    this.owners.set(mindId, { ownerId, revision });
+    return Object.freeze({ revision });
+  }
+}
+
 export type AxMindHealthState =
   | 'healthy'
   | 'lagging'
@@ -253,12 +331,7 @@ export interface AxMindSkill extends AxAgentCatalogSkill {
   }>;
 }
 
-/**
- * Host-editable artifacts: the versioned-harness seam. The writer half
- * (`AxMindArtifactSource.write`, its change and receipt records) lands with
- * the runtime that mediates it; nothing may edit an artifact without an
- * out-of-band host receipt.
- */
+/** Host-editable artifacts: the versioned-harness seam. */
 export interface AxMindArtifacts {
   /** Opaque identity of this artifact set. Stamped on every run step. */
   readonly revision: string;
@@ -270,6 +343,48 @@ export interface AxMindArtifacts {
   /** Default 8000. */
   readonly kernelTokenBudget?: number;
 }
+
+export type AxMindArtifactChange =
+  | Readonly<{ kind: 'persona'; content: string }>
+  | Readonly<{ kind: 'thinkerPrompt'; thinker: string; content: string }>
+  | Readonly<{ kind: 'goals'; goals: readonly Readonly<AxMindGoal>[] }>
+  | Readonly<{ kind: 'kernel'; skillIds: readonly string[] }>;
+
+/**
+ * Out-of-band host approval for an artifact write, on the
+ * `AxRuntimeAdmissionReceipt` precedent: approval NEVER derives from the same
+ * model text being evaluated.
+ */
+export interface AxMindArtifactReceipt {
+  readonly approver: string;
+  readonly issuedAt: number;
+  readonly scope: AxMindArtifactChange['kind'];
+  readonly digest: string;
+}
+
+export interface AxMindArtifactSource {
+  readonly id: string;
+  load(signal?: AbortSignal): Promise<Readonly<AxMindArtifacts>>;
+  /** Optional writer. Gated on a receipt the host issued, never the model. */
+  write?(
+    change: Readonly<AxMindArtifactChange>,
+    receipt: Readonly<AxMindArtifactReceipt>,
+    signal?: AbortSignal
+  ): Promise<Readonly<{ revision: string }>>;
+}
+
+/**
+ * The read-only artifact source. It has no `write`, so a mind configured with
+ * it cannot self-author at all -- which is the right default: self-authorship
+ * needs a host that can issue receipts.
+ */
+export const axMindStaticArtifacts = (
+  artifacts: Readonly<AxMindArtifacts>
+): AxMindArtifactSource =>
+  Object.freeze({
+    id: `static:${artifacts.revision}`,
+    load: async () => artifacts,
+  });
 
 export type AxMindReplyDecision = 'replied' | 'no-reply' | 'reply-failed';
 export type AxMindReplyState =
@@ -391,6 +506,14 @@ export class AxMindConfigurationError extends Error {
       | 'unknown_trajectory'
       | 'reserved_namespace'
       | 'missing_target'
+      /** A sub-run named a thinker the table does not contain. */
+      | 'unknown_thinker'
+      /**
+       * Two thinker steps are in flight and the sub-run named neither. The
+       * budget is per step; charging it to whichever thinker was first in
+       * insertion order spends a cap the caller never asked for (M5).
+       */
+      | 'ambiguous_subrun'
       | 'append_atomicity_required',
     options?: ErrorOptions
   ) {
@@ -501,6 +624,12 @@ export type AxMindDiagnosticCode =
   | 'unknown-step-type'
   | 'pacer-rate-fuse'
   | 'effect-step-reconciled'
+  /**
+   * A delivery terminalised without a pace decision and the mind re-armed one
+   * wake a bounded delay out. M7 layer (b): the arm is a runtime guarantee, so
+   * a throw anywhere in the orchestration degrades to a delay, never silence.
+   */
+  | 'liveness-fallback-armed'
   | 'cursor-paused';
 
 export interface AxMindDiagnostic {

@@ -3045,3 +3045,60 @@ describe('AxEventRuntime', () => {
     await expect(blocked).rejects.toBeInstanceOf(AxEventBackpressureError);
   });
 });
+
+describe('AxEventRuntime worker idling', () => {
+  it('drains strictly ordered deliveries under two workers without stalling timers', async () => {
+    // Two workers, one instance key, strict ordering: worker A takes the first
+    // delivery and worker B finds work that is DUE but not claimable. Retrying
+    // that on the microtask queue alone stops every timer in the process --
+    // MEASURED against `AxMind`, which configures one worker per thinker, the
+    // spin deadlocks a two-thinker mind outright (see
+    // `mind/mind.test.ts` > "runs a monolith beside a responder").
+    const store = new AxInMemoryEventStore();
+    const started: string[] = [];
+    const finished: string[] = [];
+    const runtime = new AxEventRuntime({
+      store,
+      workerConcurrency: 2,
+      routes: [
+        eventRoute({
+          id: 'ordered',
+          match: { types: ['work'] },
+          action: 'wake',
+          instanceKey: () => 'one',
+          ordering: 'strict',
+          target: eventTarget({
+            id: 'ordered-target',
+            ai,
+            program: program(async (input: any) => {
+              started.push(String(input.eventId));
+              // A macrotask wait, which is what a starved event loop kills.
+              await new Promise((resolve) => setTimeout(resolve, 0));
+              finished.push(String(input.eventId));
+              return { handled: true };
+            }),
+            mapInput: (ingress) => ({ eventId: ingress.event.id }),
+          }),
+        }),
+      ],
+    });
+    await runtime.start();
+    for (const id of ['work-1', 'work-2', 'work-3']) {
+      await runtime.publish({
+        event: { specversion: '1.0', id, source: 'test://work', type: 'work' },
+        trust: 'trusted',
+      } as AxEventIngress);
+    }
+    let timerFired = false;
+    setTimeout(() => {
+      timerFired = true;
+    }, 0);
+    await runtime.waitForIdle(5_000);
+    await runtime.close({ drain: false });
+    // The whole claim: every delivery ran to completion, and an unrelated
+    // timer got its turn while they did.
+    expect(finished).toHaveLength(3);
+    expect(started).toHaveLength(3);
+    expect(timerFired).toBe(true);
+  });
+});
