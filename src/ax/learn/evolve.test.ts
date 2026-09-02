@@ -55,8 +55,13 @@ const task = (id: string): AxAgentEvalTask<{ query: string }> => ({
   criteria: 'answers the question',
 });
 
-const TRAIN = [task('t1'), task('t2')];
-const VALIDATION = [task('v1'), task('v2')];
+// One task per split by default: every episode is a real agent run, so the
+// suite pays 2 x tasks x sides for each step. The interleaving test, which is
+// the only one that needs to see alternation, asks for the wider split.
+const TRAIN = [task('t1')];
+const VALIDATION = [task('v1')];
+const WIDE_TRAIN = [task('t1'), task('t2')];
+const WIDE_VALIDATION = [task('v1'), task('v2')];
 
 function makeAI() {
   return new AxMockAIService({
@@ -388,6 +393,7 @@ describe('axHarnessEvolve — evaluation', { timeout: SLOW }, () => {
     const h = await harness();
     const order: string[] = [];
     await evolve(h, {
+      tasks: { train: WIDE_TRAIN, validation: WIDE_VALIDATION },
       onProgress: (event: { phase: string; message: string }) => {
         if (event.phase === 'evaluate') order.push(event.message);
       },
