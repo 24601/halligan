@@ -759,7 +759,6 @@ export const axLearningEngineBuildBatch = (
   const { batchSize } = state;
   const selected: Readonly<AxLearningTrainingUnit>[] = [];
   const remaining: Readonly<AxLearningTrainingUnit>[] = [];
-  const discardedGroups = new Set<string>();
   let reasons = state.neverReasons;
 
   // Group sizes are needed up front: a group batches whole or not at all, and
@@ -776,7 +775,8 @@ export const axLearningEngineBuildBatch = (
     if (key !== undefined) {
       const size = groupSizes.get(key) ?? 0;
       if (size > batchSize) {
-        if (!discardedGroups.has(key)) discardedGroups.add(key);
+        // A group larger than the batch can never batch. Dropping it with a
+        // counted reason beats letting it block the queue forever.
         reasons = counted(reasons, 'group-discarded');
         continue;
       }
