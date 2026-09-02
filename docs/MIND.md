@@ -317,7 +317,7 @@ proposal instead of applying one.
 | C7 | after `declareEffect`, before `markEffectDispatched` | nothing left the process, so a retry is safe | clean, one send |
 | C8 | after `markEffectDispatched`, before the transport returned | the effect stays `dispatched` for a resolver | **fails closed**: a thrown call is not proof of failure |
 | C9 | after the transport returned, before `settleEffect` | the same key returns the original record, so a second declare cannot re-dispatch | **fails closed on double-send** |
-| C10 | after `settleEffect`, before the message step | `reconcile()` replays settled sends with no matching step | **the log converges to the ledger** |
+| C10 | after `settleEffect`, before the message step | `reconcile()` replays settled sends with no matching step, attributed to the thinker recorded on the effect | **the log converges to the ledger** |
 | C11 | after the outbound step, before the decision observation | answered-ness comes from the `replyTo` fact alone | clean; the observation is a convenience |
 | C12 | between the run outcome and arming the pacer | `axRecoverMindPacerState` rebuilds level and ticks from the log | **recoverable from the autobiography** |
 | C13 | during rollup sealing | sealed blocks are immutable and index-keyed; the frontier recomputes | idempotent per summarizer |

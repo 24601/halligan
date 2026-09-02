@@ -1320,6 +1320,10 @@ export class AxMind {
           trajectoryId: this.options.trajectoryId,
           store: this.options.store,
           clock: this.clock,
+          // The FALLBACK only. Each settled effect carries the thinker that
+          // composed it, so a rebuilt message step is attributed to its own
+          // writer; this identity is used only for an effect written before
+          // that was recorded, or naming a thinker this mind does not have.
           sender: this.options.thinkers[0]?.name ?? 'mind',
           selfSources: [...this.thinkers.keys(), 'mind'],
           ...(this.options.transport
