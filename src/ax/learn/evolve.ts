@@ -699,6 +699,10 @@ export const axHarnessEvolve = async <
         }
         return { score: batch.mean, complete: true, exhausted: false };
       } catch (error) {
+        // A caller that aborted wants the STEP to stop, not to receive a
+        // verdict computed from half-run episodes. The restore in the outer
+        // finally still runs, so the agent is left as it was found.
+        if (abortSignal?.aborted) throw error;
         observations.push({
           taskId,
           stage: 'apply',

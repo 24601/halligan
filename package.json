@@ -12,7 +12,7 @@
     "build": "npm run build --workspaces --if-present",
     "ci:verify": "npm run build && npm test",
     "fix": "npm run fix --workspaces --if-present",
-    "test": "run-s test:causal-evidence test:skill-provenance test:gepa-search test:gepa-upstream-compatibility test:gepa-lineage-benchmark test:demand-eval test:playbook-evidence-conformance test:trajectory-durability test:trajectory-projection test:workingstate-conformance test:workingstate-eval test:release-workflow test:axir:tools test:axir test:axir:packages test:mcp-events:generated test:mcp-oauth test:mcp-interop test:examples:generated test:format test:lint test:tests test:spelling",
+    "test": "run-s test:causal-evidence test:skill-provenance test:gepa-search test:gepa-upstream-compatibility test:gepa-lineage-benchmark test:demand-eval test:playbook-evidence-conformance test:trajectory-durability test:trajectory-projection test:workingstate-conformance test:workingstate-eval test:learning-eval test:release-workflow test:axir:tools test:axir test:axir:packages test:mcp-events:generated test:mcp-oauth test:mcp-interop test:examples:generated test:format test:lint test:tests test:spelling",
     "test:causal-evidence": "vitest run scripts/evaluate-causal-candidate-evidence.test.ts",
     "test:skill-provenance": "vitest run scripts/evaluate-skill-provenance.test.ts",
     "test:gepa-lineage-benchmark": "vitest run scripts/gepa-lineage-benchmark.test.ts",
@@ -103,7 +103,9 @@
     "check": "biome check .",
     "init-package": "node scripts/initPackage.js",
     "eval:frame-sampler": "node --import=tsx scripts/evaluate-frame-sampler.ts",
-    "test:evaluation-policy": "vitest run scripts/evaluation-policy.test.js"
+    "test:evaluation-policy": "vitest run scripts/evaluation-policy.test.js",
+    "learn:eval": "node --import=tsx scripts/eval-learning-surface.ts",
+    "test:learning-eval": "vitest run scripts/eval-learning-surface.test.ts"
   },
   "engines": {
     "node": ">=20"
