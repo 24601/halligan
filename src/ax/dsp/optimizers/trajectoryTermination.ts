@@ -290,10 +290,10 @@ export function axExceedsRunDiscardCeiling(
  *
  * This is the ONLY sanctioned way to build a promotion comparison under
  * admission. `sum` is a raw total rather than a per-example mean, and parent
- * and child are separate
- * evaluations that can discard different rows; comparing each side's own
- * admitted total means dropping k rows from the parent lowers the parent's sum
- * while leaving the child's untouched, and the child gets promoted for it.
+ * and child are separate evaluations that can discard different rows. Comparing
+ * each side's own admitted total means dropping k rows from the parent lowers
+ * the parent's sum while leaving the child's untouched, and the child gets
+ * promoted for it.
  * Intersecting first gives both sides the same denominator by construction, on
  * every strategy and at every gate.
  *

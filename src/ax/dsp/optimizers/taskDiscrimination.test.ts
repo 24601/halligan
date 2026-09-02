@@ -43,8 +43,7 @@ const seeded = (seed: number) => {
  * cell therefore enumerates the whole sampling design with exact
  * probabilities — no Monte Carlo, no tolerance for sampling noise. That is what
  * lets the tests below assert design-unbiased weighting as an equality rather
- * than as
- * "close enough over N draws".
+ * than as "close enough over N draws".
  */
 const enumerateDesign = (
   inclusions: readonly AxTaskInclusion[],
