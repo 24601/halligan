@@ -1,4 +1,5 @@
 import type { AxAIService, AxLoggerFunction } from '../ai/types.js';
+import type { AxEventClock } from '../event/types.js';
 import type { AxGEPAAdapter } from './optimizers/gepaAdapter.js';
 import type { AxGEPACandidateLineageOptions } from './optimizers/gepaLineage.js';
 import type { AxGEPAProposalOptions } from './optimizers/gepaReflection.js';
@@ -7,6 +8,11 @@ import type {
   AxMutationAnnotator,
   AxMutationKindPolicy,
 } from './optimizers/mutationTaxonomy.js';
+import type {
+  AxRejectedCandidateExpiry,
+  AxRejectedCandidateExpiryContext,
+  AxRejectedCandidateLedgerStore,
+} from './optimizers/rejectedCandidateLedger.js';
 import type {
   AxMinibatchStrategy,
   AxTaskDiscriminationOptions,
@@ -287,6 +293,36 @@ export interface AxCompileOptions {
      * records the validator failure and leaves the candidate unannotated.
      */
     policy?: 'off' | 'required';
+  }>;
+  /**
+   * GEPA only. Rejected candidates are recorded into a host store and fed back
+   * to the next round's proposer as an explicitly UNTRUSTED prior.
+   *
+   * The entries live in the store, not in the artifact, which is what makes
+   * them survive an artifact rollback: `axReplaceOptimizedProgramSnapshot`
+   * unions only the pointer set on `AxOptimizedProgram.rejectedCandidateLedgerRef`.
+   *
+   * A store that throws or hangs degrades the run — the rejection is still in
+   * lineage and an `AxGEPACandidateFailure` of kind `runtime` is appended — and
+   * never aborts it.
+   */
+  rejectedCandidateLedger?: Readonly<{
+    store: AxRejectedCandidateLedgerStore;
+    storeId: string;
+    /** REQUIRED. There is no `Date.now()` fallback anywhere in the ledger path. */
+    clock: AxEventClock;
+    /**
+     * Applied to every entry this run records. Non-empty, and must include an
+     * `after_ms` clause: the other clauses only fire when the READER supplies
+     * the matching context, so without a TTL an entry read with an empty
+     * context would be permanent negative memory. Refused before the first
+     * metric call rather than one entry at a time.
+     */
+    expiresWhen: readonly AxRejectedCandidateExpiry[];
+    /** Supplied to `list()`. A clause whose context field is missing FIRES. */
+    expiryContext?: AxRejectedCandidateExpiryContext;
+    /** Maximum entries rendered into the untrusted prior. Default: 8. */
+    maxPriorEntries?: number;
   }>;
   /**
    * Custom labels to include in OpenTelemetry metrics.
