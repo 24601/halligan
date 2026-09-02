@@ -7,9 +7,12 @@
  * while `accounting.evolveOnlyMetricCalls` restates the legacy
  * `result.metricCallsUsed` counter so a receipt read in isolation shows both.
  *
- * Absence is never rounded to zero. A phase whose calls cannot surface usage
- * reports `tokensBasis: 'unobservable'` with `totalTokens: undefined`, and a
- * run with no `costFor` hook reports `costBasis: 'unknown'`.
+ * Absence is never rounded to zero, and the two kinds of absence are kept
+ * apart: a phase whose calls CANNOT surface usage reports
+ * `tokensBasis: 'unobservable'` (a `usageTap` is the remedy), a phase that
+ * could and did not reports `'unreported'` (no remedy exists in Ax), and both
+ * carry `totalTokens: undefined`. A run with no `costFor` hook reports
+ * `costBasis: 'unknown'`.
  */
 
 import type { AxProgramUsage } from '../../../dsp/types.js';
@@ -93,7 +96,11 @@ function phaseBasis(
   ) {
     return 'unobservable';
   }
-  if (!state.observedAnyUsage) return 'unobservable';
+  // An OBSERVABLE phase that reported nothing is 'unreported', not
+  // 'unobservable': the provider surfaced no usage, and no usage tap would
+  // change that. Conflating the two puts a remedy on the receipt that does not
+  // apply to the phase it names.
+  if (!state.observedAnyUsage) return 'unreported';
   return state.callsWithUsage >= calls ? 'observed' : 'partial';
 }
 
@@ -101,12 +108,15 @@ function rollUpBasis(
   phases: readonly AxAgentPlaybookComputePhase[]
 ): AxAgentPlaybookTokensBasis {
   const bases = phases.map((phase) => phase.tokensBasis);
-  if (bases.every((basis) => basis === 'none')) return 'none';
+  if (bases.length === 0 || bases.every((basis) => basis === 'none')) {
+    return 'none';
+  }
   const informative = bases.filter((basis) => basis !== 'none');
   if (informative.every((basis) => basis === 'observed')) return 'observed';
   if (informative.every((basis) => basis === 'unobservable')) {
     return 'unobservable';
   }
+  if (informative.every((basis) => basis === 'unreported')) return 'unreported';
   return 'partial';
 }
 
@@ -460,11 +470,13 @@ export function candidateAccounting(args: {
       metricCalls: args.metricCalls,
       modelCalls: 0,
       ...(totalTokens !== undefined ? { totalTokens } : {}),
+      // `candidate_eval` reads usage straight off the predictions, so it is
+      // observable by construction: nothing reported means 'unreported'.
       tokensBasis:
         args.metricCalls === 0
           ? 'none'
           : observed.length === 0
-            ? 'unobservable'
+            ? 'unreported'
             : observed.length >= args.metricCalls
               ? 'observed'
               : 'partial',

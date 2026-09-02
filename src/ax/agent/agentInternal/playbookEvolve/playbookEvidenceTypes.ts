@@ -81,6 +81,7 @@ export type AxAgentPlaybookTokensBasis =
   | 'observed'
   | 'partial'
   | 'unobservable'
+  | 'unreported'
   | 'none';
 
 export type AxAgentPlaybookComputePhase = Readonly<{
@@ -103,6 +104,11 @@ export type AxAgentPlaybookComputePhase = Readonly<{
    * 'unobservable'  the phase's calls cannot surface usage without `usageTap`:
    *                 'mining' (the miner builds its own AxGen and returns no
    *                 usage) and 'judge' (reached only as an opaque AxMetricFn).
+   * 'unreported'    the phase's calls COULD surface usage and none did — the
+   *                 provider reported nothing. Distinct from 'unobservable'
+   *                 because a `usageTap` is not the remedy here: labelling an
+   *                 observable phase unobservable points a reader at a fix
+   *                 that would change nothing.
    * 'none'          the phase made no model calls.
    */
   tokensBasis: AxAgentPlaybookTokensBasis;

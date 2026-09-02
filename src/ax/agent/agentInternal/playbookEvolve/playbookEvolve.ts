@@ -28,6 +28,7 @@ import {
   createAccountingLedger,
   overheadReportFrom,
   overheadSplitFrom,
+  unobservableTokenPhases,
 } from './accounting.js';
 import {
   atMostWithFloatingPointTolerance,
@@ -1620,9 +1621,11 @@ export async function evolveAgentPlaybook<
           'a candidate was accepted with no costFor hook, so its cost is unknown; Ax has no provider cost field and never estimates one',
       });
     }
-    const unobservable = accounting.phases
-      .filter((phase) => phase.tokensBasis === 'unobservable')
-      .map((phase) => phase.name);
+    // Scoped to the STRUCTURALLY unobservable phases only, so the warning's
+    // "without a usageTap" remedy is always the true one. An observable phase
+    // that reported nothing reads `tokensBasis: 'unreported'` and is not named
+    // here.
+    const unobservable = unobservableTokenPhases(accounting);
     if (unobservable.length > 0) {
       runWarnings.push({
         code: 'tokens_unobservable',

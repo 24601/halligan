@@ -2074,7 +2074,13 @@ describe('agent.playbook().evolve() compute accounting', () => {
       result.accounting.phases.map((phase: any) => [phase.name, phase])
     );
     expect([...phases.keys()]).not.toContain('proposal');
-    expect(phases.get('mining')?.modelCalls).toBe(result.weaknesses.length);
+    // One invocation per failure cluster, whether or not the miner yielded a
+    // grounded weakness: a discarded cluster still cost a model call, so this
+    // is a floor, not an equality the mock happens to satisfy.
+    expect(phases.get('mining')?.modelCalls).toBeGreaterThanOrEqual(
+      result.weaknesses.length
+    );
+    expect(phases.get('mining')?.modelCalls).toBeGreaterThan(0);
     expect(phases.get('mining')?.metricCalls).toBe(0);
     expect(phases.get('mining')?.tokensBasis).toBe('unobservable');
     // A caller-supplied deterministic metric means there is no built-in judge
@@ -2082,6 +2088,30 @@ describe('agent.playbook().evolve() compute accounting', () => {
     expect(phases.get('judge')).toBeUndefined();
     expect(phases.get('baseline')?.metricCalls).toBeGreaterThan(0);
     expect(phases.get('candidate_eval')?.metricCalls).toBeGreaterThan(0);
+  });
+
+  it('labels an observable phase that reported nothing unreported, and names only the structurally unobservable ones in the warning', async () => {
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(TASKS, {
+      metric: scoreByAnswer,
+      maxProposals: 1,
+      gates: { validity: 'warn' },
+    });
+    const phases = new Map(
+      result.accounting.phases.map((phase: any) => [phase.name, phase])
+    );
+    // The mock service reports no usage. `baseline` reads usage off the
+    // predictions, so its absence is 'unreported' — a usageTap is not the
+    // remedy and the receipt must not claim it is.
+    expect(phases.get('baseline')?.tokensBasis).toBe('unreported');
+    expect(phases.get('candidate_eval')?.tokensBasis).not.toBe('unobservable');
+    expect(phases.get('mining')?.tokensBasis).toBe('unobservable');
+    const warning = (result.warnings ?? []).find(
+      (entry: any) => entry.code === 'tokens_unobservable'
+    );
+    expect(warning?.message).toContain('mining');
+    expect(warning?.message).not.toContain('baseline');
+    expect(warning?.message).not.toContain('candidate_eval');
   });
 
   it('reports cost as unknown without costFor and caller_supplied with it', async () => {

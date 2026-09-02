@@ -1,10 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { AxProgramUsage } from '../../../dsp/types.js';
 import {
+  candidateAccounting,
   createAccountingLedger,
   emptyAccounting,
   overheadReportFrom,
   overheadSplitFrom,
+  unobservableTokenPhases,
 } from './accounting.js';
 import type { AxAgentEvalBudget } from './evalHarness.js';
 import { runAgentEvalBatch } from './evalHarness.js';
@@ -662,6 +664,48 @@ describe('compute accounting', () => {
     expect(byName.get('mining')?.totalTokens).toBeUndefined();
     expect(byName.get('judge')?.tokensBasis).toBe('unobservable');
     expect(accounting.tokensBasis).toBe('unobservable');
+    expect(accounting.totalTokens).toBeUndefined();
+  });
+
+  it('reports an observable phase that surfaced nothing as unreported, not unobservable', () => {
+    // `baseline` reads usage straight off the predictions. A usageTap would
+    // change nothing about it, so labelling it 'unobservable' would point a
+    // reader at a remedy that does not apply.
+    const ledger = createAccountingLedger(tickingClock());
+    const baseline = ledger.phase('baseline');
+    baseline.addMetricCalls(2);
+    baseline.close();
+    const accounting = ledger.assemble({ evolveOnlyMetricCalls: 2 });
+    const byName = new Map(accounting.phases.map((p) => [p.name, p]));
+    expect(byName.get('baseline')?.tokensBasis).toBe('unreported');
+    expect(byName.get('baseline')?.totalTokens).toBeUndefined();
+    expect(accounting.tokensBasis).toBe('unreported');
+    expect(unobservableTokenPhases(accounting)).toEqual([]);
+  });
+
+  it('names only the structurally unobservable phases as unobservable', () => {
+    const ledger = createAccountingLedger(tickingClock());
+    const baseline = ledger.phase('baseline');
+    baseline.addMetricCalls(2);
+    baseline.close();
+    const mining = ledger.phase('mining');
+    mining.addModelCalls(1);
+    mining.close();
+    const accounting = ledger.assemble({ evolveOnlyMetricCalls: 2 });
+    expect(unobservableTokenPhases(accounting)).toEqual(['mining']);
+    // Mixed bases roll up to partial rather than claiming either extreme.
+    expect(accounting.tokensBasis).toBe('partial');
+  });
+
+  it('reports a candidate accounting with no reported usage as unreported', () => {
+    const accounting = candidateAccounting({
+      metricCalls: 2,
+      usage: [],
+      wallClockMs: 12,
+      usesBuiltInJudge: false,
+    });
+    expect(accounting.phases[0]?.tokensBasis).toBe('unreported');
+    expect(accounting.tokensBasis).toBe('unreported');
     expect(accounting.totalTokens).toBeUndefined();
   });
 
