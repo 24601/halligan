@@ -1269,6 +1269,43 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
                     admittedParetoIndices(perInstanceAdmitted[j])
                   ).map((z) => positionByIndex.get(z)!);
                 })();
+          // Fail closed. `newSum >= Math.max(0, 0) + 0` is TRUE, so an empty
+          // denominator would promote a merge on no evidence at all — and an
+          // empty intersection is reachable even when the merge evaluation
+          // itself cleared `minAdmittedFraction`, because the two parents'
+          // cached masks can exclude everything it kept.
+          if (
+            mergeEval.admittedIndices !== undefined &&
+            mergeComparisonPositions.length === 0
+          ) {
+            verboseLog(
+              `Iteration ${t + 1}: merge subsample shares no admitted row with both parents; aborting the merge candidate`
+            );
+            recordCandidate?.(() => {
+              const delta = buildGEPACandidateComponentDelta(
+                candidates[a]!.cfg,
+                mergedCfg,
+                lineageOptions!
+              );
+              return {
+                id: mergeCandidateId!,
+                parentIds: [candidates[i]!.id!, candidates[j]!.id!],
+                commonAncestorId: candidates[a]!.id!,
+                round: t + 1,
+                strategy: 'system_merge',
+                componentDelta: delta.delta,
+                omittedComponentCount: delta.omittedComponentCount,
+                evaluations: mergeEvaluations!,
+                metricCallsAtDecision: this.stats.totalCalls,
+                metricCallBudget: rolloutBudgetPareto,
+                decision: 'aborted',
+                reason: 'insufficient_admitted_rows',
+                disposition: 'aborted',
+                failures: mergeFailures!.length ? mergeFailures : undefined,
+              };
+            });
+            continue;
+          }
           const newSum = mergeComparisonPositions.reduce(
             (sum, position) => sum + (mergeEval.scalars[position] ?? 0),
             0
@@ -1680,12 +1717,36 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       );
       mutationFailures?.push(...evaluationFailures!(childMiniEval));
 
+      // GATE 1 (reflective mutation). Parent and child are two separate
+      // evaluations of the same minibatch, so they can discard different rows.
+      // `sum` is a raw total: comparing each side's own admitted total means
+      // dropping k rows from the parent lowers the parent's number while
+      // leaving the child's untouched, and the child gets promoted for it.
+      // Intersecting first gives both sides the same denominator by
+      // construction. With no classifier both `admittedIndices` are absent and
+      // the comparison below is the untouched
+      // `childMiniEval.sum > parentMiniEval.sum + t`.
+      const pairedMinibatchIndices =
+        parentMiniEval.admittedIndices && childMiniEval.admittedIndices
+          ? axPairedAdmittedIndices(
+              parentMiniEval.admittedIndices,
+              childMiniEval.admittedIndices
+            )
+          : undefined;
       // Never accepted, never rejected: an inconclusive batch is not evidence
       // either way, and treating it as a rejection would let a flaky provider
       // exhaust `earlyStoppingTrials`.
-      if (childMiniEval.admission?.inconclusive) {
+      //
+      // An EMPTY intersection is the same situation and is checked separately,
+      // because both sides can clear `minAdmittedFraction` individually and
+      // still share no row — disjoint discards leave nothing to compare, and a
+      // comparison of 0 against 0 is not a rejection, it is no evidence.
+      if (
+        childMiniEval.admission?.inconclusive ||
+        pairedMinibatchIndices?.length === 0
+      ) {
         verboseLog(
-          `Iteration ${t + 1}: child minibatch inconclusive (${childMiniEval.admission.admittedRows}/${childMiniEval.admission.evaluatedRows} rows admitted); aborting the candidate`
+          `Iteration ${t + 1}: child minibatch inconclusive (${childMiniEval.admission?.admittedRows ?? 0}/${childMiniEval.admission?.evaluatedRows ?? 0} rows admitted, ${pairedMinibatchIndices?.length ?? 0} paired with the parent); aborting the candidate`
         );
         recordCandidate?.(() => {
           const delta = buildGEPACandidateComponentDelta(
@@ -1724,21 +1785,6 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
         break;
       }
 
-      // GATE 1 (reflective mutation). Parent and child are two separate
-      // evaluations of the same minibatch, so they can discard different rows.
-      // `sum` is a raw total: comparing each side's own admitted total means
-      // dropping k rows from the parent lowers the parent's number while
-      // leaving the child's untouched, and the child gets promoted for it.
-      // Intersecting first gives both sides the same denominator by
-      // construction. With no classifier both `admittedIndices` are absent and
-      // this is the untouched `childMiniEval.sum > parentMiniEval.sum + t`.
-      const pairedMinibatchIndices =
-        parentMiniEval.admittedIndices && childMiniEval.admittedIndices
-          ? axPairedAdmittedIndices(
-              parentMiniEval.admittedIndices,
-              childMiniEval.admittedIndices
-            )
-          : undefined;
       const parentComparisonSum = pairedMinibatchIndices
         ? sumOverIndices(pairedMinibatchIndices, parentMiniEval.scalars)
         : parentMiniEval.sum;

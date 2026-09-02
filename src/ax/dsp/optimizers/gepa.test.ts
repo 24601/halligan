@@ -1624,6 +1624,26 @@ describe('AxGEPA paired admitted promotion gates', () => {
     });
   });
 
+  it('aborts rather than rejecting when the parent and child share no admitted row', async () => {
+    // Both sides clear `minAdmittedFraction` on their own, and their admitted
+    // sets are disjoint, so there is nothing to compare. A sum of 0 against a
+    // sum of 0 is not a rejection, it is no evidence, and a rejection here
+    // would burn an `earlyStoppingTrials` slot on a provider outage.
+    const record = await runMutationGate({
+      minAdmittedFraction: 0,
+      maxRunDiscardRate: 1,
+      classifier: discardBy({
+        'parent minibatch': [0, 1, 2, 3],
+        'child minibatch': [4, 5, 6, 7],
+      }),
+    });
+    expect(record).toMatchObject({
+      decision: 'aborted',
+      reason: 'insufficient_admitted_rows',
+      disposition: 'aborted',
+    });
+  });
+
   it('still promotes the child when the discarded rows are outside the disagreement', async () => {
     // Negative control: discarding rows the two candidates agree on must not
     // flip the decision, or the test above would prove nothing about pairing.
@@ -1786,6 +1806,31 @@ describe('AxGEPA merge gate paired admitted rows', () => {
     });
     expect(merges.length).toBeGreaterThan(0);
     expect(merges.some((r) => r.decision === 'accepted')).toBe(true);
+  });
+
+  it('aborts the merge rather than accepting it when the denominator is empty', async () => {
+    // `newSum >= Math.max(id1Sum, id2Sum) + threshold` is 0 >= 0 + 0, which is
+    // TRUE — so an empty denominator promotes a merge on no evidence at all
+    // unless the gate refuses first. Reachable even though the merge
+    // evaluation itself cleared its admitted floor, because the parents'
+    // cached masks exclude everything it kept.
+    const merges = await runMergeGate({
+      minAdmittedFraction: 0,
+      maxRunDiscardRate: 1,
+      classifier: (input) =>
+        input.phase === 'validation evaluation' ||
+        input.phase === 'initial Pareto evaluation'
+          ? { kind: 'environment_failure', cause: 'rate_limit' }
+          : { kind: 'completed' },
+    });
+    expect(merges.length).toBeGreaterThan(0);
+    expect(merges.every((r) => r.decision !== 'accepted')).toBe(true);
+    expect(
+      merges.some(
+        (r) =>
+          r.decision === 'aborted' && r.reason === 'insufficient_admitted_rows'
+      )
+    ).toBe(true);
   });
 
   it('honours the cached per-instance admitted mask of both parents', async () => {
