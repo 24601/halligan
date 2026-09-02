@@ -134,7 +134,10 @@ export type AxWorkingStateParkReason =
   | 'blocker_missing';
 
 export type AxWorkingStateParkedDelta = Readonly<{
-  /** Op KIND and sanitized path only — the model's `value` is never retained. */
+  /**
+   * Op KIND and the harness-authored `canonicalPath` only — neither the
+   * model's pointer text nor its `value` is ever retained.
+   */
   op: Readonly<{ op: AxStatePatchOp['op']; path: string }>;
   reason: AxWorkingStateParkReason;
   /** Checker-supplied failure code when `reason` is `checker_failed`. */
@@ -794,16 +797,23 @@ function canonicalPathFor(
 function classifyOp(
   op: AxStatePatchOp,
   deps: ClassifierDeps,
-  citedRefsByGoal: ReadonlyMap<string, readonly string[]>
+  citedRefsByGoal: ReadonlyMap<string, readonly string[]>,
+  proposedExpectsByGoal: ReadonlyMap<string, readonly string[]>
 ): AxWorkingStateClassifiedOp {
-  const shape = classifyOpShape(op, deps, citedRefsByGoal);
+  const shape = classifyOpShape(
+    op,
+    deps,
+    citedRefsByGoal,
+    proposedExpectsByGoal
+  );
   return { ...shape, canonicalPath: canonicalPathFor(shape, deps) };
 }
 
 function classifyOpShape(
   op: AxStatePatchOp,
   deps: ClassifierDeps,
-  citedRefsByGoal: ReadonlyMap<string, readonly string[]>
+  citedRefsByGoal: ReadonlyMap<string, readonly string[]>,
+  proposedExpectsByGoal: ReadonlyMap<string, readonly string[]>
 ): ClassifiedShape {
   // `test` is a guard: always admissible, never checker-visible, never parked.
   if (op.op === 'test') {
@@ -940,7 +950,12 @@ function classifyOpShape(
         kernelReason: 'unknown_receipt_ref',
       };
     }
-    const expects = believedGoal?.expects ?? [];
+    // A goal created EARLIER IN THE SAME PATCH is not in `believedState`, so
+    // resolving `expects` from the believed goal alone would make the primary
+    // Goodhart control inert on exactly the turn a model-authored goal is
+    // born. The same-patch proposal supplies it instead.
+    const expects =
+      believedGoal?.expects ?? proposedExpectsByGoal.get(goalId) ?? [];
     if (
       expects.length > 0 &&
       !known.some((receipt) => expects.includes(receipt.qualifiedName))
@@ -1052,20 +1067,61 @@ function classifyPatch(
     }
   }
 
-  return patch.map((op) => {
-    const classified = classifyOp(op, deps, citedRefsByGoal);
+  // `expects` declared by a goal CREATED IN THIS PATCH, so a create-and-close
+  // patch is held to the same receipt expectation as a goal that has already
+  // been committed (§7.2 `expects` row, §10.1 item 1).
+  const proposedExpectsByGoal = new Map<string, readonly string[]>();
+  for (const op of patch) {
+    if (op.op !== 'add') continue;
+    const segments = parseStatePatchPointer(op.path);
+    if (!segments || segments.length !== 2 || segments[0] !== 'goals') continue;
+    const value = (op as { value: unknown }).value;
+    if (!isRecord(value)) continue;
+    const expects = Array.isArray(value.expects)
+      ? (value.expects as unknown[]).filter(
+          (entry): entry is string => typeof entry === 'string'
+        )
+      : [];
+    proposedExpectsByGoal.set(segments[1]!, expects);
+  }
+
+  const classified = patch.map((op) =>
+    classifyOp(op, deps, citedRefsByGoal, proposedExpectsByGoal)
+  );
+
+  return classified.map((entry) => {
     if (
-      classified.class === 'goal_block' &&
-      classified.kernelVerdict === 'admissible' &&
-      !blockersSet.has(classified.goalId!)
+      entry.class === 'goal_block' &&
+      entry.kernelVerdict === 'admissible' &&
+      !blockersSet.has(entry.goalId!)
     ) {
       return {
-        ...classified,
+        ...entry,
         kernelVerdict: 'park',
         kernelReason: 'blocker_missing',
       } satisfies AxWorkingStateClassifiedOp;
     }
-    return classified;
+    // A goal that exists in neither the committed ledger nor an ADMISSIBLE
+    // same-patch `goal_add` cannot be completed: closing a goal the kernel
+    // never admitted would apply a `replace` to a path that does not exist.
+    if (
+      entry.class === 'goal_complete' &&
+      entry.kernelVerdict === 'admissible' &&
+      deps.believed.goals[entry.goalId!] === undefined
+    ) {
+      const created = classified.find(
+        (candidate) =>
+          candidate.class === 'goal_add' && candidate.goalId === entry.goalId
+      );
+      if (!created || created.kernelVerdict !== 'admissible') {
+        return {
+          ...entry,
+          kernelVerdict: 'park',
+          kernelReason: 'no_supporting_receipt',
+        } satisfies AxWorkingStateClassifiedOp;
+      }
+    }
+    return entry;
   });
 }
 

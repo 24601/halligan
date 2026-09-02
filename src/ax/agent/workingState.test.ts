@@ -474,6 +474,104 @@ describe('AxWorkingState classification table', () => {
     expect(state.current().goals.x!.createdTurn).toBe(TURN.turn);
   });
 
+  it('holds a goal created in the same patch to its own declared expects', async () => {
+    const state = await makeState({
+      allowModelAuthoredGoals: true,
+      expectsAllowlist: ['inventory.pack'],
+    });
+    // The only receipt this run is from a DIFFERENT callable.
+    await mint(state, 'mailer.send');
+    const outcome = await state.commit(
+      patch([
+        {
+          op: 'add',
+          path: '/goals/g_new',
+          value: {
+            id: 'g_new',
+            goal: 'pack the order',
+            status: 'pending',
+            evidence: [],
+            expects: ['inventory.pack'],
+            createdTurn: 0,
+            updatedTurn: 0,
+          },
+        },
+        {
+          op: 'add',
+          path: '/goals/g_new/evidence/-',
+          value: { kind: 'tool_receipt', ref: 'r1' },
+        },
+        { op: 'replace', path: '/goals/g_new/status', value: 'done' },
+      ]),
+      TURN
+    );
+    expect(outcome.outcome).toBe('partially_committed');
+    expect(outcome.parked.map((entry) => entry.reason)).toEqual([
+      'receipt_not_expected',
+    ]);
+    expect(outcome.committed.map((entry) => entry.class)).toEqual([
+      'goal_add',
+      'evidence_append',
+    ]);
+    expect(state.current().goals.g_new!.status).toBe('pending');
+  });
+
+  it('commits a same-patch create-and-close when the receipt matches expects', async () => {
+    const state = await makeState({
+      allowModelAuthoredGoals: true,
+      expectsAllowlist: ['inventory.pack'],
+    });
+    await mint(state, 'inventory.pack');
+    const outcome = await state.commit(
+      patch([
+        {
+          op: 'add',
+          path: '/goals/g_new',
+          value: {
+            id: 'g_new',
+            goal: 'pack the order',
+            status: 'pending',
+            evidence: [],
+            expects: ['inventory.pack'],
+            createdTurn: 0,
+            updatedTurn: 0,
+          },
+        },
+        {
+          op: 'add',
+          path: '/goals/g_new/evidence/-',
+          value: { kind: 'tool_receipt', ref: 'r1' },
+        },
+        { op: 'replace', path: '/goals/g_new/status', value: 'done' },
+      ]),
+      TURN
+    );
+    expect(outcome.outcome).toBe('committed');
+    expect(state.current().goals.g_new!.status).toBe('done');
+  });
+
+  it('parks a goal_complete on a goal the kernel never admitted', async () => {
+    const state = await makeState();
+    await mint(state, 'inventory.pick');
+    const outcome = await state.commit(
+      patch([
+        {
+          op: 'add',
+          path: '/goals/g_ghost/evidence/-',
+          value: { kind: 'tool_receipt', ref: 'r1' },
+        },
+        { op: 'replace', path: '/goals/g_ghost/status', value: 'done' },
+      ]),
+      TURN
+    );
+    // The evidence append is admissible (the ref is real) but the completion
+    // parks: a goal must exist before it can be closed.
+    expect(
+      outcome.parked.some((entry) => entry.reason === 'no_supporting_receipt')
+    ).toBe(true);
+    expect(state.current().goals.g_ghost).toBeUndefined();
+  });
+
   it('constructing with allowModelAuthoredGoals and no allowlist throws', async () => {
     await expect(
       makeState({ allowModelAuthoredGoals: true })
