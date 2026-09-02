@@ -7,6 +7,8 @@ import { availableParallelism, tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { syncSmokeLockfiles } from './lib/smoke-lockfiles.mjs';
+
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, '..');
 const rootAxir = path.join(repoRoot, 'ir', 'axcore', 'root.axir');
@@ -56,6 +58,17 @@ try {
     await compareDirectories(expectedRoot, actualRoot, target, diffs);
   }
 
+  // The Rust smoke crates pin packages/rust by path, so their Cargo.lock files
+  // go stale on every axllm version bump and the next `cargo build` rewrites
+  // them in place. Catch that here instead of on a contributor's laptop.
+  const { version, stale } = await syncSmokeLockfiles({
+    repoRoot,
+    check: true,
+  });
+  for (const lock of stale) {
+    diffs.push(`stale ${lock} (expected axllm ${version})`);
+  }
+
   if (diffs.length > 0) {
     console.error('AxIR committed packages are stale.');
     console.error(
@@ -71,7 +84,7 @@ try {
     process.exit(1);
   }
 
-  console.log('AxIR committed packages are up to date.');
+  console.log('AxIR committed packages and smoke lockfiles are up to date.');
 } finally {
   await rm(stageRoot, { recursive: true, force: true });
 }

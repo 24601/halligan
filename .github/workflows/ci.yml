@@ -66,8 +66,22 @@ jobs:
           node-version: '22.x'
           cache: npm
           cache-dependency-path: package-lock.json
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: '1.23.x'
+          cache: true
+          cache-dependency-path: tools/axir/go.mod
       - name: Install dependencies
         run: npm ci
+      # Unconditional on every PR and push: this gate reads the whole public
+      # surface (README, docs, src/examples, scripts, tools/axir, packages), so
+      # a docs-only or scripts-only change can introduce a forbidden token just
+      # as easily as an AxIR change. Scoping it behind the AxIR matrix is how
+      # two occurrences reached main on 2026-09-02. The rest of the AxIR Go
+      # suite stays scoped; this one test costs seconds.
+      - name: Check public generated-surface hygiene
+        run: cd tools/axir && go test ./internal/axir -run TestPublicGeneratedSurfaceHygiene
       - name: Test protected-main release workflow
         run: npm run test:release-workflow
       # INV-L1: GEPA must stay byte-identical to the merge base whenever the
@@ -416,6 +430,15 @@ jobs:
           javac -cp "$CP" -d /tmp/java-classes @/tmp/java-sources.txt
           java -cp "/tmp/java-classes:$CP" dev.axllm.ax.Conformance ir/conformance/axagent-real
 
+  # The single required status check for the protected default branch. It is the
+  # only context the protectmain ruleset requires, and it is produced on every
+  # pull request and push: this workflow carries no `paths` filter and this job
+  # is `if: always()` with no scope condition, so a docs-only pull request still
+  # reports it. Every scoped shard is asserted below against the CI scope
+  # outputs, so a shard that skipped when it should have run still fails here.
+  # Never add a `paths` filter to this workflow or a condition to this job:
+  # a required context that does not report leaves the pull request waiting
+  # forever and forces an admin override to merge.
   ci-summary:
     name: CI Summary
     runs-on: ubuntu-latest

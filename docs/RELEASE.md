@@ -27,6 +27,16 @@ package. Release automation may override this with `AX_PACKAGE_VERSION`; local
 compiler runs fall back to the nearest `package.json` version and then to a
 development fallback.
 
+The Rust smoke crates under `tools/axir/smoke` depend on `packages/rust` by
+path. A path dependency carries no checksum, so its `Cargo.lock` entry records
+only the version read from the dependency manifest, and every version bump
+makes those committed locks stale. `npm run axir:generate-packages` therefore
+refreshes them in the same step that regenerates the packages, so the bump and
+the lock update are committed together. Without that, the next `cargo build`
+rewrites the locks in place and a clean checkout goes dirty as soon as the
+smoke suites run. `npm run axir:check-packages` fails when a smoke lock does
+not match the current version.
+
 ## Release Flow
 
 `npm run release` is the normal release preparation path. It verifies that
