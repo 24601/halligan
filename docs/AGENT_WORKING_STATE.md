@@ -224,7 +224,15 @@ between removing the transcript and hiding it.
 `AxSkillStateTransition.rationaleDigest`, and dropped. It is never written to
 the action log, never rendered into a later prompt and never persisted, so two
 runs can be proved to have reasoned identically without retaining what they
-said.
+said. An ABSENT rationale produces no `rationaleDigest` at all: "declined to
+explain" and "explained with an empty string" are different events, and the
+audit record keeps them distinguishable.
+
+A refused turn is observed too. The code-policy branch (a non-final turn with
+no `console.log`, or multiple fenced code blocks) never executes the actor's
+code, and in this mode the observation window is the ONLY history, so the
+refusal itself is recorded as the latest observation rather than left visible
+only through the guidance entry.
 
 Only ACCEPTED transitions enter `transitions()`; every attempt is reported
 through `AxSkillStateConfig.onTransition` (fail-soft, like `onTrace`). The
@@ -238,7 +246,18 @@ rejection vocabulary is:
 | `invariant` | the kernel or the host checker refused every delta | attempted |
 
 `committedRevision` is non-optional in every configuration, because the store
-is never absent: it defaults to `AxInMemoryProgramStateStore`.
+is never absent: it defaults to `AxInMemoryProgramStateStore`. The rejection is
+decided by the error's typed `code` through `axIsWorkingStateError`, not by
+`instanceof`, so two copies of the package in one process cannot downgrade an
+`authority` or `fence` rejection to "nothing was refused".
+
+`AxSkillStateStep.state` is the STORED envelope, and its `revision` always
+equals the kernel's `currentRevision()` — including after the bounded rebase a
+losing compare-and-set performs — so a host can use it as the expected revision
+for its own `compareAndSet`. It is not the same view as the kernel's
+`current()`: a parks-only turn appends to the model-visible parked ledger
+without a store write, so `current().parked` can carry entries
+`step().state.state.parked` does not.
 
 ### Measured equals sent
 
@@ -271,6 +290,18 @@ The dynamic tail is bounded by `maxRenderChars`, `maxRosterEntries` and
 `maxObservationChars`, so it does not grow with the TURN count. It does grow
 with the size of the goal ledger, which is a task-size term the mode neither
 removes nor claims to.
+
+The transcript leaves the PROMPT, not the process. `actionLogEntries` still
+grows for the whole run, `manageContext` still walks every entry each turn, and
+each entry's `output` and `chatLogMessages` stay resident — so the loop's
+per-turn context bookkeeping is still quadratic in the turn count even though
+the prompt is not. A host that enables `tombstoning` will additionally pay for
+MODEL-BACKED tombstones over text this mode never renders; leave it off under
+`skillState` unless a transcript consumer needs them.
+
+`onTransition` is awaited with no timeout and no abort signal, exactly like
+`onTrace` and `onFunctionCall`. A throwing sink is fail-soft; a sink that never
+settles stalls the turn, so a sink that can block should bound itself.
 
 ## What the gate does NOT gate
 

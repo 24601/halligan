@@ -427,7 +427,7 @@ describe('AxSkillStateRuntime transitions', () => {
     // The rebase really moved, so the assertion below is not vacuous.
     expect(state.currentRevision()).toBeGreaterThan(seedRevision);
     expect(step.state.revision).toBe(state.currentRevision());
-    // ...and the document travelled with the revision: the envelope carries
+    // ...and the document moved with the revision: the envelope carries
     // the reloaded goals, not the pre-reload ones.
     expect(step.state.state.goals).toEqual(state.current().goals);
     expect(step.state.state.facts).toEqual(storedDocument().facts);

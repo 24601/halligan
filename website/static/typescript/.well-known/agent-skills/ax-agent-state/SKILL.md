@@ -240,7 +240,8 @@ const agentWithSkillState = agent('task:string -> answer:string', {
 - The prompt carries no action log at all. Anything needed on a later turn
   must be written into the working state by a patch.
 - `rationale` is hashed into `AxSkillStateTransition.rationaleDigest` and the
-  TEXT IS DISCARDED. Never rely on seeing it again.
+  TEXT IS DISCARDED. Never rely on seeing it again. An ABSENT rationale leaves
+  `rationaleDigest` undefined; an empty one still digests.
 - Only ACCEPTED transitions enter `transitions()`. Use `onTransition` to
   observe refusals; it is fail-soft, like `onTrace`.
 - Rejections are `schema` (unparseable — the store is never touched),
@@ -252,6 +253,12 @@ const agentWithSkillState = agent('task:string -> answer:string', {
 - Supply a durable `store` if the discarded transcript must be recoverable
   after the process exits. The default in-memory store makes the discard
   irreversible.
+- The transcript leaves the PROMPT, not the process: the loop still keeps and
+  walks every action-log entry, so per-turn context bookkeeping stays quadratic
+  in the turn count. Leave `tombstoning` off under `skillState` — it spends
+  model calls summarizing text this mode never renders.
+- `onTransition` is awaited with no timeout: a sink that can block should bound
+  itself.
 
 ## Trace (Gamma)
 
