@@ -1831,6 +1831,31 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
           ...(authorityOutcome ? { authority: authorityOutcome } : {}),
           authorityConfigured: options?.promotionAuthority !== undefined,
         });
+        // THE ONLY CHANNEL AN ABORTED RUN HAS. `outcomes[]` — and with it the
+        // evidence receipt carrying this record — is unreachable when the run
+        // rethrows `aborted` a few statements below, so a denial with code
+        // 'cancelled' would otherwise be recorded into an object no consumer
+        // could ever read. Emitted on every host-gated candidate, not only the
+        // aborted one, so the promotion decision reads the same way whether or
+        // not the run finishes.
+        progress(
+          'promotion',
+          `${spec.label}: ${promotion.status}${
+            promotion.status === 'denied'
+              ? ` (${promotion.code}: ${promotion.reason})`
+              : promotion.status === 'vetoed'
+                ? ` (${promotion.vetoes
+                    .filter((result) => result.vetoed)
+                    .map(
+                      (result) =>
+                        `${result.vetoId}${result.reason ? `: ${result.reason}` : ''}`
+                    )
+                    .join('; ')})`
+                : promotion.status === 'promoted'
+                  ? ` (receipt ${promotion.receipt.receiptId} bound to resource '${nomination.resourceId}')`
+                  : ''
+          }`
+        );
       }
 
       // Per-slice paired intervals, so a retention slice reports its own

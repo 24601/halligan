@@ -3538,6 +3538,7 @@ describe('agent.playbook().evolve() promotion authority', () => {
 
   it('records a cancelled authority call and still rethrows the aborted error', async () => {
     const controller = new AbortController();
+    const events: { phase: string; message: string }[] = [];
     const { ag } = makeAgent();
     await expect(
       ag
@@ -3548,6 +3549,8 @@ describe('agent.playbook().evolve() promotion authority', () => {
             metric: scoreByAnswer,
             maxProposals: 1,
             abortSignal: controller.signal,
+            onProgress: (event: any) =>
+              events.push({ phase: event.phase, message: event.message }),
             promotionAuthority: promotionAuthority({
               authorize: (operation: string, context: any) => {
                 controller.abort(new Error('caller cancelled'));
@@ -3558,6 +3561,108 @@ describe('agent.playbook().evolve() promotion authority', () => {
         )
       // Cancellation semantics stay exactly what they were for the caller.
     ).rejects.toThrow('AxAgent.playbook().evolve(): aborted');
+    expect(actorPromptOf(ag)).not.toContain(BULLET_MARKER);
+    // BOTH halves in one test. An aborted run never returns, so `outcomes[]`
+    // and the receipt that carries the promotion record are unreachable: the
+    // progress channel is the only place the denial can be observed, and a
+    // rethrow with no disclosure would be a denial recorded into nothing.
+    const promotionEvents = events.filter(
+      (event) => event.phase === 'promotion'
+    );
+    expect(promotionEvents).toHaveLength(1);
+    expect(promotionEvents[0]?.message).toContain('denied');
+    expect(promotionEvents[0]?.message).toContain('cancelled');
+  });
+
+  it('discloses a promotion and a veto on the same channel', async () => {
+    const promoted: { phase: string; message: string }[] = [];
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(
+      { train: TASKS, validation: VALIDATION_TASKS },
+      {
+        metric: scoreByAnswer,
+        maxProposals: 1,
+        onProgress: (event: any) =>
+          promoted.push({ phase: event.phase, message: event.message }),
+        promotionAuthority: promotionAuthority(),
+      }
+    );
+    expect(result.outcomes[0]?.promotion?.status).toBe('promoted');
+    const promotedEvent = promoted.find(
+      (event) => event.phase === 'promotion'
+    )?.message;
+    expect(promotedEvent).toContain('promoted');
+    expect(promotedEvent).toContain(PROMOTION_RESOURCE_ID);
+    // ... and the negative: a vetoed candidate says so, and never 'promoted'.
+    const vetoed: { phase: string; message: string }[] = [];
+    const second = makeAgent();
+    await second.ag.playbook().evolve(
+      { train: TASKS, validation: VALIDATION_TASKS },
+      {
+        metric: scoreByAnswer,
+        maxProposals: 1,
+        onProgress: (event: any) =>
+          vetoed.push({ phase: event.phase, message: event.message }),
+        promotionVeto: [() => ({ vetoed: true, reason: 'policy says no' })],
+      }
+    );
+    const vetoedEvent = vetoed.find(
+      (event) => event.phase === 'promotion'
+    )?.message;
+    expect(vetoedEvent).toContain('vetoed');
+    expect(vetoedEvent).toContain('policy says no');
+    expect(vetoedEvent).not.toContain('promoted');
+  });
+
+  it('rescinds every live promotion when the run is rolled back', async () => {
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(
+      { train: TASKS, validation: VALIDATION_TASKS },
+      {
+        metric: scoreByAnswer,
+        maxProposals: 1,
+        promotionAuthority: promotionAuthority(),
+        // The harness-term arm reproduces the whole gain, so the run-level
+        // control-arm gate rejects the artifact AFTER a promotion was issued
+        // against it. That is the only shape in which I8's cascade can fire.
+        controlArm: {},
+        gates: { controlArm: 'require', controlArmMargin: 0.1 },
+      }
+    );
+
+    // Five things move together, or the cascade is not coherent.
+    expect(result.applied).toBe('rolled_back');
+    expect(result.playbookSnapshot).toBeUndefined();
+    expect(result.rolledBackReason).toContain('control_arm gate failed');
+    const accepted = result.outcomes.filter((outcome: any) => outcome.accepted);
+    expect(accepted.length).toBeGreaterThan(0);
+    let rescinded = 0;
+    for (const outcome of accepted) {
+      expect(outcome.evidence.decision).toBe('superseded');
+      // A live promotion must be structurally distinguishable from a rescinded
+      // one; reading 'promoted' beside `applied: 'rolled_back'` is exactly the
+      // confusion I8 exists to make impossible.
+      expect(outcome.promotion).toBeDefined();
+      expect(outcome.promotion.status).toBe('promoted_then_rolled_back');
+      expect(outcome.promotion.status).not.toBe('promoted');
+      // Ax cannot revoke a receipt, so the honest report keeps it.
+      expect(outcome.promotion.receipt.resource.id).toBe(PROMOTION_RESOURCE_ID);
+      expect(outcome.promotion.rolledBackByGate).toBe('control_arm');
+      expect(outcome.promotion.rolledBackReason).toBe(result.rolledBackReason);
+      // The receipt's own copy moves with it.
+      expect(outcome.evidence.promotion.status).toBe(
+        'promoted_then_rolled_back'
+      );
+      rescinded++;
+    }
+    expect(rescinded).toBeGreaterThan(0);
+    // The count is real, not a fixed string: a cascade that rescinded nothing
+    // would still have warned.
+    expect(
+      result.warnings?.find(
+        (warning: any) => warning.code === 'promotion_rolled_back'
+      )?.message
+    ).toContain(`${rescinded} promotion(s) rescinded`);
     expect(actorPromptOf(ag)).not.toContain(BULLET_MARKER);
   });
 
