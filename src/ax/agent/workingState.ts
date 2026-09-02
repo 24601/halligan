@@ -275,7 +275,11 @@ export type AxWorkingStateTraceStep = Readonly<{
   action: Readonly<{
     codeDigest: string;
     codeChars: number;
-    /** False when a call-time skill injection suppressed execution. */
+    /**
+     * False when a call-time skill injection suppressed AT LEAST ONE drafted
+     * call. A mixed turn is `false` with a non-empty `calls`: this reports the
+     * turn's weakest guarantee, and `calls` stays the exact record.
+     */
     executed: boolean;
     /** Qualified callables the turn actually invoked, sorted, deduped. */
     calls: readonly string[];
@@ -603,11 +607,19 @@ export class AxWorkingStateStoreError extends AxWorkingStateError {
 export class AxWorkingStateSchemaError extends AxWorkingStateError {
   public override readonly code = 'working_state_schema_invalid';
   public readonly detail: string;
+  /**
+   * Which configuration block was invalid. Defaults to `'Working state'`;
+   * call-time skill bindings are a sibling option that reuses this error type
+   * and its `<key>: <value>` detail convention, and naming the wrong subsystem
+   * in the message sends a host to the wrong option.
+   */
+  public readonly subsystem: string;
 
-  constructor(detail: string) {
-    super(`Working state configuration is invalid: ${detail}`);
+  constructor(detail: string, subsystem = 'Working state') {
+    super(`${subsystem} configuration is invalid: ${detail}`);
     this.name = 'AxWorkingStateSchemaError';
     this.detail = detail;
+    this.subsystem = subsystem;
   }
 }
 

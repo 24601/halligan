@@ -247,6 +247,21 @@ export type AxAgentOptions<IN extends AxGenIn = AxGenIn> = Omit<
   skillState?: import('../skillState.js').AxSkillStateConfig<any>;
 
   /**
+   * Call-time skill injection, opt-in per exact qualified callable. When the
+   * actor drafts a call to a bound callable the harness does NOT execute it:
+   * it returns a frozen not-executed marker, loads the skill through the
+   * normal loaded-skills channel, appends harness-authored guidance to the
+   * trusted guidance log, and lets the model re-draft. A bound callable is
+   * additionally excluded from the runtime speculation adapter, so there is no
+   * second entry point that could authorize, execute or mint a receipt.
+   *
+   * Budgeted per callable (default 1 injection per run): once the budget is
+   * spent the tool executes normally. Unbound callables keep today's contract
+   * exactly.
+   */
+  callTimeSkills?: readonly import('../callTimeSkills.js').AxCallTimeSkillBinding[];
+
+  /**
    * Optional persistent context map for recurring long-context work.
    * When configured, Ax injects the map into the distiller prompt and updates
    * it once after each successful completed run. Use `onUpdate` to persist the

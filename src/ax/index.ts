@@ -248,6 +248,11 @@ import {
 } from './agent/benchmarks/contextMetrics.js';
 import type { AxContextScenario } from './agent/benchmarks/contextScenarios.js';
 import {
+  type AxCallTimeSkillBinding,
+  type AxCallTimeSkillNotExecuted,
+  axIsCallTimeSkillNotExecuted,
+} from './agent/callTimeSkills.js';
+import {
   type AxAgentGuidancePayload,
   AxAgentProtocolCompletionSignal,
 } from './agent/completion.js';
@@ -2777,6 +2782,7 @@ export { axIpwPairedDifference };
 export { axIpwScore };
 export { axIsAgentPlaybookEvolveError };
 export { axIsAudioOutputEnabled };
+export { axIsCallTimeSkillNotExecuted };
 export { axIsCandidateEffectManifestError };
 export { axIsCandidateStaleError };
 export { axIsDigestStrengthError };
@@ -3530,6 +3536,8 @@ export type { AxBalancerStatsStore };
 export type { AxBaseAIArgs };
 export type { AxBestOfNOptions };
 export type { AxBootstrapOptimizerOptions };
+export type { AxCallTimeSkillBinding };
+export type { AxCallTimeSkillNotExecuted };
 export type { AxCandidateEffectDeclaration };
 export type { AxCandidateEffectPolicy };
 export type { AxCapabilityGrant };

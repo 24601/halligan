@@ -1,5 +1,12 @@
 import type { AxAIService } from '../../ai/types.js';
 import type { AxGenIn, AxProgramForwardOptions } from '../../dsp/types.js';
+import {
+  type AxCallTimeSkillBinding,
+  type AxCallTimeSkillRuntime,
+  axCallTimeSkillCatalogAdmission,
+  axCallTimeSkillCatalogResolver,
+  axCallTimeSkillRuntime,
+} from '../callTimeSkills.js';
 import { createCompletionBindings } from '../completion.js';
 import {
   DEFAULT_RLM_MAX_TURNS,
@@ -352,6 +359,36 @@ export async function runActorLoop<IN extends AxGenIn>(
     }
   }
 
+  // Call-time skill injection: opt-in per exact callable, and independent of
+  // working state except for the optional `when` predicate. Built here rather
+  // than beside the receipt sink because a bound CATALOG id must resolve
+  // through the same two gates every other retrieval path uses, and
+  // `skillRetrievalGate` — the authority half — only exists above. Cleared
+  // otherwise, so the default path allocates nothing.
+  const callTimeBindings = s.options?.callTimeSkills as
+    | readonly AxCallTimeSkillBinding[]
+    | undefined;
+  let callTimeSkills: AxCallTimeSkillRuntime | undefined;
+  if (callTimeBindings && callTimeBindings.length > 0) {
+    const ws = workingState;
+    callTimeSkills = axCallTimeSkillRuntime(callTimeBindings, {
+      resolveSkill: axCallTimeSkillCatalogResolver(s.skillsCatalog),
+      // The gates are time- and authority-varying while the binding is static
+      // host config, so this is re-asked every run and refuses the run when a
+      // bound skill is hidden. `denied` is read from the gate computed above,
+      // never from a serialized field.
+      admitSkill: axCallTimeSkillCatalogAdmission(s.skillsCatalog, {
+        ...(skillPolicy?.environment
+          ? { environment: skillPolicy.environment }
+          : {}),
+        ...(skillRetrievalGate ? { denied: skillRetrievalGate.denied } : {}),
+      }),
+      // `when` reads the COMMITTED document, never a proposal.
+      ...(ws ? { workingState: () => ws.current() } : {}),
+    });
+  }
+  s._callTimeSkillRuntime = callTimeSkills;
+
   // Forward-time preset skills are executor-ingested — except for a static
   // direct-respond agent, whose runs may end at the distiller: the distiller
   // ingests them there so respond-only runs still see call-time skills.
@@ -630,6 +667,7 @@ export async function runActorLoop<IN extends AxGenIn>(
     delegatedContextSummary,
     ...(workingState ? { workingState, workingStateObservations } : {}),
     ...(skillState ? { skillState } : {}),
+    ...(callTimeSkills ? { callTimeSkills } : {}),
     mutableState,
     helpers,
   };

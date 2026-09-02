@@ -46,6 +46,7 @@ import {
   renderGuidanceLog,
   snapshotChatLogMessages,
 } from './guidanceHelpers.js';
+import { ingestSkillResults } from './skillsHelpers.js';
 import { AxAgentClarificationError } from './types.js';
 
 const ACTOR_CODE_POLICY_GUIDANCE =
@@ -274,6 +275,7 @@ export async function runActorTurn<_IN extends AxGenIn>(
     workingState,
     workingStateObservations,
     skillState,
+    callTimeSkills,
     helpers,
   } = ctx;
 
@@ -704,6 +706,37 @@ export async function runActorTurn<_IN extends AxGenIn>(
     })(),
   });
 
+  // Call-time skill injections observed during this turn's code. The skill is
+  // ingested through the ORDINARY loaded-skills channel (no parallel prompt
+  // section) and the harness-authored guidance goes to the TRUSTED guidance
+  // log, so the model re-drafts with the procedure in front of it. Both take
+  // effect on the next turn's prompt, which is exactly the re-draft point.
+  //
+  // Drained unconditionally rather than only on a turn that reached
+  // `executeActorCode`: an interception can only be recorded BY that
+  // execution, so the pending list is empty on every other path, and a drain
+  // that is a no-op is cheaper to reason about than a conditional one.
+  const callTimeInjections = callTimeSkills?.drain() ?? [];
+  if (callTimeInjections.length > 0) {
+    const injectedSkills = callTimeInjections.map(
+      (injection) => injection.skill
+    );
+    ingestSkillResults(s.currentSkillsPromptState, injectedSkills);
+    if (typeof s.onLoadedSkills === 'function') {
+      // The ordinary load path pairs ingestion with this callback; a host
+      // auditing which skill bodies reached the model must see call-time
+      // injections too. Fire-and-forget: a host error must not break the loop.
+      Promise.resolve(s.onLoadedSkills(injectedSkills)).catch(() => {});
+    }
+    for (const injection of callTimeInjections) {
+      appendGuidanceEntry(guidanceState.entries, {
+        turn: entryTurn,
+        guidance: injection.guidance,
+        triggeredBy: 'call-time skill',
+      });
+    }
+  }
+
   // Working state, when configured, mints this turn's receipts from the
   // dispatches the harness observed. Nothing here can run for a default agent:
   // `workingState` is undefined and the observation buffer does not exist.
@@ -761,6 +794,13 @@ export async function runActorTurn<_IN extends AxGenIn>(
       isError,
       receiptRefs: mintedReceiptRefs,
       calls: turnCalls,
+      // Gamma tells the truth about what ran. `executed` reports the turn's
+      // WEAKEST guarantee: at least one drafted call did not run, so a
+      // completion may not lean on this turn having done what it read like.
+      // `calls` stays exact and still lists the callables that DID dispatch —
+      // forcing it empty would hide a real call made alongside the intercepted
+      // one, and a mixed turn is `{ executed: false, calls: [<the real one>] }`.
+      ...(callTimeInjections.length > 0 ? { executed: false } : {}),
       selectedSkills: (mutableState.usedSkills ?? []).map(
         (used: { id: string }) => used.id
       ),

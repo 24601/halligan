@@ -20,6 +20,10 @@ to replay. That machinery is good at *shrinking* a transcript and structurally
 incapable of *knowing what is true*. The model's belief about progress lives
 only in prose it wrote itself, so it drifts and self-congratulates.
 
+It also carries one adjacent, independently opt-in mechanism: **call-time skill
+injection** (see below), which is configured through `callTimeSkills` and needs
+no working state unless a binding declares a `when` predicate.
+
 Working state adds one mechanism: a typed document behind a host-declared
 signature, carrying a goal ledger keyed by stable goal id plus host-declared
 facts. Each turn a proposer *proposes* the next state; a commit kernel
@@ -359,6 +363,143 @@ optimize judge already reads it).
 of `AxAgentRecursiveTraceNode` joins on `(runId, turn)` with no schema change
 on either side.
 
+## Call-time skill injection
+
+Opt-in per exact qualified callable, through `AxAgentOptions.callTimeSkills`.
+When the actor drafts a call to a bound callable the harness does **not**
+execute it: it returns a frozen not-executed marker, loads the binding's skill
+through the existing loaded-skills channel, appends harness-authored guidance
+to the trusted guidance log, and lets the model re-draft on the next turn.
+Independent of working state except for the optional `when` predicate.
+
+```ts
+callTimeSkills: [
+  { qualifiedName: 'inventory.adjustStock', skill: 'stock-adjustment' },
+];
+```
+
+### The two hooks
+
+**Hook 1 — the logical path.** `runLogicalCall` (`runtimeGlobals.ts`) consults
+the binding **before** `authorizeCall`, before `onFunctionCall` and before
+`observeResult`. An intercepted call therefore:
+
+| Contract | Intercepted | Unbound |
+|---|---|---|
+| the function body runs | no | yes |
+| an authorization decision is requested | **no** | yes |
+| `onFunctionCall` fires | no | yes |
+| `functionCallRecorder` records | no | yes |
+| a working-state receipt is minted | **no** | yes when eligible |
+
+The last row is the load-bearing one: a skill injection can never support a
+goal completion, because a receipt is the only thing that flips a goal to
+`done`.
+
+The marker is **returned, not thrown**. A thrown error is caught by the runtime
+and tagged `'error'` on the action log, which feeds `noteActorTurnErrorState`
+and can escalate the executor model. An interception is not a failure and must
+not look like one.
+
+**Hook 2 — the speculation path.** `runLogicalCall` is not the only way into a
+wrapped function. For a `kind === 'external'` callable,
+`setJSRuntimeHostFunctionSpeculationAdapter` installs a `launch` closure that
+calls `authorizeCall` and the function **directly**, and `commitSpeculativeCall`
+then reaches `observeResult`. On any callable the host placed in the runtime's
+speculation allowlist, a binding hooked only at `runLogicalCall` would not
+prevent execution, *would* request authorization, *would* fire
+`onFunctionCall`, and *would* mint a receipt.
+
+The fix is one guard at the **installation** site: a bound callable gets **no
+speculation adapter at all**, so there is no second entry point to guard. This
+is preferred over a construction-time refusal against the runtime's frozen
+speculation table, which `src/` exposes no accessor for — a refusal built on a
+table this repo cannot read would be unimplementable today and would silently
+no-op if the accessor changed shape. A construction-time diagnostic may be
+added later as a *secondary* signal.
+
+Binding a callable therefore changes how it is dispatched even on turns that
+are not intercepted: it loses speculation for the whole run. That is the
+deliberate cost of having exactly one entry point.
+
+### Budgets, predicates and validation
+
+`maxInjections` (default 1) bounds injections per callable per run. Past the
+budget the tool executes normally — the interception is a one-shot nudge, never
+a gate — so an unhelpful skill cannot trap the actor in a re-draft loop. A
+`when` predicate that returns `false` falls through **without** spending
+budget, so an early "not yet" does not disable the binding for the rest of the
+run.
+
+A `when` predicate that **throws** — or a working-state read that does — falls
+through to the normal call path and the callable behaves exactly as an unbound
+one. `intercept()` runs synchronously inside the actor's `await tool(...)`, so a
+propagated throw would become an `isError` turn and escalate the executor model;
+and since the budget is charged after the predicate, every re-draft would throw
+again with nothing bounding it. A predicate result that is not exactly `true`
+(an accidental `async when` returns an always-truthy Promise) does not
+intercept.
+
+Refused at construction: a glob in `qualifiedName`, two bindings for one
+callable, `maxInjections` below 1, non-integer or above 100, a skill id that
+does not resolve against the effective `skillsCatalog`, an inline skill with no
+body text, and a `when` predicate with no `workingState` to read.
+
+Refused at **run start**, not at construction:
+
+- a binding naming a callable this run does not register
+  (`unknown_bound_callable`). MCP and UCP callables only exist once the run's
+  execution context does, so a constructor-time check would reject every
+  legitimate `mcp.*` binding. Every registration site — executing or stubbed —
+  registers its name, so the check sees the full surface;
+- a binding naming a catalog skill the run's two catalog gates hid
+  (`ineligible_bound_skill`, `denied_bound_skill`). See below.
+
+Every call-time configuration failure is an `AxWorkingStateSchemaError` whose
+`subsystem` is `'Call-time skill'` and whose `detail` is the `<key>: <value>`
+pair above.
+
+### A binding does not bypass the catalog gates
+
+A binding is static host configuration; the two catalog gates are not.
+`requires` eligibility is resolved against the run's declared
+`skillPolicy.environment`, and the retrieval-time authority re-check
+(`axSkillRetrievalGate`) is time- and authority-varying — an expired grant or a
+revoked trajectory parks a skill mid-lifecycle, long after the binding was
+written.
+
+So a bound **catalog id** is re-asked at run start through the same admission
+verdict `discover({ skills })`, the `### Available Skills` index, the relevance
+hint and the kernel tier use, and the run is **refused** when either gate hid
+it. Refusing is deliberate over the two alternatives: silently dropping the
+skill while still intercepting would leave the actor blocked on a call it may
+not make with no procedure to read, and silently executing would make both
+gates advisory. "The host named it by id" is not an answer — that is exactly
+the argument the gates exist to overrule.
+
+An **inline** skill is not gated: it is host-supplied literal text with nothing
+to be eligible for and no provenance to re-check, the same posture as
+`presetSkills`.
+
+### Delivery and the trace
+
+The skill is ingested with `ingestSkillResults` into the ordinary loaded-skills
+prompt state; there is no parallel prompt section. The guidance entry is
+harness-authored and names only the callable and the skill id, because
+`guidanceLog` is the *trusted* prompt region and the action log is the
+untrusted one. Both take effect on the next turn's prompt, which is the
+re-draft point.
+
+`onLoadedSkills` fires for an injected skill, fire-and-forget, exactly as it
+does on the ordinary load path: a host auditing which skill bodies reached the
+model must see call-time injections too.
+
+Gamma records the intercepted turn with `action.executed: false`. That flag
+reports the turn's **weakest** guarantee — at least one drafted call did not
+run — so a mixed turn is `{ executed: false, calls: ['inventory.pick'] }`.
+`action.calls` stays the exact record: forcing it empty would hide a real call
+made alongside an intercepted one.
+
 ## Build versus buy: the RFC-6902 subset
 
 `src/ax/agent/statePatch.ts` implements `add`/`remove`/`replace`/`test` in one
@@ -473,3 +614,18 @@ to pass it.
   `AxAgentState`. Only the rendered ROSTER is bounded (`maxRosterEntries`).
   The ledger is bounded in practice by the run's own call budget; a host that
   needs a hard cap serialises its own trimmed state.
+- **Call-time injection costs a bound callable its speculation.** The adapter
+  is not installed for a bound name, so binding a hot tool that the host had
+  allowlisted for speculation removes that optimisation for the whole run. This
+  is deliberate — it is what leaves exactly one entry point to guard — but it is
+  a real cost, and it is why binding is per exact name rather than per
+  namespace.
+- **Call-time injection is not an authorization or safety gate.** It is one
+  budgeted nudge: past `maxInjections` the tool executes. Anything that must
+  not run belongs in the authority layer, not here.
+- **Per-run harness state is held per agent INSTANCE, not per `forward()`.**
+  The working-state receipt sink and the call-time binding table are both
+  rebuilt at the start of each run and stored on the instance, so two
+  overlapping `forward()` calls on ONE agent share the injection ledger and the
+  observation buffer, or clobber them mid-flight. Concurrent runs need separate
+  agent instances.
