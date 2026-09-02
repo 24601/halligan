@@ -2,12 +2,14 @@ import { getEventListeners } from 'node:events';
 import { describe, expect, it } from 'vitest';
 import {
   type AxAuthorizationDeniedError,
+  axAttenuateAuthority,
   axAuthorize,
   axSnapshotAuthority,
   axValidateCapabilityGrant,
 } from './authority.js';
 import type {
   AxAuthorityContext,
+  AxAuthorityDelegationOptions,
   AxAuthorizationAuditEvent,
   AxAuthorizationRequestContext,
   AxCapabilityGrant,
@@ -411,5 +413,136 @@ describe('Ax evidence guards at the authorization boundary', () => {
       )
     ).toBe('cancelled');
     expect(getEventListeners(signal, 'abort').length).toBe(0);
+  });
+});
+
+describe('Ax evidence guards across attenuated authority', () => {
+  const childResource: AxResourceScope = resource;
+
+  function childOptions(
+    grants: readonly AxCapabilityGrant[]
+  ): AxAuthorityDelegationOptions {
+    return {
+      principal: { id: 'principal-child', tenantId: 'tenant-a' },
+      actor: { id: 'actor-child', kind: 'agent' },
+      delegation: { parentPrincipalId: 'principal-a', depth: 1 },
+      grants,
+    };
+  }
+
+  function childGrant(
+    override: Partial<AxCapabilityGrant> = {}
+  ): AxCapabilityGrant {
+    return grant({
+      id: 'child-grant',
+      principalId: 'principal-child',
+      actor: { id: 'actor-child', kind: 'agent' },
+      parentGrantId: 'grant-1',
+      ...override,
+    });
+  }
+
+  it('axAttenuateAuthority carries evidence and observeEvidence to the child', async () => {
+    // Without the pass-through the child would inherit the requirement but
+    // none of the facts, so every delegated call would fail closed.
+    const observed: AxEvidenceObservation[] = [];
+    const { authority, requests } = harness({
+      grants: [grant({ requirements: [requirement()] })],
+      observeEvidence: () => {
+        const facts = [observation()];
+        observed.push(...facts);
+        return facts;
+      },
+    });
+    const child = axAttenuateAuthority(
+      authority,
+      childOptions([childGrant({ requirements: [requirement()] })])
+    );
+    const receipt = await axAuthorize(child, 'document.read', childResource);
+    expect(receipt?.decision).toBe('allow');
+    expect(observed).toHaveLength(1);
+    expect(requests[0]?.evidence?.[0]?.kind).toBe('session.mfa');
+  });
+
+  it('carries a frozen parent evidence array to the child', async () => {
+    const { authority } = harness({
+      grants: [grant({ requirements: [requirement()] })],
+      evidence: [observation()],
+    });
+    const child = axAttenuateAuthority(
+      authority,
+      childOptions([childGrant({ requirements: [requirement()] })])
+    );
+    expect(child.evidence).toHaveLength(1);
+    const receipt = await axAuthorize(child, 'document.read', childResource);
+    expect(receipt?.decision).toBe('allow');
+  });
+
+  it('axAttenuateAuthority rejects a child grant that drops a parent requirement', () => {
+    // Non-vacuous only because captureGrant carries requirements through the
+    // parent snapshot.
+    const { authority } = harness({
+      grants: [grant({ requirements: [requirement()] })],
+    });
+    expect(() =>
+      axAttenuateAuthority(authority, childOptions([childGrant()]))
+    ).toThrow(/expands parent authority/);
+    expect(() =>
+      axAttenuateAuthority(
+        authority,
+        childOptions([
+          childGrant({
+            requirements: [requirement({ kind: 'device.posture' })],
+          }),
+        ])
+      )
+    ).toThrow(/expands parent authority/);
+    // A requirement that only relaxes the trusted-source set is not the
+    // parent's requirement either.
+    expect(() =>
+      axAttenuateAuthority(
+        authority,
+        childOptions([
+          childGrant({
+            requirements: [requirement({ trustedSources: ['idp-a', 'idp-b'] })],
+          }),
+        ])
+      )
+    ).toThrow(/expands parent authority/);
+  });
+
+  it('axAttenuateAuthority accepts a child grant that adds a requirement', async () => {
+    const { authority } = harness({
+      grants: [grant({ requirements: [requirement()] })],
+      evidence: [observation()],
+    });
+    const child = axAttenuateAuthority(
+      authority,
+      childOptions([
+        childGrant({
+          requirements: [
+            requirement(),
+            requirement({
+              kind: 'device.posture',
+              trustedSources: ['mdm-a'],
+              match: { op: 'eq', value: 'managed' },
+            }),
+          ],
+        }),
+      ])
+    );
+    // Tightening is legal, and the added contingency is actually enforced.
+    expect(
+      await denialCode(axAuthorize(child, 'document.read', childResource))
+    ).toBe('guard_predicate_failed');
+  });
+
+  it('leaves attenuation unchanged when no grant declares a requirement', async () => {
+    const { authority } = harness();
+    const child = axAttenuateAuthority(authority, childOptions([childGrant()]));
+    expect(child.evidence).toBeUndefined();
+    expect(child.observeEvidence).toBeUndefined();
+    const receipt = await axAuthorize(child, 'document.read', childResource);
+    expect(receipt?.decision).toBe('allow');
   });
 });

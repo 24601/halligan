@@ -3,6 +3,7 @@ import {
   axCollectGrantRequirements,
   axEvaluateGuards,
   axIsEvidenceRequirement,
+  evidenceRequirementKey,
 } from './evidence.js';
 import type {
   AxActor,
@@ -978,6 +979,25 @@ function containsResource(
   );
 }
 
+/**
+ * Contingency may only tighten: a child grant must carry every requirement its
+ * parent declared, and may add more. Dropping one would expand the parent's
+ * authority just as surely as adding an operation does.
+ */
+function retainsRequirements(
+  parent: Readonly<AxCapabilityGrant>,
+  child: Readonly<AxCapabilityGrant>
+): boolean {
+  const required = parent.requirements ?? [];
+  if (!required.length) return true;
+  const carried = new Set(
+    (child.requirements ?? []).map(evidenceRequirementKey)
+  );
+  return required.every((requirement) =>
+    carried.has(evidenceRequirementKey(requirement))
+  );
+}
+
 /** Validate and construct a child authority that cannot expand parent grants. */
 export function axAttenuateAuthority(
   parent: Readonly<AxAuthorityContext>,
@@ -1066,7 +1086,9 @@ export function axAttenuateAuthority(
         (grant.expiresAt === undefined ||
           grant.expiresAt > source.expiresAt)) ||
       (source.revokedAt !== undefined &&
-        (grant.revokedAt === undefined || grant.revokedAt > source.revokedAt))
+        (grant.revokedAt === undefined ||
+          grant.revokedAt > source.revokedAt)) ||
+      !retainsRequirements(source, grant)
     ) {
       throw new Error('Child capability grant expands parent authority');
     }
@@ -1080,6 +1102,10 @@ export function axAttenuateAuthority(
     authorize: parentSnapshot.authorize,
     authorizeTimeoutMs: parentSnapshot.authorizeTimeoutMs,
     now: parentSnapshot.now,
+    // Without these two, guards and delegation would be mutually exclusive:
+    // every inherited requirement would fail with missing_observation.
+    evidence: parentSnapshot.evidence,
+    observeEvidence: parentSnapshot.observeEvidence,
     onAudit: parentSnapshot.onAudit,
   });
 }
