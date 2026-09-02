@@ -262,6 +262,10 @@ export function evaluateValidity(args: {
     predicates.push(
       predicate({
         ...scope,
+        // Per RECORD, not per attempt: `completionType` lives on
+        // `AxAgentEvalPrediction` and an attempt record carries no such field,
+        // so at `runsPerTask > 1` this reads the surviving prediction for each
+        // task. Named `final_completion_rate` for exactly what it measures.
         id: 'final_completion_rate',
         ...(counters.predictions > 0
           ? { observed: counters.finalPredictions / counters.predictions }

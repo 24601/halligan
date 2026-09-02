@@ -1919,10 +1919,22 @@
       "sourcePR": 88,
       "sourceCommit": "51dab998e83985e29443d65e91a4f928564ac068",
       "tsPaths": [
-        "src/ax/agent/agentInternal/playbookEvolve/playbookEvolve.ts"
+        "src/ax/agent/agentInternal/playbookEvolve/playbookEvolve.ts",
+        "src/ax/agent/agentInternal/playbookEvolve/playbookEvolveTypes.ts",
+        "src/ax/agent/agentInternal/playbookEvolve/playbookEvidenceTypes.ts",
+        "src/ax/agent/agentInternal/playbookEvolve/evalHarness.ts",
+        "src/ax/agent/agentInternal/playbookEvolve/gates.ts",
+        "src/ax/agent/agentInternal/playbookEvolve/statistics.ts",
+        "src/ax/agent/agentInternal/playbookEvolve/termination.ts",
+        "src/ax/agent/agentInternal/playbookEvolve/validity.ts",
+        "src/ax/agent/agentInternal/playbookEvolve/reach.ts",
+        "src/ax/agent/agentInternal/playbookEvolve/accounting.ts",
+        "src/ax/agent/agentInternal/playbookEvolve/evidenceReceipt.ts",
+        "src/ax/agent/agentInternal/playbookEvolve/canonical.ts",
+        "src/ax/index.ts"
       ],
       "portableSurface": "axagent",
-      "impact": "BREAKING (type-level): AxAgentPlaybookEvolveResult gains required control/accounting/applied and AxAgentPlaybookEvolveOutcome gains required kind, so construction sites (host test doubles, adapters) must be updated; applied is a three-state discriminant ('live'|'dry_run'|'rolled_back'), not a boolean. Portable TS behavior changes: evaluation-batch completeness now accounts for discarded environment-failure attempts (executedRuns + discardedRuns === expectedRuns) AND a task whose attempts are all discarded no longer aborts the batch (continue, not break), with truncatedAtTaskIndex set only for genuine budget exhaustion; the accept decision gains optional validity/interval/reach conjuncts, all default-off; a bounded re-draw may re-run a discarded attempt from the same metric budget. Generated packages keep the legacy gate; the new options are TypeScript-first and the gate chain is not yet expressible in Core IR. Conformance fixture ir/conformance/axagent/playbook-evidence-gate.json pins the gate order, the prune loss-tolerance variant of gate 1, and completeness-under-discards; its assertions run in scripts/playbook-evidence-conformance.test.ts until the behavior is migrated.",
+      "impact": "BREAKING (type-level): AxAgentPlaybookEvolveResult gains required control/accounting/applied and AxAgentPlaybookEvolveOutcome gains required kind, so construction sites (host test doubles, adapters) must be updated; applied is a three-state discriminant ('live'|'dry_run'|'rolled_back'), not a boolean. AxAgentEvalBatchResult — exported from the package root — likewise gains four REQUIRED properties (discardedRuns, durationMs, usage, termination), so a host-built batch result no longer compiles unchanged. AxAgentPlaybookEvolveProgressEvent.phase widens from 5 to 12 members, which breaks an exhaustive switch. Portable TS behavior changes: evaluation-batch completeness now accounts for discarded environment-failure attempts (executedRuns + discardedRuns === expectedRuns) AND a task whose attempts are all discarded no longer aborts the batch (continue, not break), with truncatedAtTaskIndex set only for genuine budget exhaustion; the accept decision gains optional validity/interval/reach conjuncts, all default-off; a bounded re-draw may re-run a discarded attempt from the same metric budget; the gate chain evaluates its two host-call gates lazily so a candidate an earlier required gate already rejected never pays for one. Token accounting distinguishes 'unreported' (the phase could report usage and none arrived) from 'unobservable' (the phase cannot report without a usageTap). Generated packages keep the legacy gate; the new options are TypeScript-first and the gate chain is not yet expressible in Core IR. Conformance fixture ir/conformance/axagent/playbook-evidence-gate.json pins the gate order, the host-call short-circuit, the prune loss-tolerance variant of gate 1, and completeness-under-discards; its assertions run in scripts/playbook-evidence-conformance.test.ts until the behavior is migrated.",
       "suggestedAxirWork": [
         "Add or update the TS-derived conformance fixture.",
         "Update AxIR/Core or descriptor data to match the portable TS behavior.",

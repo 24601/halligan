@@ -647,7 +647,13 @@ export type AxAgentPlaybookTerminationSplit = Readonly<{
   completed: number;
   policyFailures: number;
   environmentFailures: number;
-  /** environmentFailures / expectedRuns. */
+  /**
+   * `environmentFailures / expectedRuns` — a rate PER EXPECTED RUN, not per
+   * drawn attempt. With `maxDiscardRedraws > 0` more attempts are drawn than
+   * expected, so a split where every draw and re-draw was discarded reads
+   * above 1.0. That is the intended reading: the denominator is the evidence
+   * the split was supposed to produce, not the work it cost.
+   */
   discardRate: number;
   /** Attempts re-drawn after a discard. Each consumed budget. */
   redraws: number;
