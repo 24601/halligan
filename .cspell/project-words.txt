@@ -36,6 +36,7 @@ axllm
 axrejected
 backticked
 baprs
+Basit
 behaviour
 behaviourally
 Bernoulli
@@ -162,6 +163,7 @@ Multimodal
 multiservice
 multistep
 mundo
+Mustafa
 nanos
 Nemo
 nemo
