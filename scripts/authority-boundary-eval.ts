@@ -14,6 +14,8 @@ import type {
   AxAuthorityContext,
   AxAuthorizationRequestContext,
   AxCapabilityGrant,
+  AxEvidenceObservation,
+  AxEvidenceRequirement,
   AxResourceScope,
 } from '../src/ax/authority/types.js';
 import { AxGen } from '../src/ax/dsp/generate.js';
@@ -60,6 +62,31 @@ function baseGrant(
   };
 }
 
+function requirement(
+  override: Partial<AxEvidenceRequirement> = {}
+): AxEvidenceRequirement {
+  return {
+    kind: 'session.mfa',
+    trustedSources: ['idp-a'],
+    match: { op: 'eq', value: 'strong' },
+    ...override,
+  };
+}
+
+function observation(
+  override: Partial<AxEvidenceObservation> = {}
+): AxEvidenceObservation {
+  return {
+    version: 1,
+    kind: 'session.mfa',
+    sourceId: 'idp-a',
+    observedAt: NOW - 1_000,
+    value: 'strong',
+    leaseEpoch: 7,
+    ...override,
+  };
+}
+
 function receipt(
   operation: string,
   context: Readonly<AxAuthorizationRequestContext>,
@@ -93,6 +120,25 @@ function context(
     authorize: (operation, request) => receipt(operation, request),
     ...override,
   };
+}
+
+/**
+ * Minimum per-call mean over `repeats` passes. Under concurrent load a single
+ * mean carries more noise than the quantity being measured; noise is additive,
+ * so the minimum is the closest honest estimate of the path's own cost.
+ */
+async function minimumMeanMs(
+  run: () => Promise<unknown>,
+  iterations: number,
+  repeats = 5
+): Promise<number> {
+  let best = Number.POSITIVE_INFINITY;
+  for (let pass = 0; pass < repeats; pass++) {
+    const start = performance.now();
+    for (let index = 0; index < iterations; index++) await run();
+    best = Math.min(best, (performance.now() - start) / iterations);
+  }
+  return best;
 }
 
 async function denied(run: () => Promise<unknown>): Promise<boolean> {
@@ -315,11 +361,17 @@ export interface AuthorityEvaluationReport {
     sinkRedrive: 'passed';
   };
   auditRedaction: 'passed';
+  evidenceGuards: 'passed';
   overhead: {
     iterations: number;
     baselineMeanMs: number;
     scopedMeanMs: number;
     incrementalMeanMs: number;
+    /** One reused authority, no requirements declared; minimum of 5 passes. */
+    guardBaselineMeanMs: number;
+    /** The same reused authority with one satisfied requirement declared. */
+    guardedMeanMs: number;
+    guardIncrementalMeanMs: number;
   };
 }
 
@@ -371,6 +423,78 @@ export async function runAuthorityEvaluation(
       operation: 'record.read',
       resource,
     },
+    // Evidence guards. Each declares a requirement the host's own facts do not
+    // satisfy, so the grant matches and the deny comes from the guard.
+    {
+      authority: context({
+        grants: [baseGrant({ requirements: [requirement()] })],
+      }),
+      operation: 'record.read',
+      resource,
+    },
+    {
+      authority: context({
+        grants: [baseGrant({ requirements: [requirement()] })],
+        evidence: [observation({ sourceId: 'idp-rogue' })],
+      }),
+      operation: 'record.read',
+      resource,
+    },
+    {
+      authority: context({
+        grants: [baseGrant({ requirements: [requirement()] })],
+        evidence: [observation({ leaseEpoch: 6 })],
+      }),
+      operation: 'record.read',
+      resource,
+    },
+    {
+      authority: context({
+        grants: [
+          baseGrant({
+            requirements: [requirement({ trustedSources: ['idp-a', 'idp-b'] })],
+          }),
+        ],
+        // Two trusted observations of one kind: Ax denies rather than picking
+        // the freshest, the first, or the "best".
+        evidence: [
+          observation(),
+          observation({ sourceId: 'idp-b', value: 'weak' }),
+        ],
+      }),
+      operation: 'record.read',
+      resource,
+    },
+    {
+      authority: context({
+        grants: [
+          baseGrant({ requirements: [requirement({ maxAgeMs: 1_000 })] }),
+        ],
+        evidence: [observation({ observedAt: NOW - 10_000 })],
+      }),
+      operation: 'record.read',
+      resource,
+    },
+    {
+      authority: context({
+        grants: [baseGrant({ requirements: [requirement()] })],
+        evidence: [observation({ value: 'weak' })],
+      }),
+      operation: 'record.read',
+      resource,
+    },
+    // The union semantic: an unguarded sibling grant does not launder past a
+    // requirement declared on a grant matching the same operation+resource.
+    {
+      authority: context({
+        grants: [
+          baseGrant({ id: 'grant-guarded', requirements: [requirement()] }),
+          baseGrant({ id: 'grant-plain' }),
+        ],
+      }),
+      operation: 'record.read',
+      resource,
+    },
   ];
   let baselineAccepted = 0;
   let scopedDenied = 0;
@@ -386,6 +510,44 @@ export async function runAuthorityEvaluation(
   }
   assert(baselineAccepted === attacks.length, 'baseline comparison');
   assert(scopedDenied === attacks.length, 'scoped adversarial denials');
+
+  // A guard denial must cost the host nothing and must still allow when the
+  // host's own facts satisfy the requirement, so the mechanism is a gate on
+  // asking the host rather than a second, weaker authorizer.
+  let guardHostCalls = 0;
+  const guardAuthorize = (
+    operation: string,
+    request: Readonly<AxAuthorizationRequestContext>
+  ) => {
+    guardHostCalls++;
+    return receipt(operation, request);
+  };
+  assert(
+    await denied(() =>
+      axAuthorize(
+        context({
+          grants: [baseGrant({ requirements: [requirement()] })],
+          evidence: [observation({ value: 'weak' })],
+          authorize: guardAuthorize,
+        }),
+        'record.read',
+        resource
+      )
+    ),
+    'guard denial'
+  );
+  assert(guardHostCalls === 0, 'guard denial costs zero host authorizer calls');
+  const guardedReceipt = await axAuthorize(
+    context({
+      grants: [baseGrant({ requirements: [requirement({ maxAgeMs: 5_000 })] })],
+      evidence: [observation()],
+      authorize: guardAuthorize,
+    }),
+    'record.read',
+    resource
+  );
+  assert(guardedReceipt?.decision === 'allow', 'satisfied guard allows');
+  assert(guardHostCalls === 1, 'satisfied guard asks the host exactly once');
 
   const parent = context();
   const child = axAttenuateAuthority(parent, {
@@ -807,6 +969,33 @@ export async function runAuthorityEvaluation(
     await axAuthorize(context(), 'record.read', resource);
   }
   const scopedMs = performance.now() - scopedStart;
+  // Counter-metric for the guard claim. Both loops reuse one authority object,
+  // so the snapshot cache is warm on each side and the only difference between
+  // them is one satisfied requirement plus one observation. Comparing the
+  // guarded loop against `scopedMeanMs` above would flatter it, because that
+  // loop re-snapshots a fresh context on every iteration.
+  const guardBaselineAuthority = context();
+  const guardedAuthority = context({
+    grants: [baseGrant({ requirements: [requirement({ maxAgeMs: 5_000 })] })],
+    evidence: [observation()],
+  });
+  // Warm both paths before measuring either, so the first loop does not pay
+  // the JIT cost of the second's shared code, then take the minimum of several
+  // passes. A single mean on a loaded host is noise-dominated at this scale —
+  // it swung either side of zero across runs — and noise only ever adds time,
+  // so the minimum is the honest estimator of the mechanism's own cost.
+  for (let index = 0; index < iterations; index++) {
+    await axAuthorize(guardBaselineAuthority, 'record.read', resource);
+    await axAuthorize(guardedAuthority, 'record.read', resource);
+  }
+  const guardBaselineMeanMs = await minimumMeanMs(
+    () => axAuthorize(guardBaselineAuthority, 'record.read', resource),
+    iterations
+  );
+  const guardedMeanMs = await minimumMeanMs(
+    () => axAuthorize(guardedAuthority, 'record.read', resource),
+    iterations
+  );
   const baselineMeanMs = baselineMs / iterations;
   const scopedMeanMs = scopedMs / iterations;
 
@@ -834,11 +1023,15 @@ export async function runAuthorityEvaluation(
       sinkRedrive: 'passed',
     },
     auditRedaction: 'passed',
+    evidenceGuards: 'passed',
     overhead: {
       iterations,
       baselineMeanMs,
       scopedMeanMs,
       incrementalMeanMs: scopedMeanMs - baselineMeanMs,
+      guardBaselineMeanMs,
+      guardedMeanMs,
+      guardIncrementalMeanMs: guardedMeanMs - guardBaselineMeanMs,
     },
   };
 }
