@@ -20,16 +20,28 @@ import { describe, expect, it } from 'vitest';
  * memoryStore.ts and src/tools/trajectory/jsonl.ts and a fix to one silently
  * missed the other. Sharing across the package boundary can only move those
  * lines INTO this directory, so `jsonl.ts` fell 940 -> 800 and `memoryStore.ts`
- * 720 -> 520 while the directory total rose. The A1+A2 total the RFC estimated
- * at 2,900 is therefore 3,260 with projection.ts at 620; lane A2 must restate
- * that number and record the reason in docs/TRAJECTORY.md per RFC 8.7, which
- * this lane does not own.
+ * 720 -> 520 while the directory total rose.
  *
- * Measured at the cap raise: types 461, util 141, registry 171, spill 158,
- * log 483, memoryStore 507, conformance 676, index 98 -- 2,695 in total.
- * conformance.ts is the biggest single overrun of the RFC's estimate (470):
- * it is seventeen named cases, and the review's B1, Mn3, Mn4, Mn5 and Mn6
- * each added a normative assertion the kit could not previously make.
+ * Lane A2 restates the directory ceiling, as RFC 8.7 requires and as lane A1's
+ * handoff asked. RFC 5.1 put the A1+A2 total at 2,900 with one 620-line
+ * `projection.ts`; the shipped lane is 3,785 across two files. The reason is
+ * recorded in docs/TRAJECTORY.md ("Line budgets and why they moved") and is
+ * the same one A1 hit: the RFC's estimate counts the declared API surface as
+ * if it were dense, and biome's 80-column formatting plus a one-line policy
+ * comment per non-obvious field roughly doubles a types-heavy module. The
+ * projection lane is also split in two rather than shipped as one 1,000-line
+ * file: `projection.ts` is the READ path (budget, staircase, straddle descent,
+ * drill-down, renderer) and `rollups.ts` is the CACHE path (block/meta/store
+ * port, the in-memory store, the summarizer port and its two implementations,
+ * and sealing). Neither half is understandable in an afternoon inside the
+ * other.
+ *
+ * Measured at this cap raise: types 461, util 141, registry 171, spill 158,
+ * log 483, memoryStore 507, conformance 676, index 134, projection 494,
+ * rollups 560 -- 3,785 in total. conformance.ts remains the biggest single
+ * overrun of the RFC's estimate (470): it is seventeen named cases, and the
+ * A1 review's B1, Mn3, Mn4, Mn5 and Mn6 each added a normative assertion the
+ * kit could not previously make.
  */
 const CAPS: readonly (readonly [string, number])[] = [
   ['src/ax/trajectory/types.ts', 480],
@@ -39,15 +51,19 @@ const CAPS: readonly (readonly [string, number])[] = [
   ['src/ax/trajectory/log.ts', 500], // new: the shared index + read primitives
   ['src/ax/trajectory/memoryStore.ts', 520], // lowered from 720
   ['src/ax/trajectory/conformance.ts', 700], // raised from 470
-  ['src/ax/trajectory/index.ts', 110],
+  ['src/ax/trajectory/index.ts', 150], // raised from 110 by the A2 exports
+  ['src/ax/trajectory/projection.ts', 520], // new: RFC 4.8 read path
+  ['src/ax/trajectory/rollups.ts', 600], // new: RFC 4.8 cache + sealing path
   ['src/tools/trajectory/jsonl.ts', 830], // lowered from 940
 ];
 
 /**
- * Directory ceiling for the files lane A1 owns. Lane A2 adds projection.ts
- * (cap 620) and must restate this total in the same PR that adds its row.
+ * Directory ceiling for src/ax/trajectory, restated by lane A2. RFC 5.1's
+ * A1+A2 estimate was 2,900; the shipped lane measures 3,785. The reason is in
+ * the header comment above and in docs/TRAJECTORY.md. Lane A3 owns
+ * src/ax/mind and must not raise this one.
  */
-const TRAJECTORY_DIRECTORY_CAP = 2_760;
+const TRAJECTORY_DIRECTORY_CAP = 3_860;
 
 // vitest runs this workspace with cwd = src/ax, so the repo root is derived
 // from this file rather than from the process.
@@ -98,6 +114,8 @@ describe('trajectory line budgets', () => {
       'src/ax/trajectory/memoryStore.ts',
       'src/ax/trajectory/conformance.ts',
       'src/ax/trajectory/index.ts',
+      'src/ax/trajectory/projection.ts',
+      'src/ax/trajectory/rollups.ts',
       'src/tools/trajectory/jsonl.ts',
     ]) {
       expect(capped.has(path), `${path} has no cap row`).toBe(true);
