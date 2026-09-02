@@ -96,14 +96,6 @@ export interface AxPatchTaxonomy {
 
 export type AxMutationEffort = 'minimal' | 'low' | 'medium' | 'high' | 'max';
 
-const MUTATION_EFFORTS: ReadonlySet<string> = new Set([
-  'minimal',
-  'low',
-  'medium',
-  'high',
-  'max',
-]);
-
 /** The effort vocabulary, in a fixed order. Exported for the same reason as `axMutationDepths`. */
 export const axMutationEfforts: readonly AxMutationEffort[] = Object.freeze([
   'minimal',
@@ -112,6 +104,9 @@ export const axMutationEfforts: readonly AxMutationEffort[] = Object.freeze([
   'high',
   'max',
 ] as const);
+
+/** DERIVED from the exported list, never a second copy that drifts. */
+const MUTATION_EFFORTS: ReadonlySet<string> = new Set(axMutationEfforts);
 
 export interface AxMutationAnnotation {
   readonly depth: AxMutationDepth;

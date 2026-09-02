@@ -1103,14 +1103,21 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
+        // An ABORT is not a broken store. `store.record` is passed the run's
+        // abort signal, so a cancelled run rejects here with the abort reason
+        // — reporting that as "ledger unavailable" would blame the host for
+        // the caller's cancellation (§12/M3-minor).
+        const aborted = gepaAbortSignal?.aborted === true;
         verboseLog(
-          `rejected-candidate ledger unavailable, continuing without a durable record: ${message}`
+          aborted
+            ? `rejected-candidate ledger write abandoned because the run was aborted: ${message}`
+            : `rejected-candidate ledger unavailable, continuing without a durable record: ${message}`
         );
         if (lineageEnabled) {
           args.onFailure?.(
             buildGEPACandidateFailure(
-              'runtime',
-              `rejected_candidate_ledger: ${message}`,
+              aborted ? 'abort' : 'runtime',
+              `rejected_candidate_ledger_write: ${message}`,
               lineageOptions!
             )
           );
@@ -1126,7 +1133,8 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
      * than by anybody remembering to purge.
      */
     const fetchRejectedPrior = async (
-      componentIds: readonly string[]
+      componentIds: readonly string[],
+      onFailure?: (failure: AxGEPACandidateFailure) => void
     ): Promise<readonly AxRejectedCandidateLedgerEntry[] | undefined> => {
       if (!ledgerOptions) return undefined;
       try {
@@ -1143,9 +1151,24 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
         );
         return entries.length > 0 ? entries : undefined;
       } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const aborted = gepaAbortSignal?.aborted === true;
         verboseLog(
-          `rejected-candidate ledger read failed, proposing without a prior: ${error instanceof Error ? error.message : String(error)}`
+          `rejected-candidate ledger read failed, proposing without a prior: ${message}`
         );
+        // A failed READ used to leave no trace at all, so a run whose every
+        // read failed was indistinguishable from a run against an empty
+        // ledger. The write path has recorded a lineage failure since §6.3;
+        // the read path now says the same thing (§12/M2-minor).
+        if (lineageEnabled) {
+          onFailure?.(
+            buildGEPACandidateFailure(
+              aborted ? 'abort' : 'runtime',
+              `rejected_candidate_ledger_read: ${message}`,
+              lineageOptions!
+            )
+          );
+        }
         return undefined;
       }
     };
@@ -2382,7 +2405,8 @@ Your task is to write a new instruction for the assistant. Read the inputs caref
       // injected clock, so an entry whose stated conditions no longer hold
       // never reaches the proposer.
       const rejectedPrior = await fetchRejectedPrior(
-        targetGroup.map((groupTarget) => groupTarget.id)
+        targetGroup.map((groupTarget) => groupTarget.id),
+        (failure) => mutationFailures?.push(failure)
       );
       for (const groupTarget of targetGroup) {
         if (

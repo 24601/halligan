@@ -2999,7 +2999,8 @@ describe('rejected-candidate ledger wiring', () => {
    */
   const runRejecting = async (
     ledger: Record<string, unknown> | undefined,
-    overrides: Record<string, unknown> = {}
+    overrides: Record<string, unknown> = {},
+    compileOverrides: Record<string, unknown> = {}
   ) => {
     const priorSeenPerRound: unknown[][] = [];
     const optimizer = new AxGEPA({
@@ -3030,6 +3031,7 @@ describe('rejected-candidate ledger wiring', () => {
         skipPerfectScore: false,
         candidateLineage: true,
         ...(ledger ? { rejectedCandidateLedger: ledger } : {}),
+        ...compileOverrides,
       }
     );
     return { result, priorSeenPerRound };
@@ -3104,12 +3106,18 @@ describe('rejected-candidate ledger wiring', () => {
       },
       purgeExpired: async () => 0,
     };
-    const { result } = await runRejecting({
-      store: throwing,
-      storeId: 'broken',
-      clock,
-      expiresWhen: [{ kind: 'after_ms', ttlMs: 60_000 }],
-    });
+    const { result } = await runRejecting(
+      {
+        store: throwing,
+        storeId: 'broken',
+        clock,
+        expiresWhen: [{ kind: 'after_ms', ttlMs: 60_000 }],
+      },
+      {},
+      // Failure messages are fingerprint-only by default; this run reads them
+      // back, so it asks for them explicitly.
+      { candidateLineage: { includeFailureMessages: true } }
+    );
 
     // The run completed and still selected an artifact.
     expect(result.optimizedProgram?.componentMap).toEqual({
@@ -3126,6 +3134,21 @@ describe('rejected-candidate ledger wiring', () => {
             failure.messageFingerprint !== undefined
         )
       )
+    ).toBe(true);
+    // BOTH directions leave a trace. A failed READ used to record nothing, so
+    // a run whose every read failed looked exactly like a run against an empty
+    // ledger — and the prior is the half that changes what gets proposed.
+    const messages = records
+      .flatMap((record: any) => record.failures ?? [])
+      .map((failure: any) => failure.message)
+      .filter(
+        (message: unknown): message is string => typeof message === 'string'
+      );
+    expect(
+      messages.some((m) => m.startsWith('rejected_candidate_ledger_read'))
+    ).toBe(true);
+    expect(
+      messages.some((m) => m.startsWith('rejected_candidate_ledger_write'))
     ).toBe(true);
     // No ref: nothing was durably recorded, and claiming otherwise on the
     // artifact would be a pointer into an empty store.
@@ -3335,5 +3358,179 @@ describe('rejected-candidate ledger wiring', () => {
         'rejectedCandidateLedgerRef'
       )
     ).toBe(false);
+  });
+});
+
+describe('merge gate under a discriminative sampler', () => {
+  /**
+   * Three independently improvable components where improving ANY TWO is
+   * worse than improving one. Single mutations are accepted, so the archive
+   * grows enough to merge; every merge of two accepted candidates is then
+   * rejected at the merge gate. That is the only shape that reaches both gates
+   * in one run.
+   */
+  const runMerging = async (
+    store: AxInMemoryRejectedCandidateLedger,
+    clock: Readonly<{ now: () => number }>,
+    recipe: Awaited<ReturnType<typeof axHarnessRecipe>>
+  ) => {
+    const componentIds = [
+      'root::instruction',
+      'root::description',
+      'root::fn-desc:answer',
+    ];
+    const values: Record<string, string> = Object.fromEntries(
+      componentIds.map((id) => [id, 'base'])
+    );
+    const owner = (index: number) => componentIds[index % 3]!;
+    const program = {
+      getId: () => 'root',
+      setId: () => {},
+      getInstruction: () => values['root::instruction']!,
+      setInstruction: (value: string) => {
+        values['root::instruction'] = value;
+      },
+      getSignature: () => ({
+        getDescription: () => values['root::description']!,
+        toString: () => '"base" question:string -> answer:string',
+      }),
+      namedProgramInstances: () => [],
+      getOptimizableComponents: () =>
+        componentIds.map((key, position) => ({
+          key,
+          kind: ['instruction', 'description', 'fn-desc'][position]!,
+          current: values[key]!,
+        })),
+      applyOptimizedComponents: (updates: Readonly<Record<string, string>>) => {
+        for (const id of componentIds) {
+          const next = updates[id];
+          if (typeof next === 'string') values[id] = next;
+        }
+      },
+      forward: async (_ai: AxAIService, example: any) => {
+        const improved = componentIds.filter(
+          (id) => values[id] === `better-${id}`
+        );
+        if (improved.length >= 2) return { score: 0, index: example.index };
+        const own = improved.includes(owner(example.index))
+          ? 0.4
+          : improved.length > 0
+            ? -0.1
+            : 0;
+        return { score: 0.6 + own, index: example.index };
+      },
+      getTraces: () => [],
+      setDemos: () => {},
+      applyOptimization: () => {},
+      getUsage: () => [],
+      resetUsage: () => {},
+    };
+    const optimizer = new AxGEPA({
+      studentAI: {} as AxAIService,
+      teacherAI: {} as AxAIService,
+      numTrials: 6,
+      minibatch: true,
+      minibatchSize: 2,
+      mergeMax: 5,
+    } as any);
+    (optimizer as any).reflectTargetInstruction = async (componentId: string) =>
+      `better-${componentId}`;
+    return await optimizer.compile(
+      program as any,
+      Array.from({ length: 9 }, (_, index) => ({ index })) as any,
+      async ({ prediction }: any) => prediction.score,
+      {
+        maxMetricCalls: 200,
+        skipPerfectScore: false,
+        minibatchStrategy: 'discriminative',
+        candidateLineage: true,
+        harnessRecipe: { recipe },
+        rejectedCandidateLedger: {
+          store,
+          storeId: 'merge-store',
+          clock,
+          expiresWhen: [{ kind: 'after_ms', ttlMs: 600_000 }],
+        },
+      } as any
+    );
+  };
+
+  it('labels every merge-gate reading with the sum estimator while the mutation gate runs IPW', async () => {
+    const clock = { now: () => 1_000 };
+    const store = new AxInMemoryRejectedCandidateLedger({ clock });
+    const recipe = await axHarnessRecipe({
+      bindings: [{ port: 'model.primary', atomId: 'atom-a', version: '1' }],
+      boundModelId: 'model-a',
+    });
+    const result = await runMerging(store, clock, recipe);
+    const records = result.optimizedProgram?.candidateLineage?.records ?? [];
+
+    // The run REACHED the merge gate. Without this the estimator claim below
+    // is a statement about an empty set.
+    const merges = records.filter(
+      (record: any) => record.strategy === 'system_merge'
+    );
+    expect(merges.length).toBeGreaterThan(0);
+    expect(merges.every((record: any) => record.decision === 'rejected')).toBe(
+      true
+    );
+
+    const entries = await store.list({ now: clock.now() });
+    const mergeReadings = entries
+      .filter((entry) => entry.gateReading.gate === 'system_merge')
+      .map((entry) => entry.gateReading);
+    expect(mergeReadings.length).toBeGreaterThan(0);
+    for (const reading of mergeReadings) {
+      // The merge subsample is a score-disagreement stratified draw with no
+      // inclusion probabilities, so no IPW estimate of it exists — even under
+      // `minibatchStrategy: 'discriminative'` (RFC §8.7).
+      expect(reading.estimator).toBe('sum');
+      expect(reading.differenceEstimate).toBeUndefined();
+      expect(typeof reading.parentScore).toBe('number');
+      expect(typeof reading.childScore).toBe('number');
+    }
+
+    // THE CONTRAST: the same run's mutation gate really did run IPW, so the
+    // merge gate's `'sum'` is a distinction this fixture can see rather than
+    // the only value the run could have produced.
+    const mutationReadings = entries
+      .filter((entry) => entry.gateReading.gate === 'reflective_mutation')
+      .map((entry) => entry.gateReading);
+    expect(mutationReadings.length).toBeGreaterThan(0);
+    expect(
+      mutationReadings.every((reading) => reading.estimator === 'ipw_hajek')
+    ).toBe(true);
+    for (const reading of mutationReadings) {
+      // A paired difference, reported as one: no score pair is invented for it.
+      expect(typeof reading.differenceEstimate).toBe('number');
+      expect(reading.parentScore).toBeUndefined();
+      expect(reading.childScore).toBeUndefined();
+    }
+  });
+
+  it('stamps the harness on merge records too, not only on the two the split fixture reaches', async () => {
+    const clock = { now: () => 1_000 };
+    const store = new AxInMemoryRejectedCandidateLedger({ clock });
+    const recipe = await axHarnessRecipe({
+      bindings: [{ port: 'model.primary', atomId: 'atom-a', version: '1' }],
+      boundModelId: 'model-a',
+    });
+    const result = await runMerging(store, clock, recipe);
+    const records = result.optimizedProgram?.candidateLineage?.records ?? [];
+    // The structural argument is one central `lineageV2Fields` helper; this is
+    // the fixture that exercises it across every record STRATEGY rather than
+    // across two seed/mutation records.
+    expect(new Set(records.map((record: any) => record.strategy))).toEqual(
+      new Set(['seed', 'reflective_mutation', 'system_merge'])
+    );
+    expect(new Set(records.map((record: any) => record.decision))).toEqual(
+      new Set(['accepted', 'rejected'])
+    );
+    for (const record of records) {
+      expect(record.harness).toEqual({
+        recipeDigest: recipe.digest,
+        boundModelId: 'model-a',
+      });
+    }
   });
 });
