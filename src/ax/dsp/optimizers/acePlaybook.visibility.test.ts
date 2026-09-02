@@ -8,7 +8,9 @@ import { f } from '../sig.js';
 import { ax } from '../template.js';
 import { AxACE, AxACEOptimizedProgram } from './ace.js';
 import {
+  AX_ACE_MAX_SUPPORTED_PLAYBOOK_VERSION,
   applyCuratorOperations,
+  axPlaybookRequiresVisibilitySupport,
   axProjectActorPlaybook,
   axRedactPlaybookForModel,
   axRenderActorPlaybook,
@@ -599,6 +601,321 @@ describe('host-only provenance never reaches a model', () => {
     expect(
       playbook.sections.Guidelines?.[0]?.evidence?.authorityProvenance?.digest
     ).toBe(provenance().digest);
+  });
+});
+
+describe('rejected-retained verification', () => {
+  function seeded(): AxACE {
+    const playbook = createEmptyPlaybook('Retention fixture');
+    playbook.sections.Guidelines = [
+      bullet({ id: 'live-0', content: 'original guidance' }),
+    ];
+    return new AxACE(
+      { studentAI: {} as AxAIService, teacherAI: {} as AxAIService },
+      { initialPlaybook: playbook }
+    );
+  }
+
+  it('commits optimizer-tier evidence while the content reverts', () => {
+    const ace = seeded();
+    const updated = ace.retainRejectedMutation({
+      operations: [
+        {
+          type: 'UPDATE',
+          section: 'Guidelines',
+          bulletId: 'live-0',
+          content: 'a proposal that failed its held-out gate',
+        },
+        {
+          type: 'ADD',
+          section: 'Guidelines',
+          content: 'a rejected new bullet',
+        },
+      ],
+      verifierId: 'held-out',
+      testId: 'split-3',
+      now: NOW,
+      summary: 'score regressed',
+    });
+    expect(updated.length).toBe(2);
+
+    const playbook = ace.getPlaybook();
+    const live = playbook.sections.Guidelines?.find(
+      (entry) => entry.id === 'live-0'
+    );
+    // The artifact reverted: content and tier are what they were.
+    expect(live?.content).toBe('original guidance');
+    expect(live).not.toHaveProperty('visibility');
+    // The evidence committed.
+    expect(live?.evidence?.verification).toEqual([
+      {
+        verifierId: 'held-out',
+        testId: 'split-3',
+        result: 'rejected-retained',
+        timestamp: NOW,
+        summary: 'score regressed',
+      },
+    ]);
+    // The rejected new bullet exists, in the optimizer tier only.
+    const added = playbook.sections.Guidelines?.find(
+      (entry) => entry.content === 'a rejected new bullet'
+    );
+    expect(added?.visibility).toBe('optimizer');
+    expect(
+      axRenderActorPlaybook(axProjectActorPlaybook(playbook, { now: NOW }))
+    ).not.toContain('a rejected new bullet');
+    expect(
+      axRenderActorPlaybook(axProjectActorPlaybook(playbook, { now: NOW }))
+    ).toContain('original guidance');
+  });
+
+  it('timestamps come from the injected now', () => {
+    const ace = seeded();
+    ace.retainRejectedMutation({
+      operations: [
+        { type: 'UPDATE', section: 'Guidelines', bulletId: 'live-0' },
+      ],
+      verifierId: 'held-out',
+      now: NOW,
+    });
+    const live = ace.getPlaybook().sections.Guidelines?.[0];
+    expect(live?.updatedAt).toBe(NOW);
+    expect(live?.evidence?.verification?.[0]?.timestamp).toBe(NOW);
+  });
+
+  it('the retained entry survives a subsequent apply and dedupe pass', () => {
+    const ace = seeded();
+    ace.retainRejectedMutation({
+      operations: [
+        { type: 'UPDATE', section: 'Guidelines', bulletId: 'live-0' },
+      ],
+      verifierId: 'held-out',
+      now: NOW,
+    });
+    const playbook = ace.getPlaybook();
+    // `normalizeVerification` is where an unlisted result is silently eaten,
+    // and every merge path routes through it.
+    applyCuratorOperations(playbook, [
+      {
+        type: 'UPDATE',
+        section: 'Guidelines',
+        bulletId: 'live-0',
+        content: 'a later revision',
+      },
+    ]);
+    dedupePlaybookByContent(playbook);
+    expect(
+      playbook.sections.Guidelines?.[0]?.evidence?.verification?.map(
+        (entry) => entry.result
+      )
+    ).toContain('rejected-retained');
+  });
+
+  it('a later passed result does not overwrite a rejected-retained record', () => {
+    const ace = seeded();
+    ace.retainRejectedMutation({
+      operations: [
+        { type: 'UPDATE', section: 'Guidelines', bulletId: 'live-0' },
+      ],
+      verifierId: 'held-out',
+      testId: 'split-3',
+      now: NOW,
+    });
+    const playbook = ace.getPlaybook();
+    applyCuratorOperations(
+      playbook,
+      [{ type: 'UPDATE', section: 'Guidelines', bulletId: 'live-0' }],
+      {
+        hostEvidence: {
+          source: 'manual',
+          verification: [
+            {
+              verifierId: 'held-out',
+              testId: 'split-3',
+              result: 'passed',
+              timestamp: NOW,
+            },
+          ],
+        },
+      }
+    );
+    const results =
+      playbook.sections.Guidelines?.[0]?.evidence?.verification?.map(
+        (entry) => entry.result
+      );
+    expect(results).toContain('rejected-retained');
+    expect(results).toContain('passed');
+  });
+
+  it('rejected-retained survives isEvidenceStructurallyValid', () => {
+    const playbook = createEmptyPlaybook('Structural');
+    playbook.sections.Guidelines = [
+      bullet({
+        id: 'b-0',
+        evidence: {
+          verification: [
+            { verifierId: 'v', result: 'rejected-retained', timestamp: NOW },
+          ],
+        },
+      }),
+    ];
+    expect(() => applyCuratorOperations(playbook, [])).not.toThrow();
+    expect(
+      isBulletApplicable(playbook.sections.Guidelines[0]!, { now: NOW })
+    ).toBe(true);
+  });
+
+  it('rejects a call with no verifier or no clock', () => {
+    const ace = seeded();
+    const operations = [
+      { type: 'UPDATE' as const, section: 'Guidelines', bulletId: 'live-0' },
+    ];
+    expect(() =>
+      ace.retainRejectedMutation({ operations, verifierId: ' ', now: NOW })
+    ).toThrow();
+    expect(() =>
+      ace.retainRejectedMutation({ operations, verifierId: 'v', now: '' })
+    ).toThrow();
+  });
+});
+
+describe('playbook version compatibility', () => {
+  it('stamps version 2 once an optimizer bullet exists and stays 1 otherwise', () => {
+    const plain = createEmptyPlaybook('Plain');
+    plain.sections.Guidelines = [];
+    applyCuratorOperations(plain, [
+      { type: 'ADD', section: 'Guidelines', content: 'ordinary guidance' },
+    ]);
+    expect(plain.version).toBe(1);
+
+    const tiered = createEmptyPlaybook('Tiered');
+    tiered.sections.Guidelines = [];
+    applyCuratorOperations(
+      tiered,
+      [{ type: 'ADD', section: 'Guidelines', content: 'diagnostic' }],
+      { hostEvidence: { source: 'manual', visibility: 'optimizer' } }
+    );
+    expect(tiered.version).toBe(2);
+    expect(axPlaybookRequiresVisibilitySupport(tiered)).toBe(true);
+    expect(axPlaybookRequiresVisibilitySupport(plain)).toBe(false);
+  });
+
+  it('a playbook above the supported version is refused by every reader', () => {
+    // Without a reader the stamp is decoration. This is the gate that makes the
+    // NEXT incompatibility fail closed.
+    const future = legacyPlaybook();
+    future.version = AX_ACE_MAX_SUPPORTED_PLAYBOOK_VERSION + 1;
+    expect(() => renderPlaybook(future, { now: NOW })).toThrow(TypeError);
+    expect(() => axProjectActorPlaybook(future, { now: NOW })).toThrow(
+      TypeError
+    );
+    expect(() => applyCuratorOperations(future, [])).toThrow(TypeError);
+
+    const supported = legacyPlaybook();
+    supported.version = AX_ACE_MAX_SUPPORTED_PLAYBOOK_VERSION;
+    expect(() => renderPlaybook(supported, { now: NOW })).not.toThrow();
+  });
+});
+
+describe('render-time precondition re-check', () => {
+  const GRANT = 'grant-held-1';
+
+  function provenanceFor(grantIds: readonly string[]) {
+    return axExtractSkillProvenance({
+      receipts: [
+        {
+          version: 1,
+          receiptId: 'r-1',
+          requestId: 'q-1',
+          decision: 'allow',
+          operation: 'files.read',
+          resource: { type: 'file', id: 'f-1' },
+          principalId: 'p-1',
+          actor: { id: 'a-1', kind: 'agent' },
+          grantIds: [...grantIds],
+          leaseEpoch: 4,
+          authorizedAt: 1,
+        },
+      ],
+      leaseEpoch: 4,
+      capturedAt: NOW,
+    });
+  }
+
+  function gatedPlaybook(): AxACEPlaybook {
+    const playbook = createEmptyPlaybook('Gated');
+    playbook.sections.Guidelines = [
+      bullet({
+        id: 'gated',
+        content: 'guidance that depended on a grant',
+        evidence: { authorityProvenance: provenanceFor([GRANT]) },
+      }),
+      bullet({ id: 'ungated', content: 'guidance with no provenance' }),
+    ];
+    return playbook;
+  }
+
+  it('annotates rather than drops a bullet whose authority no longer holds', () => {
+    const view = axProjectActorPlaybook(gatedPlaybook(), {
+      now: NOW,
+      authority: { grantIds: [], leaseEpoch: 4 },
+    });
+    const rendered = axRenderActorPlaybook(view);
+    expect(rendered).toContain('guidance that depended on a grant');
+    expect(rendered).toContain('[advisory]');
+    expect(rendered).toContain('grant_revoked:1');
+    expect(view.decisions).toEqual([
+      {
+        bulletId: 'gated',
+        section: 'Guidelines',
+        check: {
+          outcome: 'downgrade',
+          failures: [{ kind: 'grant_revoked', count: 1 }],
+          advisory: expect.stringContaining('grant_revoked:1'),
+        },
+      },
+    ]);
+  });
+
+  it('a bullet under a drop policy is absent and reported in decisions', () => {
+    const view = axProjectActorPlaybook(gatedPlaybook(), {
+      now: NOW,
+      authority: { grantIds: [], leaseEpoch: 4 },
+      preconditionPolicy: { grant_revoked: 'drop' },
+    });
+    const rendered = axRenderActorPlaybook(view);
+    expect(rendered).not.toContain('guidance that depended on a grant');
+    expect(rendered).toContain('guidance with no provenance');
+    expect(view.decisions[0]?.check.outcome).toBe('drop');
+  });
+
+  it('leaves the render untouched when no authority snapshot is supplied', () => {
+    const playbook = gatedPlaybook();
+    const projected = axRenderActorPlaybook(
+      axProjectActorPlaybook(playbook, { now: NOW })
+    );
+    expect(projected).toBe(renderPlaybook(playbook, { now: NOW }));
+    expect(projected).not.toContain('[advisory]');
+  });
+
+  it('admits when the recorded grant is still held', () => {
+    const view = axProjectActorPlaybook(gatedPlaybook(), {
+      now: NOW,
+      authority: { grantIds: [GRANT], leaseEpoch: 4 },
+    });
+    expect(view.decisions).toEqual([]);
+    expect(axRenderActorPlaybook(view)).not.toContain('[advisory]');
+  });
+
+  it('does not persist the advisory into the source playbook', () => {
+    const playbook = gatedPlaybook();
+    axProjectActorPlaybook(playbook, {
+      now: NOW,
+      authority: { grantIds: [], leaseEpoch: 4 },
+    });
+    expect(playbook.sections.Guidelines?.[0]?.content).toBe(
+      'guidance that depended on a grant'
+    );
   });
 });
 

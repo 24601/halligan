@@ -1077,6 +1077,7 @@ import {
 import {
   type AxACEBulletChange,
   type AxACEPlaybookRenderOptions,
+  axPlaybookRequiresVisibilitySupport,
   axProjectActorPlaybook,
   axRedactPlaybookForModel,
   axRenderActorPlaybook,
@@ -2742,6 +2743,7 @@ export { axOptimizableValidators };
 export { axPairedAdmittedIndices };
 export { axPatchClassOfType };
 export { axPlaybookFailureSection };
+export { axPlaybookRequiresVisibilitySupport };
 export { axPreferenceEvidenceLimits };
 export { axPreferenceEvidenceToMemories };
 export { axPrepareTrajectoryStep };

@@ -1,4 +1,12 @@
-import { axIsSkillProvenance } from '../../authority/skillProvenance.js';
+import type {
+  AxSkillAuthoritySnapshot,
+  AxSkillPreconditionPolicy,
+} from '../../authority/skillProvenance.js';
+import {
+  axIsSkillProvenance,
+  axRecheckSkillProvenance,
+  axSkillPreconditionGuidanceDefaults,
+} from '../../authority/skillProvenance.js';
 import { getCrypto } from '../../util/crypto.js';
 import type {
   AxACEActorPlaybookView,
@@ -23,6 +31,11 @@ interface ApplyOperationsOptions {
   protectedBulletIds?: ReadonlySet<string>;
   /** Trusted caller evidence; never accepted from curator JSON. */
   hostEvidence?: Readonly<AxACEHostEvidence>;
+  /**
+   * Canonical ISO timestamp stamped on every bullet this call writes. Injected
+   * so a retained rejection and its conformance fixture are reproducible.
+   */
+  now?: string;
 }
 
 export type AxACEPlaybookRenderOptions = {
@@ -37,6 +50,13 @@ export type AxACEPlaybookRenderOptions = {
   includeInapplicable?: boolean;
   /** ISO timestamp used for deterministic expiry evaluation. Defaults to now. */
   now?: string;
+  /**
+   * Current host authority for the retrieval-time precondition re-check.
+   * Absent means no re-check, and the render is unchanged.
+   */
+  authority?: Readonly<AxSkillAuthoritySnapshot>;
+  /** Defaults to `axSkillPreconditionGuidanceDefaults` when `authority` is set. */
+  preconditionPolicy?: Readonly<AxSkillPreconditionPolicy>;
 };
 
 export type AxACEBulletChange = {
@@ -130,7 +150,7 @@ function applyCuratorOperationsInPlace(
     hostEvidence,
   } = options ?? {};
 
-  const now = new Date().toISOString();
+  const now = options?.now ?? new Date().toISOString();
 
   const protectedIds = protectedBulletIds ?? new Set<string>();
 
@@ -280,6 +300,9 @@ function applyCuratorOperationsInPlace(
 
   recomputePlaybookStats(playbook);
   playbook.updatedAt = now;
+  if (axPlaybookRequiresVisibilitySupport(playbook)) {
+    playbook.version = Math.max(playbook.version ?? 1, 2);
+  }
 
   return { updatedBulletIds: updatedBullets, autoRemoved, changes };
 }
@@ -315,6 +338,7 @@ export function renderPlaybook(
   playbook: Readonly<AxACEPlaybook>,
   options?: Readonly<AxACEPlaybookRenderOptions>
 ): string {
+  assertSupportedPlaybookVersion(playbook, 'renderPlaybook');
   const visibleSections = Object.fromEntries(
     Object.entries(playbook.sections).map(([section, bullets]) => [
       section,
@@ -353,6 +377,51 @@ export function renderPlaybook(
 }
 
 /**
+ * The highest `AxACEPlaybook.version` this build understands. `renderPlaybook`,
+ * `axProjectActorPlaybook` and `assertPlaybookMutable` all refuse a playbook
+ * whose `version` exceeds it.
+ *
+ * Stamping `2` mitigates nothing on its own — no shipped build ever read
+ * `playbook.version`. This gate is what makes the stamp load-bearing, for the
+ * NEXT incompatibility rather than this one. A playbook written by this release
+ * must not be loaded by an older ax; that residual is documented, not fixed.
+ */
+export const AX_ACE_MAX_SUPPORTED_PLAYBOOK_VERSION = 2;
+
+/**
+ * True once any bullet carries a `visibility` tier. Called by the version stamp
+ * and by the read gate, so it is not an exported predicate with no consumer.
+ */
+export function axPlaybookRequiresVisibilitySupport(
+  playbook: Readonly<AxACEPlaybook>
+): boolean {
+  for (const bullets of Object.values(playbook.sections ?? {})) {
+    for (const bullet of bullets ?? []) {
+      if (bullet?.visibility !== undefined) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function assertSupportedPlaybookVersion(
+  playbook: unknown,
+  caller: string
+): void {
+  const version = (playbook as { version?: unknown } | null)?.version;
+  if (
+    typeof version === 'number' &&
+    Number.isFinite(version) &&
+    version > AX_ACE_MAX_SUPPORTED_PLAYBOOK_VERSION
+  ) {
+    throw new TypeError(
+      `AxACE: ${caller} does not support playbook version ${version} (max ${AX_ACE_MAX_SUPPORTED_PLAYBOOK_VERSION})`
+    );
+  }
+}
+
+/**
  * Module-private brand. A public `kind` string is a label any caller can write;
  * membership here is the enforcement, and it cannot survive JSON.
  */
@@ -371,10 +440,14 @@ export function axProjectActorPlaybook(
   playbook: Readonly<AxACEPlaybook>,
   options?: Readonly<AxACEPlaybookRenderOptions>
 ): AxACEActorPlaybookView {
+  assertSupportedPlaybookVersion(playbook, 'axProjectActorPlaybook');
   // Resolve the clock once so the projection and the render that follows it
   // cannot straddle an expiry boundary.
   const now = options?.now ?? new Date().toISOString();
   const resolved: AxACEPlaybookRenderOptions = { ...(options ?? {}), now };
+  const authority = options?.authority;
+  const policy =
+    options?.preconditionPolicy ?? axSkillPreconditionGuidanceDefaults;
   const decisions: AxACEPreconditionDecision[] = [];
   const projected = clonePlaybook(playbook);
   for (const [section, bullets] of Object.entries(projected.sections)) {
@@ -382,7 +455,32 @@ export function axProjectActorPlaybook(
       if (bullet.visibility === 'optimizer') {
         return false;
       }
-      return isBulletApplicable(bullet, resolved);
+      if (!isBulletApplicable(bullet, resolved)) {
+        return false;
+      }
+      if (!authority) {
+        return true;
+      }
+      const check = axRecheckSkillProvenance(
+        bullet.evidence?.authorityProvenance,
+        authority,
+        policy,
+        now
+      );
+      if (check.outcome === 'admit') {
+        return true;
+      }
+      // Every non-admit outcome is reported, so a drop is never silent.
+      decisions.push(Object.freeze({ bulletId: bullet.id, section, check }));
+      if (check.outcome !== 'downgrade') {
+        return false;
+      }
+      // Derived at render, never stored: the advisory cannot be injected
+      // through a restored snapshot because it is not part of one.
+      if (check.advisory) {
+        bullet.content = `${check.advisory}\n  ${bullet.content}`;
+      }
+      return true;
     });
   }
   recomputePlaybookStats(projected);
@@ -589,7 +687,9 @@ function isEvidenceStructurallyValid(value: unknown): boolean {
         (entry) =>
           !isRecord(entry) ||
           typeof entry.verifierId !== 'string' ||
-          !['passed', 'failed', 'unknown'].includes(String(entry.result)) ||
+          !['passed', 'failed', 'unknown', 'rejected-retained'].includes(
+            String(entry.result)
+          ) ||
           (entry.testId !== undefined && typeof entry.testId !== 'string') ||
           (entry.timestamp !== undefined &&
             typeof entry.timestamp !== 'string') ||
@@ -642,6 +742,7 @@ function assertPlaybookMutable(
   if (!isRecord(playbook) || !isRecord(playbook.sections)) {
     throw new TypeError('AxACE: playbook sections must be an object');
   }
+  assertSupportedPlaybookVersion(playbook, 'applyCuratorOperations');
   for (const [section, bullets] of Object.entries(playbook.sections)) {
     if (!Array.isArray(bullets)) {
       throw new TypeError(
@@ -1178,7 +1279,9 @@ function normalizeVerification(
         value &&
         typeof value.verifierId === 'string' &&
         value.verifierId.trim().length > 0 &&
-        ['passed', 'failed', 'unknown'].includes(value.result)
+        ['passed', 'failed', 'unknown', 'rejected-retained'].includes(
+          value.result
+        )
     )
     .map((value) => ({
       verifierId: value.verifierId.trim(),
@@ -1193,17 +1296,22 @@ function normalizeVerification(
           }
         : {}),
     }));
-  const unique = new Map(
-    normalized.map((value) => [
-      `${value.verifierId}\u0000${value.testId ?? ''}\u0000${value.timestamp ?? ''}`,
-      value,
-    ])
-  );
-  return [...unique.values()].sort((a, b) =>
-    `${a.verifierId}\u0000${a.testId ?? ''}\u0000${a.timestamp ?? ''}`.localeCompare(
-      `${b.verifierId}\u0000${b.testId ?? ''}\u0000${b.timestamp ?? ''}`
-    )
-  );
+  // `result` is part of the key: without it a later `passed` from the same
+  // verifier, test, and timestamp silently overwrote a retained rejection, and
+  // the asymmetric rollback became symmetric again.
+  const keyOf = (value: AxACEVerificationResult): string =>
+    `${value.verifierId}\u0000${value.testId ?? ''}\u0000${value.timestamp ?? ''}\u0000${value.result}`;
+  const unique = new Map<string, AxACEVerificationResult>();
+  for (const value of normalized) {
+    const key = keyOf(value);
+    const existing = unique.get(key);
+    // Sticky: a retained rejection is never replaced by another result.
+    if (existing?.result === 'rejected-retained') {
+      continue;
+    }
+    unique.set(key, value);
+  }
+  return [...unique.values()].sort((a, b) => keyOf(a).localeCompare(keyOf(b)));
 }
 
 function mergeProvenance(

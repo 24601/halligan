@@ -36,7 +36,13 @@ export type AxACEProvenance = {
 export type AxACEVerificationResult = {
   verifierId: string;
   testId?: string;
-  result: 'passed' | 'failed' | 'unknown';
+  /**
+   * `'rejected-retained'`: the proposed mutation failed its gate and the
+   * artifact reverted, but this evidence is deliberately committed so the next
+   * proposer round does not re-propose it. Sticky: it is never overwritten by a
+   * later same-key entry.
+   */
+  result: 'passed' | 'failed' | 'unknown' | 'rejected-retained';
   timestamp?: string;
   /** Host/evaluator summary, trimmed to 500 characters on trusted updates. */
   summary?: string;

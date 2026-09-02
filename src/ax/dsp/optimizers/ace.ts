@@ -897,6 +897,106 @@ export class AxACE extends AxBaseOptimizer {
     return result.updatedBulletIds;
   }
 
+  /**
+   * Asymmetric rollback: commit the evidence of a mutation that failed its
+   * held-out gate while the artifact itself reverts.
+   *
+   * Operations are applied with `visibility: 'optimizer'` forced and a
+   * `'rejected-retained'` verification result attached, so the next proposer
+   * round sees the failed attempt and the actor never does. Bullets that
+   * already existed keep their prior content and tier — only their evidence
+   * changes — while bullets the rejected operations created stay in the
+   * optimizer tier.
+   *
+   * `now` is required and is threaded into the apply path, which otherwise
+   * stamps `new Date()` and would make the retained timestamp nondeterministic.
+   */
+  public retainRejectedMutation(
+    args: Readonly<{
+      operations: readonly AxACECuratorOperation[];
+      verifierId: string;
+      now: string;
+      testId?: string;
+      summary?: string;
+      sourceRunId?: string;
+    }>
+  ): string[] {
+    if (!args.verifierId.trim()) {
+      throw new Error('AxACE: retainRejectedMutation requires a verifierId');
+    }
+    if (!args.now.trim()) {
+      throw new Error('AxACE: retainRejectedMutation requires a now timestamp');
+    }
+    if (args.operations.length === 0) {
+      return [];
+    }
+
+    const before = clonePlaybook(this.playbook);
+    const priorById = new Map<
+      string,
+      Readonly<{ content: string; visibility?: AxACEBullet['visibility'] }>
+    >();
+    for (const bullets of Object.values(before.sections)) {
+      for (const bullet of bullets) {
+        priorById.set(bullet.id, {
+          content: bullet.content,
+          visibility: bullet.visibility,
+        });
+      }
+    }
+
+    const result = applyCuratorOperations(this.playbook, args.operations, {
+      maxSectionSize: this.aceConfig.maxSectionSize,
+      allowDynamicSections: this.aceConfig.allowDynamicSections,
+      now: args.now,
+      hostEvidence: {
+        source: 'manual',
+        ...(args.sourceRunId ? { sourceRunId: args.sourceRunId } : {}),
+        visibility: 'optimizer',
+        verification: [
+          {
+            verifierId: args.verifierId,
+            ...(args.testId ? { testId: args.testId } : {}),
+            result: 'rejected-retained',
+            timestamp: args.now,
+            ...(args.summary ? { summary: args.summary } : {}),
+          },
+        ],
+      },
+    });
+
+    // The rollback half: an existing bullet keeps the content and tier it had
+    // before the rejected proposal. Only its evidence moved.
+    for (const bullets of Object.values(this.playbook.sections)) {
+      for (const bullet of bullets) {
+        const prior = priorById.get(bullet.id);
+        if (!prior) {
+          continue;
+        }
+        bullet.content = prior.content;
+        if (prior.visibility === undefined) {
+          // Delete rather than assign undefined: a legacy bullet must round-trip
+          // through JSON without gaining the key.
+          delete bullet.visibility;
+        } else {
+          bullet.visibility = prior.visibility;
+        }
+      }
+    }
+
+    if (result.updatedBulletIds.length) {
+      this.deltaHistory.push({
+        source: 'manual',
+        epoch: -1,
+        exampleIndex: -1,
+        operations: [...args.operations],
+        updatedBulletIds: result.updatedBulletIds,
+        changes: result.changes,
+      });
+    }
+    return result.updatedBulletIds;
+  }
+
   /** The projected, actor-safe view of the current playbook. */
   public getActorPlaybookView(
     options?: Readonly<AxACEPlaybookRenderOptions>
