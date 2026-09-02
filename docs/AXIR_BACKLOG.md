@@ -193,6 +193,13 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
   - TS paths: `src/ax/agent/agentInternal/playbookEvolve/gate.ts`
   - Impact: Behaviour-preserving refactor: the evolve() acceptance decision (revalComplete/gainOk/heldOutOk/accept) and its human-readable reason move to the pure evaluateAgentPromotionGate; the retention computation, sequence counter, anchors and receipt assembly stay in playbookEvolve.ts. playbookEvolve.test.ts and playbookEvolveUnits.test.ts pass unmodified. The gate is internal (internalExportNames) and reached through evolve() and the coming axHarnessEvolve, so any AxIR migration of axagent promotion semantics now has one function to port instead of an inline expression.
   - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+- `axir-2026-09-02-axmind-pacing-ladder-wake-routing-with-source-suppression-cursor` [runtime] AxMind pacing ladder, wake routing with source suppression, cursor-deferred trajectory source, lag health, ledgered chat idempotency, salience injection, and the kernel/catalog skill tier
+  - Status: open
+  - Source PR: #95
+  - Source commit: `fdb64e3e04efed10913de83dd9ace9a67d262291`
+  - TS paths: `src/ax/mind/types.ts`
+  - Impact: Portable-in-spirit state machines a non-TypeScript target would need to reproduce: the backoff ladder (delay(0)=0, delay(n)=min(base*factor^(n-1), cap), dwell, thought ceiling, immediate error descent, unchanged-on-noop, and the absolute wakes-per-hour fuse) plus its reconstruction from the log alone; the dispatch decision table (registry-derived wakeability, source- and launchedBy-based self-suppression, unconditional own-error suppression, admission-bound deferral that never drops, wake-signal coalescing with a visible count); lag-based health thresholds; the disjunctive chat idempotency key and the priority-ordered reply-state resolution with a fail-open claim TTL; and the kernel/catalog skill selection with whole-entry demotion and host-facts-only requires gating.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 - `axir-2026-09-02-axtrajectory-append-only-step-log-blob-spill-filtered-backward-t` [runtime] AxTrajectory append-only step log, blob spill, filtered backward tail, and durable per-consumer cursors
   - Status: open
   - Source PR: #87
