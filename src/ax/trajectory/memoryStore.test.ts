@@ -449,6 +449,21 @@ describe('AxInMemoryTrajectoryStore cursors', () => {
     ).rejects.toMatchObject({ reason: 'identity_changed' });
   });
 
+  it('keeps colliding consumer and trajectory names apart', async () => {
+    const { store } = newStore();
+    await store.create({ trajectoryId: 'c' });
+    await store.create({ trajectoryId: 'b\nc' });
+    // A single-character join is ambiguous the moment a host-supplied
+    // consumer id contains that character: consumer "a\nb" / trajectory "c"
+    // and consumer "a" / trajectory "b\nc" would share one entry, and one
+    // consumer would silently inherit the other's cursor.
+    await store.saveCursor('a\nb', { trajectoryId: 'c', seq: 1 });
+    await store.saveCursor('a', { trajectoryId: 'b\nc', seq: 0 });
+
+    expect((await store.loadCursor('a\nb', 'c'))?.seq).toBe(1);
+    expect((await store.loadCursor('a', 'b\nc'))?.seq).toBe(0);
+  });
+
   it('counts an injected torn trailing frame without ever returning it', async () => {
     const { store, trajectoryId } = await seeded();
     await store.append({ trajectoryId, type: 'run' });

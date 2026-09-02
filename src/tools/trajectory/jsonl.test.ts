@@ -432,6 +432,46 @@ describe('AxJSONLTrajectoryStore on-disk contract', () => {
     expect(await reopened.loadCursor('reader-c', trajectoryId)).toBeUndefined();
   });
 
+  it('keeps colliding consumer and trajectory names in separate files', async () => {
+    const clock = new AxManualEventClock(5_000);
+    const directory = root();
+    const store = newStore(directory, clock);
+    await store.create({ trajectoryId: 'c' });
+    await store.create({ trajectoryId: 'b__c' });
+    // encodeURIComponent leaves `_` alone, so a plain `a__b` join maps
+    // consumer a__b / trajectory c onto the same file as consumer a /
+    // trajectory b__c, and one consumer silently inherits the other's cursor.
+    await store.saveCursor('a__b', { trajectoryId: 'c', seq: 1 });
+    await store.saveCursor('a', { trajectoryId: 'b__c', seq: 0 });
+
+    expect((await store.loadCursor('a__b', 'c'))?.seq).toBe(1);
+    expect((await store.loadCursor('a', 'b__c'))?.seq).toBe(0);
+    expect(readdirSync(join(directory, 'cursors'))).toHaveLength(2);
+  });
+
+  it('reports a dropped frame to one drain, not to every drain forever', async () => {
+    const clock = new AxManualEventClock(5_000);
+    const directory = root();
+    const store = newStore(directory, clock);
+    const { trajectoryId } = await store.create({});
+    await store.append({ trajectoryId, type: 'run', data: { index: 0 } });
+    appendFileSync(
+      join(directory, encodeURIComponent(trajectoryId), 'steps.jsonl'),
+      '{ not json at all\n'
+    );
+
+    const reopened = newStore(directory, clock);
+    const first = await reopened.readFrom(undefined, trajectoryId, {});
+    expect(first.corrupt).toBe(1);
+    // AxTrajectoryDrainResult.corrupt is "frames skipped by the tolerant
+    // parser", i.e. by THIS drain. A polling consumer that saw the running
+    // total would stare at the same non-zero number for the log's lifetime.
+    const second = await reopened.readFrom(first.cursor, trajectoryId, {});
+    expect(second.steps).toHaveLength(0);
+    expect(second.caughtUp).toBe(true);
+    expect(second.corrupt).toBe(0);
+  });
+
   it('rejects source on a machinery step and an unknown trajectory', async () => {
     const clock = new AxManualEventClock(5_000);
     const store = newStore(root(), clock);
