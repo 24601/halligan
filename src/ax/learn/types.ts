@@ -1,0 +1,458 @@
+/**
+ * Type surface for `src/ax/learn/` — the serve → observe → grow → nominate
+ * learning loop.
+ *
+ * Everything here is a declaration: interfaces, closed unions, and the typed
+ * `Ax*Error` classes with their structural guards. No logic, no clock reads, no
+ * IO. Implementations live beside this file.
+ */
+
+import type { AxAuthorizationReceipt } from '../authority/types.js';
+import type { AxEventClock } from '../event/types.js';
+
+// ---------------------------------------------------------------------------
+// 4.1 Values, ids, refs
+// ---------------------------------------------------------------------------
+
+export type AxLearningScalar = string | number | boolean | null;
+
+export type AxLearningValue =
+  | AxLearningScalar
+  | readonly AxLearningValue[]
+  | { readonly [key: string]: AxLearningValue };
+
+export type AxLearningRecordId = string;
+
+/**
+ * What the agent was ACTUALLY serving when the interaction ran.
+ *
+ * Sourced from the live harness installation on the agent, never from the store
+ * head. Reading a head is not serving it: an agent that was never installed, or
+ * that another process moved past, must not stamp its records with a release it
+ * did not run.
+ */
+export interface AxLearningArtifactRef {
+  /** The release whose entries are installed. Non-empty. */
+  readonly releaseId: string;
+  /** `sha256:<64 hex>` over the canonical admitted entry list of the INSTALLED tree. */
+  readonly contentId: string;
+  readonly parentReleaseId?: string;
+  /**
+   * The head `contentId` the surface last observed. Absent when the surface has
+   * never observed a head. Best-effort and non-blocking: computed from the
+   * surface's cached head, not from a store read on the serving path.
+   */
+  readonly headContentId?: string;
+  /** `contentId !== headContentId` at serve time. A mismatch is recorded, never hidden. */
+  readonly stale: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// 4.2 Records
+// ---------------------------------------------------------------------------
+
+export interface AxLearningInteractionPayload {
+  /** Program identity: the agent's signature string at serve time. */
+  readonly signature: string;
+  readonly programId: string;
+  readonly input: AxLearningValue;
+  /** Absent when the run threw and failure recording is enabled. */
+  readonly output?: AxLearningValue;
+  /** Present only for a recorded failed run. Never carries a stack. */
+  readonly failure?: Readonly<{ name: string; message: string }>;
+  readonly model?: string;
+  readonly usage?: Readonly<{
+    promptTokens?: number;
+    completionTokens?: number;
+    totalTokens?: number;
+  }>;
+  /** Opaque host correlation. Ax stores tags and never interprets them. */
+  readonly tags?: Readonly<Record<string, string>>;
+}
+
+export interface AxLearningInteractionRecord {
+  readonly kind: 'interaction';
+  readonly id: AxLearningRecordId;
+  readonly scenario: string;
+  readonly createdAt: number;
+  /**
+   * OPTIONAL, and absent exactly when no harness tree was installed on the
+   * agent at serve time. An absent ref means "this exchange is not attributable
+   * to any release" — it is never fabricated from the store head. Never present
+   * on reports.
+   */
+  readonly artifactRef?: Readonly<AxLearningArtifactRef>;
+  readonly payload: Readonly<AxLearningInteractionPayload>;
+}
+
+export interface AxLearningReportPayload {
+  /** Finite number. `boolean` is not a number and is rejected. */
+  readonly score?: number;
+  /** Opaque to the core; a processor interprets it. */
+  readonly feedback?: string | Readonly<Record<string, AxLearningValue>>;
+  /** Opaque EXCEPT `metadata.training.eligible` (default true). */
+  readonly metadata?: Readonly<Record<string, AxLearningValue>>;
+}
+
+export interface AxLearningReportRecord {
+  readonly kind: 'report';
+  readonly id: AxLearningRecordId;
+  readonly scenario: string;
+  readonly createdAt: number;
+  /** The receipts this report grades. Only interaction ids are receipts. */
+  readonly references: readonly AxLearningRecordId[];
+  readonly payload: Readonly<AxLearningReportPayload>;
+}
+
+export type AxLearningRecord =
+  | Readonly<AxLearningInteractionRecord>
+  | Readonly<AxLearningReportRecord>;
+
+/** The caller-facing input to a report append. */
+export interface AxLearningReportInput {
+  readonly references: readonly AxLearningRecordId[];
+  readonly score?: number;
+  readonly feedback?: string | Readonly<Record<string, AxLearningValue>>;
+  readonly metadata?: Readonly<Record<string, AxLearningValue>>;
+  /** Client-chosen id for the report's OWN record. Makes the call retry-safe. Not a receipt. */
+  readonly id?: AxLearningRecordId;
+}
+
+/** Returned to the caller of a recorded run. */
+export interface AxLearningReceipt {
+  readonly recordId: AxLearningRecordId;
+  readonly scenario: string;
+  /** Absent when no tree was installed — see `AxLearningInteractionRecord.artifactRef`. */
+  readonly artifactRef?: Readonly<AxLearningArtifactRef>;
+  readonly recordedAt: number;
+  readonly durability: 'volatile' | 'persistent';
+  /** True when the append deduped against an existing record. */
+  readonly duplicate: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// 4.6 Harness tree entries (the functions over them land with `tree.ts`)
+// ---------------------------------------------------------------------------
+
+export type AxHarnessEntryKind = 'instruction' | 'playbookBullet' | 'skill';
+
+/**
+ * A proposer-authored bullet carries CONTENT ONLY. `helpfulCount`,
+ * `harmfulCount`, `createdAt`, `updatedAt`, `revision`, `lineage` and
+ * `evidence` are rejected by admission (not silently stripped) and are
+ * synthesized by the installer: bullet evidence sits behind Ax's evaluator
+ * boundary, and letting a proposer write it hands the model the pen.
+ */
+export interface AxHarnessBulletConfig {
+  readonly id: string;
+  readonly section: string;
+  readonly content: string;
+  readonly tags?: readonly string[];
+}
+
+export type AxHarnessEntry = Readonly<
+  | {
+      id: string;
+      kind: 'instruction';
+      disabled?: boolean;
+      /** Installs into the executor stage's slot `learn:<entry id>`. */
+      config: Readonly<{ text: string }>;
+    }
+  | {
+      id: string;
+      kind: 'playbookBullet';
+      disabled?: boolean;
+      config: Readonly<AxHarnessBulletConfig>;
+    }
+  | {
+      id: string;
+      kind: 'skill';
+      disabled?: boolean;
+      /**
+       * Maps 1:1 onto `AxAgentCatalogSkill`: `skillId` → `id` (the dedup key
+       * AND the path-segment-constrained name), `content` → `content`. `name`
+       * is the human-readable title.
+       */
+      config: Readonly<{
+        skillId: string;
+        name: string;
+        description?: string;
+        content: string;
+      }>;
+    }
+>;
+
+export type AxHarnessTree = readonly AxHarnessEntry[];
+
+// ---------------------------------------------------------------------------
+// 4.7 Releases
+// ---------------------------------------------------------------------------
+
+export interface AxHarnessGateMetrics {
+  /** Per task, in task order. `null` marks an episode that could not run. */
+  readonly candidateScores: readonly (number | null)[];
+  readonly currentScores: readonly (number | null)[];
+  readonly candidateScore: number | null;
+  readonly currentScore: number | null;
+  readonly wins: number;
+  readonly losses: number;
+  readonly ties: number;
+  readonly heldIn: Readonly<{ before: number; after: number }>;
+  /** Absent ⇒ the step ran held-in-only. */
+  readonly heldOut?: Readonly<{ before: number; after: number }>;
+  /** sha256 over the sorted task ids of each split, frozen BEFORE `propose` ran. */
+  readonly taskSetDigest: string;
+  readonly heldOutTaskSetDigest?: string;
+  readonly failures: Readonly<{
+    new: readonly string[];
+    persisting: readonly string[];
+    fixed: readonly string[];
+  }>;
+  readonly episodeFailures: number;
+  readonly batchId?: string;
+  readonly processorId?: string;
+}
+
+export interface AxHarnessGateDecision {
+  readonly outcome: 'select' | 'reject';
+  readonly evaluator: 'harness_task_pairs' | (string & {});
+  readonly evaluatorVersion: string;
+  readonly policy: 'axPlaybookGate' | 'scoreComparison' | (string & {});
+  readonly policyVersion: string;
+  readonly reason: string;
+  readonly metrics: Readonly<AxHarnessGateMetrics>;
+  /** Additive seat for a promotion-authority receipt. Never set by Ax today. */
+  readonly authority?: Readonly<AxAuthorizationReceipt>;
+}
+
+export interface AxLearningRelease {
+  readonly releaseId: string;
+  /** The isolated workload this chain belongs to. */
+  readonly scenario: string;
+  readonly parentReleaseId?: string;
+  readonly contentId: string;
+  /** Monotonic per scenario. Never rewound, including by rollback. */
+  readonly step: number;
+  readonly operation: 'creation' | 'evolve' | 'rollback' | 'recovery';
+  /** TRUE only for the promoted head. An append always writes `false`. */
+  readonly current: boolean;
+  readonly restorable: boolean;
+  readonly recordedAt: number;
+  readonly promotedAt?: number;
+  readonly entries: AxHarnessTree;
+  /** The decision that nominated this release. Absent on `creation`. */
+  readonly gate?: Readonly<AxHarnessGateDecision>;
+  readonly rollbackTargetReleaseId?: string;
+}
+
+export interface AxLearningTreeDelivery {
+  readonly releaseId: string;
+  readonly parentReleaseId?: string;
+  readonly contentId: string;
+  readonly step: number;
+  readonly entries: AxHarnessTree;
+  readonly gate?: Readonly<AxHarnessGateDecision>;
+}
+
+// ---------------------------------------------------------------------------
+// 4.3 Store port
+// ---------------------------------------------------------------------------
+
+export interface AxLearningStoreCapabilities {
+  durability: 'volatile' | 'persistent';
+  coordination: 'single-writer' | 'multi-writer';
+  /** Chain appends and head promotions are compare-and-set. Required for a durable surface. */
+  compareAndSet: boolean;
+  conformance?: Readonly<{ schemaVersion?: number }>;
+}
+
+export interface AxLearningAppendResult {
+  /**
+   * The record the store considers authoritative:
+   *   inserted            → the stored record
+   *   duplicate           → the PREVIOUSLY stored record
+   *   references-consumed → the submitted record, which was NOT stored
+   */
+  readonly record: AxLearningRecord;
+  readonly inserted: boolean;
+  /** Monotonic per scenario. Present only when `inserted`. */
+  readonly sequence?: number;
+  /** Why an append was a no-op. */
+  readonly reason?: 'duplicate' | 'references-consumed';
+}
+
+export interface AxLearningStorePageEntry {
+  readonly sequence: number;
+  readonly record: AxLearningRecord;
+}
+
+export interface AxLearningStorePage {
+  readonly entries: readonly Readonly<AxLearningStorePageEntry>[];
+  /** Absent when the page reached the end of the log. */
+  readonly nextAfterSequence?: number;
+}
+
+export interface AxLearningStore {
+  readonly capabilities: Readonly<AxLearningStoreCapabilities>;
+  /**
+   * Clock used for store-owned timestamps. A surface constructed with its own
+   * `clock` that is not this exact instance is refused at construction.
+   */
+  readonly clock?: AxEventClock;
+
+  append(
+    record: AxLearningRecord,
+    signal?: AbortSignal
+  ): Promise<Readonly<AxLearningAppendResult>>;
+
+  get(
+    scenario: string,
+    id: AxLearningRecordId,
+    signal?: AbortSignal
+  ): Promise<AxLearningRecord | undefined>;
+
+  page(
+    scenario: string,
+    options: Readonly<{ afterSequence?: number; limit?: number }>,
+    signal?: AbortSignal
+  ): Promise<Readonly<AxLearningStorePage>>;
+
+  markConsumed(
+    scenario: string,
+    ids: readonly AxLearningRecordId[],
+    signal?: AbortSignal
+  ): Promise<void>;
+
+  /**
+   * Append a release to the chain. `expectedTailReleaseId` is `null` for the
+   * first release. A stale expectation throws `AxLearningReleaseConflictError`.
+   * Appending NEVER moves the head — every appended release is `current: false`.
+   */
+  putRelease(
+    release: Readonly<AxLearningRelease>,
+    expectedTailReleaseId: string | null,
+    signal?: AbortSignal
+  ): Promise<Readonly<AxLearningRelease>>;
+
+  /**
+   * Compare-and-set the scenario head. The ONLY way a release becomes current.
+   * `expectedHeadReleaseId` is `null` when no release has been promoted yet.
+   */
+  promoteRelease(
+    scenario: string,
+    releaseId: string,
+    expectedHeadReleaseId: string | null,
+    signal?: AbortSignal
+  ): Promise<Readonly<AxLearningRelease>>;
+
+  /** The promoted release, or undefined when nothing has been promoted. */
+  head(
+    scenario: string,
+    signal?: AbortSignal
+  ): Promise<Readonly<AxLearningRelease> | undefined>;
+
+  /** Oldest first, promoted or not. */
+  releases(
+    scenario: string,
+    signal?: AbortSignal
+  ): Promise<readonly Readonly<AxLearningRelease>[]>;
+
+  close?(options?: Readonly<{ timeoutMs?: number }>): Promise<void>;
+}
+
+// ---------------------------------------------------------------------------
+// 4.11 Errors
+// ---------------------------------------------------------------------------
+
+/** Same record id, different content. The store never silently overwrites. */
+export class AxLearningRecordConflictError extends Error {
+  readonly code = 'learning_record_conflict';
+
+  constructor(
+    readonly recordId: AxLearningRecordId,
+    readonly scenario: string,
+    options?: ErrorOptions
+  ) {
+    super(
+      `AxLearningStore: record ${recordId} in scenario ${scenario} already exists with different content`,
+      options
+    );
+    this.name = 'AxLearningRecordConflictError';
+  }
+}
+
+/** Non-persistable or self-contradictory record content, rejected at construction. */
+export class AxLearningRecordValidationError extends Error {
+  readonly code = 'learning_record_invalid';
+  /** JSON path inside the payload. Never the value. */
+  readonly path: string;
+
+  constructor(path: string, message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'AxLearningRecordValidationError';
+    this.path = path;
+  }
+}
+
+/** Report ingress refused: a bad reference, a bad score, or a declared field. */
+export class AxLearningReportValidationError extends Error {
+  readonly code = 'learning_report_invalid';
+  /** The declared field that broke, or one of `references` / `score`. */
+  readonly field: string;
+
+  constructor(field: string, message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'AxLearningReportValidationError';
+    this.field = field;
+  }
+}
+
+/** Raised by `putRelease`, `promoteRelease` and rollback on a stale expectation. */
+export class AxLearningReleaseConflictError extends Error {
+  readonly code = 'learning_release_conflict';
+  readonly operation: 'append' | 'promote';
+
+  constructor(
+    readonly scenario: string,
+    operation: 'append' | 'promote',
+    readonly expectedReleaseId: string | null,
+    readonly actualReleaseId: string | null,
+    options?: ErrorOptions
+  ) {
+    super(
+      `AxLearningStore: ${operation} in scenario ${scenario} expected ${expectedReleaseId ?? 'none'} but found ${actualReleaseId ?? 'none'}`,
+      options
+    );
+    this.name = 'AxLearningReleaseConflictError';
+    this.operation = operation;
+  }
+}
+
+/**
+ * Structural guard. `instanceof` breaks when a host store is loaded through a
+ * second copy of the package, so the discriminant is the contract.
+ */
+export function axIsLearningRecordConflictError(
+  error: unknown
+): error is AxLearningRecordConflictError {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { code?: unknown }).code === 'learning_record_conflict'
+  );
+}
+
+/** Structural guard; see `axIsLearningRecordConflictError`. */
+export function axIsLearningReleaseConflictError(
+  error: unknown
+): error is AxLearningReleaseConflictError {
+  if (
+    typeof error !== 'object' ||
+    error === null ||
+    (error as { code?: unknown }).code !== 'learning_release_conflict'
+  ) {
+    return false;
+  }
+  const operation = (error as { operation?: unknown }).operation;
+  return operation === 'append' || operation === 'promote';
+}

@@ -1601,6 +1601,52 @@ import {
   axWorkerRuntime,
 } from './funcs/worker.runtime.js';
 import {
+  AxInMemoryLearningStore,
+  type AxInMemoryLearningStoreOptions,
+  axInMemoryLearningStore,
+} from './learn/memoryStore.js';
+import {
+  type AxLearningInteractionInput,
+  type AxLearningReportRecordInput,
+  axCreateLearningInteractionRecord,
+  axCreateLearningReportRecord,
+  axLearningFailureFrom,
+  axLearningReceiptFrom,
+  axLearningRecordContent,
+} from './learn/records.js';
+import {
+  type AxHarnessBulletConfig,
+  type AxHarnessEntry,
+  type AxHarnessEntryKind,
+  type AxHarnessGateDecision,
+  type AxHarnessGateMetrics,
+  type AxHarnessTree,
+  type AxLearningAppendResult,
+  type AxLearningArtifactRef,
+  type AxLearningInteractionPayload,
+  type AxLearningInteractionRecord,
+  type AxLearningReceipt,
+  type AxLearningRecord,
+  AxLearningRecordConflictError,
+  type AxLearningRecordId,
+  AxLearningRecordValidationError,
+  type AxLearningRelease,
+  AxLearningReleaseConflictError,
+  type AxLearningReportInput,
+  type AxLearningReportPayload,
+  type AxLearningReportRecord,
+  AxLearningReportValidationError,
+  type AxLearningScalar,
+  type AxLearningStore,
+  type AxLearningStoreCapabilities,
+  type AxLearningStorePage,
+  type AxLearningStorePageEntry,
+  type AxLearningTreeDelivery,
+  type AxLearningValue,
+  axIsLearningRecordConflictError,
+  axIsLearningReleaseConflictError,
+} from './learn/types.js';
+import {
   AxMCPAppBridge,
   type AxMCPAppBridgeOptions,
   type AxMCPAppContextUpdate,
@@ -2077,6 +2123,7 @@ export { AxInMemoryAgentSessionStore };
 export { AxInMemoryBalancerStatsStore };
 export { AxInMemoryDemandStore };
 export { AxInMemoryEventStore };
+export { AxInMemoryLearningStore };
 export { AxInMemoryProgramStateStore };
 export { AxInMemoryRejectedCandidateLedger };
 export { AxInMemoryTrajectoryBlobStore };
@@ -2087,6 +2134,10 @@ export { AxInteractionTimelineSchema };
 export { AxInteractionTimelineVersion };
 export { AxJSRuntime };
 export { AxJSRuntimePermission };
+export { AxLearningRecordConflictError };
+export { AxLearningRecordValidationError };
+export { AxLearningReleaseConflictError };
+export { AxLearningReportValidationError };
 export { AxMCPAppBridge };
 export { AxMCPClient };
 export { AxMCPDPoPProofFactory };
@@ -2221,6 +2272,8 @@ export { axCreateFlowTextLogger };
 export { axCreateGeminiLiveAudioApi };
 export { axCreateGrokRealtimeApi };
 export { axCreateJSRuntime };
+export { axCreateLearningInteractionRecord };
+export { axCreateLearningReportRecord };
 export { axCreateOpenAIRealtimeApi };
 export { axCreateRuntimeAdmissionReceipt };
 export { axCreateRuntimeCapabilities };
@@ -2279,6 +2332,7 @@ export { axHarnessPortId };
 export { axHarnessRecipe };
 export { axHarnessRecipeVersion };
 export { axHarnessStamp };
+export { axInMemoryLearningStore };
 export { axInferComponentClass };
 export { axIpwPairedDifference };
 export { axIpwScore };
@@ -2296,6 +2350,8 @@ export { axIsGuardPredicateFailure };
 export { axIsHarnessPortId };
 export { axIsHarnessRecipeError };
 export { axIsHarnessStampStale };
+export { axIsLearningRecordConflictError };
+export { axIsLearningReleaseConflictError };
 export { axIsMutationTaxonomyError };
 export { axIsOpenAIChatAudioModel };
 export { axIsOpenAIRealtimeModel };
@@ -2310,6 +2366,9 @@ export { axIsTrajectoryBlobError };
 export { axIsTrajectoryCursorError };
 export { axIsTrajectoryQueryError };
 export { axKnownComponentKinds };
+export { axLearningFailureFrom };
+export { axLearningReceiptFrom };
+export { axLearningRecordContent };
 export { axMCPAPIKeyAuthentication };
 export { axMCPAppToolMeta };
 export { axMCPBasicAuthentication };
@@ -3184,14 +3243,21 @@ export type { AxGuardFailure };
 export type { AxGuardFailureCode };
 export type { AxGuardOp };
 export type { AxHarnessAtom };
+export type { AxHarnessBulletConfig };
+export type { AxHarnessEntry };
+export type { AxHarnessEntryKind };
+export type { AxHarnessGateDecision };
+export type { AxHarnessGateMetrics };
 export type { AxHarnessPortId };
 export type { AxHarnessRecipe };
 export type { AxHarnessStamp };
+export type { AxHarnessTree };
 export type { AxIField };
 export type { AxIRRuntimeCapabilities };
 export type { AxIRRuntimeCapabilitiesInput };
 export type { AxInMemoryDemandStoreOptions };
 export type { AxInMemoryEventStoreOptions };
+export type { AxInMemoryLearningStoreOptions };
 export type { AxInMemoryTrajectoryStoreOptions };
 export type { AxInputFunctionType };
 export type { AxInteractionEvent };
@@ -3213,6 +3279,26 @@ export type { AxJSRuntimeSpeculationOptions };
 export type { AxJSRuntimeSpeculationPolicy };
 export type { AxJudgeForwardOptions };
 export type { AxJudgeOptions };
+export type { AxLearningAppendResult };
+export type { AxLearningArtifactRef };
+export type { AxLearningInteractionInput };
+export type { AxLearningInteractionPayload };
+export type { AxLearningInteractionRecord };
+export type { AxLearningReceipt };
+export type { AxLearningRecord };
+export type { AxLearningRecordId };
+export type { AxLearningRelease };
+export type { AxLearningReportInput };
+export type { AxLearningReportPayload };
+export type { AxLearningReportRecord };
+export type { AxLearningReportRecordInput };
+export type { AxLearningScalar };
+export type { AxLearningStore };
+export type { AxLearningStoreCapabilities };
+export type { AxLearningStorePage };
+export type { AxLearningStorePageEntry };
+export type { AxLearningTreeDelivery };
+export type { AxLearningValue };
 export type { AxLlmQueryBudgetState };
 export type { AxLlmQueryPromptMode };
 export type { AxLoggerData };
