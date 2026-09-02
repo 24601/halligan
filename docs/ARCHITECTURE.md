@@ -8,11 +8,12 @@ For compiler and IR details, see [`docs/COMPILER.md`](./COMPILER.md). For
 audio and realtime usage, see [`docs/AUDIO.md`](./AUDIO.md). For reward-scored
 candidate selection and feedback rounds, see [`docs/REFINE.md`](./REFINE.md).
 For the append-only agent life log and its context projection, see
-[`docs/TRAJECTORY.md`](./TRAJECTORY.md).
+[`docs/TRAJECTORY.md`](./TRAJECTORY.md). For the persistent-agency runtime that
+lives in one, see [`docs/MIND.md`](./MIND.md).
 
 ## System Shape
 
-Ax has eight main runtime surfaces:
+Ax has nine main runtime surfaces:
 
 1. **AxAI**: provider clients, model catalog metadata, chat, streaming,
    embeddings, transcribe/speak, audio/realtime operations, routing, and
@@ -36,11 +37,15 @@ Ax has eight main runtime surfaces:
    classification, digest-verified blob spill, bounded filtered reads, durable
    per-consumer cursors, a fork/merge DAG, and a tiered-rollup context
    projection with drill-down.
-8. **AxLearn**: an opt-in learning surface — addressable interaction records and
+8. **AxMind**: a persistent-agency runtime over AxEventRuntime — thinkers that
+   wake from trajectory appends, a deterministic spontaneity backoff ladder with
+   an absolute rate fuse, a synthetic-idle liveness watchdog, lag-based health,
+   and ledgered outbound messages with exactly-one-reply chat semantics.
+9. **AxLearn**: an opt-in learning surface — addressable interaction records and
    receipts, late out-of-order feedback with a pure eligibility reducer, a
    diffable harness tree with a fail-closed admission gate, and a
    content-addressed release chain whose head only a human moves.
-9. **AxIR generated libraries**: Python, Java, C++, Go, and Rust packages emitted from
+10. **AxIR generated libraries**: Python, Java, C++, Go, and Rust packages emitted from
    the shared portable semantics.
 
 These surfaces are connected by the shared Ax program contract: `forward`,

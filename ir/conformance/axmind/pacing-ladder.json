@@ -1,0 +1,255 @@
+{
+  "name": "the spontaneity backoff ladder is a pure function of state, wake class and outcome",
+  "kind": "mind",
+  "operation": "pacing_ladder",
+  "note": "TypeScript-consumed in v1: conformanceSuitePaths in tools/axir/internal/axir/verify.go is a hardcoded directory list and does not include axmind, so the five generated targets do not read this file. It is run by src/ax/mind/fixtures.test.ts. Registering the suite is filed in the AxIR backlog.",
+  "defaultConfig": {
+    "baseMs": 5000,
+    "factor": 2,
+    "capMs": 300000,
+    "hold": 3,
+    "thoughtCapMs": 60000,
+    "maxWakesPerHour": 10000
+  },
+  "cases": [
+    {
+      "name": "a reactive wake resets level and ticks to zero and arms immediately",
+      "state": {
+        "level": 6,
+        "ticks": 2,
+        "spontaneousWakes": []
+      },
+      "event": {
+        "wakeClass": "reactive",
+        "outcome": "empty",
+        "now": 100000
+      },
+      "expected": {
+        "kind": "arm",
+        "level": 0,
+        "ticks": 0,
+        "delayMs": 0
+      }
+    },
+    {
+      "name": "visible work on a spontaneous wake resets the ladder",
+      "state": {
+        "level": 6,
+        "ticks": 1,
+        "spontaneousWakes": []
+      },
+      "event": {
+        "wakeClass": "spontaneous",
+        "outcome": "visible",
+        "now": 100000
+      },
+      "expected": {
+        "kind": "arm",
+        "level": 0,
+        "ticks": 0,
+        "delayMs": 0
+      }
+    },
+    {
+      "name": "an empty wake dwells rather than descending on the first tick",
+      "state": {
+        "level": 3,
+        "ticks": 0,
+        "spontaneousWakes": []
+      },
+      "event": {
+        "wakeClass": "spontaneous",
+        "outcome": "empty",
+        "now": 100000
+      },
+      "expected": {
+        "kind": "arm",
+        "level": 3,
+        "ticks": 1,
+        "delayMs": 20000
+      }
+    },
+    {
+      "name": "an empty wake descends once the dwell is spent",
+      "state": {
+        "level": 3,
+        "ticks": 2,
+        "spontaneousWakes": []
+      },
+      "event": {
+        "wakeClass": "spontaneous",
+        "outcome": "empty",
+        "now": 100000
+      },
+      "expected": {
+        "kind": "arm",
+        "level": 4,
+        "ticks": 0,
+        "delayMs": 40000
+      }
+    },
+    {
+      "name": "a thought-only wake rests at the thought cap, never at the level delay",
+      "state": {
+        "level": 9,
+        "ticks": 2,
+        "spontaneousWakes": []
+      },
+      "event": {
+        "wakeClass": "spontaneous",
+        "outcome": "thought",
+        "now": 100000
+      },
+      "expected": {
+        "kind": "arm",
+        "level": 10,
+        "ticks": 0,
+        "delayMs": 60000
+      }
+    },
+    {
+      "name": "an errored run descends immediately, with no dwell",
+      "state": {
+        "level": 3,
+        "ticks": 0,
+        "spontaneousWakes": []
+      },
+      "event": {
+        "wakeClass": "spontaneous",
+        "outcome": "error",
+        "now": 100000
+      },
+      "expected": {
+        "kind": "arm",
+        "level": 4,
+        "ticks": 0,
+        "delayMs": 40000
+      }
+    },
+    {
+      "name": "a noop wake leaves the running timer alone",
+      "state": {
+        "level": 4,
+        "ticks": 1,
+        "wakeAt": 555000,
+        "spontaneousWakes": []
+      },
+      "event": {
+        "wakeClass": "spontaneous",
+        "outcome": "noop",
+        "now": 100000
+      },
+      "expected": {
+        "kind": "unchanged",
+        "level": 4,
+        "ticks": 1,
+        "wakeAt": 555000
+      }
+    },
+    {
+      "name": "a watchdog wake that found visible work resets like engagement",
+      "state": {
+        "level": 8,
+        "ticks": 0,
+        "spontaneousWakes": []
+      },
+      "event": {
+        "wakeClass": "watchdog",
+        "outcome": "visible",
+        "now": 100000
+      },
+      "expected": {
+        "kind": "arm",
+        "level": 0,
+        "ticks": 0,
+        "delayMs": 0
+      }
+    },
+    {
+      "name": "the rate fuse parks spontaneity and touches no timer",
+      "config": {
+        "baseMs": 5000,
+        "factor": 2,
+        "capMs": 300000,
+        "hold": 3,
+        "thoughtCapMs": 60000,
+        "maxWakesPerHour": 3
+      },
+      "state": {
+        "level": 2,
+        "ticks": 1,
+        "wakeAt": 90000,
+        "spontaneousWakes": [10000, 20000, 30000]
+      },
+      "event": {
+        "wakeClass": "spontaneous",
+        "outcome": "empty",
+        "now": 100000
+      },
+      "expected": {
+        "kind": "unchanged",
+        "level": 2,
+        "ticks": 1,
+        "wakeAt": 90000,
+        "parked": "rate_fuse",
+        "parkedUntil": 3610000
+      }
+    },
+    {
+      "name": "the fuse counts wake CLASS, so a reactive wake never trips it",
+      "config": {
+        "baseMs": 5000,
+        "factor": 2,
+        "capMs": 300000,
+        "hold": 3,
+        "thoughtCapMs": 60000,
+        "maxWakesPerHour": 4
+      },
+      "state": {
+        "level": 0,
+        "ticks": 0,
+        "spontaneousWakes": [10000, 20000, 30000]
+      },
+      "event": {
+        "wakeClass": "reactive",
+        "outcome": "empty",
+        "now": 100000
+      },
+      "expected": {
+        "kind": "arm",
+        "level": 0,
+        "ticks": 0,
+        "delayMs": 0,
+        "spontaneousWakes": 3
+      }
+    },
+    {
+      "name": "wakes older than the trailing hour leave the fuse window",
+      "config": {
+        "baseMs": 5000,
+        "factor": 2,
+        "capMs": 300000,
+        "hold": 3,
+        "thoughtCapMs": 60000,
+        "maxWakesPerHour": 3
+      },
+      "state": {
+        "level": 0,
+        "ticks": 0,
+        "spontaneousWakes": [1000, 2000, 3000]
+      },
+      "event": {
+        "wakeClass": "spontaneous",
+        "outcome": "empty",
+        "now": 3700000
+      },
+      "expected": {
+        "kind": "arm",
+        "level": 0,
+        "ticks": 1,
+        "delayMs": 0,
+        "spontaneousWakes": 1
+      }
+    }
+  ]
+}

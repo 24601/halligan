@@ -240,17 +240,40 @@ describe('axMindTools', () => {
     }
   });
 
+  it('routes every handler through runThinkerTool, the close_from_inside boundary', async () => {
+    const seen: string[] = [];
+    const fake = {
+      runThinkerTool: async (call: () => Promise<unknown>) => {
+        seen.push('entered');
+        return call();
+      },
+      append: async () => ({ stepId: 'step-1' }),
+      currentArtifacts: () => ({ goals: [] }),
+      chatAs: () => ({
+        reply: async () => ({ sent: true, step: { stepId: 's' } }),
+      }),
+    } as never;
+    const tools = axMindTools(fake, 'monolith');
+    for (const one of tools) {
+      await one.func({ content: 'x', to: 'ada' } as never);
+    }
+    // A tool added without the wrapper is a hole in the guarantee, so the
+    // count has to equal the menu, not merely be non-zero.
+    expect(seen).toHaveLength(tools.length);
+  });
+
   it('writes through the mind, stamping the thinker as the writer', async () => {
     const appended: Record<string, unknown>[] = [];
     const fake = {
+      runThinkerTool: (call: () => Promise<unknown>) => call(),
       append: async (one: Record<string, unknown>) => {
         appended.push(one);
         return { stepId: `step-${appended.length}` };
       },
       currentArtifacts: () => ({ goals: [goal()] }),
-      chat: {
+      chatAs: () => ({
         reply: async () => ({ sent: false, reason: 'already_answered' }),
-      },
+      }),
     } as never;
     const tools = axMindTools(fake, 'monolith');
     const call = (name: string, args: unknown) =>

@@ -139,7 +139,14 @@
       "type": "skill-md",
       "description": "Use AxTrajectoryStore to keep an append-only agent life log with digest-verified blob spill, fork/merge, durable per-consumer cursors, a bounded filtered backward tail, and tiered-rollup context projection. Use when the user asks about AxTrajectoryStore, AxTrajectoryStep, axProjectTrajectory, rollups, drill-down, AxJSONLTrajectoryStore, or runAxTrajectoryStoreConformance.",
       "url": "ax-trajectory/SKILL.md",
-      "digest": "sha256:9467e8fd1aa9c7b81df4e79d1fb7f65a663ff3db371455cfc8d3ce3bad463370"
+      "digest": "sha256:2b983bc8faf6d80560284b2c8c20ca641d9a5e37181475ea4a79faedfbd7841b"
+    },
+    {
+      "name": "ax-mind",
+      "type": "skill-md",
+      "description": "Use mind() to run a persistent agent whose thinkers wake from trajectory appends, a paced spontaneity ladder, and a liveness watchdog, with ledgered outbound messages and exactly-one-reply chat semantics. Use when the user asks about mind(), AxMind, AxMindThinker, thinkers, persistent agency, spontaneous wakes, salience injection, or an always-on agent.",
+      "url": "ax-mind/SKILL.md",
+      "digest": "sha256:6420ed8e0150ddbd2993ab90f5ad5fcbfd1048253a75dc91c595cadfb4556e4c"
     }
   ]
 }

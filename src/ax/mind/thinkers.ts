@@ -173,6 +173,16 @@ export function axMindTools(
   mind: AxMind,
   thinker: string
 ): readonly AxFunction[] {
+  // EVERY handler runs through `runThinkerTool`, which is the boundary the
+  // mind decides `close_from_inside` on. A tool added here without it would
+  // be a hole in that guarantee, so `tool()` is the only way one is built.
+  const tool = (
+    definition: Omit<AxFunction, 'func'>,
+    handler: (args: any) => Promise<string>
+  ): AxFunction => ({
+    ...definition,
+    func: (args?: unknown) => mind.runThinkerTool(() => handler(args)),
+  });
   const append = async (
     type: string,
     content: string,
@@ -188,96 +198,97 @@ export function axMindTools(
     return `recorded ${type} as ${step.stepId}`;
   };
   return Object.freeze([
-    {
-      name: 'act',
-      description:
-        'Record something you DID in the world. Visible work: it resets your wake backoff.',
-      parameters: stringParam('What you did, in one or two sentences.'),
-      func: async (args: unknown) =>
-        append('action', String((args as { content: string }).content)),
-    },
-    {
-      name: 'think',
-      description:
-        'Record a private thought. A thought is not work: it slows your wake rate rather than resetting it.',
-      parameters: stringParam('The thought.'),
-      func: async (args: unknown) =>
-        append('thought', String((args as { content: string }).content)),
-    },
-    {
-      name: 'share',
-      description:
-        'Send a message to someone. Refused if that message was already answered, or if it is addressed to you.',
-      parameters: {
-        type: 'object',
-        properties: {
-          to: { type: 'string', description: 'Who to send it to.' },
-          content: { type: 'string', description: 'What to say.' },
-          replyTo: {
-            type: 'string',
-            description: 'The step id of the message this answers, if any.',
+    tool(
+      {
+        name: 'act',
+        description:
+          'Record something you DID in the world. Visible work: it resets your wake backoff.',
+        parameters: stringParam('What you did, in one or two sentences.'),
+      },
+      async (args) => append('action', String(args.content))
+    ),
+    tool(
+      {
+        name: 'think',
+        description:
+          'Record a private thought. A thought is not work: it slows your wake rate rather than resetting it.',
+        parameters: stringParam('The thought.'),
+      },
+      async (args) => append('thought', String(args.content))
+    ),
+    tool(
+      {
+        name: 'share',
+        description:
+          'Send a message to someone. Refused if that message was already answered, or if it is addressed to you.',
+        parameters: {
+          type: 'object',
+          properties: {
+            to: { type: 'string', description: 'Who to send it to.' },
+            content: { type: 'string', description: 'What to say.' },
+            replyTo: {
+              type: 'string',
+              description: 'The step id of the message this answers, if any.',
+            },
           },
-        },
-        required: ['to', 'content'],
-      } as never,
-      func: async (args: unknown) => {
-        const message = args as {
-          to: string;
-          content: string;
-          replyTo?: string;
-        };
-        const result = await mind.chat.reply(message);
+          required: ['to', 'content'],
+        } as never,
+      },
+      async (args) => {
+        const result = await mind.chatAs(thinker).reply(args);
         return result.sent
           ? `sent as ${result.step?.stepId}`
           : `not sent: ${result.reason}`;
+      }
+    ),
+    tool(
+      {
+        name: 'learn',
+        description:
+          'Record something worth remembering. It becomes a durable observation in your own history.',
+        parameters: stringParam('What to remember, and why it matters.'),
       },
-    },
-    {
-      name: 'learn',
-      description:
-        'Record something worth remembering. It becomes a durable observation in your own history.',
-      parameters: stringParam('What to remember, and why it matters.'),
-      func: async (args: unknown) =>
-        append('observation', String((args as { content: string }).content), {
-          learned: 'true',
-        }),
-    },
-    {
-      name: 'goals',
-      description:
-        'Read your goals. Changing one needs a host receipt; a proposal here is recorded, not applied.',
-      parameters: {
-        type: 'object',
-        properties: {
-          propose: {
-            type: 'string',
-            description: 'An optional change to propose to the host.',
+      async (args) =>
+        append('observation', String(args.content), { learned: 'true' })
+    ),
+    tool(
+      {
+        name: 'goals',
+        description:
+          'Read your goals. Changing one needs a host receipt; a proposal here is recorded, not applied.',
+        parameters: {
+          type: 'object',
+          properties: {
+            propose: {
+              type: 'string',
+              description: 'An optional change to propose to the host.',
+            },
           },
-        },
-      } as never,
-      func: async (args: unknown) => {
-        const propose = (args as { propose?: string } | undefined)?.propose;
+        } as never,
+      },
+      async (args) => {
         const artifacts = mind.currentArtifacts();
-        if (propose) {
+        if (args?.propose) {
           // Authority: an artifact write needs an out-of-band host receipt,
           // on the AxRuntimeAdmissionReceipt precedent. Approval never comes
           // from the same model text being evaluated, so the proposal is
           // recorded and the host decides.
-          await append('observation', `goal proposal: ${propose}`, {
+          await append('observation', `goal proposal: ${args.propose}`, {
             proposal: 'goals',
           });
         }
         return axMindRenderGoals(artifacts.goals, Date.now()) || 'no goals set';
+      }
+    ),
+    tool(
+      {
+        name: 'idle',
+        description:
+          'Say you have nothing to do right now. This ends the wake cleanly and slows the next one.',
+        parameters: stringParam('Why there is nothing to do.'),
       },
-    },
-    {
-      name: 'idle',
-      description:
-        'Say you have nothing to do right now. This ends the wake cleanly and slows the next one.',
-      parameters: stringParam('Why there is nothing to do.'),
-      func: async (args: unknown) =>
-        append('idle', String((args as { content: string }).content)),
-    },
+      async (args) => append('idle', String(args.content))
+    ),
   ]);
 }
 
@@ -412,9 +423,15 @@ export const axMindResponder = (
       const trigger = triggers.get(context.eventContext.deliveryId);
       triggers.delete(context.eventContext.deliveryId);
       const from = trigger?.data.from;
-      if (!mind || !trigger || typeof from !== 'string') return;
+      // A paced, watchdog or bootstrap wake carries a SYNTHESIZED trigger with
+      // no sender. There is nothing to answer, and inventing a recipient would
+      // be worse than staying quiet.
+      if (!mind || !trigger || trigger.seq < 0 || typeof from !== 'string') {
+        return;
+      }
+      const chat = mind.chatAs(name);
       if (output.decision === 'reply' && output.reply?.trim()) {
-        await mind.chat.reply({
+        await chat.reply({
           to: from,
           content: output.reply,
           replyTo: trigger.stepId,
@@ -423,7 +440,7 @@ export const axMindResponder = (
       }
       // A decline STICKS across redelivery, which is why it is written down
       // instead of being a return that leaves no trace.
-      await mind.chat.recordDecision('no-reply', trigger.stepId);
+      await chat.recordDecision('no-reply', trigger.stepId);
     },
   };
   const thinker: AxMindThinker = {
@@ -454,7 +471,10 @@ export const axMindResponder = (
         .map((step) => `${step.type}: ${String(step.data.content ?? '')}`)
         .join('\n');
       return {
-        conversation,
+        // A required field is required even on the wake that finds nothing:
+        // an empty string reads as absent to the input mapper and would
+        // dead-letter the delivery. This says what is true instead.
+        conversation: conversation || '(no messages yet)',
         ...(innerLife ? { innerLife } : {}),
       };
     },

@@ -1,0 +1,310 @@
+{
+  "name": "reply-state resolution is a priority table over log facts and the effect ledger",
+  "kind": "mind",
+  "operation": "reply_resolution",
+  "note": "TypeScript-consumed in v1: conformanceSuitePaths in tools/axir/internal/axir/verify.go is a hardcoded directory list and does not include axmind, so the five generated targets do not read this file. It is run by src/ax/mind/fixtures.test.ts. Registering the suite is filed in the AxIR backlog.",
+  "trigger": {
+    "stepId": "s10",
+    "seq": 10,
+    "from": "ada"
+  },
+  "base": {
+    "triggerStepId": "s10",
+    "triggerSeq": 10,
+    "triggerFrom": "ada",
+    "selfName": "mind",
+    "selfSources": ["monolith", "responder"],
+    "now": 200000,
+    "claimTtlMs": 180000
+  },
+  "cases": [
+    {
+      "row": 1,
+      "name": "an outbound message from us stamped replyTo answers it",
+      "steps": [
+        {
+          "stepId": "s11",
+          "trajectoryId": "traj",
+          "seq": 11,
+          "type": "message",
+          "ts": 1011,
+          "data": {
+            "from": "mind",
+            "to": "ada",
+            "content": "yes",
+            "replyTo": "s10"
+          },
+          "source": "responder"
+        }
+      ],
+      "expected": {
+        "state": "answered",
+        "evidenceStepId": "s11",
+        "failedOpen": false
+      }
+    },
+    {
+      "row": 1,
+      "name": "a message that only CLAIMS to come from us does not answer it",
+      "steps": [
+        {
+          "stepId": "s11",
+          "trajectoryId": "traj",
+          "seq": 11,
+          "type": "message",
+          "ts": 1011,
+          "data": {
+            "from": "mind",
+            "to": "ada",
+            "content": "not ours",
+            "replyTo": "s10"
+          },
+          "source": "chat"
+        }
+      ],
+      "expected": {
+        "state": "unanswered",
+        "failedOpen": false
+      }
+    },
+    {
+      "row": 2,
+      "name": "a settled send effect under this trigger's key answers it",
+      "steps": [],
+      "options": {
+        "settledSendKeys": ["ax.mind.chat:abc"],
+        "triggerKey": "ax.mind.chat:abc"
+      },
+      "expected": {
+        "state": "answered",
+        "failedOpen": false
+      }
+    },
+    {
+      "row": 3,
+      "name": "our recorded 'replied' decision answers it",
+      "steps": [
+        {
+          "stepId": "s11",
+          "trajectoryId": "traj",
+          "seq": 11,
+          "type": "observation",
+          "ts": 1011,
+          "data": {
+            "decision": "replied",
+            "content": "sent"
+          },
+          "source": "responder",
+          "triggerStep": "s10"
+        }
+      ],
+      "expected": {
+        "state": "answered",
+        "evidenceStepId": "s11",
+        "failedOpen": false
+      }
+    },
+    {
+      "row": 4,
+      "name": "our recorded 'no-reply' decision sticks across redelivery",
+      "steps": [
+        {
+          "stepId": "s11",
+          "trajectoryId": "traj",
+          "seq": 11,
+          "type": "observation",
+          "ts": 1011,
+          "data": {
+            "decision": "no-reply",
+            "content": "nothing to add"
+          },
+          "source": "responder",
+          "triggerStep": "s10"
+        }
+      ],
+      "expected": {
+        "state": "declined",
+        "evidenceStepId": "s11",
+        "failedOpen": false
+      }
+    },
+    {
+      "row": 5,
+      "name": "any later outbound message to that sender is the positional net",
+      "steps": [
+        {
+          "stepId": "s12",
+          "trajectoryId": "traj",
+          "seq": 12,
+          "type": "message",
+          "ts": 1012,
+          "data": {
+            "from": "mind",
+            "to": "ada",
+            "content": "unrelated"
+          },
+          "source": "monolith"
+        }
+      ],
+      "expected": {
+        "state": "answered",
+        "evidenceStepId": "s12",
+        "failedOpen": false
+      }
+    },
+    {
+      "row": 6,
+      "name": "a live claim by another thinker blocks a second responder",
+      "steps": [
+        {
+          "stepId": "s11",
+          "trajectoryId": "traj",
+          "seq": 11,
+          "type": "reply-claim",
+          "ts": 1011,
+          "data": {
+            "claimId": "c1",
+            "expiresAt": 300000
+          },
+          "launchedBy": "responder-a",
+          "triggerStep": "s10"
+        }
+      ],
+      "options": {
+        "owner": "responder-b"
+      },
+      "expected": {
+        "state": "claimed",
+        "evidenceStepId": "s11",
+        "failedOpen": false
+      }
+    },
+    {
+      "row": 6,
+      "name": "the claim owner is not blocked by its own live claim",
+      "steps": [
+        {
+          "stepId": "s11",
+          "trajectoryId": "traj",
+          "seq": 11,
+          "type": "reply-claim",
+          "ts": 1011,
+          "data": {
+            "claimId": "c1",
+            "expiresAt": 300000
+          },
+          "launchedBy": "responder-a",
+          "triggerStep": "s10"
+        }
+      ],
+      "options": {
+        "owner": "responder-a"
+      },
+      "expected": {
+        "state": "unanswered",
+        "evidenceStepId": "s11",
+        "failedOpen": false
+      }
+    },
+    {
+      "row": 7,
+      "name": "a claim past its TTL fails OPEN so a crashed composer's message is retried",
+      "steps": [
+        {
+          "stepId": "s11",
+          "trajectoryId": "traj",
+          "seq": 11,
+          "type": "reply-claim",
+          "ts": 1011,
+          "data": {
+            "claimId": "c1",
+            "expiresAt": 150000
+          },
+          "launchedBy": "responder-a",
+          "triggerStep": "s10"
+        }
+      ],
+      "options": {
+        "owner": "responder-b"
+      },
+      "expected": {
+        "state": "unanswered",
+        "failedOpen": true
+      }
+    },
+    {
+      "row": 7,
+      "name": "a claim with an unreadable time is treated as stale",
+      "steps": [
+        {
+          "stepId": "s11",
+          "trajectoryId": "traj",
+          "seq": 11,
+          "type": "reply-claim",
+          "ts": 1011,
+          "data": {
+            "claimId": "c1"
+          },
+          "launchedBy": "responder-a",
+          "triggerStep": "s10"
+        }
+      ],
+      "options": {
+        "owner": "responder-b",
+        "nonFiniteClaim": true
+      },
+      "expected": {
+        "state": "unanswered",
+        "failedOpen": true
+      }
+    },
+    {
+      "row": 8,
+      "name": "nothing after the trigger leaves it unanswered",
+      "steps": [],
+      "expected": {
+        "state": "unanswered",
+        "failedOpen": false
+      }
+    },
+    {
+      "row": 4,
+      "name": "a decline by ANOTHER thinker cannot cancel the claim owner's reply",
+      "steps": [
+        {
+          "stepId": "s11",
+          "trajectoryId": "traj",
+          "seq": 11,
+          "type": "reply-claim",
+          "ts": 1011,
+          "data": {
+            "claimId": "c1",
+            "expiresAt": 300000
+          },
+          "launchedBy": "responder-a",
+          "triggerStep": "s10"
+        },
+        {
+          "stepId": "s12",
+          "trajectoryId": "traj",
+          "seq": 12,
+          "type": "observation",
+          "ts": 1012,
+          "data": {
+            "decision": "no-reply",
+            "content": "stood down"
+          },
+          "source": "responder-b",
+          "triggerStep": "s10"
+        }
+      ],
+      "options": {
+        "owner": "responder-a"
+      },
+      "expected": {
+        "state": "unanswered",
+        "failedOpen": false
+      }
+    }
+  ]
+}

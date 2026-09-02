@@ -471,19 +471,22 @@ describe('AxMind liveness and budgets', () => {
     await instance.close({ drain: false, timeoutMs: 200 });
   });
 
-  it('refuses close() from inside a thinker run and records why', async () => {
+  it('refuses close() from inside a thinker tool call and records why', async () => {
     const clock = new AxManualEventClock(1_000);
     const store = await seed(clock);
     let refusal: unknown;
-    // The thinker reaches the mind exactly the way a real tool would: through
-    // a handle the host closed over, never through a global.
+    // The thinker reaches the mind exactly the way a real tool does: every
+    // handler axMindTools builds runs through runThinkerTool, which is the
+    // boundary close_from_inside is decided on.
     const host: { mind?: AxMind } = {};
     const program = probeProgram(async () => {
-      try {
-        await host.mind?.close();
-      } catch (error) {
-        refusal = error;
-      }
+      await host.mind?.runThinkerTool(async () => {
+        try {
+          await host.mind?.close();
+        } catch (error) {
+          refusal = error;
+        }
+      });
       return { reply: 'still here' };
     });
     const instance = mind(
@@ -504,6 +507,37 @@ describe('AxMind liveness and budgets', () => {
     ).toBe(true);
     // The mind survived its own refusal: the host can still close it.
     await instance.close({ drain: false, timeoutMs: 200 });
+  });
+
+  it('lets the host close a PACED mind, which is never idle by construction', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const store = await seed(clock);
+    const program = probeProgram();
+    const instance = mind(
+      baseOptions(store, [
+        thinkerWith('monolith', program, {
+          subscription: { ...axDefaultMindSubscription, watchdogMs: 0 },
+          pacer: {
+            baseMs: 20,
+            factor: 2,
+            capMs: 40,
+            hold: 3,
+            thoughtCapMs: 40,
+          },
+        }),
+      ])
+    );
+    await instance.start();
+    await settle(clock, 5, 40);
+    // It is genuinely still waking: a paced mind never goes idle, so
+    // `waitForIdle` cannot be its shutdown path, and a close that refused
+    // while a step ran would leave a persistent mind unclosable.
+    const before = program.calls.length;
+    expect(before).toBeGreaterThan(2);
+    expect(instance.getPacerState('monolith')?.wakeAt).toBeDefined();
+    await instance.close({ drain: true, timeoutMs: 500 });
+    await settle(clock, 20, 20);
+    expect(program.calls.length).toBeLessThanOrEqual(before + 2);
   });
 
   it('exposes no way to modify, delete, rewrite or compact a step', async () => {

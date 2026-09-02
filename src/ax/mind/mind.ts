@@ -11,6 +11,7 @@ import type {
   AxEventClock,
   AxEventCloseOptions,
   AxEventContext,
+  AxEventDeadLetter,
   AxEventIngress,
   AxEventRoute,
   AxEventRuntimeOptions,
@@ -227,7 +228,6 @@ function usageTokens(usage: unknown): number {
  * thing that makes a mind alive, and it is the host that calls it.
  */
 export class AxMind {
-  readonly chat: AxMindChat;
   /** The mid-run injection buffer. A thinker reaches it through its tools. */
   readonly salience: AxMindSalienceBuffer;
 
@@ -236,6 +236,7 @@ export class AxMind {
   private readonly registry: AxTrajectoryTypeRegistry;
   private readonly thinkers = new Map<string, ThinkerRuntime>();
   private readonly pending = new Map<string, PendingStep>();
+  private readonly chats = new Map<string, AxMindChat>();
   private readonly routeTable: readonly AxEventRoute[];
   private readonly trajectorySource: AxTrajectoryEventSource;
   private readonly tickSource: AxMindTickEventSource;
@@ -248,7 +249,7 @@ export class AxMind {
   private artifacts: Readonly<AxMindArtifacts>;
   private started = false;
   private closed = false;
-  private stepDepth = 0;
+  private toolDepth = 0;
   private ownershipRevision?: number;
   /**
    * Per-INSTANCE lease identity. `close()` releases it by handing the record
@@ -351,6 +352,14 @@ export class AxMind {
     });
     this.bootstrapSource = new AxPushEventSource(`${this.id}.bootstrap`);
     this.runtime = new AxEventRuntime({
+      // One worker per thinker, not the runtime's pool default. A thinker's
+      // wake is pinned to `instanceKey = thinker`, so a mind can never have
+      // more than one run per thinker in flight; a larger pool adds workers
+      // that can only contend for the same deliveries, and a MEASURED
+      // consequence of that contention is a claim going stale mid-model-call
+      // and aborting a run that was doing nothing wrong. Thinker steps are
+      // long by design, which is what makes this the wrong pool to inherit.
+      workerConcurrency: Math.max(1, options.thinkers.length),
       ...(options.event ?? {}),
       id: this.id,
       clock: this.clock,
@@ -360,22 +369,6 @@ export class AxMind {
       ...(options.effectResolver
         ? { effectResolver: options.effectResolver }
         : {}),
-    });
-    // EVERY thinker name, never just one: an outbound reply written by a
-    // sibling must still satisfy the positional net, and `data.from` on an
-    // inbound step is remote-controlled so it cannot decide outbound-ness.
-    this.chat = axMindChat({
-      trajectoryId: options.trajectoryId,
-      store: options.store,
-      clock: this.clock,
-      sender: options.thinkers[0]?.name ?? 'mind',
-      selfSources: [...this.thinkers.keys(), 'mind'],
-      ...(options.transport ? { transport: options.transport } : {}),
-      ...(options.replyClaimTtlMs !== undefined
-        ? { claimTtlMs: options.replyClaimTtlMs }
-        : {}),
-      effects: () => options.effectLedger,
-      ...(options.onDiagnostic ? { onDiagnostic: options.onDiagnostic } : {}),
     });
     this.thresholds = {
       ...(options.health ?? {}),
@@ -549,6 +542,42 @@ export class AxMind {
     );
     this.wakeGapSignal = Object.freeze({ code: 'wake_gap', text });
     this.diagnose('wake-gap-noted', text);
+  }
+
+  /**
+   * Outbound chat AS one thinker. The writer identity on a reply and on a
+   * recorded decision is the thinker that composed it, never whichever
+   * thinker happened to be first in the table -- `axResolveMindReplyState`
+   * reads that identity to decide whose claim a decline can cancel.
+   */
+  chatAs(thinker: string): AxMindChat {
+    const found = this.chats.get(thinker);
+    if (found) return found;
+    // EVERY thinker name, never just one: an outbound reply written by a
+    // sibling must still satisfy the positional net, and `data.from` on an
+    // inbound step is remote-controlled so it cannot decide outbound-ness.
+    const chat = axMindChat({
+      trajectoryId: this.options.trajectoryId,
+      store: this.options.store,
+      clock: this.clock,
+      sender: thinker,
+      selfSources: [...this.thinkers.keys(), 'mind'],
+      ...(this.options.transport ? { transport: this.options.transport } : {}),
+      ...(this.options.replyClaimTtlMs !== undefined
+        ? { claimTtlMs: this.options.replyClaimTtlMs }
+        : {}),
+      effects: () => this.options.effectLedger,
+      ...(this.options.onDiagnostic
+        ? { onDiagnostic: this.options.onDiagnostic }
+        : {}),
+    });
+    this.chats.set(thinker, chat);
+    return chat;
+  }
+
+  /** The mind's own outbound handle, for a host that is not a thinker. */
+  get chat(): AxMindChat {
+    return this.chatAs('mind');
   }
 
   /** The artifacts in force right now. Re-read only by reloadArtifacts(). */
@@ -855,7 +884,6 @@ export class AxMind {
     this.pending.delete(deliveryId);
     const runtime = step.runtime;
     runtime.running++;
-    this.stepDepth++;
     const deadline = new AbortController();
     const timer = this.clock
       .sleep(step.budget.maxWallClockMs, deadline.signal)
@@ -885,7 +913,6 @@ export class AxMind {
       deadline.abort();
       await timer;
       runtime.running--;
-      this.stepDepth--;
     }
     await this.settleStep(step, output, error);
     if (error !== undefined) throw error;
@@ -1151,6 +1178,15 @@ export class AxMind {
     return this.artifacts;
   }
 
+  /**
+   * Deliveries that failed past their attempt budget. A dead-lettered wake is
+   * invisible in the trajectory by design -- nothing ran, so nothing was
+   * appended -- which makes this the only place a host can see one.
+   */
+  deadLetters(): Promise<readonly Readonly<AxEventDeadLetter>[]> {
+    return this.runtime.listDeadLetters();
+  }
+
   /** Inspectable, for hosts and for tests. */
   routes(): readonly AxEventRoute[] {
     return this.routeTable;
@@ -1169,14 +1205,34 @@ export class AxMind {
   }
 
   /**
-   * Refused while any thinker step is running. A thinker is BY DEFINITION
-   * inside one, so this is what makes "the mind never restarts itself" a
-   * construction rather than a convention (M14 item 10). A host drains first:
-   * `await mind.waitForIdle(); await mind.close();`.
+   * Runs one thinker TOOL call. Model-directed code reaches the mind only
+   * through a tool, so this is the boundary `close_from_inside` is decided
+   * on: precise about the call it must refuse, and silent about a host that
+   * happens to be closing while a step runs.
+   *
+   * A step counter cannot do this job. A PACED mind is never idle by
+   * construction -- the tick source keeps arming wakes -- so refusing every
+   * close while a step ran would make a persistent mind unclosable, which is
+   * a worse failure than the one M14 is guarding against.
+   */
+  async runThinkerTool<T>(call: () => Promise<T>): Promise<T> {
+    this.toolDepth++;
+    try {
+      return await call();
+    } finally {
+      this.toolDepth--;
+    }
+  }
+
+  /**
+   * Refused from inside a thinker's own tool call. `close()` is not a tool and
+   * never will be, and this is the second layer under that: the mind does not
+   * restart itself (M14 item 10). A host close stops the sources first and
+   * then drains with its own deadline.
    */
   async close(options?: Readonly<AxEventCloseOptions>): Promise<void> {
-    if (this.stepDepth > 0) {
-      const explanation = `AxMind.close() was called while ${this.stepDepth} thinker step(s) are running. A mind does not restart itself: the host drains with waitForIdle() and then closes.`;
+    if (this.toolDepth > 0) {
+      const explanation = `AxMind.close() was called from inside a thinker's own tool call. A mind does not restart itself; the host owns the restart path.`;
       await this.appendInternal({
         type: 'mind-error',
         data: { reason: explanation, refused: 'close_from_inside' },

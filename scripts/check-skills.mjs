@@ -44,6 +44,7 @@ const typeScriptSkillNames = [
   'ax-mcp',
   'ax-event-runtime',
   'ax-trajectory',
+  'ax-mind',
   'ax-gepa',
   'ax-learn',
   'ax-playbook',
