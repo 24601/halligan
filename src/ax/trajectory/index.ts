@@ -5,6 +5,19 @@ export {
   axTrajectoryUnknownDescriptor,
 } from './registry.js';
 export type {
+  AxTrajectoryResolveOptions,
+  AxTrajectorySpillPolicy,
+  AxTrajectorySpillRequest,
+  AxTrajectorySpillResult,
+} from './spill.js';
+export {
+  axDefaultTrajectorySpillPolicy,
+  axResolveTrajectoryStep,
+  axResolveTrajectorySteps,
+  axSpillTrajectoryFields,
+  axTrajectoryInlineBytes,
+} from './spill.js';
+export type {
   AxTrajectoryAppendReceipt,
   AxTrajectoryAppendRequest,
   AxTrajectoryBlobPutRequest,

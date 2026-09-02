@@ -1,155 +1,93 @@
 import {
   AxTrajectoryRegistryError,
+  type AxTrajectoryStepClass,
   type AxTrajectoryTypeDescriptor,
   type AxTrajectoryTypeRegistry,
 } from './types.js';
 
 /**
+ * Descriptor builder. Defaults are the conservative ones: not wakeable, and
+ * no writer identity. Every row below therefore states only what it grants.
+ */
+const d = (
+  type: string,
+  stepClass: AxTrajectoryStepClass,
+  extra: Partial<Readonly<AxTrajectoryTypeDescriptor>> = {}
+): Readonly<AxTrajectoryTypeDescriptor> =>
+  Object.freeze({
+    wakeable: false,
+    carriesSource: false,
+    ...extra,
+    type,
+    stepClass,
+  });
+
+const narrative = { wakeSignal: false, carriesSource: true } as const;
+const wakeSignal = { wakeable: true, wakeSignal: true } as const;
+
+/**
  * The shipped registry. Every row is pinned by `registry.test.ts`, so adding a
  * type without deciding its class, wakeability and source policy fails a test
- * rather than silently defaulting.
+ * rather than silently defaulting. There is deliberately no dropped-step type:
+ * nothing is ever dropped, so nothing needs a name for it.
  */
 export const axDefaultTrajectoryTypes: readonly Readonly<AxTrajectoryTypeDescriptor>[] =
   Object.freeze([
-    {
-      type: 'trajectory',
-      stepClass: 'structural',
-      wakeable: false,
-      carriesSource: false,
-    },
-    {
-      type: 'fork',
-      stepClass: 'structural',
-      wakeable: false,
-      carriesSource: false,
-    },
-    {
-      type: 'merge',
-      stepClass: 'structural',
+    d('trajectory', 'structural'),
+    d('fork', 'structural'),
+    d('merge', 'structural', {
       wakeable: true,
       wakeSignal: false,
-      carriesSource: false,
       visibleWork: true,
       spillFields: ['content'],
-    },
-    {
-      type: 'thought',
-      stepClass: 'narrative',
+    }),
+    d('thought', 'narrative', {
+      ...narrative,
       wakeable: true,
-      wakeSignal: false,
-      carriesSource: true,
       visibleWork: false,
       spillFields: ['content'],
-    },
-    {
-      type: 'action',
-      stepClass: 'narrative',
+    }),
+    d('action', 'narrative', {
+      ...narrative,
       wakeable: true,
-      wakeSignal: false,
-      carriesSource: true,
       visibleWork: true,
       spillFields: ['content'],
-    },
-    {
-      type: 'observation',
-      stepClass: 'narrative',
+    }),
+    d('observation', 'narrative', {
+      ...narrative,
       wakeable: true,
-      wakeSignal: false,
-      carriesSource: true,
       visibleWork: true,
       spillFields: ['content'],
-    },
-    {
-      type: 'idle',
-      stepClass: 'narrative',
+    }),
+    d('idle', 'narrative', {
+      ...narrative,
       wakeable: true,
-      wakeSignal: false,
-      carriesSource: true,
       visibleWork: false,
-    },
-    {
-      type: 'message',
-      stepClass: 'narrative',
+    }),
+    d('message', 'narrative', {
+      ...narrative,
+      wakeable: true,
       conversational: true,
-      wakeable: true,
-      wakeSignal: false,
-      carriesSource: true,
       visibleWork: true,
       spillFields: ['content'],
-    },
-    {
-      type: 'error',
-      stepClass: 'narrative',
+    }),
+    d('error', 'narrative', {
+      ...narrative,
       wakeable: true,
-      wakeSignal: false,
-      carriesSource: true,
       neverRetriggersSelf: true,
       visibleWork: false,
       spillFields: ['content'],
-    },
-    {
-      type: 'run',
-      stepClass: 'machinery',
-      wakeable: false,
-      carriesSource: false,
-      spillFields: ['command'],
-    },
-    {
-      type: 'run-summary',
-      stepClass: 'machinery',
-      wakeable: false,
-      carriesSource: false,
-      spillFields: ['fullSummary'],
-    },
-    {
-      type: 'runtime-output',
-      stepClass: 'machinery',
-      wakeable: false,
-      carriesSource: false,
-      spillFields: ['stdout', 'stderr'],
-    },
-    {
-      type: 'feedback',
-      stepClass: 'machinery',
-      wakeable: false,
-      carriesSource: false,
-      spillFields: ['content'],
-    },
-    {
-      type: 'reply-claim',
-      stepClass: 'machinery',
-      wakeable: false,
-      carriesSource: false,
-    },
-    {
-      type: 'mind-wake',
-      stepClass: 'machinery',
-      wakeable: true,
-      wakeSignal: true,
-      carriesSource: false,
-    },
-    {
-      type: 'mind-idle',
-      stepClass: 'machinery',
-      wakeable: true,
-      wakeSignal: true,
-      carriesSource: false,
-    },
-    {
-      type: 'manual-trigger',
-      stepClass: 'machinery',
-      wakeable: true,
-      wakeSignal: true,
-      carriesSource: false,
-    },
-    {
-      type: 'mind-error',
-      stepClass: 'machinery',
-      wakeable: false,
-      carriesSource: false,
-      spillFields: ['reason'],
-    },
-  ] as const satisfies readonly AxTrajectoryTypeDescriptor[]);
+    }),
+    d('run', 'machinery', { spillFields: ['command'] }),
+    d('run-summary', 'machinery', { spillFields: ['fullSummary'] }),
+    d('runtime-output', 'machinery', { spillFields: ['stdout', 'stderr'] }),
+    d('feedback', 'machinery', { spillFields: ['content'] }),
+    d('reply-claim', 'machinery'),
+    d('mind-wake', 'machinery', wakeSignal),
+    d('mind-idle', 'machinery', wakeSignal),
+    d('manual-trigger', 'machinery', wakeSignal),
+    d('mind-error', 'machinery', { spillFields: ['reason'] }),
+  ]);
 
 /**
  * Open world: an unregistered type resolves to this. Conservative where it
