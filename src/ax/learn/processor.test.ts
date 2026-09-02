@@ -680,3 +680,189 @@ describe('axCreateLearningEngineState', () => {
     ).toThrow(/positive safe integer/);
   });
 });
+
+describe('batch capacity and emptiness', () => {
+  const grouped = (batchSize: number): AxLearningProcessor => ({
+    id: 'grouped',
+    batchSize,
+    judge: (context) => ({
+      outcome: 'train',
+      unit: {
+        reportId: context.report.id,
+        samples: [],
+        ...(context.report.payload.feedback === undefined
+          ? {}
+          : { groupKey: context.report.payload.feedback as string }),
+      },
+    }),
+  });
+
+  function ready(
+    processor: AxLearningProcessor,
+    arrivals: readonly (readonly [string, string | undefined])[]
+  ): AxLearningEngineState {
+    let state = axCreateLearningEngineState({ scenario: SCENARIO, processor });
+    for (const [id, group] of arrivals) {
+      state = feed(
+        state,
+        interaction(id),
+        report(`r-${id}`, [id], {
+          score: 0,
+          ...(group === undefined ? {} : { feedback: group }),
+        })
+      ).state;
+    }
+    return state;
+  }
+
+  it('never exceeds batchSize when singletons interleave with an admitted group', () => {
+    // A group reserves capacity for ALL of its members when its first member is
+    // admitted. Singletons that ignore that reservation let the group's later
+    // members — which push unconditionally — carry the batch past batchSize.
+    const state = ready(grouped(3), [
+      ['g1', 'pair'],
+      ['x1', undefined],
+      ['x2', undefined],
+      ['g2', 'pair'],
+    ]);
+    const built = axLearningEngineBuildBatch(state, 1);
+    expect(built.batch.units).toHaveLength(3);
+    expect(built.batch.units.map((unit) => unit.reportId)).toEqual([
+      'r-g1',
+      'r-x1',
+      'r-g2',
+    ]);
+    // The singleton the reservation displaced is queued for the next batch,
+    // never dropped.
+    expect(built.state.readyCount).toBe(1);
+  });
+
+  it('defers a group that does not fit the capacity singletons already took', () => {
+    const state = ready(grouped(3), [
+      ['x1', undefined],
+      ['x2', undefined],
+      ['g1', 'pair'],
+      ['g2', 'pair'],
+    ]);
+    const built = axLearningEngineBuildBatch(state, 1);
+    expect(built.batch.units.map((unit) => unit.reportId)).toEqual([
+      'r-x1',
+      'r-x2',
+    ]);
+    expect(built.state.readyCount).toBe(2);
+    expect(built.state.neverReasons['group-discarded']).toBeUndefined();
+  });
+
+  it('refuses to build when nothing is ready', () => {
+    expect(() => axLearningEngineBuildBatch(engine(), 1)).toThrow(
+      /no ready units/
+    );
+  });
+
+  it('leaves no empty batch pending when every ready unit is discarded', () => {
+    const state = ready(grouped(2), [
+      ['a', 'big'],
+      ['b', 'big'],
+      ['c', 'big'],
+    ]);
+    const built = axLearningEngineBuildBatch(state, 1);
+    expect(built.batch.units).toHaveLength(0);
+    expect(built.state.pendingBatchId).toBeUndefined();
+    expect(axLearningEngineReady(built.state)).toBe(false);
+    expect(built.state.readyCount).toBe(0);
+    expect(built.state.neverReasons['group-discarded']).toBe(3);
+  });
+});
+
+describe('sampleFields withholding on the decision path', () => {
+  it('projects the decision unit, not only the built batch', () => {
+    const state = axCreateLearningEngineState({
+      scenario: SCENARIO,
+      processor: axScoreWindowProcessor(),
+      sampleFields: ['input'],
+    });
+    const withInteraction = axLearningEngineIngest(
+      state,
+      interaction('a')
+    ).state;
+    const step = axLearningEngineIngest(withInteraction, report('r1', ['a']));
+    const decision = step.decisions[0]?.decision;
+    expect(decision?.outcome).toBe('train');
+    const unit = decision?.outcome === 'train' ? decision.unit : undefined;
+    expect(unit?.samples[0]?.payload).toEqual({ input: { question: 'a' } });
+    // The per-decision signal is the only per-report signal a host gets. A host
+    // tag and the model identity must not reach it either.
+    expect(JSON.stringify(decision)).not.toContain('acme');
+    expect(JSON.stringify(decision)).not.toContain('gpt-5.6');
+    // And the batch hands out exactly the unit the decision announced.
+    const { batch } = axLearningEngineBuildBatch(step.state, 1);
+    expect(batch.units[0]).toEqual(unit);
+  });
+});
+
+describe('the parked bound', () => {
+  it('evicts the oldest parked report with a named, counted decision', () => {
+    const state = feed(
+      axCreateLearningEngineState({
+        scenario: SCENARIO,
+        processor: axScoreWindowProcessor(),
+        maxParkedReports: 2,
+      }),
+      report('r1', ['missing-1']),
+      report('r2', ['missing-2'])
+    ).state;
+    expect(state.waitingCount).toBe(2);
+
+    const step = axLearningEngineIngest(state, report('r3', ['missing-3']));
+    expect(step.state.waitingCount).toBe(2);
+    expect(step.state.neverReasons['parked-evicted']).toBe(1);
+    expect(
+      step.decisions.map((entry) => [entry.reportId, entry.decision.outcome])
+    ).toEqual([
+      ['r3', 'wait'],
+      ['r1', 'never'],
+    ]);
+    const evicted = step.decisions[1]?.decision;
+    expect(evicted?.outcome === 'never' ? evicted.reason : undefined).toBe(
+      'parked-evicted'
+    );
+
+    // The evicted report leaves the waiting index too: its interaction arriving
+    // later must not resurrect a report already reported as never.
+    const after = axLearningEngineIngest(step.state, interaction('missing-1'));
+    expect(after.decisions).toHaveLength(0);
+    expect(after.state.waitingCount).toBe(2);
+    expect(after.state.readyCount).toBe(0);
+  });
+
+  it('never evicts the report it has just accepted', () => {
+    const state = axCreateLearningEngineState({
+      scenario: SCENARIO,
+      processor: axScoreWindowProcessor(),
+      maxParkedReports: 1,
+    });
+    const step = feed(
+      state,
+      report('r1', ['missing-1']),
+      report('r2', ['missing-2'])
+    );
+    expect(step.state.waitingCount).toBe(1);
+    expect(step.state.neverReasons['parked-evicted']).toBe(1);
+    // r2 is the survivor: the newest arrival stays parked and the oldest goes.
+    const resolved = axLearningEngineIngest(
+      step.state,
+      interaction('missing-2')
+    );
+    expect(resolved.decisions[0]?.decision.outcome).toBe('train');
+  });
+
+  it('refuses a nonsensical parked bound', () => {
+    expect(() =>
+      axCreateLearningEngineState({
+        scenario: SCENARIO,
+        processor: axScoreWindowProcessor(),
+        maxParkedReports: 0,
+      })
+    ).toThrow(/positive safe integer/);
+  });
+});

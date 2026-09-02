@@ -67,7 +67,8 @@ export type AxLearningNeverReason =
   | 'already-trained-source'
   | 'report-already-seen'
   | 'slot-occupied'
-  | 'group-discarded';
+  | 'group-discarded'
+  | 'parked-evicted';
 
 export type AxLearningDecision = Readonly<
   | { outcome: 'train'; unit: Readonly<AxLearningTrainingUnit> }
@@ -264,7 +265,20 @@ export interface AxLearningBatch {
   readonly droppedSamples: number;
 }
 
-/** Opaque immutable reducer state. Structurally cloneable; safe to snapshot. */
+/**
+ * Opaque immutable reducer state. Structurally cloneable; safe to snapshot.
+ *
+ * Growth, stated plainly rather than left to be discovered. The parked set is
+ * bounded by `maxParkedReports` and every eviction is a counted decision. The
+ * interaction index, the seen-report set and the trained-source set are
+ * monotonic BY DESIGN: forgetting a trained source would let an already
+ * consumed exchange train twice (I9), and forgetting a seen report would let a
+ * duplicate through the `report-already-seen` check, so neither can be evicted
+ * without breaking an invariant this subsystem exists to hold. State is
+ * therefore sized to the record window a caller folds into it — a page range
+ * over the store, not an unbounded replay of a lifetime log — and a long-lived
+ * worker builds fresh state per window instead of keeping one forever.
+ */
 export interface AxLearningEngineState {
   readonly scenario: string;
   readonly processorId: string;
@@ -298,6 +312,18 @@ export interface AxLearningEngineOptions {
   readonly sampleFields?: readonly (keyof AxLearningInteractionPayload)[];
   /** Canonical-JSON byte cap over a batch's whole sample set. Default 65_536. */
   readonly maxSampleBytes?: number;
+  /**
+   * Cap on reports parked waiting for a referenced interaction. Default 10_000.
+   *
+   * A parked report whose interaction never arrives — evicted by the store's
+   * own cap before the report was ingested, never appended at all, or named by
+   * a reference that is not an interaction receipt — would otherwise wait
+   * forever. Past the cap the oldest parked report is released with a counted
+   * `parked-evicted` decision, so the loss is named and counted like every
+   * other terminal outcome instead of showing up only as a rising
+   * `waitingCount`.
+   */
+  readonly maxParkedReports?: number;
 }
 
 const DEFAULT_SAMPLE_FIELDS: readonly (keyof AxLearningInteractionPayload)[] = [
@@ -306,11 +332,13 @@ const DEFAULT_SAMPLE_FIELDS: readonly (keyof AxLearningInteractionPayload)[] = [
   'failure',
 ];
 const DEFAULT_MAX_SAMPLE_BYTES = 65_536;
+const DEFAULT_MAX_PARKED_REPORTS = 10_000;
 
 type EngineInternal = {
   readonly processor: AxLearningProcessor;
   readonly sampleFields: readonly (keyof AxLearningInteractionPayload)[];
   readonly maxSampleBytes: number;
+  readonly maxParkedReports: number;
   readonly byId: ReadonlyMap<
     AxLearningRecordId,
     Readonly<AxLearningInteractionRecord>
@@ -369,12 +397,20 @@ export const axCreateLearningEngineState = (
       'axCreateLearningEngineState: maxSampleBytes must be a positive safe integer'
     );
   }
+  const maxParkedReports =
+    options.maxParkedReports ?? DEFAULT_MAX_PARKED_REPORTS;
+  if (!Number.isSafeInteger(maxParkedReports) || maxParkedReports < 1) {
+    throw new Error(
+      'axCreateLearningEngineState: maxParkedReports must be a positive safe integer'
+    );
+  }
   const internal: EngineInternal = {
     processor,
     sampleFields: Object.freeze([
       ...(options.sampleFields ?? DEFAULT_SAMPLE_FIELDS),
     ]),
     maxSampleBytes,
+    maxParkedReports,
     byId: new Map(),
     waiting: new Map(),
     parked: new Map(),
@@ -459,6 +495,8 @@ class Draft {
   private slotsCopy: Set<string> | null = null;
 
   reasons: Readonly<Record<string, number>>;
+  /** Reports the parked bound released during this call, oldest first. */
+  readonly evicted: Readonly<AxLearningReportRecord>[] = [];
 
   constructor(
     private readonly internal: EngineInternal,
@@ -546,14 +584,27 @@ class Draft {
     return [...waiters];
   }
 
-  park(report: Readonly<AxLearningReportRecord>): void {
-    this.mutableParked().set(report.id, report);
+  park(report: Readonly<AxLearningReportRecord>, maxParked: number): void {
+    const parked = this.mutableParked();
+    parked.set(report.id, report);
     const waiting = this.mutableWaiting();
     for (const reference of report.references) {
       if (this.byId.has(reference)) continue;
       const waiters = waiting.get(reference) ?? [];
       if (!waiters.includes(report.id)) waiters.push(report.id);
       waiting.set(reference, waiters);
+    }
+    // Bound the parked set. A report re-parked while it waits keeps its
+    // original insertion position, so `parked` is ordered by first-park age and
+    // the oldest waiter is the one that goes. The report just accepted is never
+    // the victim: evicting it would report `wait` and `parked-evicted` for the
+    // same arrival and would make a cap of one useless.
+    while (parked.size > maxParked) {
+      const oldest = parked.values().next().value;
+      if (oldest === undefined || oldest.id === report.id) break;
+      this.release(oldest);
+      this.count('parked-evicted');
+      this.evicted.push(oldest);
     }
   }
 
@@ -620,9 +671,10 @@ function occupiedSlotsOf(internal: EngineInternal): ReadonlySet<string> {
  */
 function judgeReport(
   draft: Draft,
-  processor: AxLearningProcessor,
+  internal: EngineInternal,
   report: Readonly<AxLearningReportRecord>
 ): AxLearningDecision {
+  const processor = internal.processor;
   if (report.references.some((id) => draft.trainedSources.has(id))) {
     draft.count('already-trained-source');
     draft.release(report);
@@ -649,11 +701,24 @@ function judgeReport(
         `AxLearningEngine: processor ${processor.id} returned wait with no missing reference for report ${report.id}`
       );
     }
-    draft.park(report);
+    draft.park(report, internal.maxParkedReports);
     return decision;
   }
 
-  const slot = decision.unit.slot;
+  // Project HERE, not at batch time. `sampleFields` is a withholding control
+  // over what reaches a model prompt, and this decision is the only per-report
+  // signal a host gets: projecting only inside `buildBatch` would hand every
+  // caller that reacts per decision the very fields it asked to withhold.
+  const unit = Object.freeze({
+    ...decision.unit,
+    samples: Object.freeze(
+      decision.unit.samples.map((sample) =>
+        projectSample(sample, internal.sampleFields)
+      )
+    ),
+  });
+
+  const slot = unit.slot;
   if (slot !== undefined && draft.occupiedSlots.has(slot)) {
     draft.count('slot-occupied');
     draft.release(report);
@@ -661,8 +726,8 @@ function judgeReport(
   }
 
   draft.release(report);
-  draft.pushReady(decision.unit);
-  return decision;
+  draft.pushReady(unit);
+  return Object.freeze({ outcome: 'train' as const, unit });
 }
 
 /**
@@ -691,7 +756,7 @@ export const axLearningEngineIngest = (
     for (const reportId of waiters) {
       const parkedReport = draft.parked.get(reportId);
       if (!parkedReport) continue;
-      const decision = judgeReport(draft, internal.processor, parkedReport);
+      const decision = judgeReport(draft, internal, parkedReport);
       decisions.push(Object.freeze({ reportId, decision }));
     }
   } else {
@@ -703,8 +768,20 @@ export const axLearningEngineIngest = (
       };
     }
     draft.markReportSeen(record.id);
-    const decision = judgeReport(draft, internal.processor, record);
+    const decision = judgeReport(draft, internal, record);
     decisions.push(Object.freeze({ reportId: record.id, decision }));
+  }
+
+  // Evictions come last: a report evicted by the parked bound may also have
+  // been judged earlier in this same call, and the terminal decision is the one
+  // that stands.
+  for (const evictedReport of draft.evicted) {
+    decisions.push(
+      Object.freeze({
+        reportId: evictedReport.id,
+        decision: never('parked-evicted'),
+      })
+    );
   }
 
   return {
@@ -738,6 +815,10 @@ function byteLength(value: unknown): number {
  * The same batch comes back until it is acknowledged: a caller that crashed
  * mid-nomination must be able to ask again and get the identical work, or the
  * loop is not replayable.
+ *
+ * Gate it on `axLearningEngineReady`. With no ready unit and no pending batch
+ * there is nothing to build and this throws rather than minting an empty batch
+ * that `ready()` would then answer `true` for forever.
  */
 export const axLearningEngineBuildBatch = (
   state: AxLearningEngineState,
@@ -756,9 +837,21 @@ export const axLearningEngineBuildBatch = (
     );
   }
 
+  if (internal.readyUnits.length === 0) {
+    throw new Error(
+      'axLearningEngineBuildBatch: no ready units; gate on axLearningEngineReady'
+    );
+  }
+
   const { batchSize } = state;
   const selected: Readonly<AxLearningTrainingUnit>[] = [];
   const remaining: Readonly<AxLearningTrainingUnit>[] = [];
+  // Capacity a unit consumes is RESERVED when it is admitted, and a whole group
+  // reserves all of its members at once. Counting `selected.length` instead
+  // would let singletons spend the capacity an admitted group already claimed,
+  // and the group's later members — which push unconditionally — would carry
+  // the batch past `batchSize`.
+  let reserved = 0;
   let reasons = state.neverReasons;
 
   // Group sizes are needed up front: a group batches whole or not at all, and
@@ -776,41 +869,38 @@ export const axLearningEngineBuildBatch = (
       const size = groupSizes.get(key) ?? 0;
       if (size > batchSize) {
         // A group larger than the batch can never batch. Dropping it with a
-        // counted reason beats letting it block the queue forever.
+        // counted reason beats letting it block the queue forever. The counter
+        // moves once per discarded UNIT, not once per group.
         reasons = counted(reasons, 'group-discarded');
         continue;
       }
       const alreadyTaken = selected.some((taken) => taken.groupKey === key);
       if (alreadyTaken) {
+        // Capacity for the whole group was reserved when its first member was
+        // admitted, so this member is already paid for.
         selected.push(unit);
         continue;
       }
-      if (selected.length + size <= batchSize) {
+      if (reserved + size <= batchSize) {
         selected.push(unit);
+        reserved += size;
         continue;
       }
       remaining.push(unit);
       continue;
     }
-    if (selected.length < batchSize) selected.push(unit);
-    else remaining.push(unit);
+    if (reserved < batchSize) {
+      selected.push(unit);
+      reserved += 1;
+    } else remaining.push(unit);
   }
 
-  // Apply the projection, then the byte cap. A unit is atomic, so the cap drops
-  // whole units oldest-first and the survivors stay complete; every dropped
-  // unit goes back on the ready queue for the next batch.
-  const projected = selected.map((unit) =>
-    Object.freeze({
-      ...unit,
-      samples: Object.freeze(
-        unit.samples.map((sample) =>
-          projectSample(sample, internal.sampleFields)
-        )
-      ),
-    })
-  );
-
-  const kept = [...projected];
+  // Samples were projected by `sampleFields` when their unit was created, so
+  // nothing from here on can widen what reaches a prompt. What is left is the
+  // byte cap: a unit is atomic, so the cap drops whole units oldest-first and
+  // the survivors stay complete; every dropped unit goes back on the ready
+  // queue for the next batch.
+  const kept = [...selected];
   const deferred: Readonly<AxLearningTrainingUnit>[] = [];
   let droppedSamples = 0;
   while (
@@ -836,11 +926,14 @@ export const axLearningEngineBuildBatch = (
   // Deferred units keep their arrival order ahead of the units this batch did
   // not reach.
   const nextReady = Object.freeze([...deferred, ...remaining]);
-  const nextInternal: EngineInternal = {
-    ...internal,
-    readyUnits: nextReady,
-    pendingBatch: batch,
-  };
+  // An empty batch is never pending. Every ready unit can be discarded in one
+  // pass (a group larger than `batchSize`), and marking that empty result
+  // pending would make `axLearningEngineReady` answer `true` until something
+  // acknowledged a batch with no work in it.
+  const nextInternal: EngineInternal =
+    kept.length === 0
+      ? { ...internal, readyUnits: nextReady }
+      : { ...internal, readyUnits: nextReady, pendingBatch: batch };
   return { state: publish(state, nextInternal, reasons), batch };
 };
 
@@ -867,14 +960,18 @@ export const axLearningEngineAcknowledge = (
   }
   const trainedSources = new Set(internal.trainedSources);
   const consumed: AxLearningRecordId[] = [];
+  const seen = new Set<AxLearningRecordId>();
+  const take = (id: AxLearningRecordId): void => {
+    if (seen.has(id)) return;
+    seen.add(id);
+    consumed.push(id);
+  };
   for (const unit of pending.units) {
     for (const sample of unit.samples) {
       trainedSources.add(sample.sourceRecordId);
-      if (!consumed.includes(sample.sourceRecordId)) {
-        consumed.push(sample.sourceRecordId);
-      }
+      take(sample.sourceRecordId);
     }
-    if (!consumed.includes(unit.reportId)) consumed.push(unit.reportId);
+    take(unit.reportId);
   }
   const { pendingBatch: _retired, ...rest } = internal;
   const nextInternal: EngineInternal = { ...rest, trainedSources };
