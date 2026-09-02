@@ -188,6 +188,64 @@ describe(
       expect(await h.surface.releases()).toHaveLength(1);
     });
 
+    it('refuses a built-in judge that would silently reuse the proposer teacher', async () => {
+      // R2: correlated proposer/evaluator error. `evolve()` falls back
+      // judgeAI -> agent judge -> teacherAI, and inheriting that last step
+      // here would hand the judge the exact service the proposer writes with.
+      const h = await harness();
+      const metric = vi.fn(() => 1);
+      const propose = vi.fn(() => [ADD_BULLET]);
+      await expect(
+        evolve(h, {
+          metric: undefined,
+          teacherAI: h.ai,
+          propose,
+        })
+      ).rejects.toThrow(AxHarnessEvolveConfigError);
+      // Refused before anything ran, like every other config failure.
+      expect(propose).not.toHaveBeenCalled();
+      expect(metric).not.toHaveBeenCalled();
+      expect(await h.surface.releases()).toHaveLength(1);
+
+      try {
+        await evolve(h, { metric: undefined, teacherAI: h.ai });
+        throw new Error('expected a refusal');
+      } catch (error) {
+        expect((error as AxHarnessEvolveConfigError).field).toBe('judgeAI');
+      }
+    });
+
+    it('accepts an explicit judgeAI, and an agent that can name its own', async () => {
+      // The correlation is a decision, not an accident: naming the same
+      // service as judgeAI is allowed, and an agent that exposes its own
+      // construction-time judge is consulted before the refusal fires.
+      const h = await harness();
+      const explicit = await evolve(h, {
+        metric: undefined,
+        teacherAI: h.ai,
+        judgeAI: h.ai,
+        // The mock judge scores nothing useful; the point is that the config
+        // was accepted and the step ran to a verdict.
+        propose: () => null,
+      });
+      expect(explicit.status).toBe('skipped');
+
+      const viaAgent = {
+        ...h.evolveAgent,
+        getJudgeAI: () => h.ai,
+      } as unknown as AxHarnessEvolveAgent;
+      const inherited = await axHarnessEvolve({
+        agent: viaAgent,
+        ai: h.ai,
+        surface: h.surface,
+        tasks: { train: TRAIN, validation: VALIDATION },
+        propose: () => null,
+        teacherAI: h.ai,
+        clock: h.clock,
+      });
+      expect(inherited.status).toBe('skipped');
+    });
+
     it('names the field and points at the opt-out', async () => {
       const h = await harness();
       try {

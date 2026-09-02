@@ -29,6 +29,14 @@ Stated first, because everything below is easier to misread than to read.
 - **`contentId` is identity, not tamper-evidence.** It is a full `sha256:` over
   the canonical admitted entry list. It answers "is my copy current"; it does
   not attest who wrote the tree.
+- **The proposer and the judge are not guaranteed to be independent.** When no
+  `metric` is supplied, `axHarnessEvolve` builds an LLM judge, and an LLM judge
+  correlated with the proposer will happily grade the proposer's own habits as
+  good. Ax refuses to arrive there silently: `teacherAI` set with no `judgeAI`
+  and no `metric` throws `AxHarnessEvolveConfigError{ field: 'judgeAI' }`, and
+  naming the same service for both emits a progress event saying so. What Ax
+  cannot do is make an LLM judge independent. A deterministic `metric` is the
+  only configuration in which the gate is a measurement rather than an opinion.
 - **The credential tripwire is a heuristic.** It matches known key *names* and
   known literal *shapes*. A novel credential format under an innocuous key is
   not caught. It is not a secret scanner.
@@ -145,13 +153,30 @@ entry is excluded from render but still validated and still persisted.
 produced without a timestamp, so the caller supplies one from its injected
 clock. `now` is not part of `contentId`.
 
-`axApplyHarnessTree(tree, target, options)` writes through the structural
-`AxHarnessInstallTarget` port and returns an exact, idempotent `dispose()`. It
-refuses a target that already carries an installation, so "what is installed"
-stays single-valued — which is what makes a record's `artifactRef` honest. It
-also refuses a target with continuous playbook learning unless
-`acknowledgeContinuousPlaybookReset: true`, because installing a tree replaces
-the playbook; the resulting `discardedBulletCount` is reported, never silent.
+`axApplyHarnessTree(tree, target, options, signal?)` writes through the
+structural `AxHarnessInstallTarget` port and returns an exact, idempotent
+`dispose()`. It refuses a target that already carries an installation, so "what
+is installed" stays single-valued — which is what makes a record's
+`artifactRef` honest.
+
+**The install is a function of the target, not of the tree.** Whenever the
+target has a playbook handle, the install replaces the playbook — including
+with the empty rendering of a tree that carries no bullets, because a tree with
+no bullets is a tree that says "serve no bullets". Leaving prior bullets in
+place would make the agent serve release X plus content that is in no release,
+and every record stamped with X would be a lie. The same rule applies to the
+skills slot, except that a slot this installer never had anything in is left
+alone, so an instruction-only tree does not inherit the setter's refusal of a
+host `onSkillsSearch`.
+
+A target with continuous playbook learning is refused unless
+`acknowledgeContinuousPlaybookReset: true` — on **every** install, not only on
+one carrying bullets, because the reset is what the guard exists for. The
+resulting `discardedBulletCount` is reported, never silent.
+
+`dispose()` attempts every channel and raises an `AggregateError` listing what
+it could not put back, and deregisters the installation either way: a target in
+an unknown state must not keep claiming to serve a release.
 
 ## Release chain
 

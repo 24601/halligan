@@ -303,6 +303,12 @@ held-out set and not a live-model improvement claim.
 - No `node:` imports under `src/ax/learn`.
 - Do not expect a bare `forward()` or `streamingForward()` to record.
 - Do not treat `contentId` as a confidentiality control.
+- Do not let the proposer's teacher become the judge by omission. With no
+  `metric`, `axHarnessEvolve` refuses `teacherAI` without an explicit
+  `judgeAI`. Naming the same service for both is allowed and is reported as a
+  correlated regime; it is not made independent by being allowed. Prefer a
+  deterministic `metric`, which is the only configuration where the gate is a
+  measurement rather than an opinion.
 - Do not call `promote()` from automation without a human decision point.
 - Do not claim canary, staged rollout, online monitoring, or automatic
   demotion. **None exist.**

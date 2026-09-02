@@ -228,6 +228,16 @@ export interface AxHarnessEvolveAgent<
   getLearn?():
     | { suspendRecording(): () => void; suppressedRecords: number }
     | undefined;
+  /**
+   * The agent's own construction-time judge, if it has one.
+   *
+   * `agent.playbook().evolve()` consults it before falling back
+   * (`playbookEvolve.ts:409-412`); a structural target that can answer gets
+   * the same precedence here. A target that cannot answer must name
+   * `judgeAI` explicitly whenever it also names `teacherAI` — see the
+   * refusal in `axHarnessEvolve`.
+   */
+  getJudgeAI?(): Readonly<AxAIService> | undefined;
 }
 
 export interface AxHarnessEvolveResult<OUT extends AxGenOut = AxGenOut> {
@@ -432,6 +442,29 @@ export const axHarnessEvolve = async <
     throw new AxHarnessEvolveConfigError(
       'gate.requireHeldOut',
       'axHarnessEvolve: requireHeldOut defaults to true and needs a { train, validation } dataset. Pass a validation split, or set gate.requireHeldOut: false to opt into the held-in-only regime — the same permissive regime measured at a 66.7% false-promotion rate.'
+    );
+  }
+
+  // The built-in judge is resolved here, before any model call, and a
+  // correlated proposer/judge pair is never arrived at by default.
+  //
+  // `agent.playbook().evolve()` resolves judgeAI ?? agentJudgeAI ?? teacherAI
+  // ?? studentAI. Silently inheriting that last-but-one step would hand the
+  // judge the SAME service the proposer writes with (`models.teacher`), which
+  // is R2's correlated-error risk arrived at by accident rather than by
+  // choice. So: an explicit `judgeAI` is honoured (it may legitimately be the
+  // teacher — that is an informed decision), the agent's own judge is honoured
+  // next, and a bare `teacherAI` with no judge and no metric is refused.
+  const agentJudgeAI = agent.getJudgeAI?.();
+  const resolvedJudgeAI = options.judgeAI ?? agentJudgeAI;
+  if (
+    options.metric === undefined &&
+    resolvedJudgeAI === undefined &&
+    options.teacherAI !== undefined
+  ) {
+    throw new AxHarnessEvolveConfigError(
+      'judgeAI',
+      "axHarnessEvolve: teacherAI is set but no judge is. The built-in judge would silently reuse the proposer's own teacher, correlating the author of a candidate with its evaluator. Pass judgeAI explicitly (it may be the same service if you accept that correlation), or supply your own metric."
     );
   }
 
@@ -659,9 +692,21 @@ export const axHarnessEvolve = async <
       options.metric ??
       createAgentOptimizeMetric(
         agent,
-        options.judgeAI ?? options.teacherAI ?? ai,
+        resolvedJudgeAI ?? ai,
         options.judgeOptions ?? {}
       );
+    if (
+      options.metric === undefined &&
+      options.teacherAI !== undefined &&
+      resolvedJudgeAI === options.teacherAI
+    ) {
+      // Allowed, because it was asked for — but never silent. R2 is a real
+      // residual risk and the reader of a progress log deserves to see it.
+      emit(
+        'evaluate',
+        'correlated regime: the judge and the proposer share one AxAIService'
+      );
+    }
 
     const scoreOne = async (
       side: Side,
