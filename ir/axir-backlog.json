@@ -1910,6 +1910,27 @@
       "completedAt": null,
       "completedByCommit": null,
       "verification": null
+    },
+    {
+      "id": "axir-2026-09-02-agent-playbook-evolve-termination-classification-per-attempt-evi",
+      "status": "open",
+      "title": "Agent playbook evolve: termination classification, per-attempt evidence, bootstrap intervals, variance band, validity conjuncts, reach instrumentation, gate chain and evidence receipt",
+      "createdAt": "2026-09-02",
+      "sourcePR": 88,
+      "sourceCommit": "51dab998e83985e29443d65e91a4f928564ac068",
+      "tsPaths": [
+        "src/ax/agent/agentInternal/playbookEvolve/playbookEvolve.ts"
+      ],
+      "portableSurface": "axagent",
+      "impact": "BREAKING (type-level): AxAgentPlaybookEvolveResult gains required control/accounting/applied and AxAgentPlaybookEvolveOutcome gains required kind, so construction sites (host test doubles, adapters) must be updated; applied is a three-state discriminant ('live'|'dry_run'|'rolled_back'), not a boolean. Portable TS behavior changes: evaluation-batch completeness now accounts for discarded environment-failure attempts (executedRuns + discardedRuns === expectedRuns) AND a task whose attempts are all discarded no longer aborts the batch (continue, not break), with truncatedAtTaskIndex set only for genuine budget exhaustion; the accept decision gains optional validity/interval/reach conjuncts, all default-off; a bounded re-draw may re-run a discarded attempt from the same metric budget. Generated packages keep the legacy gate; the new options are TypeScript-first and the gate chain is not yet expressible in Core IR. Conformance fixture ir/conformance/axagent/playbook-evidence-gate.json pins the gate order, the prune loss-tolerance variant of gate 1, and completeness-under-discards; its assertions run in scripts/playbook-evidence-conformance.test.ts until the behavior is migrated.",
+      "suggestedAxirWork": [
+        "Add or update the TS-derived conformance fixture.",
+        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
+        "Run npm run axir:conformance:check and npm run test:axir."
+      ],
+      "completedAt": null,
+      "completedByCommit": null,
+      "verification": null
     }
   ],
   "nonPortableExemptions": [
