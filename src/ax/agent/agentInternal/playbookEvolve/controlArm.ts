@@ -57,7 +57,6 @@ import type {
   AxAgentPlaybookControlArmOptions,
   AxAgentPlaybookControlArmReport,
   AxAgentPlaybookControlArmResult,
-  AxAgentPlaybookGateMode,
   AxAgentPlaybookSplitScore,
 } from './playbookEvidenceTypes.js';
 
@@ -151,9 +150,11 @@ export function neutralArtifactFor(args: {
   const scaffoldingTokens = measure('');
   const scaffoldingChars = scaffoldingTokens * 4;
   const wantedChars = Math.max(0, args.targetTokens * 4 - scaffoldingChars);
-  let text = '';
-  while (text.length < wantedChars) text += NEUTRAL_SENTENCE;
-  text = text.slice(0, wantedChars);
+  // `repeat` rather than a `+=` loop: `targetTokens` is the evolved playbook's
+  // own rendered size and is unbounded above, so the loop was quadratic in it.
+  const text = NEUTRAL_SENTENCE.repeat(
+    Math.ceil(wantedChars / NEUTRAL_SENTENCE.length)
+  ).slice(0, wantedChars);
   const rendered = measure(text);
   return {
     playbook: neutralPlaybookOf(text, args.nowIso),
@@ -172,6 +173,14 @@ export function neutralArtifactFor(args: {
  * EXISTING string input field rather than adding a new key: a signature renders
  * only its declared fields, so a new key would be silently dropped and the
  * "refinement" would never reach the model at all.
+ *
+ * The carrier is the FIRST string-valued field in the input object's own
+ * enumerable key order, which for an object literal is declaration order. The
+ * rule is deliberately positional rather than heuristic (longest field, a
+ * name-matching guess): a signature's first declared input is the one a caller
+ * writes the question into, and a heuristic that silently picks a different
+ * field on a different task shape would make the arm impossible to reproduce. Every
+ * other field is passed through untouched.
  *
  * Returns `undefined` when the task has no string input field to carry the
  * critique — reported as an arm that could not run, never as a round that
@@ -207,7 +216,7 @@ export function refinementTaskOf<IN extends AxGenIn>(args: {
 export function scoresByTaskIndex<IN extends AxGenIn, OUT extends AxGenOut>(
   batch: Readonly<AxAgentEvalBatchResult<IN, OUT>>,
   tasks: readonly AxAgentEvalTask<IN>[]
-): (number | undefined)[] {
+): readonly (number | undefined)[] {
   const index = new Map<object, number>();
   for (const [position, task] of tasks.entries()) {
     if (!index.has(task as object)) index.set(task as object, position);
@@ -249,7 +258,10 @@ export type AxControlArmEvaluate<IN extends AxGenIn, OUT extends AxGenOut> = (
   }>
 ) => Promise<AxAgentEvalBatchResult<IN, OUT>>;
 
-export type AxControlArmContext<IN extends AxGenIn, OUT extends AxGenOut> = {
+export type AxControlArmContext<
+  IN extends AxGenIn,
+  OUT extends AxGenOut,
+> = Readonly<{
   arms: readonly AxAgentPlaybookControlArmKind[];
   /** The deciding split. Always held-out; there is no fallback to current. */
   tasks: readonly AxAgentEvalTask<IN>[];
@@ -268,7 +280,7 @@ export type AxControlArmContext<IN extends AxGenIn, OUT extends AxGenOut> = {
   restoreUnevolvedArtifact: () => void;
   progress: (phase: 'control' | 'ablation', message: string) => void;
   abortSignal?: AbortSignal;
-};
+}>;
 
 export type AxControlArmRun = Readonly<{
   result: AxAgentPlaybookControlArmResult;
@@ -373,11 +385,18 @@ export async function runControlArms<IN extends AxGenIn, OUT extends AxGenOut>(
     let neutral: AxNeutralArtifact | undefined;
 
     if (kind === 'best_of_n') {
-      n = ctx.options.bestOfN ?? Math.max(2, Math.floor(armBudget / passCost));
+      const planned =
+        ctx.options.bestOfN ?? Math.max(2, Math.floor(armBudget / passCost));
       scores = new Array(ctx.tasks.length).fill(undefined);
-      for (let sample = 0; sample < n; sample++) {
+      for (let sample = 0; sample < planned; sample++) {
         if (budget.remaining < passCost) break;
-        ctx.progress('control', `best_of_n: sample ${sample + 1}/${n}`);
+        throwIfAborted(ctx.abortSignal);
+        ctx.progress('control', `best_of_n: sample ${sample + 1}/${planned}`);
+        // `n` counts what was DRAWN, never what was planned: an arm that ran
+        // one sample and reported best-of-2 overstates the control the evolved
+        // artifact was compared against, which biases the comparison the wrong
+        // way (§7.6 — the control exists to make the claim harder).
+        n++;
         const before = budget.remaining;
         const batch = await ctx.evaluate({
           phase: 'control_arm',
@@ -394,7 +413,7 @@ export async function runControlArms<IN extends AxGenIn, OUT extends AxGenOut>(
         }
       }
     } else if (kind === 'self_refine') {
-      n =
+      const planned =
         ctx.options.refineRounds ??
         Math.max(1, Math.floor(armBudget / passCost) - 1);
       ctx.progress('control', `self_refine: initial sample`);
@@ -405,11 +424,12 @@ export async function runControlArms<IN extends AxGenIn, OUT extends AxGenOut>(
         budget,
       });
       absorb(tally, first, before - budget.remaining);
-      scores = scoresByTaskIndex(first, ctx.tasks);
+      scores = [...scoresByTaskIndex(first, ctx.tasks)];
       let answers = answersByTaskIndex(first, ctx.tasks);
       let canRefine = true;
-      for (let round = 1; round <= n && canRefine; round++) {
+      for (let round = 1; round <= planned && canRefine; round++) {
         if (budget.remaining < passCost) break;
+        throwIfAborted(ctx.abortSignal);
         const derived: AxAgentEvalTask<IN>[] = [];
         const origins = new Map<object, AxAgentEvalTask<IN>>();
         const positions = new Map<object, number>();
@@ -436,7 +456,10 @@ export async function runControlArms<IN extends AxGenIn, OUT extends AxGenOut>(
           }
           break;
         }
-        ctx.progress('control', `self_refine: round ${round}/${n}`);
+        ctx.progress('control', `self_refine: round ${round}/${planned}`);
+        // The initial sample is not a refinement round, so `n` counts only the
+        // rounds that actually re-invoked the program.
+        n++;
         const roundBefore = budget.remaining;
         const batch = await ctx.evaluate({
           phase: 'control_arm',
@@ -491,11 +514,25 @@ export async function runControlArms<IN extends AxGenIn, OUT extends AxGenOut>(
           budget,
         });
         absorb(tally, batch, before - budget.remaining);
-        scores = scoresByTaskIndex(batch, ctx.tasks);
+        scores = [...scoresByTaskIndex(batch, ctx.tasks)];
       } finally {
         // Every later arm must see the unevolved program, not the neutral one.
         ctx.restoreUnevolvedArtifact();
       }
+    }
+
+    if (scores.every((score) => score === undefined)) {
+      // B1 / RFC §6 I4: `weightedMeanOfScores` of nothing is 0, which is the
+      // WORST possible score — an arm whose every task went unscored would
+      // otherwise be reported as a control the evolved artifact beat by its own
+      // full held-out mean. Unmeasurable is not the same as unchanged, so the
+      // arm is reported as one that could not run. Its spend still lands in
+      // `accounting.metricCalls` (I6): the calls happened.
+      skipped.push({
+        kind,
+        reason: `every task in the deciding split ended without a score (${tally.executedRuns} run(s) executed, ${tally.discardedRuns} discarded), so this arm measured nothing`,
+      });
+      continue;
     }
 
     const score = splitScoreOf(tally, scores, ctx.tasks);
@@ -559,12 +596,78 @@ function withAnswer(
 }
 
 /**
- * The RUN-LEVEL verdict. Fails closed: an arm that did not run, or failed, is
- * not a pass — under `require` it rolls the whole accepted set back rather than
- * letting the run report a gain nobody checked.
+ * The arm the evolved artifact is compared against: the highest held-out mean.
+ * A tie keeps the FIRST arm in the configured order, which is deliberate —
+ * `harness_term` is last in the default list, so a plumbing-only gain does not
+ * quietly become a `best_of_n` headline when both score the same.
+ */
+export function bestControlArmOf(
+  runs: readonly AxControlArmRun[]
+): AxControlArmRun {
+  const [first, ...rest] = runs;
+  if (!first) {
+    throw new Error('bestControlArmOf: no control arm produced a result');
+  }
+  return rest.reduce(
+    (leader, candidate) =>
+      candidate.result.heldOut.mean > leader.result.heldOut.mean
+        ? candidate
+        : leader,
+    first
+  );
+}
+
+type AxMeasuredControlArmReport = Extract<
+  AxAgentPlaybookControlArmReport,
+  { status: 'partial' | 'completed' }
+>;
+
+/**
+ * Why a report that has arms still carries no comparison a gate may read.
+ *
+ * A `mean` of 0 over zero scored tasks and a real `mean` of 0 are the same
+ * number, and a fabricated zero-width interval (`clusters: 0`, `resamples: 0`)
+ * is shaped exactly like a computed one. Both would let a run whose control arm
+ * measured nothing report the largest possible advantage and PASS the required
+ * gate — the fail-open direction, and the one that favours the evolved
+ * artifact. So the absence is named here and consumed by both the verdict and
+ * the warning code.
+ */
+function unmeasuredReason(
+  report: Readonly<AxMeasuredControlArmReport>
+): string | undefined {
+  const best = report.arms.find((arm) => arm.kind === report.best.kind);
+  if (!best) {
+    return `the control-arm report names '${report.best.kind}' as its best arm but carries no result for it`;
+  }
+  if (!best.heldOut.complete) {
+    return `the best control arm '${best.kind}' left the deciding split incomplete (${best.heldOut.executedRuns}/${best.heldOut.expectedRuns} run(s), ${best.heldOut.discardedRuns} discarded), so its mean is not a measurement of the whole split`;
+  }
+  if (report.interval.clusters === 0 || report.interval.resamples === 0) {
+    return `no task of the deciding split could be paired between the best control arm '${best.kind}' and the evolved artifact's own held-out records, so the comparison interval could not be computed`;
+  }
+  return undefined;
+}
+
+/**
+ * True when the report carries a comparison that was actually measured. Callers
+ * use it to pick between "the arm was not beaten" and "there was no arm reading
+ * to beat" — reporting an arm that threw under a code asserting a comparison
+ * happened would be the same silent absence this machinery exists to remove.
+ */
+export function controlArmComparisonMade(
+  report: Readonly<AxAgentPlaybookControlArmReport>
+): boolean {
+  if (report.status === 'not_run' || report.status === 'failed') return false;
+  return unmeasuredReason(report) === undefined;
+}
+
+/**
+ * The RUN-LEVEL verdict. Fails closed: an arm that did not run, failed, or
+ * measured nothing is not a pass — under `require` it rolls the whole accepted
+ * set back rather than letting the run report a gain nobody checked.
  */
 export function controlArmVerdict(args: {
-  mode: AxAgentPlaybookGateMode;
   margin: number;
   report: Readonly<AxAgentPlaybookControlArmReport>;
 }): Readonly<{ passed: boolean; detail: string }> {
@@ -577,6 +680,13 @@ export function controlArmVerdict(args: {
   }
   if (report.status === 'failed') {
     return { passed: false, detail: `control arm failed: ${report.reason}` };
+  }
+  const unmeasured = unmeasuredReason(report);
+  if (unmeasured) {
+    return {
+      passed: false,
+      detail: `${unmeasured}; a required gate cannot read an absent comparison, so it fails closed`,
+    };
   }
   const beatsMargin = report.evolvedAdvantage >= args.margin;
   const notNegative = report.interval.direction !== 'negative';

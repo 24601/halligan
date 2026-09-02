@@ -42,7 +42,12 @@ import {
   cloneAndFreeze,
   deepFreeze,
 } from './canonical.js';
-import { controlArmVerdict, runControlArms } from './controlArm.js';
+import {
+  bestControlArmOf,
+  controlArmComparisonMade,
+  controlArmVerdict,
+  runControlArms,
+} from './controlArm.js';
 import type {
   AxAgentEvalBatchResult,
   AxAgentEvalBudget,
@@ -1905,11 +1910,7 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
         accounting: armAccounting(),
       };
     }
-    const best = runs.reduce((leader, candidate) =>
-      candidate.result.heldOut.mean > leader.result.heldOut.mean
-        ? candidate
-        : leader
-    );
+    const best = bestControlArmOf(runs);
     const evolvedHeldOutMean = heldOut ?? 0;
     // Pair the BEST arm's per-task scores against the final artifact's own
     // held-out records, by split position: the arm ran over the same split, but
@@ -1995,26 +1996,52 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
   // exists to remove.
   let rolledBackReason: string | undefined;
   const controlGateMode = options?.gates?.controlArm ?? 'off';
+  if (
+    (control.status === 'partial' || control.status === 'completed') &&
+    control.interval.clusters === 0
+  ) {
+    // The report carries an interval field whatever happens, so an interval
+    // that was never computed says so on the record rather than sitting on the
+    // receipt shaped exactly like a real paired bootstrap.
+    runWarnings.push({
+      code: 'interval_unresolved',
+      message:
+        "the control arm's advantage carries no paired interval: no held-out task could be paired between the best arm and the evolved artifact's own records, so `interval` is reported with clusters 0 and resamples 0 rather than as a computed comparison",
+      scope: 'heldOut',
+    });
+  }
   if (controlGateMode !== 'off') {
     const verdict = controlArmVerdict({
-      mode: controlGateMode,
       margin: options?.gates?.controlArmMargin ?? 0,
       report: control,
     });
     if (!verdict.passed) {
-      if (controlGateMode === 'require' && accepted.length > 0) {
+      // A dry run applied nothing, so there is no live artifact change for a
+      // run-level gate to rescind: relabelling it `rolled_back` would tell a
+      // caller who asked for `apply: false` that the artifact went live and was
+      // then withdrawn, and would run the I8 cascade over a state that was
+      // always going to be thrown away. I1 pins `applied` for a dry run.
+      const dryRun = options?.apply === false;
+      if (controlGateMode === 'require' && accepted.length > 0 && !dryRun) {
         rolledBackReason = `control_arm gate failed: ${verdict.detail}`;
       } else {
         // A run that accepted nothing has no artifact change for a run-level
         // gate to reject, and calling its unchanged baseline 'rolled_back'
         // would label a perfectly good artifact as poison. The finding is still
         // on the record, in `control` and in this warning.
+        const suffix =
+          accepted.length === 0
+            ? '; no candidate was accepted, so there is no artifact change to roll back'
+            : dryRun
+              ? '; this run was a dry run (apply: false), so nothing was applied for a run-level gate to roll back'
+              : '';
         runWarnings.push({
-          code: 'control_arm_not_beaten',
-          message:
-            accepted.length === 0
-              ? `${verdict.detail}; no candidate was accepted, so there is no artifact change to roll back`
-              : verdict.detail,
+          // `not_beaten` asserts a comparison happened. When the arm did not
+          // run, threw, or measured nothing, that assertion would be false.
+          code: controlArmComparisonMade(control)
+            ? 'control_arm_not_beaten'
+            : 'control_arm_unmeasured',
+          message: `${verdict.detail}${suffix}`,
           scope: 'heldOut',
         });
       }

@@ -2,9 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { emptyAccounting } from './accounting.js';
 import { canonicalDigest } from './canonical.js';
 import {
+  bestControlArmOf,
+  controlArmComparisonMade,
   controlArmVerdict,
   neutralArtifactFor,
   refinementTaskOf,
+  runControlArms,
   SELF_REFINE_INSTRUCTION,
   scoresByTaskIndex,
   weightedMeanOfScores,
@@ -15,6 +18,7 @@ import {
   rescindPromotion,
   supersedeEvidenceReceipt,
 } from './evidenceReceipt.js';
+import type { AxAgentPlaybookControlArmKind } from './playbookEvidenceTypes.js';
 import { axIsAgentPlaybookEvolveError } from './playbookEvidenceTypes.js';
 import {
   captureSnapshot,
@@ -37,6 +41,7 @@ function fakeHandle(initial: FakeState) {
   let failLoads = 0;
   /** Restores are silently partial: `load` writes something else entirely. */
   let partialLoad: FakeState | undefined;
+  let partialLoadsLeft = 0;
   return {
     loads,
     getState: () => structuredClone(state) as any,
@@ -46,8 +51,8 @@ function fakeHandle(initial: FakeState) {
         failLoads--;
         throw new Error('load exploded');
       }
-      const corrupted = partialLoad;
-      partialLoad = undefined;
+      const corrupted = partialLoadsLeft > 0 ? partialLoad : undefined;
+      if (partialLoadsLeft > 0) partialLoadsLeft--;
       state = structuredClone(corrupted ?? snapshot);
     },
     mutate: (next: FakeState) => {
@@ -59,6 +64,12 @@ function fakeHandle(initial: FakeState) {
     /** The NEXT load lands somewhere else entirely: a silent partial restore. */
     corruptNextLoad: (next: FakeState) => {
       partialLoad = next;
+      partialLoadsLeft = 1;
+    },
+    /** The next `count` loads all land somewhere else. */
+    corruptNextLoads: (count: number, next: FakeState) => {
+      partialLoad = next;
+      partialLoadsLeft = count;
     },
     current: () => structuredClone(state),
   };
@@ -249,6 +260,77 @@ describe('playbook evolve snapshot state machine', () => {
     expect((error.cause as AggregateError).errors).toHaveLength(2);
   });
 
+  it('retries when the RETURN restore lands somewhere else and verifies the evolved digest', async () => {
+    // The evolved-side assertion is the one that matters most: a silent partial
+    // restore here leaves the live agent holding something other than what the
+    // run reports, and the run then says `applied: 'live'` over it. An
+    // implementation that digests the TARGET instead of the handle would see no
+    // mismatch at all and stop after a single load.
+    const handle = fakeHandle(BASELINE);
+    const baseline = snapshotStateOf(captureSnapshot(handle)!);
+    handle.mutate(EVOLVED);
+    const evolved = snapshotStateOf(captureSnapshot(handle)!);
+
+    const outcome = await withRestoredArtifact({
+      handle,
+      restoreTo: baseline,
+      returnTo: evolved,
+      run: async () => {
+        handle.corruptNextLoad({
+          playbook: { bullets: ['b1', 'stowaway'] },
+          artifact: { epoch: 1 },
+        });
+        return 'ok';
+      },
+    });
+
+    expect(outcome.status).toBe('ran');
+    // baseline restore + the partial evolved restore + the verified retry.
+    expect(handle.loads).toHaveLength(3);
+    expect(handle.loads[2]).toEqual(EVOLVED);
+    expect(canonicalDigest(handle.current())).toBe(evolved.digest);
+  });
+
+  it('throws control_arm_failed when the RETURN restore is partial twice', async () => {
+    const handle = fakeHandle(BASELINE);
+    const baseline = snapshotStateOf(captureSnapshot(handle)!);
+    handle.mutate(EVOLVED);
+    const evolved = snapshotStateOf(captureSnapshot(handle)!);
+    const stowaway: FakeState = {
+      playbook: { bullets: ['b1', 'stowaway'] },
+      artifact: { epoch: 1 },
+    };
+
+    let thrown: unknown;
+    try {
+      await withRestoredArtifact({
+        handle,
+        restoreTo: baseline,
+        returnTo: evolved,
+        run: async () => {
+          handle.corruptNextLoads(2, stowaway);
+        },
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    const error = thrown as any;
+    expect(axIsAgentPlaybookEvolveError(thrown)).toBe(true);
+    expect(error.code).toBe('control_arm_failed');
+    expect(error.message).toContain(baseline.digest);
+    expect(error.message).toContain(evolved.digest);
+    // The recovery snapshot rides on the error: the live artifact is neither
+    // the baseline nor the evolved state the result would have described.
+    expect(error.playbookSnapshot).toEqual(EVOLVED);
+    expect((error.cause as AggregateError).errors).toHaveLength(2);
+    for (const cause of (error.cause as AggregateError).errors) {
+      expect((cause as Error).message).toContain('the restore was partial');
+      expect((cause as Error).message).toContain('evolved');
+    }
+    expect(canonicalDigest(handle.current())).not.toBe(evolved.digest);
+  });
+
   it('aggregates the body failure with the restore failures', async () => {
     const handle = fakeHandle(BASELINE);
     const baseline = snapshotStateOf(captureSnapshot(handle)!);
@@ -355,6 +437,27 @@ describe('refinementTaskOf', () => {
     expect(refined?.id).toBe('t1');
   });
 
+  it('carries the critique on the FIRST string field and leaves the rest alone', () => {
+    // The rule is positional, not heuristic: a signature's first declared input
+    // is the one a caller writes the question into, and a heuristic that picked
+    // a different field on a different task shape would make the arm impossible
+    // to reproduce.
+    const refined = refinementTaskOf({
+      task: {
+        input: { context: 'ctx', question: 'q1', k: 3, notes: 'n' },
+        criteria: 'c',
+        id: 't',
+      } as any,
+      previousAnswer: 'prev',
+      round: 2,
+    })!;
+    expect((refined.input as any).context).toContain('ctx');
+    expect((refined.input as any).context).toContain(SELF_REFINE_INSTRUCTION);
+    expect((refined.input as any).question).toBe('q1');
+    expect((refined.input as any).notes).toBe('n');
+    expect((refined.input as any).k).toBe(3);
+  });
+
   it('returns undefined when no input field can carry a critique', () => {
     expect(
       refinementTaskOf({
@@ -418,15 +521,37 @@ describe('controlArmVerdict', () => {
     seed: 1,
     direction,
   });
-  const completed = (advantage: number, direction: any) =>
+  const arm = (overrides: Record<string, unknown> = {}) =>
+    ({
+      kind: 'best_of_n',
+      n: 2,
+      selector: 'metric',
+      heldOut: {
+        mean: 0.5,
+        executedRuns: 3,
+        discardedRuns: 0,
+        expectedRuns: 3,
+        complete: true,
+        ...((overrides.heldOut as object) ?? {}),
+      },
+      accounting: emptyAccounting(),
+    }) as any;
+  const completed = (
+    advantage: number,
+    direction: any,
+    overrides: Record<string, unknown> = {}
+  ) =>
     ({
       status: 'completed',
       matchedBudget: emptyAccounting(),
       budgetBasis: 'evolve_total',
-      arms: [],
+      arms: [arm(overrides)],
       best: { kind: 'best_of_n', split: 'heldOut', mean: 0.5 },
       evolvedAdvantage: advantage,
-      interval: interval(direction),
+      interval: {
+        ...interval(direction),
+        ...((overrides.interval as object) ?? {}),
+      },
       heldOutSelectionComparisons: 1,
       accounting: emptyAccounting(),
     }) as any;
@@ -436,14 +561,12 @@ describe('controlArmVerdict', () => {
     // silent-absence failure the control arm exists to remove.
     expect(
       controlArmVerdict({
-        mode: 'require',
         margin: 0,
         report: { status: 'not_run', reason: 'not configured' },
       }).passed
     ).toBe(false);
     expect(
       controlArmVerdict({
-        mode: 'require',
         margin: 0,
         report: {
           status: 'failed',
@@ -457,14 +580,12 @@ describe('controlArmVerdict', () => {
   it('requires both the margin and a non-negative interval', () => {
     expect(
       controlArmVerdict({
-        mode: 'require',
         margin: 0.05,
         report: completed(0.2, 'positive'),
       }).passed
     ).toBe(true);
     expect(
       controlArmVerdict({
-        mode: 'require',
         margin: 0.05,
         report: completed(0.01, 'positive'),
       }).passed
@@ -473,28 +594,410 @@ describe('controlArmVerdict', () => {
     // point estimate says.
     expect(
       controlArmVerdict({
-        mode: 'require',
         margin: 0,
         report: completed(0.2, 'negative'),
       }).passed
     ).toBe(false);
     expect(
       controlArmVerdict({
-        mode: 'require',
         margin: 0,
         report: completed(0.2, 'unresolved'),
       }).passed
     ).toBe(true);
   });
 
+  it('fails closed on a report whose best arm measured nothing', () => {
+    // The failure this branch exists for: `weightedMeanOfScores` of nothing is
+    // 0, so an arm that scored no task reports the WORST possible mean and the
+    // run claims its whole held-out score as an advantage. Fail-open in the
+    // direction that favours the evolved artifact is worse than no gate.
+    const noArmResult = controlArmVerdict({
+      margin: 0.1,
+      report: {
+        ...completed(1, 'unresolved'),
+        arms: [],
+      } as any,
+    });
+    expect(noArmResult.passed).toBe(false);
+    expect(noArmResult.detail).toContain('carries no result for it');
+
+    const incomplete = controlArmVerdict({
+      margin: 0.1,
+      report: completed(1, 'unresolved', {
+        heldOut: { complete: false, executedRuns: 0, expectedRuns: 3 },
+      }),
+    });
+    expect(incomplete.passed).toBe(false);
+    expect(incomplete.detail).toContain('incomplete');
+    expect(incomplete.detail).toContain('0/3');
+  });
+
+  it('fails closed when the advantage carries no computed interval', () => {
+    // A fabricated zero-width interval is shaped exactly like a real paired
+    // bootstrap, and `direction: 'unresolved'` satisfies `!== 'negative'`.
+    const fabricated = controlArmVerdict({
+      margin: 0.1,
+      report: completed(1, 'unresolved', {
+        interval: { clusters: 0, resamples: 0, lower: 1, upper: 1, point: 1 },
+      }),
+    });
+    expect(fabricated.passed).toBe(false);
+    expect(fabricated.detail).toContain('could not be computed');
+    // Resamples alone is enough: an interval nobody resampled is not one.
+    expect(
+      controlArmVerdict({
+        margin: 0.1,
+        report: completed(1, 'unresolved', {
+          interval: { resamples: 0 },
+        }),
+      }).passed
+    ).toBe(false);
+  });
+
+  it('separates "no comparison" from "the arm was not beaten"', () => {
+    // The warning code is picked from this, so a run whose arm THREW is never
+    // reported under a code asserting that a comparison happened.
+    expect(
+      controlArmComparisonMade({ status: 'not_run', reason: 'x' } as any)
+    ).toBe(false);
+    expect(
+      controlArmComparisonMade({
+        status: 'failed',
+        reason: 'threw',
+        accounting: emptyAccounting(),
+      } as any)
+    ).toBe(false);
+    expect(
+      controlArmComparisonMade(
+        completed(1, 'unresolved', { interval: { clusters: 0 } })
+      )
+    ).toBe(false);
+    expect(controlArmComparisonMade(completed(0.2, 'positive'))).toBe(true);
+  });
+
   it('names the best arm and the margin in the detail', () => {
     const detail = controlArmVerdict({
-      mode: 'require',
       margin: 0.05,
       report: completed(0.01, 'positive'),
     }).detail;
     expect(detail).toContain('best_of_n');
     expect(detail).toContain('0.05');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runControlArms — the module's core loop (RFC 4.3, 7.6, 8.6)
+// ---------------------------------------------------------------------------
+
+const ARM_TASKS = [
+  { input: { question: 'q1' }, criteria: 'c', id: 't1' },
+  { input: { question: 'q2' }, criteria: 'c', id: 't2' },
+];
+
+type ArmPass = readonly (number | undefined)[];
+
+/**
+ * A scripted `AxControlArmEvaluate`: no agent, no model, no metric. Every pass
+ * returns exactly the per-task scores the test dictates, so the SELECTION rule
+ * (max across best-of-N samples, last round for self-refinement) is observable
+ * on its own rather than only through a fixture where every sample ties.
+ */
+function scriptedArms(args: {
+  arms: AxAgentPlaybookControlArmKind[];
+  passes: readonly ArmPass[];
+  matched: number;
+  tasks?: readonly any[];
+  runsPerTask?: number;
+  options?: Record<string, unknown>;
+  evolvedRenderedTokens?: number;
+  abortSignal?: AbortSignal;
+  onPass?: (index: number) => void;
+}) {
+  const tasks = (args.tasks ?? ARM_TASKS) as any[];
+  const runsPerTask = args.runsPerTask ?? 1;
+  const calls: { phase: string; tasks: any[]; spent: number }[] = [];
+  const artifactLoads: string[] = [];
+  let pass = 0;
+  let clock = 0;
+  const evaluate = async (evalArgs: any) => {
+    const scores = args.passes[pass] ?? [];
+    args.onPass?.(pass);
+    pass++;
+    const cost = evalArgs.tasks.length * runsPerTask;
+    evalArgs.budget.remaining -= cost;
+    calls.push({
+      phase: evalArgs.phase,
+      tasks: [...evalArgs.tasks],
+      spent: cost,
+    });
+    const records = evalArgs.tasks.flatMap((task: any, index: number) => {
+      const score = scores[index];
+      return score === undefined
+        ? []
+        : [
+            {
+              task,
+              score,
+              passed: score >= 1,
+              prediction: { output: { answer: `answer-${index}-p${pass}` } },
+            },
+          ];
+    });
+    return {
+      records,
+      mean: 0,
+      exhausted: false,
+      executedRuns: cost,
+      discardedRuns: cost - records.length,
+      expectedRuns: cost,
+      validEvidence: true,
+      complete: records.length === evalArgs.tasks.length,
+      durationMs: 1,
+      usage: [],
+    } as any;
+  };
+  const ctx = {
+    arms: args.arms,
+    tasks,
+    runsPerTask,
+    matched: args.matched,
+    options: (args.options ?? {}) as any,
+    evolvedRenderedTokens: args.evolvedRenderedTokens ?? 120,
+    nowIso: NOW_ISO,
+    now: () => {
+      clock += 5;
+      return clock;
+    },
+    usesBuiltInJudge: false,
+    evaluate,
+    loadNeutralArtifact: () => artifactLoads.push('neutral'),
+    restoreUnevolvedArtifact: () => artifactLoads.push('baseline'),
+    progress: () => {},
+    ...(args.abortSignal ? { abortSignal: args.abortSignal } : {}),
+  } as any;
+  return { ctx, calls, artifactLoads };
+}
+
+describe('runControlArms', () => {
+  it('selects the per-task MAXIMUM across best-of-N samples', async () => {
+    // Oracle-strong selection (§4.3): the scoring metric picks the sample, so
+    // the control is stronger than anything deployable and the evolved
+    // artifact's claim gets harder. A `min` or last-write-wins implementation
+    // is indistinguishable in any fixture where every sample ties.
+    const { ctx, calls } = scriptedArms({
+      arms: ['best_of_n'],
+      matched: 6,
+      passes: [
+        [0.1, 0.9],
+        [0.8, 0.2],
+        [0.4, 0.5],
+      ],
+    });
+    const { runs, skipped } = await runControlArms(ctx);
+    expect(skipped).toEqual([]);
+    expect(calls).toHaveLength(3);
+    expect(runs[0]!.scores).toEqual([0.8, 0.9]);
+    expect(runs[0]!.result.heldOut.mean).toBeCloseTo(0.85, 10);
+    expect(runs[0]!.result.heldOut.complete).toBe(true);
+    expect(runs[0]!.result.n).toBe(3);
+  });
+
+  it('keeps the LAST refinement round, not the best one', async () => {
+    // A self-refinement arm reports the final answer, however it moved. Taking
+    // the max here would silently turn it into a second best-of-N.
+    const { ctx, calls } = scriptedArms({
+      arms: ['self_refine'],
+      matched: 6,
+      passes: [
+        [0.9, 0.9],
+        [0.5, 0.5],
+        [0.2, 0.7],
+      ],
+    });
+    const { runs, skipped } = await runControlArms(ctx);
+    expect(skipped).toEqual([]);
+    expect(runs[0]!.scores).toEqual([0.2, 0.7]);
+    // Two rounds re-invoked the program on top of the initial sample.
+    expect(runs[0]!.result.n).toBe(2);
+    expect(calls).toHaveLength(3);
+    // The agent sees its own previous answer plus the fixed critique; the
+    // metric keeps scoring the original example.
+    const roundOne = calls[1]!.tasks[0]!.input.question as string;
+    expect(roundOne).toContain('q1');
+    expect(roundOne).toContain('answer-0-p1');
+    expect(roundOne).toContain(SELF_REFINE_INSTRUCTION);
+    expect(calls[2]!.tasks[0]!.input.question).toContain('answer-0-p2');
+  });
+
+  it('stops drawing samples when the arm budget cannot cover another pass', async () => {
+    // The reported `n` must be what the arm DREW. Reporting the planned figure
+    // overstates the control the evolved artifact was compared against, which
+    // biases the comparison towards accepting the artifact.
+    const { ctx, calls } = scriptedArms({
+      arms: ['best_of_n'],
+      matched: 5,
+      options: { bestOfN: 4 },
+      passes: [
+        [0.3, 0.3],
+        [0.4, 0.4],
+        [0.9, 0.9],
+      ],
+    });
+    const { runs } = await runControlArms(ctx);
+    // armBudget 5, one pass over the 2-task split costs 2: two passes fit.
+    expect(calls).toHaveLength(2);
+    expect(runs[0]!.result.n).toBe(2);
+    expect(runs[0]!.result.accounting.metricCalls).toBe(4);
+    expect(runs[0]!.scores).toEqual([0.4, 0.4]);
+  });
+
+  it('reports zero refinement rounds rather than the round it could not afford', async () => {
+    const { ctx, calls } = scriptedArms({
+      arms: ['self_refine'],
+      matched: 3,
+      passes: [[0.6, 0.6]],
+    });
+    const { runs } = await runControlArms(ctx);
+    // armBudget 3 covers the initial 2-call pass, leaving 1 — not a round.
+    expect(calls).toHaveLength(1);
+    expect(runs[0]!.result.n).toBe(0);
+    expect(runs[0]!.scores).toEqual([0.6, 0.6]);
+  });
+
+  it('reports an arm that scored nothing as skipped, never as a mean of zero', async () => {
+    // The fail-open this branch removes: a weighted mean over no scored task is
+    // 0, the WORST possible score, so an arm wiped out by a provider outage
+    // would be reported as a control the evolved artifact beat by its entire
+    // held-out mean — and a required gate would pass on it.
+    const { ctx } = scriptedArms({
+      arms: ['best_of_n', 'harness_term'],
+      matched: 8,
+      passes: [
+        [undefined, undefined],
+        [undefined, undefined],
+        [0.4, 0.4],
+      ],
+    });
+    const { runs, skipped } = await runControlArms(ctx);
+    expect(runs.map((run) => run.result.kind)).toEqual(['harness_term']);
+    expect(skipped).toEqual([
+      {
+        kind: 'best_of_n',
+        reason: expect.stringContaining('measured nothing'),
+      },
+    ]);
+  });
+
+  it('drives the verdict off a best_of_n winner', async () => {
+    // Every integration fixture in this repo has `harness_term` winning, so the
+    // non-plumbing branch of the comparison needs its own test.
+    const { ctx } = scriptedArms({
+      arms: ['best_of_n', 'harness_term'],
+      matched: 8,
+      passes: [
+        [0.9, 0.7],
+        [0.6, 0.9],
+        [0.2, 0.2],
+      ],
+    });
+    const { runs } = await runControlArms(ctx);
+    const best = bestControlArmOf(runs);
+    expect(best.result.kind).toBe('best_of_n');
+    expect(best.result.heldOut.mean).toBeCloseTo(0.9, 10);
+    // The evolved artifact scored 0.95 on the same split: a +0.05 advantage
+    // that does not clear a 0.1 margin, so the run is rejected.
+    const report = {
+      status: 'completed',
+      matchedBudget: emptyAccounting(),
+      budgetBasis: 'evolve_total',
+      arms: runs.map((run) => run.result),
+      best: {
+        kind: best.result.kind,
+        split: 'heldOut',
+        mean: best.result.heldOut.mean,
+      },
+      evolvedAdvantage: 0.05,
+      interval: {
+        point: 0.05,
+        lower: -0.02,
+        upper: 0.12,
+        level: 0.95,
+        resamples: 200,
+        unit: 'task',
+        clusters: 2,
+        seed: 7,
+        direction: 'unresolved',
+      },
+      heldOutSelectionComparisons: 1,
+      accounting: emptyAccounting(),
+    } as any;
+    const verdict = controlArmVerdict({ margin: 0.1, report });
+    expect(verdict.passed).toBe(false);
+    expect(verdict.detail).toContain("best arm 'best_of_n'");
+    expect(controlArmVerdict({ margin: 0.04, report }).passed).toBe(true);
+  });
+
+  it('puts the unevolved artifact back after the neutral one, always', async () => {
+    const { ctx, artifactLoads } = scriptedArms({
+      arms: ['harness_term'],
+      matched: 4,
+      passes: [[0.3, 0.4]],
+    });
+    const { runs } = await runControlArms(ctx);
+    expect(artifactLoads).toEqual(['neutral', 'baseline']);
+    expect(runs[0]!.result.n).toBe(1);
+    expect(runs[0]!.result.neutralArtifactTokens).toBeGreaterThan(0);
+    expect(runs[0]!.result.neutralArtifactDigest).toBeDefined();
+  });
+
+  it('skips an arm the matched budget cannot cover and names the shortfall', async () => {
+    const { ctx, calls } = scriptedArms({
+      arms: ['best_of_n', 'self_refine'],
+      matched: 3,
+      passes: [[0.5, 0.5]],
+    });
+    const { runs, skipped } = await runControlArms(ctx);
+    // floor(3/2) = 1 call per arm; one pass over the 2-task split costs 2.
+    expect(runs).toEqual([]);
+    expect(calls).toEqual([]);
+    expect(skipped).toHaveLength(2);
+    expect(skipped[0]!.reason).toContain('matched budget');
+  });
+
+  it('checks the abort signal between samples, not only between arms', async () => {
+    const controller = new AbortController();
+    const { ctx, calls } = scriptedArms({
+      arms: ['best_of_n'],
+      matched: 8,
+      abortSignal: controller.signal,
+      passes: [
+        [0.3, 0.3],
+        [0.4, 0.4],
+        [0.5, 0.5],
+        [0.6, 0.6],
+      ],
+      onPass: (index) => {
+        if (index === 0) controller.abort();
+      },
+    });
+    await expect(runControlArms(ctx)).rejects.toThrow('aborted');
+    // One pass completed before the abort landed; the second never started.
+    expect(calls).toHaveLength(1);
+  });
+
+  it('reports the arm as unable to run when no task can carry a critique', async () => {
+    const { ctx } = scriptedArms({
+      arms: ['self_refine'],
+      matched: 6,
+      tasks: [
+        { input: { count: 1 }, criteria: 'c', id: 'n1' },
+        { input: { count: 2 }, criteria: 'c', id: 'n2' },
+      ],
+      passes: [[0.5, 0.5]],
+    });
+    const { runs, skipped } = await runControlArms(ctx);
+    expect(runs).toEqual([]);
+    expect(skipped[0]!.reason).toContain('string input field');
   });
 });
 

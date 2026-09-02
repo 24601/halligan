@@ -260,7 +260,13 @@ export type AxAgentPlaybookControlArmKind =
 
 export type AxAgentPlaybookControlArmResult = Readonly<{
   kind: AxAgentPlaybookControlArmKind;
-  /** Samples per task (best_of_n), rounds (self_refine), or 1 (harness_term). */
+  /**
+   * What the arm ACTUALLY ran: samples drawn per task (best_of_n), refinement
+   * rounds re-invoked (self_refine), or 1 (harness_term). Never the planned
+   * figure — an arm that drew one sample under a starved budget and reported
+   * best-of-2 would overstate the control the evolved artifact was compared
+   * against, biasing the comparison towards accepting the artifact.
+   */
   n: number;
   /**
    * How best-of-N picked a sample. Only 'metric' is implemented: it selects
@@ -983,6 +989,13 @@ export type AxAgentPlaybookEvidenceWarningCode =
    * machinery exists to remove.
    */
   | 'control_arm_not_beaten'
+  /**
+   * A run-level control-arm gate had nothing to read: the arm did not run,
+   * failed, measured no task on the deciding split, or produced no record
+   * that could be paired. Kept distinct from `control_arm_not_beaten`, which asserts that a
+   * comparison happened and the evolved artifact lost it.
+   */
+  | 'control_arm_unmeasured'
   | 'harness_term_not_run'
   | 'transfer_not_run'
   | 'cost_unknown'

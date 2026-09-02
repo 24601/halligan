@@ -1826,6 +1826,19 @@ describe('agent.playbook().evolve() legacy identity', () => {
       reason: 'controlArm option not supplied',
     });
     expect(result.applied).toBe('live');
+    // `stripLegacy`'s `playbookSnapshot: result.playbookSnapshot` is a
+    // self-reference, so it cannot pin WHICH artifact the snapshot describes —
+    // and this PR moved that field's source (`evolvedSnapshot ?? getState()`).
+    // Pin the content instead: the snapshot is the state the curate loop left,
+    // and it round-trips through the live handle.
+    const snapshotBullets = Object.values(
+      (result.playbookSnapshot as any).playbook.sections
+    )
+      .flat()
+      .map((bullet: any) => String(bullet.content));
+    expect(snapshotBullets).toHaveLength(1);
+    expect(snapshotBullets[0]).toContain(BULLET_MARKER);
+    expect(result.playbookSnapshot).toEqual(ag.getPlaybook().getState());
     expect(result.outcomes[0]!.kind).toBe('curate');
     expect(result.outcomes[0]!.evidence).toBeUndefined();
     expect(result.outcomes[0]!.promotion).toBeUndefined();
@@ -3004,7 +3017,7 @@ describe('agent.playbook().evolve() matched-budget control arm', () => {
     expect(actorPromptOf(ag)).not.toContain(BULLET_MARKER);
   });
 
-  it('reports a partial arm when the matched budget cannot cover one pass', async () => {
+  it('reports a failed arm when the matched budget cannot cover one pass', async () => {
     const { ag } = makeAgent();
     const result = await ag.playbook().evolve(CONTROL_DATASET, {
       metric: scoreByAnswer,
@@ -3035,6 +3048,95 @@ describe('agent.playbook().evolve() matched-budget control arm', () => {
     ).toBe(false);
   });
 
+  it('fails closed when an outage inside the arm phase leaves every arm unscored', async () => {
+    // The fail-OPEN this removes: a weighted mean over no scored task is 0, so
+    // three wiped-out arms would report the worst possible control, the run
+    // would claim its entire held-out score as an advantage, and a `require`
+    // gate would PASS on a comparison nobody made. An outage during phase 9 is
+    // the single easiest way to make the evolved artifact look maximally good.
+    const { ag } = makeAgent();
+    let inArmPhase = false;
+    const result = await ag.playbook().evolve(CONTROL_DATASET, {
+      metric: scoreByAnswer,
+      maxProposals: 1,
+      controlArm: {},
+      gates: { controlArm: 'require', controlArmMargin: 0.1 },
+      classifyTermination: () =>
+        inArmPhase
+          ? { kind: 'environment_failure', cause: 'provider_unavailable' }
+          : undefined,
+      onProgress: (event: any) => {
+        if (event.phase === 'control' || event.phase === 'ablation') {
+          inArmPhase = true;
+        }
+      },
+    });
+
+    expect(result.control.status).toBe('failed');
+    expect((result.control as any).reason).toContain('measured nothing');
+    // Not an advantage of +1.000 over a control that scored nothing.
+    expect((result.control as any).evolvedAdvantage).toBeUndefined();
+    expect(result.applied).toBe('rolled_back');
+    expect(result.playbookSnapshot).toBeUndefined();
+    expect(result.rolledBackReason).toContain('control_arm gate failed');
+    expect(actorPromptOf(ag)).not.toContain(BULLET_MARKER);
+  });
+
+  it('keeps a dry run labelled dry_run when the required gate fails', async () => {
+    // A caller who asked for `apply: false` must never be told the artifact
+    // went live and was then withdrawn, and the I8 cascade must not rescind
+    // promotions issued against a state that was always going to be discarded.
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(CONTROL_DATASET, {
+      metric: scoreByAnswer,
+      maxProposals: 1,
+      apply: false,
+      controlArm: {},
+      gates: { controlArm: 'require', controlArmMargin: 0.5 },
+    });
+
+    expect(result.outcomes.some((outcome: any) => outcome.accepted)).toBe(true);
+    expect(result.applied).toBe('dry_run');
+    expect(result.rolledBackReason).toBeUndefined();
+    // No I8 cascade: nothing was applied, so nothing is superseded or rescinded.
+    for (const outcome of result.outcomes as any[]) {
+      if (!outcome.accepted) continue;
+      expect(outcome.evidence?.decision).toBe('accepted');
+      expect(outcome.promotion?.status).not.toBe('promoted_then_rolled_back');
+    }
+    expect(
+      (result.warnings ?? []).some(
+        (w: any) => w.code === 'promotion_rolled_back'
+      )
+    ).toBe(false);
+    // The finding is still on the record, under the code that says a
+    // comparison happened and the evolved artifact did not win it.
+    const warning = (result.warnings ?? []).find(
+      (w: any) => w.code === 'control_arm_not_beaten'
+    );
+    expect(warning).toBeDefined();
+    expect(warning.message).toContain('dry run');
+    // The legacy dry-run contract is untouched: exact rollback, snapshot kept.
+    expect(actorPromptOf(ag)).not.toContain(BULLET_MARKER);
+    expect(result.playbookSnapshot).toBeDefined();
+  });
+
+  it('reports an arm that never ran under a code that claims no comparison', async () => {
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(CONTROL_DATASET, {
+      metric: scoreByAnswer,
+      maxProposals: 1,
+      // floor(1/3) = 0 calls per arm, so nothing can be compared at all.
+      controlArm: { maxMetricCalls: 1 },
+      gates: { controlArm: 'warn' },
+    });
+    expect(result.control.status).toBe('failed');
+    const codes = (result.warnings ?? []).map((w: any) => w.code);
+    // 'not_beaten' would assert a comparison that never happened.
+    expect(codes).toContain('control_arm_unmeasured');
+    expect(codes).not.toContain('control_arm_not_beaten');
+  });
+
   it('leaves no abort listeners on the caller signal after the arm phase', async () => {
     const { ag } = makeAgent();
     const controller = new AbortController();
@@ -3045,6 +3147,27 @@ describe('agent.playbook().evolve() matched-budget control arm', () => {
       abortSignal: controller.signal,
     });
     expect(getEventListeners(controller.signal, 'abort').length).toBe(0);
+  });
+
+  it('leaves no abort listeners when the caller aborts mid-arm', async () => {
+    // A clean run cannot show a listener leaked on the abort PATH, which is the
+    // path that unwinds through the snapshot bracket's `finally`.
+    const { ag } = makeAgent();
+    const controller = new AbortController();
+    await expect(
+      ag.playbook().evolve(CONTROL_DATASET, {
+        metric: scoreByAnswer,
+        maxProposals: 1,
+        controlArm: {},
+        abortSignal: controller.signal,
+        onProgress: (event: any) => {
+          if (String(event.message).includes('best_of_n')) controller.abort();
+        },
+      })
+    ).rejects.toThrow('aborted');
+    expect(getEventListeners(controller.signal, 'abort').length).toBe(0);
+    // The bracket still put the evolved artifact back before unwinding.
+    expect(actorPromptOf(ag)).toContain(BULLET_MARKER);
   });
 
   it('rejects a control arm with no held-out set before evaluating anything', async () => {
