@@ -5,6 +5,7 @@ import type {
   AxTrajectoryStep,
   AxTrajectoryStore,
 } from '../trajectory/types.js';
+import { AxTrajectoryAppendError } from '../trajectory/types.js';
 import { axTrajectoryTruncateUtf8 } from '../trajectory/util.js';
 import {
   type AxMindChat,
@@ -396,6 +397,26 @@ export const axMindChat = (
     return resolution;
   };
 
+  /**
+   * A store that cannot read back its own append has broken the store
+   * contract. Saying so beats `step!`, which hands the caller `undefined`
+   * dressed as a step and fails somewhere else entirely.
+   */
+  const readBack = async (
+    stepId: string,
+    signal?: AbortSignal
+  ): Promise<Readonly<AxTrajectoryStep>> => {
+    const step = await store.getStep(trajectoryId, stepId, signal);
+    if (!step) {
+      throw new AxTrajectoryAppendError(
+        `AxMindChat appended ${stepId} to ${trajectoryId} but the store cannot read it back`,
+        'index',
+        'store_failure'
+      );
+    }
+    return step;
+  };
+
   const appendMessage = async (
     message: Readonly<AxMindChatMessage>,
     signal?: AbortSignal
@@ -415,8 +436,7 @@ export const axMindChat = (
       },
       signal
     );
-    const step = await store.getStep(trajectoryId, receipt.stepId, signal);
-    return step!;
+    return readBack(receipt.stepId, signal);
   };
 
   /**
@@ -685,8 +705,7 @@ export const axMindChat = (
         },
         signal
       );
-      const step = await store.getStep(trajectoryId, receipt.stepId, signal);
-      return step!;
+      return readBack(receipt.stepId, signal);
     },
   };
 };
@@ -695,6 +714,11 @@ export const axMindChat = (
  * Crash C10: a send that settled but whose message step never landed. The log
  * converges to the LEDGER, never the other way round -- the ledger is the only
  * record that proves the message actually left.
+ *
+ * Consequence worth stating: the ledger stores the body truncated at
+ * `METADATA_CONTENT_BYTES`, so a reconciled step can be shorter than what the
+ * transport sent. The alternative -- a full copy of every body in the effect
+ * metadata -- is worse, and the step names the effect it was rebuilt from.
  */
 export async function axMindReconcileChatSends(
   options: Readonly<AxMindChatOptions>,

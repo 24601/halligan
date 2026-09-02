@@ -3,8 +3,13 @@ import type {
   AxTrajectoryStep,
   AxTrajectoryStore,
 } from '../trajectory/types.js';
+import { AxTrajectoryAppendError } from '../trajectory/types.js';
 import { axTrajectoryTruncateUtf8 } from '../trajectory/util.js';
-import type { AxMindSalienceBuffer, AxMindSalienceItem } from './types.js';
+import type {
+  AxMindDiagnostic,
+  AxMindSalienceBuffer,
+  AxMindSalienceItem,
+} from './types.js';
 
 const DEFAULT_MAX_ITEMS = 32;
 
@@ -125,6 +130,7 @@ export async function axRecordMindSalience(
     trajectoryId: string;
     thinker: string;
     item: Readonly<AxMindSalienceItem>;
+    onDiagnostic?: (diagnostic: Readonly<AxMindDiagnostic>) => void;
   }>,
   signal?: AbortSignal
 ): Promise<Readonly<AxTrajectoryStep>> {
@@ -141,10 +147,24 @@ export async function axRecordMindSalience(
     },
     signal
   );
+  options.onDiagnostic?.({
+    code: 'salience-injected',
+    thinker: options.thinker,
+    stepId: options.item.sourceStepId,
+    at: options.item.createdAt,
+    message: `injected ${options.item.sourceStepId} into ${options.thinker}'s running turn`,
+  });
   const step = await store.getStep(
     options.trajectoryId,
     receipt.stepId,
     signal
   );
-  return step!;
+  if (!step) {
+    throw new AxTrajectoryAppendError(
+      `the salience record ${receipt.stepId} is not readable back from ${options.trajectoryId}`,
+      'index',
+      'store_failure'
+    );
+  }
+  return step;
 }

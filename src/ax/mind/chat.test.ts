@@ -847,6 +847,37 @@ describe('claims and concurrent responders', () => {
   });
 });
 
+describe('store contract failures', () => {
+  it('a store that cannot read back its own append fails with a typed error', async () => {
+    const { store, clock } = await seed();
+    const trigger = await inbound(store, 'ada', 'ping');
+    // A store that accepts an append and then cannot return the step has
+    // broken its contract. `step!` would hand the caller `undefined` dressed
+    // as a step and fail somewhere else entirely.
+    const blind = new Proxy(store, {
+      get(target, property, receiver) {
+        if (property === 'getStep') return async () => undefined;
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const chat = axMindChat({
+      trajectoryId: TRAJECTORY,
+      store: blind,
+      clock,
+      sender: 'responder',
+    });
+    const error = await chat
+      .recordDecision('no-reply', trigger.stepId)
+      .catch((one) => one);
+    expect(error).toMatchObject({
+      code: 'trajectory_append_failed',
+      reason: 'store_failure',
+      phase: 'index',
+    });
+  });
+});
+
 describe('the ledger boundary', () => {
   it('a crash between dispatch and settle parks the effect and sends nothing twice', async () => {
     const { store, clock } = await seed();

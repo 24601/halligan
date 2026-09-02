@@ -319,6 +319,12 @@ export interface AxMindChatTransport {
  * The effect-ledger slice an outbound send needs. A real `AxEventContext`
  * satisfies it structurally, which is how a thinker reaches it: through
  * `extra.eventContext`, never through a ledger of the mind's own.
+ *
+ * `AxEventContext.listEffects()` reports the CURRENT DELIVERY's effects only;
+ * the store-level variant takes a `deliveryId`. Crash C10's reconcile-at-start
+ * therefore needs a host adapter that satisfies this structural type while
+ * listing the effects of the deliveries it is recovering. That adapter is the
+ * seam, and it is deliberate rather than an oversight.
  */
 export type AxMindEffectLedger = Readonly<
   Pick<
@@ -384,6 +390,7 @@ export class AxMindConfigurationError extends Error {
       | 'effect_store_required'
       | 'unknown_trajectory'
       | 'reserved_namespace'
+      | 'missing_target'
       | 'append_atomicity_required',
     options?: ErrorOptions
   ) {

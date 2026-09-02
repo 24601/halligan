@@ -12,6 +12,7 @@ export {
   axMindHealth,
   axMindHealthReporter,
   axMindHealthState,
+  axMindStalledThreshold,
   axMindStoreDurability,
 } from './health.js';
 export {

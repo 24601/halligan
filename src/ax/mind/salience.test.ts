@@ -195,6 +195,24 @@ describe('axWithMindSalience', () => {
     expect(buffer.size).toBe(1);
   });
 
+  it('reports the injection it recorded', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const store = new AxInMemoryTrajectoryStore({ clock });
+    await store.create({ trajectoryId: TRAJECTORY });
+    const diagnostics: Array<{ code: string; stepId?: string }> = [];
+    await axRecordMindSalience(store, {
+      trajectoryId: TRAJECTORY,
+      thinker: 'monolith',
+      item: item('step-11'),
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+    });
+    // RFC 7.7 step 2's own deliverable: the audit trail is a step AND a
+    // reported diagnostic, not one or the other.
+    expect(diagnostics).toEqual([
+      expect.objectContaining({ code: 'salience-injected', stepId: 'step-11' }),
+    ]);
+  });
+
   it('a turn that calls no host function sees nothing, and the item survives', () => {
     const buffer = axMindSalienceBuffer();
     buffer.offer(item('step-9'));

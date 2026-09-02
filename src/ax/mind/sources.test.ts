@@ -254,11 +254,14 @@ describe('AxTrajectoryEventSource', () => {
     const store = await seed(clock);
     const controller = new AbortController();
     const test = harness(controller.signal);
-    // A cursor past the end of the log: the store refuses it rather than
-    // rounding it to a frame boundary, so the consumer stops loudly.
+    // A token from ANOTHER instance of this trajectory -- the forked or
+    // rebuilt log case. The store refuses it rather than rounding it to a
+    // frame boundary, so the consumer stops loudly instead of resuming at a
+    // position that means something different now.
     await store.saveCursor('traj-source:broken', {
       trajectoryId: TRAJECTORY,
-      seq: 9_999,
+      seq: 0,
+      token: 'another-instance-of-this-log:0',
     });
     const source = new AxTrajectoryEventSource({
       id: 'traj-source',
@@ -273,9 +276,10 @@ describe('AxTrajectoryEventSource', () => {
     await source.drain(test.context);
 
     expect(test.errors).toHaveLength(1);
-    expect((test.errors[0] as { code: string }).code).toBe(
-      'trajectory_cursor_invalid'
-    );
+    expect(test.errors[0]).toMatchObject({
+      code: 'trajectory_cursor_invalid',
+      reason: 'identity_changed',
+    });
     const thinkers = test.published.map(
       (one) => (one.event.data as { thinker: string }).thinker
     );

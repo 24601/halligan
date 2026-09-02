@@ -9,6 +9,7 @@ import type {
   AxTrajectoryTypeRegistry,
 } from '../trajectory/types.js';
 import type { AxMindSubscription, AxMindThinker } from './types.js';
+import { AxMindConfigurationError } from './types.js';
 
 /**
  * The four event types the mind publishes. A trajectory step never carries its
@@ -205,8 +206,12 @@ export function axMindEventRoutes(
   for (const thinker of options.thinkers) {
     const target = options.targets[thinker.name];
     if (!target) {
-      throw new Error(
-        `AxMind thinker ${thinker.name} has no event target; a wake route without a target cannot start`
+      // A configuration failure carries a `reason` from the closed union
+      // (RFC 7.10 step 1); dropping to an untyped throw would make it
+      // unclassifiable at the host boundary.
+      throw new AxMindConfigurationError(
+        `AxMind thinker ${thinker.name} has no event target; a wake route without a target cannot start`,
+        'missing_target'
       );
     }
     for (const pending of ['queue', 'coalesce'] as const) {

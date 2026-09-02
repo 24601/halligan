@@ -12,6 +12,7 @@ import {
   axMindHealth,
   axMindHealthReporter,
   axMindHealthState,
+  axMindStalledThreshold,
   axMindStoreDurability,
 } from './health.js';
 import { AxTrajectoryEventSource } from './sources.js';
@@ -151,6 +152,33 @@ describe('axMindHealthState', () => {
     };
     expect(axMindHealthState(partial)).toBe('stalled');
     expect(axMindHealthState({ ...partial, lagMs: 1_000 })).toBe('errored');
+  });
+});
+
+describe('axMindStalledThreshold', () => {
+  it('is two windows of the slower clock that keeps a mind quiet', () => {
+    // The defaults coincide at 600 000, which is exactly why a constant looked
+    // right and was not: a host with a long watchdog would otherwise get a
+    // stalled threshold INSIDE its own watchdog window and read a legitimate
+    // quiet period as a stall.
+    expect(axMindStalledThreshold()).toBe(600_000);
+    expect(axMindStalledThreshold({ watchdogMs: 900_000 })).toBe(1_800_000);
+    expect(axMindStalledThreshold({ capMs: 1_200_000 })).toBe(2_400_000);
+    const partial = {
+      newestStepSeq: 100,
+      newestStepAt: 0,
+      newestProcessedSeq: 1,
+      lagSteps: 99,
+      lagMs: 800_000,
+      durability: DURABILITY,
+      thinkers: [thinkerHealth()],
+    };
+    expect(axMindHealthState(partial)).toBe('stalled');
+    expect(
+      axMindHealthState(partial, {
+        stalledMs: axMindStalledThreshold({ watchdogMs: 900_000 }),
+      })
+    ).toBe('lagging');
   });
 });
 

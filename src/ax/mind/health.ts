@@ -1,15 +1,34 @@
 import type { AxEventStore } from '../event/types.js';
 import type { AxTrajectoryStore } from '../trajectory/types.js';
-import type {
-  AxMindHealth,
-  AxMindHealthState,
-  AxMindHealthThresholds,
-  AxMindThinkerHealth,
+import {
+  type AxMindHealth,
+  type AxMindHealthState,
+  type AxMindHealthThresholds,
+  type AxMindThinkerHealth,
+  axDefaultMindPacerConfig,
+  axDefaultMindSubscription,
 } from './types.js';
 
 const DEFAULT_LAG_STEPS = 25;
-/** 2 x the default pacer cap: a mind quiet for two full cap windows is stuck. */
-const DEFAULT_STALLED_MS = 600_000;
+
+/**
+ * `2 x max(watchdogMs, capMs)` (RFC 5.2): two full windows of the SLOWER of
+ * the two clocks that legitimately keep a mind quiet. A constant derived from
+ * the defaults alone would put a host with a long watchdog under a stalled
+ * threshold inside its own watchdog window, and read a legitimate quiet period
+ * as a stall.
+ */
+export function axMindStalledThreshold(
+  windows?: Readonly<{ watchdogMs?: number; capMs?: number }>
+): number {
+  return (
+    2 *
+    Math.max(
+      windows?.watchdogMs ?? axDefaultMindSubscription.watchdogMs,
+      windows?.capMs ?? axDefaultMindPacerConfig.capMs
+    )
+  );
+}
 
 /**
  * Health is LAG -- newest appended versus newest processed -- and never
@@ -22,7 +41,7 @@ export function axMindHealthState(
   thresholds?: Readonly<AxMindHealthThresholds>
 ): AxMindHealthState {
   const lagSteps = thresholds?.lagSteps ?? DEFAULT_LAG_STEPS;
-  const stalledMs = thresholds?.stalledMs ?? DEFAULT_STALLED_MS;
+  const stalledMs = thresholds?.stalledMs ?? axMindStalledThreshold();
   if (health.lagSteps > 0 && health.lagMs > stalledMs) return 'stalled';
   // An errored run is a DISTINCT STATE from an idle one, in the log and here:
   // a mind that keeps failing must never read as calm resting.

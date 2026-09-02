@@ -227,32 +227,45 @@ describe('axMindWakeRoute', () => {
     ).toBe('monolith');
   });
 
-  it('a thinker cannot reach the transport identity or the route table', () => {
+  it('the route table is frozen and rebuilt per call', () => {
     const one = thinker('monolith');
-    const table = axMindEventRoutes({
-      mindId: MIND,
-      thinkers: [one],
-      targets: { monolith: target('t').target },
-      registry,
-      sourceId: SOURCE,
-      tickMs: 100,
-    });
-    // The thinker record carries no from-identity, no transport and no routes:
-    // all three are host-owned options the mind never exposes to a program.
-    expect(Object.keys(one)).toEqual([
-      'name',
-      'kind',
-      'subscription',
-      'ai',
-      'program',
-    ]);
-    expect(JSON.stringify(Object.keys(one))).not.toContain('transport');
-    // The table is frozen and rebuilt per call, so a program that reached one
-    // route could still not edit the mind's routing.
+    const build = () =>
+      axMindEventRoutes({
+        mindId: MIND,
+        thinkers: [one],
+        targets: { monolith: target('t').target },
+        registry,
+        sourceId: SOURCE,
+        tickMs: 100,
+      });
+    const table = build();
+    // A program that reached one route could still not edit the mind's
+    // routing. (That a thinker carries no transport or route field at all is
+    // a COMPILE-time fact, asserted in mind.test-d.ts: a runtime Object.keys
+    // check on a literal this test wrote three lines earlier proves nothing.)
     expect(Object.isFrozen(table)).toBe(true);
     expect(() => {
       (table as AxEventRuntime[]).push({} as never);
     }).toThrow();
+    expect(build()).not.toBe(table);
+  });
+
+  it('a thinker with no event target is a typed configuration failure', () => {
+    expect(() =>
+      axMindEventRoutes({
+        mindId: MIND,
+        thinkers: [thinker('monolith')],
+        targets: {},
+        registry,
+        sourceId: SOURCE,
+        tickMs: 100,
+      })
+    ).toThrow(
+      expect.objectContaining({
+        code: 'mind_configuration_invalid',
+        reason: 'missing_target',
+      })
+    );
   });
 });
 

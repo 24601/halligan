@@ -1954,6 +1954,7 @@ import {
   axMindHealth,
   axMindHealthReporter,
   axMindHealthState,
+  axMindStalledThreshold,
   axMindStoreDurability,
 } from './mind/health.js';
 import {
@@ -2676,6 +2677,7 @@ export { axMindSalienceBuffer };
 export { axMindSalienceGuidance };
 export { axMindSalienceTextBytes };
 export { axMindSkillTokens };
+export { axMindStalledThreshold };
 export { axMindStepEventExtensions };
 export { axMindStoreDurability };
 export { axMindSubscribedStepTypes };

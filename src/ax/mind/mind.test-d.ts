@@ -46,6 +46,15 @@ const asTarget: AxEventTarget<{ prompt: string }, { answer: string }> = {
 };
 void validateEventTarget(asTarget);
 
+// The thinker record is the entire surface a program can reach: no transport
+// identity and no route table, both host-owned (authority items 3 and 5). A
+// runtime `Object.keys` check on a literal the test just wrote proves nothing;
+// this fails to compile the moment either field is added.
+// @ts-expect-error a thinker carries no transport
+void thinker.transport;
+// @ts-expect-error a thinker carries no route table
+void thinker.routes;
+
 // A subscription is deeply readonly: routes are fixed at construction and a
 // thinker never edits its own wake policy.
 // @ts-expect-error triggerSelf is readonly
