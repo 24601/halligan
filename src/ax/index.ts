@@ -1939,6 +1939,116 @@ import type {
   AxMemoryData,
   AxMemoryMessageValue,
 } from './mem/types.js';
+import {
+  type AxMindChatOptions,
+  type AxMindReplyStateOptions,
+  axMindChat,
+  axMindChatIdempotencyKey,
+  axMindChatOperation,
+  axMindInferReplyTo,
+  axMindReconcileChatSends,
+  axResolveMindReplyState,
+} from './mind/chat.js';
+import {
+  type AxMindHealthInput,
+  axMindHealth,
+  axMindHealthReporter,
+  axMindHealthState,
+  axMindStoreDurability,
+} from './mind/health.js';
+import {
+  axMindPaceDelay,
+  axMindPacerFuse,
+  axMindPaceStepData,
+  axMindPaceStepType,
+  axMindVisibleStepTypes,
+  axMindWakeOutcomeOf,
+  axMindWorkProbe,
+  axNextMindPace,
+  axRecoverMindPacerState,
+} from './mind/pacer.js';
+import {
+  type AxMindEventRoutesOptions,
+  type AxMindWakeRouteOptions,
+  axMindEventRoutes,
+  axMindEventSource,
+  axMindEventTypes,
+  axMindPendingClass,
+  axMindStepEventExtensions,
+  axMindSubscribedStepTypes,
+  axMindThinkerSubject,
+  axMindWakeRoute,
+} from './mind/routes.js';
+import {
+  type AxMindSalienceBufferOptions,
+  axMindSalienceBuffer,
+  axMindSalienceGuidance,
+  axRecordMindSalience,
+  axWithMindSalience,
+} from './mind/salience.js';
+import {
+  type AxMindSkillEnvironment,
+  type AxMindSkillSelection,
+  type AxSelectMindSkillsOptions,
+  axDefaultMindKernelTokenBudget,
+  axMindSkillTokens,
+  axSelectMindSkills,
+} from './mind/skills.js';
+import {
+  type AxMindTickDuty,
+  type AxMindTickDutyState,
+  AxMindTickEventSource,
+  type AxMindTickEventSourceOptions,
+  type AxMindTrajectoryConsumer,
+  AxTrajectoryEventSource,
+  type AxTrajectoryEventSourceOptions,
+  axMindTickDue,
+} from './mind/sources.js';
+import {
+  type AxMindArtifacts,
+  AxMindBudgetExceededError,
+  type AxMindChat,
+  AxMindChatError,
+  type AxMindChatMessage,
+  type AxMindChatTransport,
+  AxMindConfigurationError,
+  type AxMindDiagnostic,
+  type AxMindDiagnosticCode,
+  type AxMindEffectLedger,
+  type AxMindGoal,
+  type AxMindHealth,
+  type AxMindHealthState,
+  type AxMindHealthThresholds,
+  AxMindLivenessError,
+  type AxMindOwnershipStore,
+  type AxMindPaceDecision,
+  type AxMindPacerConfig,
+  type AxMindPacerState,
+  type AxMindReplyDecision,
+  type AxMindReplyResolution,
+  type AxMindReplyState,
+  type AxMindRoutingSignal,
+  type AxMindSalienceBuffer,
+  type AxMindSalienceItem,
+  type AxMindSendReceipt,
+  type AxMindSkill,
+  type AxMindStepResult,
+  type AxMindSubscription,
+  type AxMindThinker,
+  type AxMindThinkerBudget,
+  type AxMindThinkerHealth,
+  type AxMindThinkerKind,
+  type AxMindWakeClass,
+  type AxMindWakeOutcome,
+  type AxMindWorkProbe,
+  axDefaultMindPacerConfig,
+  axDefaultMindSubscription,
+  axDefaultMindThinkerBudget,
+  axInitialMindPacerState,
+  axIsMindBudgetExceededError,
+  axIsMindChatError,
+  axIsMindConfigurationError,
+} from './mind/types.js';
 import { axSpanAttributes, axSpanEvents } from './trace/trace.js';
 import {
   type AxTrajectoryStoreConformanceFactory,
@@ -2274,6 +2384,11 @@ export { AxMCPWebSocketTransport };
 export { AxManualEventClock };
 export { AxMediaNotSupportedError };
 export { AxMemory };
+export { AxMindBudgetExceededError };
+export { AxMindChatError };
+export { AxMindConfigurationError };
+export { AxMindLivenessError };
+export { AxMindTickEventSource };
 export { AxMockAIService };
 export { AxMultiServiceRouter };
 export { AxMutationTaxonomyError };
@@ -2309,6 +2424,7 @@ export { AxTokenLimitError };
 export { AxTrajectoryAppendError };
 export { AxTrajectoryBlobError };
 export { AxTrajectoryCursorError };
+export { AxTrajectoryEventSource };
 export { AxTrajectoryForkError };
 export { AxTrajectoryLog };
 export { AxTrajectoryQueryError };
@@ -2409,6 +2525,10 @@ export { axCreateTaskStatTable };
 export { axDeclaresToolCapability };
 export { axDefaultFlowLogger };
 export { axDefaultMetricsConfig };
+export { axDefaultMindKernelTokenBudget };
+export { axDefaultMindPacerConfig };
+export { axDefaultMindSubscription };
+export { axDefaultMindThinkerBudget };
 export { axDefaultMutationAnnotator };
 export { axDefaultOptimizerLogger };
 export { axDefaultOptimizerMetricsConfig };
@@ -2463,6 +2583,7 @@ export { axHarnessRecipeVersion };
 export { axHarnessStamp };
 export { axInMemoryLearningStore };
 export { axInferComponentClass };
+export { axInitialMindPacerState };
 export { axIpwPairedDifference };
 export { axIpwScore };
 export { axIsAgentPlaybookEvolveError };
@@ -2481,6 +2602,9 @@ export { axIsHarnessRecipeError };
 export { axIsHarnessStampStale };
 export { axIsLearningRecordConflictError };
 export { axIsLearningReleaseConflictError };
+export { axIsMindBudgetExceededError };
+export { axIsMindChatError };
+export { axIsMindConfigurationError };
 export { axIsMutationTaxonomyError };
 export { axIsOpenAIChatAudioModel };
 export { axIsOpenAIRealtimeModel };
@@ -2531,6 +2655,34 @@ export { axMergeChatAudioConfig };
 export { axMergeRejectedCandidateLedgerRefs };
 export { axMergeTrajectoryAdmission };
 export { axMergeUsageContexts };
+export { axMindChat };
+export { axMindChatIdempotencyKey };
+export { axMindChatOperation };
+export { axMindEventRoutes };
+export { axMindEventSource };
+export { axMindEventTypes };
+export { axMindHealth };
+export { axMindHealthReporter };
+export { axMindHealthState };
+export { axMindInferReplyTo };
+export { axMindPaceDelay };
+export { axMindPaceStepData };
+export { axMindPaceStepType };
+export { axMindPacerFuse };
+export { axMindPendingClass };
+export { axMindReconcileChatSends };
+export { axMindSalienceBuffer };
+export { axMindSalienceGuidance };
+export { axMindSkillTokens };
+export { axMindStepEventExtensions };
+export { axMindStoreDurability };
+export { axMindSubscribedStepTypes };
+export { axMindThinkerSubject };
+export { axMindTickDue };
+export { axMindVisibleStepTypes };
+export { axMindWakeOutcomeOf };
+export { axMindWakeRoute };
+export { axMindWorkProbe };
 export { axModelInfoAnthropic };
 export { axModelInfoCohere };
 export { axModelInfoDeepSeek };
@@ -2541,6 +2693,7 @@ export { axModelInfoOpenAI };
 export { axModelInfoOpenAIResponses };
 export { axModelInfoReka };
 export { axModelInfoWebLLM };
+export { axNextMindPace };
 export { axNormalizeAppliedServiceTier };
 export { axNormalizeAxIRRuntimeCapabilities };
 export { axNormalizeOpenAIUsage };
@@ -2562,6 +2715,8 @@ export { axProgramSourceVersion };
 export { axProjectTrajectory };
 export { axReactCanonicalJSON };
 export { axReactSerializeHistory };
+export { axRecordMindSalience };
+export { axRecoverMindPacerState };
 export { axRejectedCandidateDigest };
 export { axRejectedCandidateLedgerEntry };
 export { axRejectedCandidatePrior };
@@ -2575,6 +2730,7 @@ export { axResolveAIProfileId };
 export { axResolveGeminiLiveAudioConfig };
 export { axResolveGrokRealtimeAudioConfig };
 export { axResolveMCPExecutionContext };
+export { axResolveMindReplyState };
 export { axResolveOpenAIChatAudioConfig };
 export { axResolveOpenAIRealtimeAudioConfig };
 export { axResolveServiceTier };
@@ -2596,6 +2752,7 @@ export { axScoreProvidersForRequest };
 export { axScoreWindowProcessor };
 export { axSelectCodeRuntime };
 export { axSelectExecutableSkills };
+export { axSelectMindSkills };
 export { axSelectOptimalProvider };
 export { axSelectPreferenceEvidence };
 export { axSerializeOptimizedProgram };
@@ -2650,6 +2807,7 @@ export { axValidateMutationAnnotation };
 export { axValidateProviderCapabilities };
 export { axValidateStatePatch };
 export { axVisualPerceptualDigest };
+export { axWithMindSalience };
 export { axWorkerRuntime };
 export { axWorkingState };
 export { axWorkingStateFingerprint };
@@ -3626,6 +3784,50 @@ export type { AxMetricFn };
 export type { AxMetricFnArgs };
 export type { AxMetricResult };
 export type { AxMetricsConfig };
+export type { AxMindArtifacts };
+export type { AxMindChat };
+export type { AxMindChatMessage };
+export type { AxMindChatOptions };
+export type { AxMindChatTransport };
+export type { AxMindDiagnostic };
+export type { AxMindDiagnosticCode };
+export type { AxMindEffectLedger };
+export type { AxMindEventRoutesOptions };
+export type { AxMindGoal };
+export type { AxMindHealth };
+export type { AxMindHealthInput };
+export type { AxMindHealthState };
+export type { AxMindHealthThresholds };
+export type { AxMindOwnershipStore };
+export type { AxMindPaceDecision };
+export type { AxMindPacerConfig };
+export type { AxMindPacerState };
+export type { AxMindReplyDecision };
+export type { AxMindReplyResolution };
+export type { AxMindReplyState };
+export type { AxMindReplyStateOptions };
+export type { AxMindRoutingSignal };
+export type { AxMindSalienceBuffer };
+export type { AxMindSalienceBufferOptions };
+export type { AxMindSalienceItem };
+export type { AxMindSendReceipt };
+export type { AxMindSkill };
+export type { AxMindSkillEnvironment };
+export type { AxMindSkillSelection };
+export type { AxMindStepResult };
+export type { AxMindSubscription };
+export type { AxMindThinker };
+export type { AxMindThinkerBudget };
+export type { AxMindThinkerHealth };
+export type { AxMindThinkerKind };
+export type { AxMindTickDuty };
+export type { AxMindTickDutyState };
+export type { AxMindTickEventSourceOptions };
+export type { AxMindTrajectoryConsumer };
+export type { AxMindWakeClass };
+export type { AxMindWakeOutcome };
+export type { AxMindWakeRouteOptions };
+export type { AxMindWorkProbe };
 export type { AxMinibatchStrategy };
 export type { AxMockAIServiceConfig };
 export type { AxModelConfig };
@@ -3791,6 +3993,7 @@ export type { AxRuntimeTimeoutEnforcement };
 export type { AxSamplePickerOptions };
 export type { AxScoreWindowProcessorOptions };
 export type { AxSelectExecutableSkillsOptions };
+export type { AxSelectMindSkillsOptions };
 export type { AxSelectedExecutableSkill };
 export type { AxSelectedPreferenceEvidence };
 export type { AxSelfTuningConfig };
@@ -3856,6 +4059,7 @@ export type { AxTrajectoryCreateRequest };
 export type { AxTrajectoryCursor };
 export type { AxTrajectoryDrainBudget };
 export type { AxTrajectoryDrainResult };
+export type { AxTrajectoryEventSourceOptions };
 export type { AxTrajectoryFieldValue };
 export type { AxTrajectoryForkRequest };
 export type { AxTrajectoryForkResult };

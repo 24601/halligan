@@ -847,6 +847,66 @@ void trajectoryType;
 void trajectoryExhausted;
 void trajectoryAssertions;
 
+// === Mind surface (src/ax/mind) ===
+// Proves the generated barrel really exports the pacing ladder, the wake
+// routing, both event sources, lag health, ledgered chat and the skill tier.
+// `AxMind` and `mind()` land with the runtime commit.
+import {
+  AxMindChatError,
+  type AxMindDiagnostic,
+  type AxMindHealth,
+  type AxMindPaceDecision,
+  type AxMindReplyResolution,
+  type AxMindSkillSelection,
+  type AxMindThinker,
+  AxMindTickEventSource,
+  AxTrajectoryEventSource,
+  axDefaultMindPacerConfig,
+  axMindChatIdempotencyKey,
+  axMindEventRoutes,
+  axMindHealthState,
+  axMindSalienceBuffer,
+  axNextMindPace,
+  axRecoverMindPacerState,
+  axResolveMindReplyState,
+  axSelectMindSkills,
+  axWithMindSalience,
+} from './index.js';
+
+void axNextMindPace;
+void axRecoverMindPacerState;
+void axResolveMindReplyState;
+void axMindChatIdempotencyKey;
+void axSelectMindSkills;
+void axWithMindSalience;
+void axMindEventRoutes;
+void axMindHealthState;
+void axMindSalienceBuffer;
+void AxMindChatError;
+void AxTrajectoryEventSource;
+void AxMindTickEventSource;
+
+const mindCapMs: number = axDefaultMindPacerConfig.capMs;
+declare const mindThinker: AxMindThinker;
+declare const mindDecision: AxMindPaceDecision;
+declare const mindHealth: AxMindHealth;
+declare const mindReply: AxMindReplyResolution;
+declare const mindSkills: AxMindSkillSelection;
+declare const mindDiagnostic: AxMindDiagnostic;
+const mindThinkerName: string = mindThinker.name;
+const mindDecisionKind: 'arm' | 'unchanged' = mindDecision.kind;
+const mindLagSteps: number = mindHealth.lagSteps;
+const mindFailedOpen: boolean = mindReply.failedOpen;
+const mindKernelTokens: number = mindSkills.kernelTokens;
+const mindDiagnosticAt: number = mindDiagnostic.at;
+void mindCapMs;
+void mindThinkerName;
+void mindDecisionKind;
+void mindLagSteps;
+void mindFailedOpen;
+void mindKernelTokens;
+void mindDiagnosticAt;
+
 // === Host-owned evidence guards ===
 // RFC §8.8: the guard surface is reachable, and correctly shaped, from the
 // generated public barrel rather than only from the subsystem module.
