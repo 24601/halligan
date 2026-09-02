@@ -314,10 +314,12 @@ export async function runActorTurn<_IN extends AxGenIn>(
     };
   }
   if (skillState) {
-    const rendered = skillState.renderPrompt();
+    // The two fields the substrate ADDS. `renderPrompt()` would re-run the
+    // three working-state renders the block above just did and throw them
+    // away, so the per-turn accessors are used instead.
     s._skillStatePromptValues = {
-      skillSpec: rendered.skillSpec,
-      latestObservation: rendered.latestObservation,
+      skillSpec: skillState.skillSpec(),
+      latestObservation: skillState.renderObservations(),
     };
   }
 
@@ -569,6 +571,11 @@ export async function runActorTurn<_IN extends AxGenIn>(
           return calls.length > 0 ? { _functionCalls: calls } : {};
         })(),
       });
+      // This branch returns before the normal `skillState?.observe(...)` at
+      // the end of the turn. In `skillState` mode the observation is the ONLY
+      // history the actor sees, so without this the refused turn would be
+      // invisible to it and the same code could be re-emitted forever.
+      skillState?.observe(policyViolation, entryTurn);
 
       if (actorTurnCallback) {
         await actorTurnCallback({

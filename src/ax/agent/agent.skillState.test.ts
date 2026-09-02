@@ -77,6 +77,7 @@ function buildSkillStateAgent(
     skillState?: Record<string, unknown>;
     memoryMode?: 'transcript' | 'skillState';
     maxTurns?: number;
+    runtime?: ReturnType<typeof axCreateEvaluatingRuntime>;
   }
 ): Built {
   const { ai, executorPrompts } = axCreateScriptedMock(script);
@@ -94,7 +95,7 @@ function buildSkillStateAgent(
   };
   const built = agent('task:string -> answer:string', {
     functions: [pickFn],
-    runtime: axCreateEvaluatingRuntime(),
+    runtime: overrides?.runtime ?? axCreateEvaluatingRuntime(),
     maxTurns: overrides?.maxTurns ?? 6,
     workingState,
     actorMemoryMode: overrides?.memoryMode ?? 'skillState',
@@ -274,6 +275,75 @@ describe('skillState turn loop', () => {
     expect(traces.every((step) => step.proposal === 'none')).toBe(true);
     expect(traces.every((step) => step.outcome === 'unchanged')).toBe(true);
     expect(transitions).toHaveLength(0);
+    expect(built.getWorkingState()?.goals.g_pick?.status).toBe('pending');
+  });
+
+  it('shows a refused-code turn to the actor as the latest observation', async () => {
+    // The code-policy branch returns before the turn's normal
+    // `skillState.observe(...)`. In this mode the observation window is the
+    // ONLY history, so without an explicit observe the refused turn would be
+    // invisible and the actor could re-emit the same code forever.
+    const { built, ai, executorPrompts } = buildSkillStateAgent(
+      {
+        distiller: DISTILL,
+        executor: [
+          // No console.log on a non-final turn: a policy violation, so the
+          // code never executes.
+          'const neverLogged = 1;',
+          'console.log("RECOVERED")',
+          'await final("done", {"answer":"ok"})',
+        ],
+      },
+      {
+        // Turns the incremental-console turn policy ON for this run only.
+        runtime: axCreateEvaluatingRuntime({
+          usageInstructions: 'Inspect values with console.log(...).',
+        }),
+      }
+    );
+
+    await built.forward(ai, { task: 'pick order 42' } as never);
+
+    // The turn AFTER the refusal can see what happened.
+    expect(executorPrompts[1]).toContain('[POLICY]');
+    expect(executorPrompts[1]).toContain(
+      'Non-final turns must include at least one'
+    );
+    // ...and it is the observation region carrying it, not the transcript:
+    // the next prompt has moved on to the recovered turn's output.
+    expect(executorPrompts[2]).toContain('RECOVERED');
+    expect(executorPrompts[2]).not.toContain('[POLICY]');
+  });
+
+  it('converts a patch-free final with a pending goal through the completion interlock', async () => {
+    // The interlock reaches the kernel through `commitContext`, and in
+    // skillState mode a turn with no `statePatch` takes the early
+    // `recordNonCommit` branch. That branch must still resolve the interlock.
+    const { built, ai, traces, executorPrompts } = buildSkillStateAgent(
+      {
+        distiller: DISTILL,
+        executor: [
+          'await final("done", {"answer":"ok"})',
+          'console.log("still working")',
+          'await final("done", {"answer":"ok"})',
+        ],
+      },
+      {
+        workingState: {
+          completionPolicy: 'interlock',
+          maxCompletionInterlocks: 1,
+        } as Partial<AxWorkingStateConfig<any>>,
+      }
+    );
+
+    await built.forward(ai, { task: 'pick order 42' } as never);
+
+    expect(
+      traces.some((step) => step.completionInterlock === 'converted')
+    ).toBe(true);
+    // The loop really continued and the harness guidance named the goal.
+    expect(executorPrompts.length).toBeGreaterThan(1);
+    expect(executorPrompts[1] ?? '').toContain('g_pick');
     expect(built.getWorkingState()?.goals.g_pick?.status).toBe('pending');
   });
 

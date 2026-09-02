@@ -55,10 +55,21 @@ export const axWorkingStateHarnessUsage = () => ({
   tokens: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
 });
 
-/** An evaluating stub session: the actor's code really runs. */
-export function axCreateEvaluatingRuntime(): AxCodeRuntime {
+/**
+ * An evaluating stub session: the actor's code really runs.
+ *
+ * `usageInstructions` defaults to the empty string, which is what every
+ * existing caller gets. Passing text containing `console.log` is how a test
+ * turns ON the actor's incremental-console turn policy (the agent derives
+ * `enforceIncrementalConsoleTurns` from these instructions), so a scripted
+ * turn can be REFUSED by the policy rather than executed.
+ */
+export function axCreateEvaluatingRuntime(
+  options?: Readonly<{ usageInstructions?: string }>
+): AxCodeRuntime {
+  const usageInstructions = options?.usageInstructions ?? '';
   return {
-    getUsageInstructions: () => '',
+    getUsageInstructions: () => usageInstructions,
     createSession(globals): AxCodeSession {
       const scope: Record<string, unknown> = globals ?? {};
       return {
