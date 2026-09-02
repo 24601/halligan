@@ -31,7 +31,7 @@ class Reflector extends AxMindDeterministicProgram<
   { reflection: string }
 > {
   constructor(private readonly host: AxMind) {
-    super(new AxSignature('mindContext:string -> reflection:string'));
+    super(AxSignature.create('mindContext:string -> reflection:string'));
   }
   async run(values: { mindContext: string }) {
     const lines = values.mindContext
