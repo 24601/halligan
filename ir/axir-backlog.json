@@ -1882,6 +1882,25 @@
       "completedAt": null,
       "completedByCommit": null,
       "verification": null
+    },
+    {
+      "id": "axir-2026-09-02-gepa-evidence-primitives-branded-digests-trajectory-admission-mu",
+      "status": "open",
+      "title": "GEPA evidence primitives: branded digests, trajectory admission, mutation taxonomy, harness recipes, discriminative sampling with IPW, candidate effect declarations, rejected-candidate ledger",
+      "createdAt": "2026-09-02",
+      "sourcePR": 89,
+      "sourceCommit": "50f3de89c2dd03e38c9b66324b749dd4cab87d91",
+      "tsPaths": ["src/ax/dsp/optimizers/digests.ts"],
+      "portableSurface": "axoptimize",
+      "impact": "Adds seven pure, currently UNWIRED modules under src/ax/dsp/optimizers/ and narrows fingerprintGEPAValue's return type. Nothing here is reachable from AxGEPA, so portable optimizer behaviour is byte-identical (proved by test:gepa-upstream-compatibility against the merge base). The portable semantics these modules will carry once wired: three digest strengths with a runtime strength assertion; host-classified trajectory termination with a non-reclassifiable override for config errors and program-source failures, admission accounting, a run-level discard ceiling, and an intersected paired-admitted index set; a mutation depth/patch taxonomy keyed on component kind that fails closed on an unmapped kind; harness recipes digesting bindings plus a bound model id; Beta(1,1)-smoothed Bernoulli-variance inclusion probabilities with a mandatory exploration floor, water-fill, Madow systematic pps sampling consuming exactly one RNG draw, and a Hajek/IPW paired-difference estimator; structural validation of candidate effect declarations bound to AxEventEffectIntent; and a rejected-candidate ledger port whose entries expire by construction with fail-open unknown context.",
+      "suggestedAxirWork": [
+        "Add or update the TS-derived conformance fixture.",
+        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
+        "Run npm run axir:conformance:check and npm run test:axir."
+      ],
+      "completedAt": null,
+      "completedByCommit": null,
+      "verification": null
     }
   ],
   "nonPortableExemptions": [
