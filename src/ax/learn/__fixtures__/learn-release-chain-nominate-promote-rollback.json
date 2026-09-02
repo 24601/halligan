@@ -1,0 +1,72 @@
+{
+  "name": "learn-release-chain-nominate-promote-rollback",
+  "behaviour": "releaseChain",
+  "description": "creation -> evolve (nominate) -> promote -> rollback. Publishing never moves the head; promoting is a separate compare-and-set; a rollback is a NEW release carrying an old contentId, and `step` never rewinds.",
+  "scenario": "support",
+  "seed": [
+    {
+      "id": "tone",
+      "kind": "instruction",
+      "config": { "text": "Answer briefly." }
+    }
+  ],
+  "candidate": [
+    {
+      "id": "tone",
+      "kind": "instruction",
+      "config": { "text": "Answer in exactly one sentence." }
+    }
+  ],
+  "steps": [
+    {
+      "op": "seed",
+      "expected": {
+        "releaseId": "rel-1",
+        "step": 1,
+        "operation": "creation",
+        "current": true,
+        "headReleaseId": "rel-1"
+      }
+    },
+    {
+      "op": "publish",
+      "expected": {
+        "releaseId": "rel-2",
+        "step": 2,
+        "operation": "evolve",
+        "current": false,
+        "parentReleaseId": "rel-1",
+        "headReleaseId": "rel-1"
+      }
+    },
+    {
+      "op": "promote",
+      "releaseId": "rel-2",
+      "expectedHeadReleaseId": "rel-1",
+      "expected": {
+        "releaseId": "rel-2",
+        "step": 2,
+        "operation": "evolve",
+        "current": true,
+        "headReleaseId": "rel-2"
+      }
+    },
+    {
+      "op": "rollback",
+      "releaseId": "rel-1",
+      "expectedHeadReleaseId": "rel-2",
+      "expected": {
+        "releaseId": "rel-3",
+        "step": 3,
+        "operation": "rollback",
+        "current": true,
+        "parentReleaseId": "rel-2",
+        "rollbackTargetReleaseId": "rel-1",
+        "contentIdEqualsReleaseId": "rel-1",
+        "headReleaseId": "rel-3"
+      }
+    }
+  ],
+  "expectedChainSteps": [1, 2, 3],
+  "expectedCurrentCount": 1
+}

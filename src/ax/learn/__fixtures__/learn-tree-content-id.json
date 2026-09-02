@@ -1,0 +1,94 @@
+{
+  "name": "learn-tree-content-id",
+  "behaviour": "contentId",
+  "description": "Content identity is over the admitted entry list in tree order. Key permutation does not change it; a value change, an order swap, and a toggled `disabled` flag each do. `axEventCanonicalJson` drops `undefined`, so the disabled cases are asserted rather than assumed.",
+  "base": [
+    { "id": "a", "kind": "instruction", "config": { "text": "First rule." } },
+    { "id": "b", "kind": "instruction", "config": { "text": "Second rule." } }
+  ],
+  "variants": [
+    {
+      "case": "key permutation",
+      "sameAsBase": true,
+      "tree": [
+        {
+          "config": { "text": "First rule." },
+          "kind": "instruction",
+          "id": "a"
+        },
+        {
+          "kind": "instruction",
+          "config": { "text": "Second rule." },
+          "id": "b"
+        }
+      ]
+    },
+    {
+      "case": "value change",
+      "sameAsBase": false,
+      "tree": [
+        {
+          "id": "a",
+          "kind": "instruction",
+          "config": { "text": "First rule!" }
+        },
+        {
+          "id": "b",
+          "kind": "instruction",
+          "config": { "text": "Second rule." }
+        }
+      ]
+    },
+    {
+      "case": "order swap",
+      "sameAsBase": false,
+      "tree": [
+        {
+          "id": "b",
+          "kind": "instruction",
+          "config": { "text": "Second rule." }
+        },
+        {
+          "id": "a",
+          "kind": "instruction",
+          "config": { "text": "First rule." }
+        }
+      ]
+    },
+    {
+      "case": "disabled toggled on",
+      "sameAsBase": false,
+      "tree": [
+        {
+          "id": "a",
+          "kind": "instruction",
+          "disabled": true,
+          "config": { "text": "First rule." }
+        },
+        {
+          "id": "b",
+          "kind": "instruction",
+          "config": { "text": "Second rule." }
+        }
+      ]
+    },
+    {
+      "case": "disabled written explicitly false",
+      "sameAsBase": false,
+      "tree": [
+        {
+          "id": "a",
+          "kind": "instruction",
+          "disabled": false,
+          "config": { "text": "First rule." }
+        },
+        {
+          "id": "b",
+          "kind": "instruction",
+          "config": { "text": "Second rule." }
+        }
+      ]
+    }
+  ],
+  "expected": { "format": "^sha256:[0-9a-f]{64}$" }
+}
