@@ -2127,6 +2127,25 @@
       "verification": null
     },
     {
+      "id": "axir-2026-09-02-learning-surface-review-fixes-candidate-only-failure-manifest-ta",
+      "status": "open",
+      "title": "Learning surface review fixes: candidate-only failure manifest, target-driven install, judge resolution, cycle classification",
+      "createdAt": "2026-09-02",
+      "sourcePR": 96,
+      "sourceCommit": "38d5a2350e5a1dce12b126b32ba25068d903888d",
+      "tsPaths": ["src/ax/learn/types.ts"],
+      "portableSurface": "axoptimize",
+      "impact": "Corrects portable TS semantics shipped by the learning surface. (1) The failure manifest is advanced from the CANDIDATE side's observations only; observations carry the side they were seen on and the current side travels on the evaluation instead, so a nominated candidate never ships a durable claim that it failed the baseline's tasks. (2) Installing a tree is a function of the TARGET: whenever the target has a playbook handle the install replaces the playbook and the continuous-learning reset guard fires, including for a tree carrying no bullets; the skills slot is replaced whenever the tree fills it or the slot already holds something. (3) The built-in judge resolves judgeAI then the target's own getJudgeAI(), and refuses a teacherAI with neither, so proposer and evaluator are never correlated by default. (4) A tree that cannot be canonicalized is denied 'non-json-config' rather than raising RangeError, on every entry point. (5) The evolve step number is derived from the chain tail, matching publish. (6) publish holds the gate decision to the same persistability floor as a record payload. (7) A non-restorable rollback target raises the typed AxLearningRollbackRefusedError with a structural guard.",
+      "suggestedAxirWork": [
+        "Add or update the TS-derived conformance fixture.",
+        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
+        "Run npm run axir:conformance:check and npm run test:axir."
+      ],
+      "completedAt": null,
+      "completedByCommit": null,
+      "verification": null
+    },
+    {
       "id": "axir-2026-09-02-register-the-axmind-conformance-suite-with-the-axir-verifier-and",
       "status": "open",
       "title": "Register the axmind conformance suite with the AxIR verifier and the five target runners",
