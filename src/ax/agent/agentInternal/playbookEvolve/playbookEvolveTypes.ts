@@ -362,7 +362,14 @@ export type AxAgentPlaybookEvolveOptions<IN extends AxGenIn = AxGenIn> = {
   maxDiscardRedraws?: number;
   /** Caller cost hook. Without it `costUsd` is undefined and the basis unknown. */
   costFor?: AxAgentPlaybookCostFn;
-  /** Usage tap for the 'mining' and 'judge' phases. Caller-owned. */
+  /**
+   * Usage tap for the structurally unobservable phases. Caller-owned: Ax
+   * subscribes for the length of the run and always unsubscribes, and never
+   * wraps an `AxAIService` itself. Forwarded usage is attributed to the phase
+   * open when it arrives AND ONLY when that phase is structurally unobservable
+   * ('mining', 'judge') — every other phase already reads its own usage off the
+   * predictions, so counting tapped usage there would double the total.
+   */
   usageTap?: AxAgentPlaybookUsageTap;
   /** Warn when the accepted artifact's relative overhead exceeds this. Default 0.25. */
   overheadWarnRatio?: number;

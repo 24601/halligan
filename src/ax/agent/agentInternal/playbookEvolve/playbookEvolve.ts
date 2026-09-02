@@ -22,6 +22,7 @@ import type {
   AxAgentJudgeOptions,
 } from '../agentOptimizeTypes.js';
 import { createAgentOptimizeMetric } from '../optimizer.js';
+import type { AxAccountingLedger } from './accounting.js';
 import {
   accountingForPhases,
   candidateAccounting,
@@ -325,12 +326,41 @@ function validateEvidenceOptions(
   validateIntervalOptions(options?.intervalOptions);
 }
 
+/**
+ * The caller owns its `AxAIService`; Ax never wraps one. When a `usageTap` is
+ * supplied Ax subscribes for the length of the run, attributes whatever arrives
+ * to the open phase (see `AxAccountingLedger.tapUsage`), and always
+ * unsubscribes — including when the run throws.
+ */
 export async function evolveAgentPlaybook<
   IN extends AxGenIn,
   OUT extends AxGenOut,
 >(
   self: any,
   dataset: Readonly<AxAgentEvalDataset<IN>>,
+  options?: Readonly<AxAgentPlaybookEvolveOptions<IN>>
+): Promise<AxAgentPlaybookEvolveResult<OUT>> {
+  const nowFn = options?.now ?? Date.now;
+  const ledger = createAccountingLedger(nowFn);
+  const unsubscribe = options?.usageTap?.subscribe((usage) => {
+    ledger.tapUsage(usage);
+  });
+  try {
+    return await runEvolve<IN, OUT>(self, dataset, ledger, nowFn, options);
+  } finally {
+    try {
+      unsubscribe?.();
+    } catch {
+      // A caller's unsubscribe must not mask the run's own outcome.
+    }
+  }
+}
+
+async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
+  self: any,
+  dataset: Readonly<AxAgentEvalDataset<IN>>,
+  ledger: AxAccountingLedger,
+  nowFn: () => number,
   options?: Readonly<AxAgentPlaybookEvolveOptions<IN>>
 ): Promise<AxAgentPlaybookEvolveResult<OUT>> {
   const s = self as any;
@@ -374,8 +404,6 @@ export async function evolveAgentPlaybook<
   const verify = options?.verify !== false;
   validateEvidenceOptions(options, verify);
   const evidenceEnabled = activeEvidenceOptions(options).length > 0;
-  const nowFn = options?.now ?? Date.now;
-  const ledger = createAccountingLedger(nowFn);
   const usesBuiltInJudge = options?.metric === undefined;
   const maxDiscardRedraws =
     options?.maxDiscardRedraws ?? (options?.classifyTermination ? 1 : 0);

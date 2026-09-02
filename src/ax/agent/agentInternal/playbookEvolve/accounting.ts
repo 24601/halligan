@@ -64,6 +64,14 @@ export type AxPhaseHandle = {
 export type AxAccountingLedger = {
   /** Open (or reopen) a phase and start its wall clock. */
   phase: (name: AxAgentPlaybookComputePhaseName) => AxPhaseHandle;
+  /**
+   * Usage forwarded by a caller-owned `usageTap`, attributed to the phase that
+   * is open when it arrives. Attribution is DELIBERATELY restricted to the
+   * structurally unobservable phases: every other phase already reads its own
+   * usage off the predictions, so accepting tapped usage there would count the
+   * same tokens twice. Returns true when the usage was attributed.
+   */
+  tapUsage: (usage: readonly AxProgramUsage[]) => boolean;
   /** Every usage record the run observed, in observation order. */
   usage: () => readonly AxProgramUsage[];
   /** Total wall clock since the ledger was created. */
@@ -179,6 +187,22 @@ export function createAccountingLedger(
         },
         close: () => closeState(state),
       };
+    },
+    tapUsage(usage) {
+      const target = openPhase;
+      if (!target || !STRUCTURALLY_UNOBSERVABLE_PHASES.has(target.name)) {
+        return false;
+      }
+      for (const entry of usage) {
+        if (!entry) continue;
+        seenUsage.push(entry);
+        const tokens = tokensOf(entry);
+        if (tokens === undefined) continue;
+        target.totalTokens += tokens;
+        target.callsWithUsage++;
+        target.observedAnyUsage = true;
+      }
+      return true;
     },
     usage: () => seenUsage,
     wallClockMs: () => now() - startedAt,

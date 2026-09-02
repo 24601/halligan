@@ -160,10 +160,14 @@ export type AxAgentPlaybookCostFn = (
 /**
  * Optional usage tap for the two structurally unobservable phases. The caller
  * wraps its own `AxAIService` and forwards each response's usage; Ax attributes
- * whatever arrives to the phase that is open when it arrives. Without it,
+ * whatever arrives to the phase that is open when it arrives, AND ONLY when
+ * that phase is structurally unobservable. Usage forwarded while an observable
+ * phase is open is DROPPED: that phase already counted the same call off the
+ * prediction, so accepting it would double the total. Without a tap,
  * `phases['mining'|'judge'].tokensBasis` is `'unobservable'` and their
- * `totalTokens` is `undefined` — reported, never guessed. Ax never wraps a
- * caller-owned service itself: ownership stays with the caller.
+ * `totalTokens` is `undefined` — reported, never guessed. With one that reports
+ * nothing, the basis is `'unreported'`. Ax never wraps a caller-owned service
+ * itself: ownership stays with the caller, and Ax always unsubscribes.
  */
 export type AxAgentPlaybookUsageTap = Readonly<{
   subscribe: (

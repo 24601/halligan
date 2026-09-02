@@ -667,6 +667,54 @@ describe('compute accounting', () => {
     expect(accounting.totalTokens).toBeUndefined();
   });
 
+  it('attributes tapped usage to an open unobservable phase and refuses it elsewhere', () => {
+    const ledger = createAccountingLedger(tickingClock());
+    const baseline = ledger.phase('baseline');
+    baseline.addMetricCalls(1);
+    // Dropped: `baseline` already counted this call's usage off the
+    // prediction, so accepting it here would count the same tokens twice.
+    expect(ledger.tapUsage([usageOf(999)])).toBe(false);
+    baseline.close();
+    const mining = ledger.phase('mining');
+    mining.addModelCalls(1);
+    expect(ledger.tapUsage([usageOf(120)])).toBe(true);
+    mining.close();
+    const accounting = ledger.assemble({
+      evolveOnlyMetricCalls: 1,
+      usageTapped: true,
+    });
+    const byName = new Map(accounting.phases.map((p) => [p.name, p]));
+    expect(byName.get('mining')?.totalTokens).toBe(120);
+    expect(byName.get('mining')?.tokensBasis).toBe('observed');
+    expect(byName.get('baseline')?.totalTokens).toBeUndefined();
+    expect(accounting.totalTokens).toBe(120);
+  });
+
+  it('drops tapped usage that arrives with no phase open', () => {
+    const ledger = createAccountingLedger(tickingClock());
+    expect(ledger.tapUsage([usageOf(50)])).toBe(false);
+    const accounting = ledger.assemble({
+      evolveOnlyMetricCalls: 0,
+      usageTapped: true,
+    });
+    expect(accounting.totalTokens).toBeUndefined();
+    expect(accounting.tokensBasis).toBe('none');
+  });
+
+  it('reports a tapped phase that still saw nothing as unreported', () => {
+    const ledger = createAccountingLedger(tickingClock());
+    const mining = ledger.phase('mining');
+    mining.addModelCalls(2);
+    mining.close();
+    const accounting = ledger.assemble({
+      evolveOnlyMetricCalls: 0,
+      usageTapped: true,
+    });
+    // A tap was installed and nothing arrived: that is 'unreported', not the
+    // structural 'unobservable' the same phase reads without one.
+    expect(accounting.phases[0]?.tokensBasis).toBe('unreported');
+  });
+
   it('reports an observable phase that surfaced nothing as unreported, not unobservable', () => {
     // `baseline` reads usage straight off the predictions. A usageTap would
     // change nothing about it, so labelling it 'unobservable' would point a

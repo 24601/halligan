@@ -2114,6 +2114,64 @@ describe('agent.playbook().evolve() compute accounting', () => {
     expect(warning?.message).not.toContain('candidate_eval');
   });
 
+  it('attributes tapped usage to the open mining phase, drops it for observable phases, and always unsubscribes', async () => {
+    const { ag, ai } = makeAgent();
+    let emit: ((usage: readonly any[]) => void) | undefined;
+    const unsubscribe = vi.fn();
+    const originalChat = (ai as any).chat.bind(ai);
+    (ai as any).chat = async (req: any, chatOptions?: any) => {
+      const response = await originalChat(req, chatOptions);
+      // Every model call the caller's wrapped service sees is forwarded,
+      // including the ones made while an observable phase is open.
+      emit?.([
+        {
+          ai: 'mock',
+          model: 'tapped',
+          tokens: { promptTokens: 3, completionTokens: 4, totalTokens: 7 },
+        },
+      ]);
+      return response;
+    };
+    const result = await ag.playbook().evolve(TASKS, {
+      metric: scoreByAnswer,
+      maxProposals: 1,
+      usageTap: {
+        subscribe: (onUsage: any) => {
+          emit = onUsage;
+          return unsubscribe;
+        },
+      },
+    });
+    const phases = new Map(
+      result.accounting.phases.map((phase: any) => [phase.name, phase])
+    );
+    // Mining is structurally unobservable WITHOUT a tap. With one, the
+    // forwarded usage lands on it.
+    expect(phases.get('mining')?.tokensBasis).not.toBe('unobservable');
+    expect(phases.get('mining')?.totalTokens).toBeGreaterThan(0);
+    // The observable phases read their own usage off the predictions, so
+    // tapped usage arriving while they are open is dropped rather than added
+    // on top of what they already counted.
+    expect(phases.get('baseline')?.totalTokens).toBeUndefined();
+    expect(phases.get('candidate_eval')?.totalTokens).toBeUndefined();
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
+  });
+
+  it('unsubscribes the usage tap when the run throws', async () => {
+    const { ag } = makeAgent();
+    const unsubscribe = vi.fn();
+    await expect(
+      ag.playbook().evolve(
+        { train: [] },
+        {
+          metric: scoreByAnswer,
+          usageTap: { subscribe: () => unsubscribe },
+        }
+      )
+    ).rejects.toThrow(/at least one training task/);
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
+  });
+
   it('reports cost as unknown without costFor and caller_supplied with it', async () => {
     const { ag: bare } = makeAgent();
     const withoutCost = await bare.playbook().evolve(TASKS, {
