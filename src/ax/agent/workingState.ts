@@ -1258,7 +1258,7 @@ export class AxWorkingState<S = Record<string, unknown>> {
     restored?: Readonly<AxAgentStateWorkingState>
   ): Promise<AxWorkingState<S>> {
     const resolved = resolveWorkingStateConfig(config, deps.runId);
-    let document = seedDocument(config, resolved);
+    let document = seedDocument(config);
     let revision: number | undefined;
     let receipts: readonly AxWorkingStateReceipt[] = [];
 
@@ -2295,13 +2295,8 @@ function boundEvidence(evidence: unknown, maxBytes: number): unknown {
   return { truncated: true, bytes: serialized.length };
 }
 
-function seedDocument<S>(
-  config: Readonly<AxWorkingStateConfig<S>>,
-  resolved: ResolvedConfig<S>
-): AxWorkingStateDocument<S> {
-  const seededGoals = config.initial?.goals ?? {};
-  const goals: Record<string, AxWorkingStateGoal> = {};
-  for (const [id, goal] of Object.entries(seededGoals)) {
+function validateSeedGoals<S>(config: Readonly<AxWorkingStateConfig<S>>): void {
+  for (const [id, goal] of Object.entries(config.initial?.goals ?? {})) {
     if (!GOAL_ID_PATTERN.test(id)) {
       throw new AxWorkingStateSchemaError(`invalid_goal_id: ${id}`);
     }
@@ -2315,6 +2310,40 @@ function seedDocument<S>(
         `invalid_seed_evidence: goal ${id} cites evidence with no receipts minted`
       );
     }
+  }
+}
+
+/**
+ * The §6.5 config-time rules, split out so `AxAgent`'s constructor can run
+ * them EAGERLY: a bad working-state config must fail at construction, not at
+ * turn 40. Pure and cheap; the per-run resolution below still happens once
+ * per `forward()`.
+ *
+ * @internal
+ */
+export function axValidateWorkingStateConfig<S>(
+  config: Readonly<AxWorkingStateConfig<S>>
+): void {
+  const { roots } = resolveStateSignature(config.stateSignature);
+  if (roots.length === 0) {
+    throw new AxWorkingStateSchemaError('empty_fact_space');
+  }
+  if (
+    config.allowModelAuthoredGoals === true &&
+    (config.expectsAllowlist?.length ?? 0) === 0
+  ) {
+    throw new AxWorkingStateSchemaError('model_goals_require_allowlist');
+  }
+  validateSeedGoals(config);
+}
+
+function seedDocument<S>(
+  config: Readonly<AxWorkingStateConfig<S>>
+): AxWorkingStateDocument<S> {
+  const seededGoals = config.initial?.goals ?? {};
+  const goals: Record<string, AxWorkingStateGoal> = {};
+  validateSeedGoals(config);
+  for (const [id, goal] of Object.entries(seededGoals)) {
     goals[id] = {
       ...goal,
       evidence: goal.evidence ?? [],
@@ -2322,7 +2351,6 @@ function seedDocument<S>(
       updatedTurn: goal.updatedTurn ?? 0,
     };
   }
-  void resolved;
   return {
     schemaVersion: config.initial?.schemaVersion ?? 1,
     goals,
@@ -2335,16 +2363,8 @@ function resolveWorkingStateConfig<S>(
   config: Readonly<AxWorkingStateConfig<S>>,
   runId: string
 ): ResolvedConfig<S> {
+  axValidateWorkingStateConfig(config);
   const { signature, roots } = resolveStateSignature(config.stateSignature);
-  if (roots.length === 0) {
-    throw new AxWorkingStateSchemaError('empty_fact_space');
-  }
-  if (
-    config.allowModelAuthoredGoals === true &&
-    (config.expectsAllowlist?.length ?? 0) === 0
-  ) {
-    throw new AxWorkingStateSchemaError('model_goals_require_allowlist');
-  }
   const trace =
     typeof config.trace === 'boolean'
       ? { enabled: config.trace, summaries: false }

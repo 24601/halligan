@@ -20,11 +20,12 @@ import {
 } from './agentInternal/workingStateHarness.js';
 import type { AxAgentFunction } from './index.js';
 import { agent } from './index.js';
-import type {
-  AxWorkingStateConfig,
-  AxWorkingStateGoal,
-  AxWorkingStateProposer,
-  AxWorkingStateTraceStep,
+import {
+  type AxWorkingStateConfig,
+  type AxWorkingStateGoal,
+  type AxWorkingStateProposer,
+  AxWorkingStateSchemaError,
+  type AxWorkingStateTraceStep,
 } from './workingState.js';
 
 const STATE_SIGNATURE = 'orderId:string, itemsPacked:number, shipped:boolean';
@@ -143,6 +144,55 @@ function makeAgent(
 
 const FINAL = 'await final("done", {"answer":"ok"})';
 const DISTILL = 'await final("distilled", {"evidence":"summary"})';
+
+describe('working state config-time validation at the agent boundary', () => {
+  // §6.5: a config that cannot work must fail at CONSTRUCTION, not at turn 40.
+  // These run through `agent(...)` rather than the kernel, because the kernel
+  // is reached only at the first `forward()`.
+  it('throws on a fact space with no declared fields before any model call', () => {
+    // The signature parser refuses an output-less signature before
+    // `empty_fact_space` is reached; what matters is that the failure lands at
+    // CONSTRUCTION rather than at the first `forward()`.
+    expect(() =>
+      agent('task:string -> answer:string', {
+        workingState: { stateSignature: 'task:string ->' } as never,
+      })
+    ).toThrow();
+  });
+
+  it('throws on model-authored goals with no expects allowlist', () => {
+    expect(() =>
+      agent('task:string -> answer:string', {
+        workingState: {
+          stateSignature: STATE_SIGNATURE,
+          allowModelAuthoredGoals: true,
+        },
+      })
+    ).toThrow(AxWorkingStateSchemaError);
+  });
+
+  it('throws on a seeded goal whose id does not match its key', () => {
+    expect(() =>
+      agent('task:string -> answer:string', {
+        workingState: {
+          stateSignature: STATE_SIGNATURE,
+          initial: { goals: { g1: seededGoal('g2') } },
+        },
+      })
+    ).toThrow(AxWorkingStateSchemaError);
+  });
+
+  it('constructs a valid config without touching the store or the clock', () => {
+    const store = new AxInMemoryProgramStateStore();
+    const load = vi.spyOn(store, 'load');
+    expect(() =>
+      agent('task:string -> answer:string', {
+        workingState: { stateSignature: STATE_SIGNATURE, store },
+      })
+    ).not.toThrow();
+    expect(load).not.toHaveBeenCalled();
+  });
+});
 
 describe('working state stage scoping', () => {
   it('the distiller stage constructs no working state and the executor does', async () => {
@@ -328,6 +378,49 @@ describe('working state receipts from the dispatch site', () => {
     const receipts = built.getState()?.workingState?.receipts ?? [];
     // The real tool in the same turn still mints, so the assertion is about
     // eligibility rather than about receipts being broken.
+    expect(receipts.map((receipt) => receipt.qualifiedName)).toEqual([
+      'inventory.pick',
+    ]);
+  });
+
+  it('mints no receipt for a REAL child agent bound through getFunction()', async () => {
+    // The marker must be structural, not route-dependent: this child never
+    // passes through `normalizeAgentFunctionCollection`'s agentic branch, it
+    // arrives as a plain `AxFunction` the way any user tool would.
+    const { ai: childAi } = axCreateScriptedMock({
+      distiller: [DISTILL],
+      executor: ['await final("child done", {"answer":"child"})'],
+    });
+    const child = agent('question:string -> answer:string', {
+      ai: childAi as unknown as AxAIService,
+      agentIdentity: {
+        name: 'helper',
+        description: 'A child agent that reports on packing',
+        namespace: 'agents',
+      },
+      runtime: axCreateEvaluatingRuntime(),
+      maxTurns: 3,
+    });
+    const childFn = child.getFunction();
+    expect((childFn as { _kind?: string })._kind).toBe('internal');
+
+    const { agent: built, ai } = makeAgent(
+      {
+        distiller: [DISTILL],
+        executor: [
+          'await agents.helper({question:"is it packed?"}); await inventory.pick({order:"42"})',
+          FINAL,
+        ],
+      },
+      receiptConfig(),
+      { functions: [pickFn, childFn] }
+    );
+
+    await built.forward(ai, { task: 'delegate' } as never);
+    const receipts = built.getState()?.workingState?.receipts ?? [];
+    // The real tool in the same turn still mints, so this asserts eligibility
+    // rather than receipts being broken. The child's answer is another model's
+    // self-report and must never become environment evidence.
     expect(receipts.map((receipt) => receipt.qualifiedName)).toEqual([
       'inventory.pick',
     ]);

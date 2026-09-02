@@ -19,6 +19,7 @@ import {
   normalizeAgentFunctionCollection,
   toCamelCase,
 } from '../runtimeDiscovery.js';
+import { axValidateWorkingStateConfig } from '../workingState.js';
 import { createCatalogMemoriesSearch } from './memoriesHelpers.js';
 import {
   createCatalogSkillsSearch,
@@ -38,6 +39,13 @@ export function initializeAgentInternal(
   // Resolve the stage's behavioral policy once; every stage-conditional in
   // the agent internals reads named capabilities from this object.
   s.stagePolicy = resolveStagePolicy(options.stageVariant);
+
+  // §6.5: a working-state config that cannot work must fail HERE, not at the
+  // first `forward()` forty turns into a run. The per-run resolution still
+  // happens once per `forward()`; this is only the config-time gate.
+  if (options.workingState) {
+    axValidateWorkingStateConfig(options.workingState);
+  }
 
   const {
     debug,

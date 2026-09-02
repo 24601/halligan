@@ -467,7 +467,15 @@ export class AxAgent<IN extends AxGenIn, OUT extends AxGenOut>
     if (init.agentIdentity) {
       const coordForward = this.forward.bind(this);
       const coordSig = this.fullSignature;
+      // `_kind: 'internal'` is stamped HERE so every agent-derived callable
+      // carries it by construction, whatever route it takes into
+      // `functions: [...]` — `functions: [child.getFunction()]` and any
+      // `AxFunctionProvider` wrapping one included. Receipt ineligibility is
+      // then structural: a child agent's return value is its own `final()`
+      // payload, i.e. another model's self-report, and promoting that to
+      // environment evidence is exactly what the receipt gate forbids.
       this.func = {
+        _kind: 'internal',
         name: toCamelCase(init.agentIdentity.name),
         componentId: `agent:${init.agentIdentity.namespace ? `${init.agentIdentity.namespace}:` : ''}${toCamelCase(init.agentIdentity.name)}`,
         description: init.agentIdentity.description,
@@ -491,7 +499,10 @@ export class AxAgent<IN extends AxGenIn, OUT extends AxGenOut>
             })
             .join('\n');
         },
-      };
+        // The marker lives on `AxAgentFunction`, which every registration site
+        // widens to; the cast keeps `this.func` typed as the public
+        // `AxFunction` it is returned as.
+      } as AxFunction;
     }
 
     if (this.playbookConfigResolved) {
