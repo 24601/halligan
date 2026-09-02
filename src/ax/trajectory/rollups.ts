@@ -241,6 +241,13 @@ export interface AxDeterministicTrajectorySummarizerOptions {
   readonly promptVersion?: string;
   /** Entries quoted in the summary head and tail. Default 1 each. */
   readonly quoted?: number;
+  /**
+   * Characters kept per quoted entry. Default 60. A summarizer whose output
+   * grows with its input is not summarizing: without this the stub's tier-k
+   * summary embeds its children's text and the staircase stops being
+   * logarithmic in RENDERED SIZE while still being logarithmic in sections.
+   */
+  readonly quoteChars?: number;
 }
 
 /**
@@ -252,14 +259,16 @@ export function axDeterministicTrajectorySummarizer(
   options?: Readonly<AxDeterministicTrajectorySummarizerOptions>
 ): AxTrajectorySummarizer {
   const quoted = Math.max(1, Math.floor(options?.quoted ?? 1));
+  const quoteChars = Math.max(8, Math.floor(options?.quoteChars ?? 60));
+  const clip = (text: string): string => text.slice(0, quoteChars);
   return Object.freeze({
     id: options?.id ?? 'deterministic',
     promptVersion: options?.promptVersion ?? '1',
     async summarize(request: Readonly<AxTrajectorySummarizerRequest>) {
       request.signal?.throwIfAborted();
       const texts = request.inputs.map((input) => input.text);
-      const head = texts.slice(0, quoted).join(' | ');
-      const tail = texts.slice(-quoted).join(' | ');
+      const head = texts.slice(0, quoted).map(clip).join(' | ');
+      const tail = texts.slice(-quoted).map(clip).join(' | ');
       const themes = [
         ...new Set(texts.map((text) => text.split(/[\s:]+/)[0] ?? '')),
       ]
