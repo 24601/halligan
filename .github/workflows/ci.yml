@@ -70,6 +70,13 @@ jobs:
         run: npm ci
       - name: Test protected-main release workflow
         run: npm run test:release-workflow
+      # INV-L1: GEPA must stay byte-identical to the merge base whenever the
+      # opt-in options are absent. The gate rebuilds the merge base in a
+      # detached worktree, so it needs the full history fetched above.
+      - name: Check GEPA upstream compatibility
+        run: npm run test:gepa-upstream-compatibility
+      - name: Test GEPA lineage benchmark assertions
+        run: npm run test:gepa-lineage-benchmark
       - name: Check AxIR backlog coverage for portable TypeScript changes
         # On push events origin/main already equals HEAD, so diff against the
         # pre-push tip; the script falls back safely when it is unreachable.

@@ -957,6 +957,14 @@ import type {
 import type { AxRolloutTrace } from './dsp/optimizers/axGenAdapter.js';
 import { AxBootstrapFewShot } from './dsp/optimizers/bootstrapFewshot.js';
 import {
+  type AxCandidateEffectDeclaration,
+  AxCandidateEffectManifestError,
+  type AxCandidateEffectPolicy,
+  axDeclaresToolCapability,
+  axIsCandidateEffectManifestError,
+  axValidateCandidateEffectDeclaration,
+} from './dsp/optimizers/candidateEffectManifest.js';
+import {
   type AxCausalAffectedComponent,
   type AxCausalCandidateAblation,
   type AxCausalCandidateEvidenceManifest,
@@ -975,6 +983,23 @@ import {
   axCreateCausalCandidateEvidenceManifest,
   axFingerprintCausalEvidence,
 } from './dsp/optimizers/causalCandidateEvidence.js';
+import {
+  type AxDigestStrength,
+  AxDigestStrengthError,
+  type AxFnv1a64Digest,
+  type AxSha256Digest,
+  type AxSha256Digest64,
+  axAssertDigestStrength,
+  axCompareCodeUnits,
+  axDigestStrength,
+  axFnv1a64Digest,
+  axIsDigestStrengthError,
+  axIsFnv1a64Digest,
+  axIsSha256Digest,
+  axIsSha256Digest64,
+  axSha256Digest,
+  axSha256Digest64Sync,
+} from './dsp/optimizers/digests.js';
 import {
   AxGEPA,
   type AxGEPAOptimizationReport,
@@ -1014,6 +1039,101 @@ import {
   type AxGEPAComponentBanditState,
   AxGEPAComponentSelector,
 } from './dsp/optimizers/gepaSelection.js';
+import {
+  AxCandidateStaleError,
+  type AxHarnessAtom,
+  type AxHarnessPortId,
+  type AxHarnessRecipe,
+  AxHarnessRecipeError,
+  type AxHarnessStamp,
+  axAssertHarnessStampFresh,
+  axHarnessPortId,
+  axHarnessRecipe,
+  axHarnessRecipeVersion,
+  axHarnessStamp,
+  axIsCandidateStaleError,
+  axIsHarnessPortId,
+  axIsHarnessRecipeError,
+  axIsHarnessStampStale,
+} from './dsp/optimizers/harnessRecipe.js';
+import {
+  type AxComponentClass,
+  type AxMutationAnnotation,
+  type AxMutationAnnotator,
+  type AxMutationDepth,
+  type AxMutationDepthHistogram,
+  type AxMutationEffort,
+  type AxMutationKindPolicy,
+  type AxMutationSurface,
+  AxMutationTaxonomyError,
+  type AxPatchClass,
+  type AxPatchTaxonomy,
+  type AxPatchType,
+  axBuildMutationDepthHistogram,
+  axDefaultMutationAnnotator,
+  axInferComponentClass,
+  axIsMutationTaxonomyError,
+  axKnownComponentKinds,
+  axPatchClassOfType,
+  axValidateMutationAnnotation,
+} from './dsp/optimizers/mutationTaxonomy.js';
+import {
+  type AxGEPARejectedPriorBlock,
+  AxInMemoryRejectedCandidateLedger,
+  type AxRejectedCandidateDelta,
+  type AxRejectedCandidateExpiry,
+  type AxRejectedCandidateExpiryContext,
+  type AxRejectedCandidateGateReading,
+  type AxRejectedCandidateLedgerCapabilities,
+  type AxRejectedCandidateLedgerEntry,
+  AxRejectedCandidateLedgerError,
+  type AxRejectedCandidateLedgerQuery,
+  type AxRejectedCandidateLedgerRef,
+  type AxRejectedCandidateLedgerStore,
+  axIsRejectedCandidateExpired,
+  axIsRejectedCandidateLedgerError,
+  axMergeRejectedCandidateLedgerRefs,
+  axRejectedCandidateDigest,
+  axRejectedCandidateLedgerEntry,
+  axRejectedCandidatePrior,
+  axRunRejectedCandidateLedgerConformance,
+} from './dsp/optimizers/rejectedCandidateLedger.js';
+import {
+  type AxIpwEstimate,
+  type AxMinibatchStrategy,
+  type AxResolvedTaskDiscriminationOptions,
+  AxTaskDiscriminationError,
+  type AxTaskDiscriminationOptions,
+  type AxTaskDiscriminationSummary,
+  type AxTaskInclusion,
+  type AxTaskInclusionSnapshot,
+  type AxTaskStat,
+  type AxTaskStatPhase,
+  AxTaskStatTable,
+  axComputeInclusionProbabilities,
+  axCreateTaskStatTable,
+  axIpwPairedDifference,
+  axIpwScore,
+  axIsTaskDiscriminationError,
+  axResolveTaskDiscriminationOptions,
+  axSampleByInclusion,
+} from './dsp/optimizers/taskDiscrimination.js';
+import {
+  type AxEnvironmentFailureCause,
+  type AxResolvedTrajectoryAdmissionOptions,
+  type AxTrajectoryAdmissionOptions,
+  type AxTrajectoryAdmissionReport,
+  type AxTrajectoryTermination,
+  type AxTrajectoryTerminationClassifier,
+  type AxTrajectoryTerminationInput,
+  axClassifyTrajectory,
+  axDefaultTrajectoryTermination,
+  axExceedsRunDiscardCeiling,
+  axMergeTrajectoryAdmission,
+  axPairedAdmittedIndices,
+  axResolveTrajectoryAdmissionOptions,
+  axSummarizeTrajectoryAdmission,
+} from './dsp/optimizers/trajectoryTermination.js';
 import type {
   AxOptimizerLoggerData,
   AxOptimizerLoggerFunction,
@@ -1845,10 +1965,13 @@ export { AxBaseAI };
 export { AxBaseOptimizer };
 export { AxBestOfN };
 export { AxBootstrapFewShot };
+export { AxCandidateEffectManifestError };
+export { AxCandidateStaleError };
 export { AxContentProcessingError };
 export { AxContextMetricsCollector };
 export { AxDefaultCostTracker };
 export { AxDemandBoundary };
+export { AxDigestStrengthError };
 export { AxDockerSession };
 export { AxEmbeddingAdapter };
 export { AxEvalUtil };
@@ -1873,12 +1996,14 @@ export { AxGEPA };
 export { AxGEPAComponentSelector };
 export { AxGen };
 export { AxGenerateError };
+export { AxHarnessRecipeError };
 export { AxInMemoryAgentSessionScheduler };
 export { AxInMemoryAgentSessionStore };
 export { AxInMemoryBalancerStatsStore };
 export { AxInMemoryDemandStore };
 export { AxInMemoryEventStore };
 export { AxInMemoryProgramStateStore };
+export { AxInMemoryRejectedCandidateLedger };
 export { AxInMemoryTrajectoryBlobStore };
 export { AxInMemoryTrajectoryStore };
 export { AxInteractionTimeline };
@@ -1907,6 +2032,7 @@ export { AxMediaNotSupportedError };
 export { AxMemory };
 export { AxMockAIService };
 export { AxMultiServiceRouter };
+export { AxMutationTaxonomyError };
 export { AxOptimizedProgramImpl };
 export { AxPlaybook };
 export { AxProgram };
@@ -1921,6 +2047,7 @@ export { AxRateLimiterTokenUsage };
 export { AxReact };
 export { AxRefine };
 export { AxRefineError };
+export { AxRejectedCandidateLedgerError };
 export { AxSignature };
 export { AxSignatureBuilder };
 export { AxStopFunctionCallException };
@@ -1928,6 +2055,8 @@ export { AxStreamingAssertionError };
 export { AxStringUtil };
 export { AxSynth };
 export { AxSystemEventClock };
+export { AxTaskDiscriminationError };
+export { AxTaskStatTable };
 export { AxTemporalEnvelopeSchema };
 export { AxTemporalValidationError };
 export { AxTestPrompt };
@@ -1979,6 +2108,8 @@ export { axAnalyzeRequestRequirements };
 export { axApplyEventEffectTransition };
 export { axApplyMCPAuthentication };
 export { axApplyOpenAIChatAudioRequest };
+export { axAssertDigestStrength };
+export { axAssertHarnessStampFresh };
 export { axAttachCausalCandidateEvidence };
 export { axAttenuateAuthority };
 export { axAudioFormatFromMimeType };
@@ -1991,13 +2122,17 @@ export { axBaseAIDefaultConfig };
 export { axBaseAIDefaultCreativeConfig };
 export { axBuildDistillerDefinition };
 export { axBuildExecutorDefinition };
+export { axBuildMutationDepthHistogram };
 export { axBuildResponderDefinition };
 export { axCanonicalizeCausalCandidateEvidenceManifest };
 export { axCheckMetricsHealth };
+export { axClassifyTrajectory };
 export { axCloneCausalCandidateEvidenceManifest };
 export { axCodeRuntimeProtocol };
 export { axCodeRuntimeProtocolVersion };
 export { axCollectGrantRequirements };
+export { axCompareCodeUnits };
+export { axComputeInclusionProbabilities };
 export { axConcatBase64 };
 export { axCreateCausalCandidateEvidenceManifest };
 export { axCreateDefaultColorLogger };
@@ -2012,14 +2147,19 @@ export { axCreateJSRuntime };
 export { axCreateOpenAIRealtimeApi };
 export { axCreateRuntimeAdmissionReceipt };
 export { axCreateRuntimeCapabilities };
+export { axCreateTaskStatTable };
+export { axDeclaresToolCapability };
 export { axDefaultFlowLogger };
 export { axDefaultMetricsConfig };
+export { axDefaultMutationAnnotator };
 export { axDefaultOptimizerLogger };
 export { axDefaultOptimizerMetricsConfig };
 export { axDefaultTrajectorySpillPolicy };
+export { axDefaultTrajectoryTermination };
 export { axDefaultTrajectoryTypes };
 export { axDemandEventObserver };
 export { axDeserializeOptimizedProgram };
+export { axDigestStrength };
 export { axEmitUsageEvent };
 export { axErasePreferenceEvidence };
 export { axEvaluateGuards };
@@ -2037,12 +2177,14 @@ export { axEventMatches };
 export { axEventScopedCorrelationKey };
 export { axEventScopedDedupeKey };
 export { axEventSizeBytes };
+export { axExceedsRunDiscardCeiling };
 export { axExecutableSkillRef };
 export { axExtendAxIRRuntimeCapabilities };
 export { axFailOpenSpan };
 export { axFetchJsonSpeech };
 export { axFetchMultipartTranscription };
 export { axFingerprintCausalEvidence };
+export { axFnv1a64Digest };
 export { axFrameSampler };
 export { axFreezeTrajectoryStep };
 export { axFunctionAuthorityTarget };
@@ -2056,19 +2198,40 @@ export { axGetRuntimeHookFrame };
 export { axGetSupportedAIModels };
 export { axGlobals };
 export { axGoogleGeminiLiveAudioDefaults };
+export { axHarnessPortId };
+export { axHarnessRecipe };
+export { axHarnessRecipeVersion };
+export { axHarnessStamp };
+export { axInferComponentClass };
+export { axIpwPairedDifference };
+export { axIpwScore };
 export { axIsAudioOutputEnabled };
+export { axIsCandidateEffectManifestError };
+export { axIsCandidateStaleError };
+export { axIsDigestStrengthError };
 export { axIsEventOutputPersistenceError };
 export { axIsEvidenceRequirement };
+export { axIsFnv1a64Digest };
 export { axIsGeminiLiveAudioModel };
 export { axIsGrokVoiceModel };
 export { axIsGuardPredicateFailure };
+export { axIsHarnessPortId };
+export { axIsHarnessRecipeError };
+export { axIsHarnessStampStale };
+export { axIsMutationTaxonomyError };
 export { axIsOpenAIChatAudioModel };
 export { axIsOpenAIRealtimeModel };
 export { axIsOpenAIRealtimeTranscriptionModel };
+export { axIsRejectedCandidateExpired };
+export { axIsRejectedCandidateLedgerError };
+export { axIsSha256Digest };
+export { axIsSha256Digest64 };
+export { axIsTaskDiscriminationError };
 export { axIsTrajectoryAppendError };
 export { axIsTrajectoryBlobError };
 export { axIsTrajectoryCursorError };
 export { axIsTrajectoryQueryError };
+export { axKnownComponentKinds };
 export { axMCPAPIKeyAuthentication };
 export { axMCPAppToolMeta };
 export { axMCPBasicAuthentication };
@@ -2092,6 +2255,8 @@ export { axMapOpenAIChatAudioDelta };
 export { axMapOpenAIChatAudioResponse };
 export { axMapOpenAIInputAudioPart };
 export { axMergeChatAudioConfig };
+export { axMergeRejectedCandidateLedgerRefs };
+export { axMergeTrajectoryAdmission };
 export { axMergeUsageContexts };
 export { axModelInfoAnthropic };
 export { axModelInfoCohere };
@@ -2111,6 +2276,8 @@ export { axNormalizeTrajectoryTimestamp };
 export { axNormalizeTranscriptionResponse };
 export { axOpenAIChatAudioDefaults };
 export { axOptimizableValidators };
+export { axPairedAdmittedIndices };
+export { axPatchClassOfType };
 export { axPlaybookFailureSection };
 export { axPreferenceEvidenceLimits };
 export { axPreferenceEvidenceToMemories };
@@ -2121,6 +2288,9 @@ export { axProgramSourceRuntimeProtocol };
 export { axProgramSourceVersion };
 export { axReactCanonicalJSON };
 export { axReactSerializeHistory };
+export { axRejectedCandidateDigest };
+export { axRejectedCandidateLedgerEntry };
+export { axRejectedCandidatePrior };
 export { axRenewPreferenceEvidence };
 export { axReplaceOptimizedProgramSnapshot };
 export { axReportRuntimeCapabilityContradictions };
@@ -2132,21 +2302,27 @@ export { axResolveMCPExecutionContext };
 export { axResolveOpenAIChatAudioConfig };
 export { axResolveOpenAIRealtimeAudioConfig };
 export { axResolveServiceTier };
+export { axResolveTaskDiscriminationOptions };
+export { axResolveTrajectoryAdmissionOptions };
 export { axResolveTrajectoryStep };
 export { axResolveTrajectorySteps };
 export { axRetractPreferenceEvidence };
+export { axRunRejectedCandidateLedgerConformance };
 export { axRuntimeCapabilitiesToAxIR };
 export { axRuntimeCapabilitiesVersion };
 export { axRuntimeCapabilityRequirementsVersion };
 export { axRuntimeHookFrame };
 export { axRuntimePrimitives };
 export { axRuntimeProtocolFromToken };
+export { axSampleByInclusion };
 export { axScoreProvidersForRequest };
 export { axSelectCodeRuntime };
 export { axSelectExecutableSkills };
 export { axSelectOptimalProvider };
 export { axSelectPreferenceEvidence };
 export { axSerializeOptimizedProgram };
+export { axSha256Digest };
+export { axSha256Digest64Sync };
 export { axShouldUseGeminiLiveAudio };
 export { axShouldUseGrokRealtime };
 export { axShouldUseOpenAIRealtime };
@@ -2158,6 +2334,7 @@ export { axSpillTrajectoryFields };
 export { axSpillTrajectoryStep };
 export { axStartActiveSpanFailOpen };
 export { axStartSpanFailOpen };
+export { axSummarizeTrajectoryAdmission };
 export { axTrajectoryCompactData };
 export { axTrajectoryId };
 export { axTrajectoryInlineBytes };
@@ -2172,12 +2349,14 @@ export { axTrajectoryUtf8ByteLength };
 export { axUpdateBalancerRouteStats };
 export { axUpdateMetricsConfig };
 export { axUpdateOptimizerMetricsConfig };
+export { axValidateCandidateEffectDeclaration };
 export { axValidateCapabilityGrant };
 export { axValidateChatRequestMessage };
 export { axValidateChatResponseResult };
 export { axValidateEventEffectCreateRequest };
 export { axValidateEventEnvelope };
 export { axValidateGeminiLiveAudioInput };
+export { axValidateMutationAnnotation };
 export { axValidateProviderCapabilities };
 export { axVisualPerceptualDigest };
 export { axWorkerRuntime };
@@ -2588,6 +2767,8 @@ export type { AxBalancerStatsStore };
 export type { AxBaseAIArgs };
 export type { AxBestOfNOptions };
 export type { AxBootstrapOptimizerOptions };
+export type { AxCandidateEffectDeclaration };
+export type { AxCandidateEffectPolicy };
 export type { AxCapabilityGrant };
 export type { AxCausalAffectedComponent };
 export type { AxCausalCandidateAblation };
@@ -2618,6 +2799,7 @@ export type { AxCodeSession };
 export type { AxCodeSessionSnapshot };
 export type { AxCodeSessionSnapshotEntry };
 export type { AxCompileOptions };
+export type { AxComponentClass };
 export type { AxContentProcessingServices };
 export type { AxContextCacheInfo };
 export type { AxContextCacheOperation };
@@ -2657,10 +2839,12 @@ export type { AxDemandReceipt };
 export type { AxDemandRecord };
 export type { AxDemandScope };
 export type { AxDemandStore };
+export type { AxDigestStrength };
 export type { AxDiscoveryTurnSummary };
 export type { AxDockerContainer };
 export type { AxEmbedRequest };
 export type { AxEmbedResponse };
+export type { AxEnvironmentFailureCause };
 export type { AxErrorCategory };
 export type { AxEvaluateArgs };
 export type { AxEventClock };
@@ -2798,6 +2982,7 @@ export type { AxFlowTypedParallelBranch };
 export type { AxFlowTypedSubContext };
 export type { AxFlowable };
 export type { AxFluentFieldInfo };
+export type { AxFnv1a64Digest };
 export type { AxForwardable };
 export type { AxFrameSamplerBudget };
 export type { AxFrameSamplerDecision };
@@ -2835,6 +3020,7 @@ export type { AxGEPAProposalOptions };
 export type { AxGEPAProposalPolicy };
 export type { AxGEPAProposalPolicyArgs };
 export type { AxGEPAReflectiveTuple };
+export type { AxGEPARejectedPriorBlock };
 export type { AxGEPAResolvedLineageOptions };
 export type { AxGEPATraceSummary };
 export type { AxGEPATraceSummaryCall };
@@ -2853,6 +3039,10 @@ export type { AxGuardEvaluationContext };
 export type { AxGuardFailure };
 export type { AxGuardFailureCode };
 export type { AxGuardOp };
+export type { AxHarnessAtom };
+export type { AxHarnessPortId };
+export type { AxHarnessRecipe };
+export type { AxHarnessStamp };
 export type { AxIField };
 export type { AxIRRuntimeCapabilities };
 export type { AxIRRuntimeCapabilitiesInput };
@@ -2868,6 +3058,7 @@ export type { AxInteractionTimelineProjectionOptions };
 export type { AxInteractionTimelineResolvedOptions };
 export type { AxInteractionTimelineSnapshot };
 export type { AxInteractionTimelineStreamState };
+export type { AxIpwEstimate };
 export type { AxJSRuntimeNodePermissionAllowlist };
 export type { AxJSRuntimeOutputMode };
 export type { AxJSRuntimeResourceLimits };
@@ -3029,6 +3220,7 @@ export type { AxMetricFn };
 export type { AxMetricFnArgs };
 export type { AxMetricResult };
 export type { AxMetricsConfig };
+export type { AxMinibatchStrategy };
 export type { AxMockAIServiceConfig };
 export type { AxModelConfig };
 export type { AxModelInfo };
@@ -3037,6 +3229,13 @@ export type { AxModelUsage };
 export type { AxModuleRankInput };
 export type { AxMultiMetricFn };
 export type { AxMultiProviderConfig };
+export type { AxMutationAnnotation };
+export type { AxMutationAnnotator };
+export type { AxMutationDepth };
+export type { AxMutationDepthHistogram };
+export type { AxMutationEffort };
+export type { AxMutationKindPolicy };
+export type { AxMutationSurface };
 export type { AxNamedProgramInstance };
 export type { AxOpenAIReasoningContentMode };
 export type { AxOptimizableComponent };
@@ -3054,6 +3253,9 @@ export type { AxOptimizerMetricsConfig };
 export type { AxOptimizerMetricsInstruments };
 export type { AxOptimizerResult };
 export type { AxParetoResult };
+export type { AxPatchClass };
+export type { AxPatchTaxonomy };
+export type { AxPatchType };
 export type { AxPlaybookEvolveOptions };
 export type { AxPlaybookEvolveResult };
 export type { AxPlaybookOptions };
@@ -3124,6 +3326,15 @@ export type { AxReactTerminationReason };
 export type { AxReactToolEvent };
 export type { AxRefineOptions };
 export type { AxRefineStrategy };
+export type { AxRejectedCandidateDelta };
+export type { AxRejectedCandidateExpiry };
+export type { AxRejectedCandidateExpiryContext };
+export type { AxRejectedCandidateGateReading };
+export type { AxRejectedCandidateLedgerCapabilities };
+export type { AxRejectedCandidateLedgerEntry };
+export type { AxRejectedCandidateLedgerQuery };
+export type { AxRejectedCandidateLedgerRef };
+export type { AxRejectedCandidateLedgerStore };
 export type { AxRelevanceHints };
 export type { AxRenderedPrompt };
 export type { AxResolvedAgentPlaybookConfig };
@@ -3133,6 +3344,8 @@ export type { AxResolvedCitations };
 export type { AxResolvedContextPolicy };
 export type { AxResolvedExecutorModelPolicy };
 export type { AxResolvedExecutorModelPolicyEntry };
+export type { AxResolvedTaskDiscriminationOptions };
+export type { AxResolvedTrajectoryAdmissionOptions };
 export type { AxResourceScope };
 export type { AxResultPickerFunction };
 export type { AxResultPickerFunctionFieldResults };
@@ -3177,6 +3390,8 @@ export type { AxServiceTierMap };
 export type { AxServiceTierPricing };
 export type { AxSessionTimeRange };
 export type { AxSetExamplesOptions };
+export type { AxSha256Digest };
+export type { AxSha256Digest64 };
 export type { AxSharedSessionPhase };
 export type { AxSignatureConfig };
 export type { AxSignatureInput };
@@ -3199,6 +3414,12 @@ export type { AxSynthResult };
 export type { AxSynthesizerInit };
 export type { AxSynthesizerOptions };
 export type { AxSynthesizerRole };
+export type { AxTaskDiscriminationOptions };
+export type { AxTaskDiscriminationSummary };
+export type { AxTaskInclusion };
+export type { AxTaskInclusionSnapshot };
+export type { AxTaskStat };
+export type { AxTaskStatPhase };
 export type { AxTemporalClassification };
 export type { AxTemporalEnvelope };
 export type { AxTextInteractionEvent };
@@ -3206,6 +3427,8 @@ export type { AxThoughtBlockItem };
 export type { AxTimerEventSourceOptions };
 export type { AxTokenUsage };
 export type { AxToolActivityInteractionEvent };
+export type { AxTrajectoryAdmissionOptions };
+export type { AxTrajectoryAdmissionReport };
 export type { AxTrajectoryAppendReceipt };
 export type { AxTrajectoryAppendRequest };
 export type { AxTrajectoryBlobPutRequest };
@@ -3241,6 +3464,9 @@ export type { AxTrajectoryStoreConformanceInstance };
 export type { AxTrajectoryStoreConformanceReport };
 export type { AxTrajectoryTailQuery };
 export type { AxTrajectoryTailResult };
+export type { AxTrajectoryTermination };
+export type { AxTrajectoryTerminationClassifier };
+export type { AxTrajectoryTerminationInput };
 export type { AxTrajectoryTypeDescriptor };
 export type { AxTrajectoryTypeRegistry };
 export type { AxTrajectoryTypeRegistryOptions };
