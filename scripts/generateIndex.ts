@@ -93,6 +93,7 @@ const internalExportNames = new Set([
   'axCreateEvaluatingRuntime',
   'axCreateScriptedMock',
   'axWorkingStateHarnessUsage',
+  'AxWorkingStateScriptTurn',
   // Working-state harness plumbing: the sink contract between the dispatch
   // site and the loop, and the config gate the agent constructor runs. Not
   // public API — hosts configure receipts through `AxWorkingStateConfig`.

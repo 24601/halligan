@@ -217,6 +217,16 @@ export function buildActorLoopSetup(
       values.workingState = workingStateValues.workingState;
       values.receiptRoster = workingStateValues.receiptRoster;
     }
+    // The `skillState` substrate: the frozen spec (constant for the run) and
+    // the observation window that replaces the action log. Refreshed by the
+    // turn hook before anything measures or sends the prompt.
+    const skillStateValues = s._skillStatePromptValues as
+      | Readonly<{ skillSpec: string; latestObservation: string }>
+      | undefined;
+    if (skillStateValues) {
+      values.skillSpec = skillStateValues.skillSpec;
+      values.latestObservation = skillStateValues.latestObservation;
+    }
     const contextMetadata = inputState.getContextMetadata();
     if (contextMetadata) {
       values.contextMetadata = contextMetadata;
@@ -330,6 +340,13 @@ export function buildActorLoopSetup(
   const refreshCheckpointSummary = async (
     turnForEvent: number
   ): Promise<boolean> => {
+    // `skillState` omits `summarizedActorLog` from the actor signature, so a
+    // checkpoint would be rendered, SUMMARIZED BY A MODEL CALL and then
+    // dropped on the floor. Skipping the whole path is the difference between
+    // removing the transcript and merely hiding it.
+    if (!actorSignatureDeclares('summarizedActorLog')) {
+      return false;
+    }
     const applyNext = async (
       nextState: CheckpointSummaryState | undefined,
       reason: 'over_budget' | 'under_budget' | 'disabled'

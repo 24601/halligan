@@ -20,12 +20,14 @@ import {
   emitContextEvent,
   renderContextPressure,
 } from '../contextEvents.js';
+import type { ActionLogParts } from '../contextManager.js';
 import { manageContext } from '../contextManager.js';
 import { normalizeActorCode } from '../optimize.js';
 import {
   formatBubbledActorTurnOutput,
   validateActorTurnCodePolicy,
 } from '../runtime.js';
+import type { AxSkillStateRuntime } from '../skillState.js';
 import { axValidateStatePatch } from '../statePatch.js';
 import type {
   AxWorkingState,
@@ -149,6 +151,30 @@ async function runWorkingStateTurn(
 }
 
 /**
+ * Run one `skillState` turn. There is no proposer: the actor emitted the patch
+ * itself as a typed output field, so the turn goes straight to validation and
+ * the kernel. An ABSENT patch is not an error — it means the turn proved
+ * nothing, and the state is carried forward unchanged.
+ */
+async function runSkillStateTurn(
+  runtime: AxSkillStateRuntime<any>,
+  workingState: AxWorkingState<any>,
+  context: AxWorkingStateCommitContext,
+  output: Readonly<{ statePatch?: unknown; rationale?: unknown }>,
+  signal: AbortSignal | undefined
+): Promise<readonly AxWorkingStateGuidanceNote[]> {
+  const document = output.statePatch;
+  if (document === undefined || document === null) {
+    await workingState.recordNonCommit(context, 'none');
+    return [];
+  }
+  const rationale =
+    typeof output.rationale === 'string' ? output.rationale : undefined;
+  await runtime.applyPatch(document, rationale, context, signal);
+  return runtime.lastGuidance();
+}
+
+/**
  * Harness-authored interlock guidance: goal ids and statuses only, never
  * model-authored prose.
  */
@@ -247,6 +273,7 @@ export async function runActorTurn<_IN extends AxGenIn>(
     mutableState,
     workingState,
     workingStateObservations,
+    skillState,
     helpers,
   } = ctx;
 
@@ -286,8 +313,20 @@ export async function runActorTurn<_IN extends AxGenIn>(
       receiptRoster: workingState.renderReadOnly(),
     };
   }
+  if (skillState) {
+    const rendered = skillState.renderPrompt();
+    s._skillStatePromptValues = {
+      skillSpec: rendered.skillSpec,
+      latestObservation: rendered.latestObservation,
+    };
+  }
 
-  let actionLogParts = renderActionLogParts();
+  // In `skillState` mode the action log is not rendered AT ALL: the cost the
+  // mode exists to remove is the rendering and compaction of a growing
+  // transcript, so skipping only the prompt field would keep paying it.
+  let actionLogParts: ActionLogParts = skillState
+    ? { summary: '', history: '', compactions: [] }
+    : renderActionLogParts();
   let summarizedActorLogText = actionLogParts.summary || undefined;
   let actionLogText = actionLogParts.history || '(no actions yet)';
   const guidanceLogText = renderGuidanceLog(guidanceState.entries);
@@ -319,6 +358,7 @@ export async function runActorTurn<_IN extends AxGenIn>(
   const defaultHygieneMode =
     runtimeContext.effectiveContextConfig.contextHygiene?.defaultMode ?? 'none';
   if (
+    !skillState &&
     pressure !== 'ok' &&
     pressureHygieneMode &&
     pressureHygieneMode !== defaultHygieneMode
@@ -707,23 +747,38 @@ export async function runActorTurn<_IN extends AxGenIn>(
       return interlockDecision;
     };
 
-    const guidanceNotes = await runWorkingStateTurn(
-      workingState,
-      {
-        action: actionLogCode,
-        observation: output,
-        turn: entryTurn,
-        isError,
-        receiptRefs: mintedReceiptRefs,
-        calls: turnCalls,
-        selectedSkills: (mutableState.usedSkills ?? []).map(
-          (used: { id: string }) => used.id
-        ),
-        resolveCompletionInterlock,
-      },
-      { action: actionLogCode, observation: output },
-      _effectiveAbortSignal
-    );
+    const commitContext: AxWorkingStateCommitContext = {
+      action: actionLogCode,
+      observation: output,
+      turn: entryTurn,
+      isError,
+      receiptRefs: mintedReceiptRefs,
+      calls: turnCalls,
+      selectedSkills: (mutableState.usedSkills ?? []).map(
+        (used: { id: string }) => used.id
+      ),
+      resolveCompletionInterlock,
+    };
+    // The observation is recorded BEFORE the patch is applied so a rejected
+    // patch still leaves the model looking at what actually happened.
+    skillState?.observe(output, entryTurn);
+    const guidanceNotes = skillState
+      ? await runSkillStateTurn(
+          skillState,
+          workingState,
+          commitContext,
+          executorResult as Readonly<{
+            statePatch?: unknown;
+            rationale?: unknown;
+          }>,
+          _effectiveAbortSignal
+        )
+      : await runWorkingStateTurn(
+          workingState,
+          commitContext,
+          { action: actionLogCode, observation: output },
+          _effectiveAbortSignal
+        );
     const guidanceText = buildWorkingStateGuidance(guidanceNotes);
     if (guidanceText) {
       appendGuidanceEntry(guidanceState.entries, {

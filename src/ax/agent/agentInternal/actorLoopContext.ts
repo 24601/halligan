@@ -2,6 +2,7 @@ import type {
   ActionLogEntry,
   CheckpointSummaryState,
 } from '../contextManager.js';
+import type { AxSkillStateRuntime } from '../skillState.js';
 import type { AxWorkingState } from '../workingState.js';
 import type { buildActorLoopSetup } from './actorLoopSetup.js';
 import type { AxAgentToolReceiptObservation } from './runtimeGlobals.js';
@@ -52,6 +53,12 @@ export interface ActorLoopContext {
    * Filled at the dispatch site (`wrapFunction`) and drained once per turn.
    */
   workingStateObservations?: AxAgentToolReceiptObservation[];
+  /**
+   * The `skillState` substrate for this run. Present only when
+   * `actorMemoryMode: 'skillState'` is configured AND this stage maintains
+   * working state.
+   */
+  skillState?: AxSkillStateRuntime<any>;
   mutableState: MutableActorLoopState;
   helpers: ReturnType<typeof buildActorLoopSetup>;
 }
