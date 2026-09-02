@@ -2157,6 +2157,7 @@ describe('AxGEPA discriminative minibatch selection', () => {
     program?: unknown;
     minibatchSize?: number;
     reflect?: () => Promise<string>;
+    trajectoryTermination?: unknown;
   }) => {
     const events: any[] = [];
     const optimizer = new AxGEPA({
@@ -2184,6 +2185,9 @@ describe('AxGEPA discriminative minibatch selection', () => {
         skipPerfectScore: false,
         candidateLineage: true,
         ...(args.strategy ? { minibatchStrategy: args.strategy } : {}),
+        ...(args.trajectoryTermination
+          ? { trajectoryTermination: args.trajectoryTermination }
+          : {}),
       } as any
     );
     return { result, events };
@@ -2342,6 +2346,83 @@ describe('AxGEPA discriminative minibatch selection', () => {
 
     expect(await decisionOf()).toBe('accepted');
     expect(await decisionOf('discriminative')).toBe('rejected');
+  });
+
+  /**
+   * The fourth quadrant of the promotion table: a classifier AND the
+   * discriminative sampler, together. Each commit's own tests cover one row of
+   * §7.3 each; this is the row where they interact, and it is also the only
+   * place the stat table's "an environment failure is not evidence about task
+   * difficulty either" rule is reachable, because every other sampler test
+   * runs without a classifier and so has no discarded row to skip.
+   *
+   * Task 0 is the only task that separates the candidates. The classifier
+   * discards exactly task 0.
+   */
+  const discriminatingTaskFixture = () =>
+    buildProgram((index, instruction) =>
+      index === 0 ? (instruction === 'better' ? 1 : 0) : 0.5
+    );
+  const discardTaskZero: AxTrajectoryTerminationClassifier = (input) =>
+    input.exampleIndex === 0
+      ? { kind: 'environment_failure', cause: 'transport' }
+      : { kind: 'completed' };
+
+  const runDiscriminatingFixture = (trajectoryTermination?: unknown) =>
+    run({
+      strategy: 'discriminative',
+      numTrials: 6,
+      minibatchSize: 2,
+      taskCount: 4,
+      program: discriminatingTaskFixture(),
+      ...(trajectoryTermination ? { trajectoryTermination } : {}),
+    });
+
+  it('promotes on the discriminative gate when the only discriminating task is admitted', async () => {
+    const { result } = await runDiscriminatingFixture();
+    expect(
+      (
+        (result.optimizedProgram?.candidateLineage?.records ?? []) as any[]
+      ).filter((r) => r.strategy === 'reflective_mutation')
+    ).toContainEqual(expect.objectContaining({ decision: 'accepted' }));
+  });
+
+  it('refuses the same promotion once the discriminating task leaves the paired denominator', async () => {
+    // Both per-batch floors are disabled so the only thing that can change the
+    // decision is the paired denominator itself, not an inconclusive batch or
+    // the run ceiling.
+    const { result, events } = await runDiscriminatingFixture({
+      classifier: discardTaskZero,
+      minAdmittedFraction: 0,
+      maxRunDiscardRate: 1,
+    });
+
+    // The raw batch sum still contains task 0's 1-against-0 improvement — the
+    // all-rows meaning of `sum` never changes — so only the intersected
+    // denominator can explain the rejection.
+    const mutations = (
+      (result.optimizedProgram?.candidateLineage?.records ?? []) as any[]
+    ).filter((r) => r.strategy === 'reflective_mutation');
+    expect(mutations.length).toBeGreaterThan(0);
+    expect(mutations.every((r) => r.decision === 'rejected')).toBe(true);
+
+    // And the discarded rows are not evidence about task difficulty either.
+    // Asserting that task 0 was actually DRAWN is what stops this from passing
+    // vacuously on a sampler that simply never sampled it.
+    const snapshots = events
+      .filter((e) => e.name === 'RoundProgress')
+      .map((e) => e.value.inclusionSnapshot)
+      .filter(Boolean);
+    const drawn = snapshots.flatMap((snapshot: any) => snapshot.sampledIndices);
+    expect(drawn).toContain(0);
+    const summary = events.find((e) => e.name === 'OptimizationComplete').value
+      .discrimination;
+    expect(summary.finalStats[0].trials).toBe(0);
+    expect(
+      summary.finalStats
+        .slice(1)
+        .reduce((total: number, stat: any) => total + stat.trials, 0)
+    ).toBeGreaterThan(0);
   });
 });
 
