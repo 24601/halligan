@@ -1,3 +1,5 @@
+import { getEventListeners } from 'node:events';
+
 import { describe, expect, it } from 'vitest';
 
 import { AxAgentSessionHost } from '../agent/retainedSessions.js';
@@ -1125,6 +1127,118 @@ describe('AxMind step settlement', () => {
       )
     ).toBe(true);
     await instance.close({ drain: false, timeoutMs: 200 });
+  });
+});
+
+/**
+ * `AxEventClock.sleep` adds an abort listener and removes it only when the
+ * signal fires -- it never removes the one it adds on the RESOLVE path. Every
+ * thinker step arms one of those against its own wall-clock deadline, so the
+ * mind's obligation is that each step's deadline is aborted and each sleeper
+ * cancelled once the step settles, whatever the step did.
+ */
+class RecordingClock extends AxManualEventClock {
+  readonly sleeps: Array<{
+    ms: number;
+    signal?: AbortSignal;
+    settled: boolean;
+  }> = [];
+
+  override sleep(ms: number, signal?: AbortSignal): Promise<void> {
+    const record = { ms, ...(signal ? { signal } : {}), settled: false };
+    this.sleeps.push(record);
+    return super.sleep(ms, signal).then(
+      () => {
+        record.settled = true;
+      },
+      (reason) => {
+        record.settled = true;
+        throw reason;
+      }
+    );
+  }
+}
+
+describe('AxMind step deadline hygiene', () => {
+  it('leaves no abort listener and no live sleeper behind on a settled step', async () => {
+    const DEADLINE_MS = 987_654;
+    const clock = new RecordingClock(1_000);
+    const store = new AxInMemoryTrajectoryStore({ clock });
+    await store.create({ trajectoryId: TRAJECTORY });
+    let release: (() => void) | undefined;
+    const parked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered = 0;
+    const program = probeProgram(async () => {
+      entered += 1;
+      if (entered === 1) await parked;
+      return { reply: 'ok' };
+    });
+    const instance = mind(
+      baseOptions(
+        store,
+        [
+          thinkerWith('worker', program, {
+            budget: {
+              maxWallClockMs: DEADLINE_MS,
+              maxTokens: 120_000,
+              maxSubRuns: 8,
+              maxDepth: 2,
+            },
+          }),
+        ],
+        { clock }
+      )
+    );
+    // The deadline is identified by its own distinctive window, so the tick's
+    // and the runtime's own sleeps on the same clock cannot be mistaken for
+    // it -- and a mind that armed no deadline at all would record none.
+    const deadlines = () =>
+      clock.sleeps.filter((one) => one.ms === DEADLINE_MS);
+    await instance.start();
+    await pumpUntil(clock, () => entered > 0);
+    expect(deadlines()).toHaveLength(1);
+    // ARMED while the step runs: one live sleeper, one listener. Without this
+    // an implementation that never sleeps would pass every assertion below.
+    expect(deadlines()[0]!.settled).toBe(false);
+    expect(getEventListeners(deadlines()[0]!.signal!, 'abort')).toHaveLength(1);
+
+    release?.();
+    await pumpUntil(clock, () => deadlines()[0]?.settled ?? false);
+    for (let round = 0; round < 4; round++) {
+      await instance.append({
+        trajectoryId: '',
+        type: 'observation',
+        source: 'chat',
+        data: { content: `round ${round}` },
+      });
+      await pumpUntil(clock, () => entered > round + 1);
+    }
+    // Five steps in, every deadline is settled and every signal is clean: the
+    // listeners do not accumulate one per wake for the life of the mind.
+    expect(deadlines().length).toBeGreaterThanOrEqual(5);
+    for (const record of deadlines()) {
+      expect(record.settled).toBe(true);
+      expect(getEventListeners(record.signal!, 'abort')).toHaveLength(0);
+    }
+    await instance.close({ drain: false, timeoutMs: 200 });
+  });
+
+  it('closing aborts the settle path rather than appending into a closed mind', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const store = await seed(clock);
+    const program = probeProgram();
+    const instance = mind(baseOptions(store, [thinkerWith('worker', program)]));
+    await instance.start();
+    await pumpUntil(clock, () => program.calls.length > 0);
+    await instance.close({ drain: false, timeoutMs: 200 });
+    const settledAt = (await typesIn(store)).length;
+    // A second close is inert, and nothing else lands: the lifetime signal is
+    // already aborted, so a late settle stops at the store boundary.
+    await instance.close({ drain: false, timeoutMs: 200 });
+    await settle(clock, 5, 10);
+    expect((await typesIn(store)).length).toBe(settledAt);
   });
 });
 

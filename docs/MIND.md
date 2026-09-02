@@ -402,10 +402,10 @@ ceiling; the shipped total is higher, and each raise has a reason:
 | `step.ts` | 180 | new: a thinker rendered as an `AxEventTarget`, the delegating `AxProgrammable` wrapper that brackets one run, and the trailing `mind-settle` sink |
 | `subruns.ts` | 150 | new: fork → run → merge with the depth and spend caps, plus the bound on an unsummarized merge content |
 | `thinkers.ts` | 560 | the monolith, the responder, `AxMindDeterministicProgram`, the function menu and the prompt assembly |
-| `mind.ts` | 1_450 | RFC 5.1 gives this file five deliverables at once and none of the surface they need: the options record is 90 lines, the start sequence is seven steps with five typed refusals, and the context assembly carries the dead-letter path M19 depends on. The review raise adds the idempotent delivery-keyed settle, the liveness-fallback arm (M7 layer (b)), the tick's reaper and the named sub-run owner |
+| `mind.ts` | 1_490 | RFC 5.1 gives this file five deliverables at once and none of the surface they need: the options record is 90 lines, the start sequence is seven steps with five typed refusals, and the context assembly carries the dead-letter path M19 depends on. The review raise adds the idempotent delivery-keyed settle, the liveness-fallback arm (M7 layer (b)), the tick's reaper and the named sub-run owner; the follow-up adds the lifetime `AbortController` and the signal threaded through the whole settle path |
 | `index.ts` | 175 | the barrel grew with the runtime |
 
-The DIRECTORY ceiling is **5,650** non-blank production lines against RFC 5.1's
+The DIRECTORY ceiling is **5,700** non-blank production lines against RFC 5.1's
 3,050. That is a real miss against RFC 11's definition of done, stated here
 rather than left to be discovered: the estimate costed the declaration surface
 and the shipped files carry the implementation too, at 80 columns with a doc

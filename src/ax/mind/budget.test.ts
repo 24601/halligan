@@ -93,10 +93,20 @@ import { describe, expect, it } from 'vitest';
  *   forever; the fix is a dispatch rule, so it belongs on this page.
  * - `types.ts` 600 -> 615: the `wake-suppressed-sibling` diagnostic code and
  *   the doc comment that says which loop its absence hides.
+ * - `mind.ts` 1_450 -> 1_490: the lifetime `AbortController` that `close()`
+ *   aborts, and the signal threaded from `settleDelivery` through
+ *   `settleStep` into the work probe and all four outcome appends. Every one
+ *   of those calls already took a trailing `signal?`; the settle was the one
+ *   path that passed none, so a closing mind kept appending.
+ * - `chat.ts` 768 -> 800 was already the cap; the per-effect sender is inside
+ *   it. `index.ts` 175 likewise absorbs the two new exports.
+ * - The DIRECTORY ceiling 5_650 -> 5_700. The previous raise measured 5_472,
+ *   but that figure predates two commits that landed on main afterwards, so
+ *   the shipped total was already 5_579 before this pass touched anything.
  *
- * Measured at this raise: types 602, pacer 284, health 138, routes 314,
- * sources 594, chat 768, salience 163, skills 134, context 138, step 166,
- * subruns 140, thinkers 518, mind 1_415, index 165 -- 5_539 in total.
+ * Measured at this raise: types 607, pacer 284, health 138, routes 314,
+ * sources 594, chat 785, salience 163, skills 134, context 138, step 168,
+ * subruns 140, thinkers 540, mind 1_471, index 174 -- 5_650 in total.
  */
 const CAPS: readonly (readonly [string, number])[] = [
   ['src/ax/mind/types.ts', 615], // raised from 430, 480, then 600
@@ -111,7 +121,7 @@ const CAPS: readonly (readonly [string, number])[] = [
   ['src/ax/mind/step.ts', 180], // new: not in RFC 5.1, then raised from 160
   ['src/ax/mind/subruns.ts', 150], // new: not in RFC 5.1, then raised from 140
   ['src/ax/mind/thinkers.ts', 560], // raised from 380
-  ['src/ax/mind/mind.ts', 1_450], // raised from 600, then 1_300
+  ['src/ax/mind/mind.ts', 1_490], // raised from 600, 1_300, then 1_450
   ['src/ax/mind/index.ts', 175], // raised from 90, then 120, then 130
 ];
 
@@ -123,7 +133,7 @@ const CAPS: readonly (readonly [string, number])[] = [
  * rather than letting the estimate stand. Raising it again needs the same
  * treatment: a reason per file, here and in docs/MIND.md.
  */
-const MIND_DIRECTORY_CAP = 5_650;
+const MIND_DIRECTORY_CAP = 5_700;
 
 // vitest runs this workspace with cwd = src/ax, so the repo root is derived
 // from this file rather than from the process.
