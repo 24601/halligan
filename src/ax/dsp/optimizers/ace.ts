@@ -28,6 +28,7 @@ import {
   dedupePlaybookByContent,
   generateBulletId,
   renderPlaybook,
+  rollbackRejectedMutation,
   updateBulletFeedback,
 } from './acePlaybook.js';
 import type {
@@ -903,10 +904,11 @@ export class AxACE extends AxBaseOptimizer {
    *
    * Operations are applied with `visibility: 'optimizer'` forced and a
    * `'rejected-retained'` verification result attached, so the next proposer
-   * round sees the failed attempt and the actor never does. Bullets that
-   * already existed keep their prior content and tier — only their evidence
-   * changes — while bullets the rejected operations created stay in the
-   * optimizer tier.
+   * round sees the failed attempt and the actor never does. The artifact then
+   * reverts wholesale to its pre-apply state (`rollbackRejectedMutation`) —
+   * a rejected `REMOVE` or a rejected superseding `ADD` must not be able to
+   * empty the actor playbook — while bullets the rejected operations created
+   * stay in the optimizer tier.
    *
    * `now` is required and is threaded into the apply path, which otherwise
    * stamps `new Date()` and would make the retained timestamp nondeterministic.
@@ -932,57 +934,48 @@ export class AxACE extends AxBaseOptimizer {
     }
 
     const before = clonePlaybook(this.playbook);
-    const priorById = new Map<
-      string,
-      Readonly<{ content: string; visibility?: AxACEBullet['visibility'] }>
-    >();
-    for (const bullets of Object.values(before.sections)) {
-      for (const bullet of bullets) {
-        priorById.set(bullet.id, {
-          content: bullet.content,
-          visibility: bullet.visibility,
-        });
-      }
-    }
+    const hostEvidence: AxACEHostEvidence = {
+      source: 'manual',
+      ...(args.sourceRunId ? { sourceRunId: args.sourceRunId } : {}),
+      visibility: 'optimizer',
+      verification: [
+        {
+          verifierId: args.verifierId,
+          ...(args.testId ? { testId: args.testId } : {}),
+          result: 'rejected-retained',
+          timestamp: args.now,
+          ...(args.summary ? { summary: args.summary } : {}),
+        },
+      ],
+    };
 
     const result = applyCuratorOperations(this.playbook, args.operations, {
       maxSectionSize: this.aceConfig.maxSectionSize,
       allowDynamicSections: this.aceConfig.allowDynamicSections,
       now: args.now,
-      hostEvidence: {
-        source: 'manual',
-        ...(args.sourceRunId ? { sourceRunId: args.sourceRunId } : {}),
-        visibility: 'optimizer',
-        verification: [
-          {
-            verifierId: args.verifierId,
-            ...(args.testId ? { testId: args.testId } : {}),
-            result: 'rejected-retained',
-            timestamp: args.now,
-            ...(args.summary ? { summary: args.summary } : {}),
-          },
-        ],
-      },
+      hostEvidence,
     });
 
-    // The rollback half: an existing bullet keeps the content and tier it had
-    // before the rejected proposal. Only its evidence moved.
-    for (const bullets of Object.values(this.playbook.sections)) {
-      for (const bullet of bullets) {
-        const prior = priorById.get(bullet.id);
-        if (!prior) {
-          continue;
-        }
-        bullet.content = prior.content;
-        if (prior.visibility === undefined) {
-          // Delete rather than assign undefined: a legacy bullet must round-trip
-          // through JSON without gaining the key.
-          delete bullet.visibility;
-        } else {
-          bullet.visibility = prior.visibility;
-        }
+    // The rollback half. Every pre-existing bullet an operation named is
+    // retained, including the target of a rejected REMOVE and the target of a
+    // rejected supersession, which the previous in-place patch could not reach.
+    const touchedBulletIds = new Set(result.updatedBulletIds);
+    for (const operation of args.operations) {
+      if (operation.bulletId) {
+        touchedBulletIds.add(operation.bulletId);
+      }
+      for (const superseded of operation.supersedes ?? []) {
+        touchedBulletIds.add(superseded);
       }
     }
+    rollbackRejectedMutation(this.playbook, before, {
+      touchedBulletIds: [...touchedBulletIds],
+      hostEvidence,
+      now: args.now,
+      ...(this.aceConfig.maxSectionSize !== undefined
+        ? { maxSectionSize: this.aceConfig.maxSectionSize }
+        : {}),
+    });
 
     if (result.updatedBulletIds.length) {
       this.deltaHistory.push({

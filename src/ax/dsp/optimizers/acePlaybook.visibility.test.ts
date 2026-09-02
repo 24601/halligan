@@ -669,6 +669,89 @@ describe('rejected-retained verification', () => {
     ).toContain('original guidance');
   });
 
+  it('a rejected REMOVE does not delete the bullet', () => {
+    // The bullet is spliced out of the applied playbook, so an in-place patch
+    // over the survivors can never reach it. A proposal that FAILED its gate
+    // must not be able to delete actor guidance.
+    const ace = seeded();
+    ace.retainRejectedMutation({
+      operations: [
+        { type: 'REMOVE', section: 'Guidelines', bulletId: 'live-0' },
+      ],
+      verifierId: 'held-out',
+      now: NOW,
+    });
+    const playbook = ace.getPlaybook();
+    const live = playbook.sections.Guidelines?.find(
+      (entry) => entry.id === 'live-0'
+    );
+    expect(live?.content).toBe('original guidance');
+    expect(live?.evidence?.verification?.[0]?.result).toBe('rejected-retained');
+    expect(
+      axRenderActorPlaybook(axProjectActorPlaybook(playbook, { now: NOW }))
+    ).toContain('original guidance');
+  });
+
+  it('a rejected superseding ADD does not retire its target', () => {
+    // `applySupersession` stamps lifecycle.status = 'superseded', which
+    // `isBulletApplicable` filters out of every render — a second way for a
+    // rejected proposal to empty the actor playbook without deleting anything.
+    const ace = seeded();
+    ace.retainRejectedMutation({
+      operations: [
+        {
+          type: 'ADD',
+          section: 'Guidelines',
+          content: 'a replacement that failed its gate',
+          supersedes: ['live-0'],
+        },
+      ],
+      verifierId: 'held-out',
+      now: NOW,
+    });
+    const playbook = ace.getPlaybook();
+    const live = playbook.sections.Guidelines?.find(
+      (entry) => entry.id === 'live-0'
+    );
+    expect(live?.evidence?.lifecycle?.status).toBeUndefined();
+    expect(live?.revision ?? 1).toBe(1);
+    expect(live?.lineage).toBeUndefined();
+    expect(live?.evidence?.verification?.[0]?.result).toBe('rejected-retained');
+    const rendered = axRenderActorPlaybook(
+      axProjectActorPlaybook(playbook, { now: NOW })
+    );
+    expect(rendered).toContain('original guidance');
+    // The rejected replacement is kept, optimizer-tier only.
+    expect(rendered).not.toContain('a replacement that failed its gate');
+    expect(
+      playbook.sections.Guidelines?.find(
+        (entry) => entry.content === 'a replacement that failed its gate'
+      )?.visibility
+    ).toBe('optimizer');
+  });
+
+  it('reverts metadata, revision and lineage, not only content and tier', () => {
+    const ace = seeded();
+    ace.retainRejectedMutation({
+      operations: [
+        {
+          type: 'UPDATE',
+          section: 'Guidelines',
+          bulletId: 'live-0',
+          content: 'rejected rewrite',
+          metadata: { rejected: true },
+        },
+      ],
+      verifierId: 'held-out',
+      now: NOW,
+    });
+    const live = ace.getPlaybook().sections.Guidelines?.[0];
+    expect(live?.content).toBe('original guidance');
+    expect(live?.metadata).toBeUndefined();
+    expect(live?.revision ?? 1).toBe(1);
+    expect(live?.lineage).toBeUndefined();
+  });
+
   it('timestamps come from the injected now', () => {
     const ace = seeded();
     ace.retainRejectedMutation({

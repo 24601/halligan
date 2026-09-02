@@ -308,6 +308,78 @@ function applyCuratorOperationsInPlace(
 }
 
 /**
+ * Reinstate `before` as the live artifact while keeping the evidence a rejected
+ * apply produced. The asymmetric half of `retainRejectedMutation`.
+ *
+ * Patching `content` and `visibility` on the surviving bullets is NOT enough,
+ * and the two escapes are both silent:
+ * - `REMOVE` splices the bullet out, so an in-place loop over the applied
+ *   playbook never reaches it and the bullet is gone for good;
+ * - `applySupersession` stamps `evidence.lifecycle.status = 'superseded'` on
+ *   its target, which `isBulletApplicable` then filters out of EVERY render.
+ *
+ * Either one lets a proposal that failed its held-out gate empty the actor
+ * playbook. So the artifact reverts wholesale — content, revision, lineage,
+ * metadata, tags, applicability and lifecycle all come from `before` — and only
+ * two things move forward: the retained verification on the bullets the
+ * operations touched, and the bullets those operations created, which stay in
+ * the optimizer tier so the next proposer round sees the failed attempt and the
+ * actor never does.
+ */
+export function rollbackRejectedMutation(
+  playbook: AxACEPlaybook,
+  before: Readonly<AxACEPlaybook>,
+  options: Readonly<{
+    touchedBulletIds: readonly string[];
+    hostEvidence: Readonly<AxACEHostEvidence>;
+    maxSectionSize?: number;
+    now: string;
+  }>
+): void {
+  const applied = clonePlaybook(playbook);
+  const priorIds = new Set<string>();
+  for (const bullets of Object.values(before.sections)) {
+    for (const bullet of bullets) {
+      priorIds.add(bullet.id);
+    }
+  }
+  const touched = new Set(options.touchedBulletIds);
+  const restored = clonePlaybook(before);
+  for (const bullets of Object.values(restored.sections)) {
+    for (const bullet of bullets) {
+      if (!touched.has(bullet.id)) {
+        continue;
+      }
+      bullet.evidence = mergeBulletEvidence(
+        bullet.evidence,
+        undefined,
+        options.hostEvidence
+      );
+    }
+  }
+  const maxSectionSize = options.maxSectionSize ?? Number.POSITIVE_INFINITY;
+  for (const [sectionName, bullets] of Object.entries(applied.sections)) {
+    for (const bullet of bullets) {
+      if (priorIds.has(bullet.id)) {
+        continue;
+      }
+      restored.sections[sectionName] ??= [];
+      const target = restored.sections[sectionName]!;
+      if (target.length >= maxSectionSize) {
+        continue;
+      }
+      target.push(bullet);
+    }
+  }
+  recomputePlaybookStats(restored);
+  restored.updatedAt = options.now;
+  if (axPlaybookRequiresVisibilitySupport(restored)) {
+    restored.version = Math.max(restored.version ?? 1, 2);
+  }
+  replacePlaybook(playbook, restored);
+}
+
+/**
  * Increase the helpful/harmful counters reported by the Reflector stage.
  */
 export function updateBulletFeedback(
