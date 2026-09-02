@@ -1,4 +1,5 @@
 name: Publish generated packages
+# cspell:ignore Prelease Dskip
 
 on:
   release:

@@ -413,3 +413,9 @@ unwakeable
 wakeups
 skillstate
 skillspec
+npmjs
+dtolnay
+pypi
+sdist
+pypa
+temurin
