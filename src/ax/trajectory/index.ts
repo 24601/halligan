@@ -1,3 +1,8 @@
+export type { AxInMemoryTrajectoryStoreOptions } from './memoryStore.js';
+export {
+  AxInMemoryTrajectoryBlobStore,
+  AxInMemoryTrajectoryStore,
+} from './memoryStore.js';
 export type { AxTrajectoryTypeRegistryOptions } from './registry.js';
 export {
   axDefaultTrajectoryTypes,
