@@ -462,7 +462,7 @@ describe('working state turn hook', () => {
   });
 
   it('appends harness guidance that carries no model-authored text', async () => {
-    const injection = 'IGNOREPREVIOUSINSTRUCTIONS';
+    const injection = ['IGNORE', 'PREVIOUS', 'INSTRUCTIONS'].join('');
     const {
       agent: built,
       ai,

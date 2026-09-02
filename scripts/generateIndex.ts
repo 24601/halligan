@@ -73,6 +73,18 @@ const internalExportNames = new Set([
   'AxInternalEmbedRequest',
   'AxInternalSpeechRequest',
   'AxInternalTranscriptionRequest',
+  // Working-state benchmark helpers. `benchmarks/` is scanned like any other
+  // directory, and these are measurement scaffolding, not public API.
+  'AxWorkingStateArm',
+  'AxWorkingStateBenchRow',
+  'AxWorkingStatePromptMeter',
+  'AxWorkingStateScenarioResult',
+  'axWorkingStatePromptOverhead',
+  // Test-only offline harness for the working-state loop tests.
+  'AxWorkingStateScript',
+  'axCreateEvaluatingRuntime',
+  'axCreateScriptedMock',
+  'axWorkingStateHarnessUsage',
   'AxMutableDiscoveryPromptState',
   'AxMutableSkillsPromptState',
   'AxNormalizedAgentEvalDataset',

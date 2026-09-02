@@ -143,6 +143,12 @@ runtime.
 boundary. Host callbacks and granted runtime permissions remain the authority
 boundary; keep durable secrets and privileged effects in host-side functions.
 
+An opt-in verifier-gated working state can be maintained beside the transcript
+on the executor stage: a goal ledger keyed by stable id whose transitions
+commit only on host-checker support and harness-minted tool receipts. It is off
+by default and adds nothing to the prompt when unconfigured. The normative
+contract is [`docs/AGENT_WORKING_STATE.md`](./AGENT_WORKING_STATE.md).
+
 ## AxFlow
 
 AxFlow is an Ax program graph, not a generic workflow engine. Flow nodes call

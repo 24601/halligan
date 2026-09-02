@@ -302,7 +302,7 @@ function applyOp(
 ): { root: unknown } | Rejection {
   const segments = parseStatePatchPointer(op.path);
   if (!segments) {
-    return { code: 'type_mismatch', detail: `unparseable pointer ${op.path}` };
+    return { code: 'type_mismatch', detail: `unparsable pointer ${op.path}` };
   }
 
   if (segments.length === 0) {

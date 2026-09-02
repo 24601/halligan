@@ -5,7 +5,7 @@
  * that an agent configured WITHOUT `workingState` / `actorMemoryMode` /
  * `callTimeSkills` produces byte-identical prompts, signatures, exported state
  * and context events. That promise is only worth anything if it is pinned
- * BEFORE the behavioural commits land, so this file is the safety net every
+ * BEFORE the behavioral commits land, so this file is the safety net every
  * later commit is re-run against.
  *
  * Four artifacts are pinned:

@@ -1055,3 +1055,71 @@ void harnessGate.metrics.taskSetDigest;
 
 void axReportSchema({ score: { type: 'number', min: 0, max: 1 } });
 void axAssertPersistableValue({ ok: true }, 'payload');
+
+// --- Verifier-gated working state ------------------------------------------
+// Every symbol below must be reachable from the generated barrel; the
+// benchmark scaffolding must NOT be.
+
+import {
+  type AxStatePatchOp,
+  type AxWorkingStateCheckerPolicy,
+  type AxWorkingStateDocument,
+  type AxWorkingStateTraceStep,
+  axIsWorkingStateError,
+  axWorkingState,
+} from './index.js';
+
+type WorkingStateFacts = { shipped: boolean };
+
+const workingStateDocument: AxWorkingStateDocument<WorkingStateFacts> = {
+  schemaVersion: 1,
+  goals: {
+    g_ship: {
+      id: 'g_ship',
+      goal: 'Ship order 42',
+      status: 'pending',
+      evidence: [],
+      expects: ['shipping.dispatch'],
+      createdTurn: 0,
+      updatedTurn: 0,
+    },
+  },
+  facts: { shipped: false },
+  parked: [],
+};
+const shippedFact: boolean = workingStateDocument.facts.shipped;
+void shippedFact;
+
+const workingStateChecker: AxWorkingStateCheckerPolicy<WorkingStateFacts> = {
+  id: 'ship-guard',
+  check: ({ proposedState }) =>
+    proposedState.facts.shipped
+      ? { status: 'pass' }
+      : { status: 'fail', failure: { code: 'not_shipped' } },
+};
+void workingStateChecker;
+
+const removeStatePatchOp: AxStatePatchOp = {
+  op: 'remove',
+  path: '/goals/g_ship',
+};
+void removeStatePatchOp;
+
+declare const workingStateTraceStep: AxWorkingStateTraceStep;
+const workingStateTurn: number = workingStateTraceStep.turn;
+void workingStateTurn;
+
+void axWorkingState<WorkingStateFacts>(
+  { stateSignature: 'shipped:boolean' },
+  { runId: 'ws:x:1', stage: 'executor' }
+);
+void axIsWorkingStateError(new Error('x'));
+
+// Benchmark scaffolding must stay internal: `AxWorkingStateBenchRow` and the
+// offline harness are listed in `internalExportNames`, so the generated barrel
+// does not carry them.
+type WorkingStateBarrel = typeof import('./index.js');
+type BenchRowIsNotPublic =
+  'AxWorkingStateBenchRow' extends keyof WorkingStateBarrel ? never : true;
+const benchRowIsNotPublic: BenchRowIsNotPublic = true;
+void benchRowIsNotPublic;

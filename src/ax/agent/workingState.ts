@@ -726,7 +726,7 @@ function forbid(
 
 /**
  * Classify one op against the CLOSED delta table. Anything no row matches is
- * `forbidden` — the table is closed, not open, so an unrecognised path shape
+ * `forbidden` — the table is closed, not open, so an unrecognized path shape
  * can never be silently admitted.
  */
 function classifyOp(
@@ -1806,7 +1806,7 @@ export class AxWorkingState<S = Record<string, unknown>> {
             : {}),
         };
       }
-      // An unrecognised verdict fails closed.
+      // An unrecognized verdict fails closed.
       return { kind: 'error', code: 'checker_error' };
     } finally {
       sleepCancel.abort();

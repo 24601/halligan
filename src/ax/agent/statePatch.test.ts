@@ -283,7 +283,7 @@ describe('axApplyStatePatch', () => {
   });
 
   it('refuses a prototype-polluting pointer even if validation is bypassed', () => {
-    // Defence in depth: `axApplyStatePatch` is public, so a caller that skips
+    // Defense in depth: `axApplyStatePatch` is public, so a caller that skips
     // `axValidateStatePatch` still cannot reach `Object.prototype`.
     const result = axApplyStatePatch(makeDocument(), [
       { op: 'add', path: '/__proto__/polluted', value: true },
