@@ -1815,6 +1815,25 @@
       "verification": null
     },
     {
+      "id": "axir-2026-09-02-a-call-time-skill-binding-is-admitted-through-both-catalog-gates",
+      "status": "open",
+      "title": "A call-time skill binding is admitted through both catalog gates, or the run is refused",
+      "createdAt": "2026-09-02",
+      "sourcePR": 98,
+      "sourceCommit": "b3c28f0339fdafaa0069a24b6261f72f9ded4a7e",
+      "tsPaths": ["src/ax/agent/callTimeSkills.ts"],
+      "portableSurface": "axagent",
+      "impact": "Review-driven refinement of the call-time skill injection entry for PR #98. New portable rule: a callTimeSkills binding that names a skillsCatalog ID is re-resolved at RUN START through the same two catalog gates every other retrieval path uses - requires-eligibility against the run's declared skill environment, and the retrieval-time authority re-check that produces the denied set - and the run is REFUSED with a distinct ineligible_bound_skill / denied_bound_skill detail when either gate hid the skill. This is fail-closed by design: silently dropping the skill while still intercepting would leave the actor blocked on a call it may not make with no procedure to read, and silently executing would make both gates advisory. The ordering is part of the rule: the binding table must be opened AFTER the retrieval gate is computed, because the gate is time- and authority-varying (an expired grant or revoked trajectory parks a skill mid-lifecycle) while a binding is static host configuration. An INLINE skill is not gated - host-supplied literal text has nothing to be eligible for and no provenance to re-check, the same posture as preset skills. Two further portable rules land with it: a host 'when' predicate (or the committed-state read behind it) that THROWS falls through to the normal call path rather than propagating, because the interception runs synchronously inside the actor's await and a propagated throw would become an error turn AND would never charge the injection budget, leaving the re-draft loop unbounded; and a predicate result that is not exactly true does not intercept. maxInjections is bounded above at 100.",
+      "suggestedAxirWork": [
+        "Add or update the TS-derived conformance fixture.",
+        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
+        "Run npm run axir:conformance:check and npm run test:axir."
+      ],
+      "completedAt": null,
+      "completedByCommit": null,
+      "verification": null
+    },
+    {
       "id": "axir-2026-09-02-ace-optimizer-only-bullet-visibility-rejected-retained-verificat",
       "status": "open",
       "title": "ACE optimizer-only bullet visibility, rejected-retained verification, model-facing provenance redaction, and retrieval-time authority re-check",
