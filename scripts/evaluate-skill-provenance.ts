@@ -21,6 +21,7 @@ import type {
   AxSkillProvenance,
 } from '../src/ax/authority/skillProvenance.js';
 import { axExtractSkillProvenance } from '../src/ax/authority/skillProvenance.js';
+import { AxACE, AxACEOptimizedProgram } from '../src/ax/dsp/optimizers/ace.js';
 import {
   applyCuratorOperations,
   axProjectActorPlaybook,
@@ -34,6 +35,8 @@ import type {
   AxACEBullet,
   AxACEPlaybook,
 } from '../src/ax/dsp/optimizers/aceTypes.js';
+import { AxPlaybook } from '../src/ax/dsp/playbook.js';
+import { ax, f } from '../src/ax/index.js';
 
 /**
  * Deterministic, zero-cost mechanism evaluation. No provider calls, no network,
@@ -319,16 +322,57 @@ function evaluateVisibility(): Record<string, unknown> {
   const contents = optimizerBullets.map((bullet) => bullet.content);
   const ids = optimizerBullets.map((bullet) => bullet.id);
 
+  // Real water through real pipes: each surface is produced by the call site a
+  // host actually reaches, not by re-rendering one projection under four names.
+  // Rerouting `applyTo` or `composeInstruction` back to `renderPlaybook` has to
+  // move these numbers, or the metric is measuring nothing.
+  const signature = () =>
+    ax(f().input('question', f.string()).output('answer', f.string()).build());
+
+  const applied = signature();
+  new AxACEOptimizedProgram({
+    bestScore: 1,
+    stats: {} as never,
+    playbook,
+    artifact: { playbook, feedback: [], history: [] },
+    baseInstruction: 'base instruction',
+  }).applyTo(applied);
+
+  const ace = new AxACE(
+    { studentAI: {} as never, teacherAI: {} as never },
+    { initialPlaybook: playbook }
+  );
+  const live = new AxPlaybook(signature(), {
+    studentAI: {} as never,
+    initialPlaybook: playbook,
+  });
+
   const actorSurfaces: Record<string, string> = {
     projection: axRenderActorPlaybook(
       axProjectActorPlaybook(playbook, { includeInapplicable: true, now: NOW })
     ),
+    applyTo: applied.getSignature().getDescription() ?? '',
+    composeInstruction: (
+      ace as unknown as {
+        composeInstruction: (
+          base: string,
+          playbook: AxACEPlaybook,
+          options: Readonly<{ includeInapplicable: boolean; now: string }>
+        ) => string;
+      }
+    ).composeInstruction('base instruction', playbook, {
+      includeInapplicable: true,
+      now: NOW,
+    }),
+    playbookRender: live.render({ includeInapplicable: true, now: NOW }),
   };
-  // The three remaining actor paths compose the same projection, so the eval
-  // renders it under each name rather than reconstructing the agent.
-  actorSurfaces.applyTo = actorSurfaces.projection as string;
-  actorSurfaces.composeInstruction = actorSurfaces.projection as string;
-  actorSurfaces.playbookRender = actorSurfaces.projection as string;
+  for (const [name, surface] of Object.entries(actorSurfaces)) {
+    // A renderer that dropped everything would pass every leak assertion.
+    assert(
+      surface.includes('actor visible text 0'),
+      `actor path ${name} rendered no actor guidance`
+    );
+  }
 
   let leakedContent = 0;
   for (const surface of Object.values(actorSurfaces)) {
@@ -337,10 +381,6 @@ function evaluateVisibility(): Record<string, unknown> {
     }
   }
   assert(leakedContent === 0, `actor paths leaked ${leakedContent} contents`);
-  assert(
-    (actorSurfaces.projection as string).includes('actor visible text 0'),
-    'actor guidance must still render'
-  );
 
   const optimizerView = createExecutablePlaybookView(playbook, NOW);
   const optimizerMarkdown = renderPlaybook(optimizerView, {
@@ -717,8 +757,11 @@ async function evaluateRails(): Promise<Record<string, unknown>> {
 
   return {
     baseline: {
-      name: 'no budget: a rail emitting a fresh signature every call is unbounded',
+      name: 'unbounded rails: no round counter, no per-run diagnostic cap',
       roundsObserved: 'unbounded',
+      // Not a reachable production configuration any more: rails with no
+      // `verificationBudget` take AX_DEFAULT_VERIFICATION_MAX_ROUNDS.
+      reachableWithoutABudget: false,
     },
     toolCalls: 50,
     roundsObserved: state.rounds,
@@ -730,21 +773,49 @@ async function evaluateRails(): Promise<Record<string, unknown>> {
   };
 }
 
+// --------------------------------------------------------------- digest ---
+
+/**
+ * The digest covers the fixture BYTES, not a handful of scalars.
+ *
+ * Hashing `{artifacts: 24, queries: 40, lease: 5, ...}` would let every
+ * provenance record, playbook bullet, catalog entry and cost profile be
+ * rewritten without moving the constant — which is exactly the silent rot RFC
+ * 8.9 pins the digest against. So this serializes the fixtures the evaluation
+ * actually consumes: every artifact and its provenance in every drift scenario
+ * with its paired authority snapshot, the tiered playbook, and every ranking
+ * catalog with its cost profiles.
+ */
+export function canonicalFixtureBytes(): string {
+  return JSON.stringify({
+    now: NOW,
+    lease: LEASE,
+    scenarios: DRIFT_SCENARIOS,
+    adverse: [...ADVERSE_QUERIES].sort((left, right) => left - right),
+    artifacts: Array.from({ length: ARTIFACT_COUNT }, (_unused, index) => ({
+      control: executableArtifact(index, provenanceFor(index)),
+      controlSnapshot: snapshotFor(index),
+      drifted: DRIFT_SCENARIOS.map((scenario) => ({
+        scenario,
+        artifact: executableArtifact(index, provenanceFor(index, scenario)),
+        snapshot: snapshotFor(index, scenario),
+      })),
+    })),
+    // `createEmptyPlaybook` stamps a wall-clock `updatedAt`; pin it so the
+    // digest is a function of the fixture and nothing else.
+    playbook: { ...tieredPlaybook(), updatedAt: NOW },
+    catalogs: Array.from({ length: QUERY_COUNT }, (_unused, index) =>
+      catalogFor(index)
+    ),
+  });
+}
+
 // ------------------------------------------------------------------ main ---
 
 export async function runSkillProvenanceEvaluation(): Promise<
   Record<string, unknown>
 > {
-  const fixtureDigest = fnv1a64(
-    JSON.stringify({
-      artifacts: ARTIFACT_COUNT,
-      scenarios: DRIFT_SCENARIOS,
-      queries: QUERY_COUNT,
-      adverse: [...ADVERSE_QUERIES],
-      lease: LEASE,
-      now: NOW,
-    })
-  );
+  const fixtureDigest = fnv1a64(canonicalFixtureBytes());
   return {
     honesty: HONESTY,
     budget: {

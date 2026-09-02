@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
-import { runSkillProvenanceEvaluation } from './evaluate-skill-provenance.js';
+import {
+  canonicalFixtureBytes,
+  runSkillProvenanceEvaluation,
+} from './evaluate-skill-provenance.js';
 
 /**
  * Re-runs the evaluation in-process and asserts every metric the report marks
@@ -14,7 +17,7 @@ describe('skill provenance evaluation', () => {
       any
     >;
 
-    expect(report.fixtureDigest).toBe('fnv1a64:fa8aae063e10d722');
+    expect(report.fixtureDigest).toBe('fnv1a64:8175f8fd49774454');
     expect(report.budget).toEqual({
       providerCalls: 0,
       tokens: 0,
@@ -22,6 +25,17 @@ describe('skill provenance evaluation', () => {
       network: 'none',
     });
     expect(report.honesty).toContain('paraphrases optimizer-tier content');
+
+    // The digest covers the fixture BYTES. A digest over `{artifacts: 24,
+    // queries: 40, ...}` would let every record be rewritten without moving
+    // the pin, so assert the serialization actually carries them.
+    const bytes = canonicalFixtureBytes();
+    expect(bytes).toContain('optimizer only text 0');
+    expect(bytes).toContain('guidance from an authorized trajectory');
+    expect(bytes).toContain('receipt-23');
+    expect(bytes).toContain('sha256:digest-23');
+    expect(bytes).toContain('skill-correct-39');
+    expect(bytes.length).toBeGreaterThan(100_000);
 
     // C1 — the re-check detects authority drift the baseline cannot see.
     expect(report.c1RetrievalRecheck).toMatchObject({
@@ -67,5 +81,8 @@ describe('skill provenance evaluation', () => {
       disabledRails: ['thrower', 'hanger'],
     });
     expect(report.c4VerificationBudgetAndRails.railWallMs).toBeLessThan(10_000);
+    expect(
+      report.c4VerificationBudgetAndRails.baseline.reachableWithoutABudget
+    ).toBe(false);
   });
 });
