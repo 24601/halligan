@@ -19,6 +19,8 @@
     "tools/axir/internal/axir/templates"
   ],
   "words": [
+    "Bonferroni",
+    "counterfactuals",
     "crossmodal",
     "indegree",
     "parallelizable",
@@ -29,6 +31,8 @@
     "timebase",
     "timebases",
     "topo",
-    "unproduced"
+    "unevolved",
+    "unproduced",
+    "unvalidated"
   ]
 }
