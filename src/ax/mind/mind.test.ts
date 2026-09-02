@@ -1363,17 +1363,27 @@ describe('AxMind settle signal discipline', () => {
     // the run surviving -- exactly the wakes most worth recording.
     const cancelled = new AbortController();
     cancelled.abort(new Error('the runtime cancelled this run'));
-    const quiet = probeProgram(async () => ({}));
-    await instance.runThinkerStep(worker, quiet, ai, { context: 'x' }, {
-      eventContext: captured,
-      abortSignal: cancelled.signal,
-    } as never);
+    // A THROWING step, because the `error` branch is the one worth recording:
+    // a wake that was cancelled and left no `error` step is a broken mind that
+    // reads as a healthy one.
+    const failing = probeProgram(async () => {
+      throw new Error('the step itself failed');
+    });
+    await expect(
+      instance.runThinkerStep(worker, failing, ai, { context: 'x' }, {
+        eventContext: captured,
+        abortSignal: cancelled.signal,
+      } as never)
+    ).rejects.toThrow('the step itself failed');
     const seen = new Set(before.map((step) => step.stepId));
     const fresh = (await typesIn(store)).filter(
       (step) => !seen.has(step.stepId)
     );
     // Both halves of RFC 7.5 step 8 land: the outcome step and its pace step.
-    expect(fresh.filter((step) => step.type === 'idle')).toHaveLength(1);
+    const errors = fresh.filter((step) => step.type === 'error');
+    expect(errors).toHaveLength(1);
+    expect(String(errors[0]?.data.content)).toContain('the step itself failed');
+    expect(errors[0]?.source).toBe('worker');
     expect(
       fresh.filter((step) => step.type === axMindPaceStepType)
     ).toHaveLength(1);
