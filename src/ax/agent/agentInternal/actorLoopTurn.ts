@@ -46,6 +46,7 @@ import {
   renderGuidanceLog,
   snapshotChatLogMessages,
 } from './guidanceHelpers.js';
+import { ingestSkillResults } from './skillsHelpers.js';
 import { AxAgentClarificationError } from './types.js';
 
 const ACTOR_CODE_POLICY_GUIDANCE =
@@ -274,6 +275,7 @@ export async function runActorTurn<_IN extends AxGenIn>(
     workingState,
     workingStateObservations,
     skillState,
+    callTimeSkills,
     helpers,
   } = ctx;
 
@@ -704,6 +706,30 @@ export async function runActorTurn<_IN extends AxGenIn>(
     })(),
   });
 
+  // Call-time skill injections observed during this turn's code. The skill is
+  // ingested through the ORDINARY loaded-skills channel (no parallel prompt
+  // section) and the harness-authored guidance goes to the TRUSTED guidance
+  // log, so the model re-drafts with the procedure in front of it. Both take
+  // effect on the next turn's prompt, which is exactly the re-draft point.
+  //
+  // A turn refused by the code policy returns before this point; its
+  // interceptions stay pending and are drained on the next turn rather than
+  // being dropped.
+  const callTimeInjections = callTimeSkills?.drain() ?? [];
+  if (callTimeInjections.length > 0) {
+    ingestSkillResults(
+      s.currentSkillsPromptState,
+      callTimeInjections.map((injection) => injection.skill)
+    );
+    for (const injection of callTimeInjections) {
+      appendGuidanceEntry(guidanceState.entries, {
+        turn: entryTurn,
+        guidance: injection.guidance,
+        triggeredBy: 'call-time skill',
+      });
+    }
+  }
+
   // Working state, when configured, mints this turn's receipts from the
   // dispatches the harness observed. Nothing here can run for a default agent:
   // `workingState` is undefined and the observation buffer does not exist.
@@ -761,6 +787,11 @@ export async function runActorTurn<_IN extends AxGenIn>(
       isError,
       receiptRefs: mintedReceiptRefs,
       calls: turnCalls,
+      // Gamma tells the truth about what ran: an intercepted call executed
+      // nothing, so a turn carrying an injection is not an executed turn.
+      // `calls` still lists the callables that DID dispatch — forcing it empty
+      // would hide a real call made alongside the intercepted one.
+      ...(callTimeInjections.length > 0 ? { executed: false } : {}),
       selectedSkills: (mutableState.usedSkills ?? []).map(
         (used: { id: string }) => used.id
       ),

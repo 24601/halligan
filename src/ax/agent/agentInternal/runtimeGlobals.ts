@@ -18,6 +18,10 @@ import {
   setJSRuntimeHostFunctionSpeculationAdapter,
 } from '../../funcs/jsRuntimeHostFunction.js';
 import { mergeAbortSignals } from '../../util/abort.js';
+import type {
+  AxCallTimeSkillHook,
+  AxCallTimeSkillRuntime,
+} from '../callTimeSkills.js';
 import { AxAgentProtocolCompletionSignal } from '../completion.js';
 import { serializeForEval } from '../optimize.js';
 import { DISCOVERY_DISCOVER_NAME, MEMORIES_LOAD_NAME } from '../runtime.js';
@@ -185,7 +189,14 @@ export function wrapFunction(
   authority?: AxAuthorityContext,
   authorityInheritance?: AxAuthorityInheritance,
   receipts?: AxAgentToolReceiptBinding,
-  rails?: AxAgentVerifierRailBinding
+  rails?: AxAgentVerifierRailBinding,
+  /**
+   * Call-time skill injection for THIS callable. Its presence carries both
+   * halves of the interlock: `runLogicalCall` consults it before the authority
+   * boundary, and no speculation adapter is installed, so the runtime's
+   * speculation path cannot reach the function behind the hook's back.
+   */
+  callTimeSkill?: AxCallTimeSkillHook
 ): (...args: unknown[]) => Promise<unknown> {
   const normalizedQualifiedName = qualifiedName ?? fn.name;
 
@@ -458,6 +469,16 @@ export function wrapFunction(
     callArgs: Record<string, unknown>,
     invocationSignal: AbortSignal | undefined
   ): Promise<unknown> => {
+    if (callTimeSkill) {
+      // BEFORE `authorizeCall`, `observeCall` and `observeResult`: a call that
+      // did not happen must not request an authorization decision, must not
+      // reach an observer, and must not mint a receipt. The marker is
+      // RETURNED, never thrown — a throw is tagged `'error'` on the action log
+      // and feeds the actor's error-escalation policy, and an interception is
+      // not a failure.
+      const notExecuted = callTimeSkill();
+      if (notExecuted) return notExecuted;
+    }
     const authorization = await authorizeCall(invocationSignal);
     if (onFunctionCall) await observeCall(callArgs);
     return observeResult(
@@ -521,7 +542,16 @@ export function wrapFunction(
   // Child agents are intentionally excluded: their nested tools and budgets
   // do not have a proven pure-call contract. External AxFunction/MCP/UCP
   // callables still require an exact AxJSRuntime speculation allowlist entry.
-  if (kind === 'external') {
+  //
+  // A call-time-skill-bound callable is excluded too, and this is the PRIMARY
+  // protection for the interception: the adapter's `launch` closure calls
+  // `authorizeCall` and the function directly, and its commit path reaches
+  // `observeResult`, so a hook placed only on the logical path would leave a
+  // second entry point that authorizes, executes and mints. Guarding the
+  // INSTALLATION site instead means there is no second entry point at all,
+  // needs nothing from the external runtime, and fails closed regardless of
+  // what the host allowlisted for speculation.
+  if (kind === 'external' && callTimeSkill === undefined) {
     setJSRuntimeHostFunctionSpeculationAdapter(wrapped, {
       launch: async (args, signal) => {
         const callArgs = normalizeCallArgs(args);
@@ -666,6 +696,13 @@ export function buildRuntimeGlobals(
       ? { eligible, sink: receiptSink, now: receiptNow }
       : undefined;
 
+  // Call-time skill injection rides the stage the same way. Absent unless the
+  // host configured `callTimeSkills`, so the default path performs one
+  // identity check per registration site and allocates nothing.
+  const callTimeSkills = s._callTimeSkillRuntime as
+    | AxCallTimeSkillRuntime
+    | undefined;
+
   // Rails ride the stage the way the receipt sink does: absent unless the host
   // supplied `verifierRails`, so the default path allocates and observes
   // nothing.
@@ -683,6 +720,9 @@ export function buildRuntimeGlobals(
       globals[ns] = {};
     }
     const qualifiedName = `${ns}.${agentFn.name}`;
+    // Registered at EVERY site, executing or stubbed, so `finishRegistration`
+    // can refuse a binding that names a callable this run does not have.
+    const callTimeSkill = callTimeSkills?.register(qualifiedName);
     (globals[ns] as Record<string, unknown>)[agentFn.name] = executesTools
       ? wrapFunction(
           agentFn,
@@ -700,7 +740,8 @@ export function buildRuntimeGlobals(
           // `_kind: 'internal'`) can never mint a receipt: their return value
           // is another model's self-report.
           receiptBinding(agentFn._kind !== 'internal'),
-          railBinding
+          railBinding,
+          callTimeSkill
         )
       : buildStageToolStub(qualifiedName);
     if (agentFn._alwaysInclude !== true) {
@@ -731,6 +772,7 @@ export function buildRuntimeGlobals(
         .getToolBindings()
         .filter((candidate) => candidate.namespace === namespace)) {
         const qualifiedName = `mcp.${namespace}.tools.${binding.name}`;
+        const callTimeSkill = callTimeSkills?.register(qualifiedName);
         tools[binding.name] = executesTools
           ? wrapFunction(
               binding,
@@ -745,7 +787,8 @@ export function buildRuntimeGlobals(
               authority,
               authorityInheritance,
               receiptBinding(true),
-              railBinding
+              railBinding,
+              callTimeSkill
             )
           : buildStageToolStub(qualifiedName);
         registerCallable(
@@ -928,6 +971,7 @@ export function buildRuntimeGlobals(
       const operations: Record<string, unknown> = {};
       for (const binding of client.getOperationBindings()) {
         const qualifiedName = `ucp.${namespace}.${binding.name}`;
+        const callTimeSkill = callTimeSkills?.register(qualifiedName);
         operations[binding.name] = executesTools
           ? wrapFunction(
               binding,
@@ -942,7 +986,8 @@ export function buildRuntimeGlobals(
               authority,
               authorityInheritance,
               receiptBinding(true),
-              railBinding
+              railBinding,
+              callTimeSkill
             )
           : buildStageToolStub(qualifiedName);
         registerCallable(
@@ -1082,6 +1127,11 @@ export function buildRuntimeGlobals(
       onUsed?.(id, reason);
     };
   }
+
+  // Every callable this run has is now registered. A binding that matched
+  // none of them is a typo that would otherwise be a silent no-op for the
+  // whole run, so it fails the run at its start rather than at turn 40.
+  callTimeSkills?.finishRegistration();
 
   return globals;
 }

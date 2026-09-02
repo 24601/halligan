@@ -1,5 +1,11 @@
 import type { AxAIService } from '../../ai/types.js';
 import type { AxGenIn, AxProgramForwardOptions } from '../../dsp/types.js';
+import {
+  type AxCallTimeSkillBinding,
+  type AxCallTimeSkillRuntime,
+  axCallTimeSkillCatalogResolver,
+  axCallTimeSkillRuntime,
+} from '../callTimeSkills.js';
 import { createCompletionBindings } from '../completion.js';
 import {
   DEFAULT_RLM_MAX_TURNS,
@@ -198,6 +204,24 @@ export async function runActorLoop<IN extends AxGenIn>(
     s._workingStateReceiptSink = undefined;
     s._workingStateClockNow = undefined;
   }
+
+  // Call-time skill injection: opt-in per exact callable, and independent of
+  // working state except for the optional `when` predicate. Built here, beside
+  // the receipt sink, so `buildRuntimeGlobals` can bind it per registration
+  // site; cleared otherwise, so the default path allocates nothing.
+  const callTimeBindings = s.options?.callTimeSkills as
+    | readonly AxCallTimeSkillBinding[]
+    | undefined;
+  let callTimeSkills: AxCallTimeSkillRuntime | undefined;
+  if (callTimeBindings && callTimeBindings.length > 0) {
+    const ws = workingState;
+    callTimeSkills = axCallTimeSkillRuntime(callTimeBindings, {
+      resolveSkill: axCallTimeSkillCatalogResolver(s.skillsCatalog),
+      // `when` reads the COMMITTED document, never a proposal.
+      ...(ws ? { workingState: () => ws.current() } : {}),
+    });
+  }
+  s._callTimeSkillRuntime = callTimeSkills;
 
   // Verifier rails and the verification budget. Both are opt-in: with no rails
   // configured the binding is absent and every tool call runs exactly as it
@@ -630,6 +654,7 @@ export async function runActorLoop<IN extends AxGenIn>(
     delegatedContextSummary,
     ...(workingState ? { workingState, workingStateObservations } : {}),
     ...(skillState ? { skillState } : {}),
+    ...(callTimeSkills ? { callTimeSkills } : {}),
     mutableState,
     helpers,
   };

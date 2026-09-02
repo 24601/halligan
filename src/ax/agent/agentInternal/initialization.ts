@@ -2,6 +2,10 @@ import { AxGen } from '../../dsp/generate.js';
 import type { AxTunable, AxUsable } from '../../dsp/types.js';
 import { AxJSRuntime } from '../../funcs/jsRuntime.js';
 import {
+  axCallTimeSkillCatalogResolver,
+  axValidateCallTimeSkillBindings,
+} from '../callTimeSkills.js';
+import {
   DEFAULT_CONTEXT_FIELD_PROMPT_MAX_CHARS,
   RELEVANCE_RANKING_DEFAULT,
   resolveAutoUpgrade,
@@ -125,6 +129,21 @@ export function initializeAgentInternal(
   // environment changed constructs a new agent.
   s.skillEnvironment = options.skillPolicy?.environment;
   rebuildSkillsSearch(s);
+  // Call-time skill bindings are validated HERE, after the effective skills
+  // catalog exists, so an unresolvable skill id or a `when` predicate with no
+  // working state to read fails at construction.
+  //
+  // `unknown_bound_callable` is deliberately NOT checked here: MCP and UCP
+  // callables only exist once a run's execution context does, so a
+  // constructor-time check would reject every legitimate `mcp.*` binding. It
+  // is enforced at run start instead, once the full callable surface is
+  // registered.
+  if (options.callTimeSkills !== undefined) {
+    axValidateCallTimeSkillBindings(options.callTimeSkills, {
+      hasWorkingState: options.workingState !== undefined,
+      resolveSkill: axCallTimeSkillCatalogResolver(s.skillsCatalog),
+    });
+  }
   s.onLoadedSkills = options.onLoadedSkills;
   s.onUsedSkills = options.onUsedSkills;
   // Memories: a static catalog backs recall(...) with a built-in local search

@@ -1,3 +1,4 @@
+import type { AxCallTimeSkillRuntime } from '../callTimeSkills.js';
 import type {
   ActionLogEntry,
   CheckpointSummaryState,
@@ -59,6 +60,12 @@ export interface ActorLoopContext {
    * working state.
    */
   skillState?: AxSkillStateRuntime<any>;
+  /**
+   * Call-time skill bindings for this run. Present only when the agent
+   * configured `callTimeSkills`. The loop drains its interceptions once per
+   * turn to ingest the skill and append the harness guidance.
+   */
+  callTimeSkills?: AxCallTimeSkillRuntime;
   mutableState: MutableActorLoopState;
   helpers: ReturnType<typeof buildActorLoopSetup>;
 }
