@@ -1,0 +1,106 @@
+{
+  "name": "skill_state_transition",
+  "kind": "agent_skill_state",
+  "operation": "skill_state_transition",
+  "description": "TypeScript-only (not yet ported to AxIR; see the backlog entry). Core-owned skillState transition semantics: the real SHA-256 rationale digest over canonical bytes, the compare-and-set revision advance, the kernel's BOUNDED single rebase, the mapping of a persistently lost write onto rejection 'fence', and the rule that only an ACCEPTED transition enters the ledger. Host-supplied checker behaviour is deliberately NOT expected here; the checker declared below is a no-op. The store the runner supplies is seeded at revision 4 (a run that has already committed) and, for the second writer only, models a competing writer that commits immediately after each read — the only way a single bounded rebase can still lose. Both are behaviours the declared AxProgramStateStore contract permits; what is asserted is what the kernel does when the store behaves that way.",
+  "source": {
+    "tsDerived": true,
+    "extractor": "src/ax/agent/skillState.ts",
+    "reference": [
+      "src/ax/agent/skillState.ts",
+      "src/ax/agent/workingState.ts",
+      "src/ax/agent/statePatch.ts"
+    ]
+  },
+  "input": {
+    "stateSignature": "orderId:string, itemsPacked:number, shipped:boolean",
+    "storedRevision": 4,
+    "checker": { "id": "noop", "verdict": "pass" },
+    "skill": {
+      "id": "warehouse-pick",
+      "name": "Warehouse picking procedure",
+      "content": "Pick every line on the order, then close the goal by citing the newest inventory.pick receipt ref from the Receipt Roster."
+    },
+    "believedState": {
+      "schemaVersion": 1,
+      "goals": {
+        "g_pick": {
+          "id": "g_pick",
+          "goal": "Pick every line on order 42",
+          "status": "pending",
+          "evidence": [],
+          "expects": ["inventory.pick"],
+          "createdTurn": 1,
+          "updatedTurn": 1
+        }
+      },
+      "facts": { "orderId": "42", "itemsPacked": 0, "shipped": false },
+      "parked": []
+    },
+    "receipts": [
+      {
+        "ref": "r1",
+        "turn": 5,
+        "at": 1700000120000,
+        "call": {
+          "qualifiedName": "inventory.pick",
+          "arguments": { "order": "42" },
+          "result": { "picked": 3 }
+        }
+      }
+    ],
+    "turn": 5,
+    "fence": { "deliveryId": "d-1", "fencingToken": 7 },
+    "transitions": [
+      {
+        "name": "accepted",
+        "concurrentWriter": false,
+        "rationale": "r1 proves order 42 was picked",
+        "patch": [
+          {
+            "op": "add",
+            "path": "/goals/g_pick/evidence/-",
+            "value": { "kind": "tool_receipt", "ref": "r1" }
+          },
+          { "op": "replace", "path": "/goals/g_pick/status", "value": "done" },
+          { "op": "replace", "path": "/facts/itemsPacked", "value": 3 }
+        ]
+      },
+      {
+        "name": "lost-compare-and-set",
+        "concurrentWriter": true,
+        "rationale": "r1 proves order 42 was picked",
+        "patch": [
+          {
+            "op": "add",
+            "path": "/goals/g_pick/evidence/-",
+            "value": { "kind": "tool_receipt", "ref": "r1" }
+          },
+          { "op": "replace", "path": "/goals/g_pick/status", "value": "done" },
+          { "op": "replace", "path": "/facts/itemsPacked", "value": 3 }
+        ]
+      }
+    ]
+  },
+  "expected": {
+    "transitions": [
+      {
+        "accepted": true,
+        "committedRevision": 5,
+        "recordedLedgerLength": 1,
+        "rationaleDigest": "8eaa59a208231b7e64f5a338c5844eeacb83c5c8f981f6222d1a54e0aa6ea618"
+      },
+      {
+        "accepted": false,
+        "rejection": "fence",
+        "committedRevision": 5,
+        "recordedLedgerLength": 0,
+        "rationaleDigest": "8eaa59a208231b7e64f5a338c5844eeacb83c5c8f981f6222d1a54e0aa6ea618"
+      }
+    ],
+    "goalStatusesAfter": { "g_pick": "done" },
+    "storedRevisionAfterNote": "The loser's committedRevision is 5, not 6: it rebased onto revision 5 and then lost again, so it never committed and reports the revision it last read. The store reaches 7 because the competing writer commits after each of the loser's two reads — one for the rebase, one for the conflict-versus-outage check.",
+    "storedRevisionAfter": 7,
+    "fenceSeenByStore": true
+  }
+}
