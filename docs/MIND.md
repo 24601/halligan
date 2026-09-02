@@ -128,6 +128,13 @@ mode; an always-alive loop that owns an injected clock is not.
 - The **watchdog duty** synthesizes `ax.mind.idle` after a quiet-while-free
   window. Running or deferred work refreshes it, so a long agentic run never
   ends in a spurious wake.
+- A mind runs **one event worker per thinker**, not the runtime's pool
+  default. A wake is pinned to `instanceKey = thinker`, so extra workers can
+  only contend for the same deliveries, and the measured consequence of that
+  contention is a claim going stale mid-model-call and aborting a run that was
+  doing nothing wrong.
+- A wake that fails past its attempt budget appends NOTHING -- nothing ran --
+  so `deadLetters()` is the only place a host can see one.
 - Every liveness bug degrades to a `<= watchdogMs` delay, never a dead mind. A
   hung step holds the watchdog off — long runs are legitimate — but is bounded
   by its own `maxWallClockMs`.
@@ -146,6 +153,12 @@ Exactly one reply per inbound message, or a recorded decline, through five
 layers: `replyTo` stamped at the transport, the positional net, the TTL'd
 claim, the recorded `decision` observation, and a reply-state check at the send
 site itself.
+
+Outbound chat is reached through `mind.chatAs(thinker)`, so a reply and a
+recorded decision carry the identity of the thinker that composed them rather
+than whichever thinker happened to be first in the table -- the resolution
+table below reads that identity to decide whose claim a decline can cancel.
+`mind.chat` is the mind-level handle, for a host that is not a thinker.
 
 `axResolveMindReplyState` answers the FACT ("has this been answered"), never
 the JUDGMENT ("does it need a reply"). The rows are a PRIORITY order:

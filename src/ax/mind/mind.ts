@@ -850,7 +850,13 @@ export class AxMind {
       signal
     );
     if (runtime) runtime.subRuns++;
-    this.newestStep = { seq: this.newestStep.seq + 1, ts: this.clock.now() };
+    // A sub-run writes a fork step AND a merge step into this trajectory, so
+    // the count is re-grounded from the store rather than guessed at.
+    const stats = await this.options.store.stats(
+      this.options.trajectoryId,
+      signal
+    );
+    if (stats) this.newestStep = { seq: stats.newestSeq, ts: stats.newestTs };
     this.trajectorySource.notify();
     return result;
   }

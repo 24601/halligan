@@ -68,7 +68,7 @@ import { describe, expect, it } from 'vitest';
  *   list) and the prompt assembly both land here too.
  * Measured at this raise: types 571, pacer 284, health 138, routes 222,
  * sources 594, chat 768, salience 163, skills 134, context 138, step 137,
- * subruns 121, thinkers 469, mind 1_255, index 168.
+ * subruns 121, thinkers 469, mind 1_261, index 168.
  */
 const CAPS: readonly (readonly [string, number])[] = [
   ['src/ax/mind/types.ts', 600], // raised from 430, then 480
