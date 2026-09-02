@@ -1,0 +1,162 @@
+{
+  "kind": "program_contract",
+  "name": "playbook-evidence-gate",
+  "notes": "TS-derived contract for the playbook evidence gate chain and for batch completeness under environment-failure discards. The generated targets do not yet implement this behavior, so they run the fixture through the program_contract shape and assert nothing about it; the executable assertions live in the consumer named below and are recorded as an open AxIR backlog entry. The three contracts are chosen so that a stub cannot satisfy them: a curate-threshold implementation rejects the zero-gain prune, a break-based batch loop produces a shorter record list, and a budget-shaped rejection string fails the environment-incomplete case.",
+  "source": {
+    "tsDerived": true,
+    "consumer": "scripts/playbook-evidence-conformance.test.ts",
+    "reference": [
+      "src/ax/agent/agentInternal/playbookEvolve/gates.ts",
+      "src/ax/agent/agentInternal/playbookEvolve/evalHarness.ts",
+      "src/ax/agent/agentInternal/playbookEvolve/termination.ts"
+    ],
+    "name": "playbook-evidence-gate",
+    "observed": {}
+  },
+  "program": "gen",
+  "program_id": "root.agent.playbook.evolve",
+  "signature": "question:string -> answer:string",
+  "gate_order": [
+    "gain",
+    "held_out",
+    "retention",
+    "validity",
+    "interval",
+    "reach",
+    "prune_size",
+    "veto",
+    "authority"
+  ],
+  "cases": [
+    {
+      "name": "gate-order-short-circuits-on-the-first-required-failure",
+      "gate_chain": {
+        "kind": "curate",
+        "gain": {
+          "revalComplete": true,
+          "currentGain": 0.0,
+          "threshold": 0.05
+        },
+        "heldOut": { "delta": -1.0, "tolerance": 0.01 }
+      },
+      "expected": {
+        "entries": 9,
+        "failedGate": "gain",
+        "accepts": false
+      }
+    },
+    {
+      "name": "prune-variant-passes-a-zero-gain-removal",
+      "gate_chain": {
+        "kind": "prune",
+        "gain": { "revalComplete": true, "currentGain": 0.0, "threshold": 0.0 },
+        "heldOut": { "delta": 0.0, "tolerance": 0.01 },
+        "pruneSize": {
+          "tokensBefore": 120,
+          "tokensAfter": 100,
+          "minTokenReduction": 1
+        }
+      },
+      "expected": {
+        "entries": 9,
+        "gainStatus": "pass",
+        "pruneSizeStatus": "pass",
+        "accepts": true
+      }
+    },
+    {
+      "name": "prune-variant-still-rejects-a-real-loss",
+      "gate_chain": {
+        "kind": "prune",
+        "gain": {
+          "revalComplete": true,
+          "currentGain": -0.2,
+          "threshold": 0.0
+        },
+        "pruneSize": {
+          "tokensBefore": 120,
+          "tokensAfter": 100,
+          "minTokenReduction": 1
+        }
+      },
+      "expected": { "failedGate": "gain", "accepts": false }
+    },
+    {
+      "name": "counterfactual-reach-cannot-satisfy-a-required-reach-gate",
+      "gate_chain": {
+        "kind": "curate",
+        "gain": {
+          "revalComplete": true,
+          "currentGain": 0.2,
+          "threshold": 0.05
+        },
+        "reach": {
+          "mode": "require",
+          "basis": "applicability_counterfactual",
+          "gateEligible": false,
+          "reachRate": 1.0,
+          "reachedTasks": 3,
+          "taskCount": 3
+        }
+      },
+      "expected": {
+        "failedGate": "reach",
+        "reachStatus": "unmeasured",
+        "accepts": false
+      }
+    }
+  ],
+  "batch_completeness": [
+    {
+      "name": "discards-leave-the-denominator-and-the-batch-continues",
+      "tasks": 5,
+      "runsPerTask": 1,
+      "budget": 50,
+      "discard": ["t2:0:0"],
+      "expected": {
+        "records": 4,
+        "recordTaskIds": ["t1", "t3", "t4", "t5"],
+        "executedRuns": 4,
+        "discardedRuns": 1,
+        "expectedRuns": 5,
+        "tasksWithNoScoredAttempt": 1,
+        "truncatedAtTaskIndex": null,
+        "complete": false,
+        "exhausted": false
+      }
+    },
+    {
+      "name": "discards-do-not-score-as-zeros",
+      "tasks": 5,
+      "runsPerTask": 2,
+      "budget": 50,
+      "discard": ["t1:0:0", "t2:1:0", "t3:0:0"],
+      "expected": {
+        "records": 5,
+        "executedRuns": 7,
+        "discardedRuns": 3,
+        "expectedRuns": 10,
+        "discardRate": 0.3,
+        "mean": 1.0,
+        "complete": true
+      }
+    },
+    {
+      "name": "budget-exhaustion-truncates-and-says-where",
+      "tasks": 5,
+      "runsPerTask": 1,
+      "budget": 2,
+      "discard": [],
+      "expected": {
+        "records": 2,
+        "truncatedAtTaskIndex": 2,
+        "exhausted": true,
+        "complete": false
+      }
+    }
+  ],
+  "rejection_reasons": {
+    "environment_incomplete": "evaluation incomplete due to environment failures (1 tasks)",
+    "forbidden_substring": "metric_budget"
+  }
+}
