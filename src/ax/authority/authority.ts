@@ -1,4 +1,5 @@
 import type { AxFunction } from '../ai/types.js';
+import { axIsEvidenceRequirement } from './evidence.js';
 import type {
   AxActor,
   AxAuthorityClaim,
@@ -10,12 +11,15 @@ import type {
   AxAuthorizationRequestContext,
   AxCapabilityGrant,
   AxDelegationClaims,
+  AxEvidenceRequirement,
   AxResourceScope,
 } from './types.js';
 
 let fallbackRequestId = 0;
 const authoritySnapshots = new WeakSet<object>();
 const DEFAULT_AUTHORIZE_TIMEOUT_MS = 30_000;
+/** Bounds the per-grant contingency list a host may declare. */
+const MAX_GRANT_REQUIREMENTS = 32;
 
 export class AxAuthorizationDeniedError extends Error {
   constructor(
@@ -146,6 +150,37 @@ function captureActor(
   });
 }
 
+/**
+ * `captureGrant` reconstructs a grant from an explicit field list, so a field
+ * it does not name is silently dropped. Requirements are captured here — and
+ * validated here — so that a declared contingency survives
+ * `axSnapshotAuthority` and so a malformed one throws from
+ * `axValidateCapabilityGrant` rather than at guard-evaluation time.
+ */
+function captureRequirements(
+  value: unknown,
+  label: string
+): readonly Readonly<AxEvidenceRequirement>[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
+  if (value.length > MAX_GRANT_REQUIREMENTS) {
+    throw new Error(`${label} exceeds ${MAX_GRANT_REQUIREMENTS} entries`);
+  }
+  return Object.freeze(
+    Array.from(value, (entry, index) => {
+      if (!axIsEvidenceRequirement(entry)) {
+        throw new Error(`${label}[${index}] is malformed`);
+      }
+      return Object.freeze({
+        kind: entry.kind,
+        trustedSources: Object.freeze([...entry.trustedSources]),
+        ...(entry.maxAgeMs !== undefined ? { maxAgeMs: entry.maxAgeMs } : {}),
+        match: Object.freeze({ ...entry.match }),
+      }) as Readonly<AxEvidenceRequirement>;
+    })
+  );
+}
+
 function captureGrant(
   grant: Readonly<AxCapabilityGrant>
 ): Readonly<AxCapabilityGrant> {
@@ -161,6 +196,7 @@ function captureGrant(
   const leaseEpoch = grant?.leaseEpoch;
   const parentGrantId = grant?.parentGrantId;
   const claims = grant?.claims;
+  const requirements = grant?.requirements;
   if (version !== 1) throw new Error('AxCapabilityGrant.version must be 1');
   nonEmpty(id, 'AxCapabilityGrant.id');
   nonEmpty(principalId, 'AxCapabilityGrant.principalId');
@@ -201,6 +237,10 @@ function captureGrant(
     ? captureActor(actor as Readonly<AxActor>, 'AxCapabilityGrant.actor')
     : undefined;
   const capturedClaims = captureClaims(claims, 'AxCapabilityGrant.claims');
+  const capturedRequirements = captureRequirements(
+    requirements,
+    'AxCapabilityGrant.requirements'
+  );
   return Object.freeze({
     version,
     id,
@@ -221,6 +261,7 @@ function captureGrant(
     leaseEpoch,
     ...(parentGrantId !== undefined ? { parentGrantId } : {}),
     ...(capturedClaims ? { claims: capturedClaims } : {}),
+    ...(capturedRequirements ? { requirements: capturedRequirements } : {}),
   });
 }
 
