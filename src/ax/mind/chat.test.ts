@@ -346,6 +346,40 @@ describe('axResolveMindReplyState', () => {
     ).toBe('declined');
   });
 
+  it("a loser's decline does not cancel the claim owner's reply", () => {
+    const claim = step({
+      seq: 2,
+      type: 'reply-claim',
+      triggerStep: 'trigger',
+      launchedBy: 'responder',
+      data: { claimId: 'c1', expiresAt: 9_000 },
+    });
+    const declined = step({
+      seq: 3,
+      type: 'observation',
+      triggerStep: 'trigger',
+      source: 'responder-b',
+      data: { decision: 'no-reply' },
+    });
+    const owned = { ...options, owner: 'responder' };
+    // The mirror of the inert-loser-claim rule. A responder that lost the
+    // race and stood down must not turn the winner's reply into a drop.
+    expect(
+      axResolveMindReplyState([trigger, claim, declined], owned).state
+    ).toBe('unanswered');
+    // The owner's OWN decline still sticks, and so does anyone's when this
+    // thinker holds no claim.
+    expect(
+      axResolveMindReplyState(
+        [trigger, claim, { ...declined, source: 'responder' }],
+        owned
+      ).state
+    ).toBe('declined');
+    expect(axResolveMindReplyState([trigger, declined], owned).state).toBe(
+      'declined'
+    );
+  });
+
   it('the positional net catches an unstamped reply to the same sender', () => {
     const unstamped = step({
       seq: 2,
@@ -854,11 +888,11 @@ describe('the ledger boundary', () => {
     expect(await messages(store)).toHaveLength(1);
   });
 
-  it('key reuse with different content fails closed', async () => {
+  it('the send site refuses a duplicate reply and appends nothing', async () => {
     const { store, clock } = await seed();
     const transport = transportFor();
     const trigger = await inbound(store, 'ada', 'ping');
-    const error = await withLedger(async (effects) => {
+    const outcome = await withLedger(async (effects) => {
       const chat = axMindChat({
         trajectoryId: TRAJECTORY,
         store,
@@ -867,21 +901,85 @@ describe('the ledger boundary', () => {
         transport,
         effects: () => effects,
       });
-      await chat.send({ to: 'ada', content: 'pong', replyTo: trigger.stepId });
-      // Same antecedent, same recipient, DIFFERENT body: the canonical
-      // request digest refuses to reuse the key rather than quietly send it.
-      return chat
+      const first = await chat.send({
+        to: 'ada',
+        content: 'pong',
+        replyTo: trigger.stepId,
+      });
+      // The last guard, reached by a bare `send` that never consulted
+      // reply state: the same body, and a different body under the same
+      // antecedent, are both refused before any effect is declared.
+      const repeat = await chat
+        .send({ to: 'ada', content: 'pong', replyTo: trigger.stepId })
+        .catch((one) => one);
+      const different = await chat
         .send({
           to: 'ada',
           content: 'a different pong',
           replyTo: trigger.stepId,
         })
         .catch((one) => one);
+      return { first, repeat, different };
+    });
+    expect(axIsMindChatError(outcome.repeat)).toBe(true);
+    expect((outcome.repeat as { reason: string }).reason).toBe(
+      'already_answered'
+    );
+    expect((outcome.different as { reason: string }).reason).toBe(
+      'already_answered'
+    );
+    expect(transport.sent).toHaveLength(1);
+    // Trigger plus exactly one outbound step: a refusal writes no message.
+    expect(await messages(store)).toHaveLength(2);
+  });
+
+  it('a duplicate send appends no second message step', async () => {
+    const { store, clock } = await seed();
+    const transport = transportFor();
+    const outcome = await withLedger(async (effects) => {
+      const chat = axMindChat({
+        trajectoryId: TRAJECTORY,
+        store,
+        clock,
+        sender: 'monolith',
+        transport,
+        effects: () => effects,
+      });
+      const body = { to: 'ada', content: 'the same unsolicited hello' };
+      const first = await chat.send(body);
+      // Key reuse: the effect is already `succeeded`, so nothing leaves the
+      // process. The append-only log must not gain a second reply either --
+      // there is no delete path to take one back.
+      const second = await chat.send(body);
+      return { first, second };
+    });
+    expect(transport.sent).toHaveLength(1);
+    expect(outcome.second.stepId).toBe(outcome.first.stepId);
+    expect(await messages(store)).toHaveLength(1);
+  });
+
+  it('key reuse with a different body fails closed at the ledger', async () => {
+    const error = await withLedger(async (effects) => {
+      const key = await axMindChatIdempotencyKey({
+        identityScope: TRAJECTORY,
+        to: 'ada',
+        replyTo: 'trigger',
+      });
+      const declare = (content: string) =>
+        effects.declareEffect({
+          operation: axMindChatOperation,
+          idempotencyKey: key,
+          replaySafety: 'unknown',
+          metadata: { to: 'ada', trajectoryId: TRAJECTORY, content },
+        });
+      await declare('pong');
+      // Same key, DIFFERENT canonical request: the ledger refuses the reuse
+      // rather than quietly treating a new message as the old one.
+      return declare('a different pong').catch((one) => one);
     });
     expect(String((error as Error).message)).toContain(
       'conflicts with existing'
     );
-    expect(transport.sent).toHaveLength(1);
   });
 
   it('a settled effect with no message step answers, and reconcile appends it', async () => {

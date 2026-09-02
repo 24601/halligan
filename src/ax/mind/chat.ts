@@ -114,35 +114,8 @@ export function axResolveMindReplyState(
       widened,
     });
 
-  const stamped = after.find(
-    (step) =>
-      step.type === 'message' &&
-      ours(step) &&
-      text(step.data.replyTo) === options.triggerStepId
-  );
-  if (stamped) return resolved('answered', stamped);
-  if (
-    options.triggerKey &&
-    options.settledSendKeys?.includes(options.triggerKey)
-  ) {
-    // The ledger settled a send under this trigger's key. The message step may
-    // not exist yet (crash C10) and answered-ness must not wait for it.
-    return resolved('answered');
-  }
-  const replied = decision('replied');
-  if (replied) return resolved('answered', replied);
-  const declined = decision('no-reply');
-  // A recorded decline STICKS across redelivery: the mind does not re-compose
-  // an answer it already decided not to send.
-  if (declined) return resolved('declined', declined);
-  const positional = after.find(
-    (step) =>
-      step.type === 'message' &&
-      ours(step) &&
-      text(step.data.to) === options.triggerFrom
-  );
-  if (positional) return resolved('answered', positional);
-
+  // The claim scan runs FIRST so ownership is known to the rows below; the
+  // RESULT priority is still the §7.6 order, decided after this.
   let failedOpen = false;
   const live: Readonly<AxTrajectoryStep>[] = [];
   for (const step of after) {
@@ -170,6 +143,40 @@ export function axResolveMindReplyState(
   const winner = live[0];
   const ownWinner =
     options.owner !== undefined && winner?.launchedBy === options.owner;
+
+  const stamped = after.find(
+    (step) =>
+      step.type === 'message' &&
+      ours(step) &&
+      text(step.data.replyTo) === options.triggerStepId
+  );
+  if (stamped) return resolved('answered', stamped);
+  if (
+    options.triggerKey &&
+    options.settledSendKeys?.includes(options.triggerKey)
+  ) {
+    // The ledger settled a send under this trigger's key. The message step may
+    // not exist yet (crash C10) and answered-ness must not wait for it.
+    return resolved('answered');
+  }
+  const replied = decision('replied');
+  if (replied) return resolved('answered', replied);
+  const declined = decision('no-reply');
+  // A recorded decline STICKS across redelivery: the mind does not re-compose
+  // an answer it already decided not to send. One exception, the mirror of
+  // the inert-loser-claim rule: a decline recorded by ANOTHER thinker cannot
+  // cancel the reply of the thinker holding the winning claim. A loser that
+  // stood down would otherwise turn the winner's reply into a silent drop.
+  if (declined && !(ownWinner && declined.source !== options.owner)) {
+    return resolved('declined', declined);
+  }
+  const positional = after.find(
+    (step) =>
+      step.type === 'message' &&
+      ours(step) &&
+      text(step.data.to) === options.triggerFrom
+  );
+  if (positional) return resolved('answered', positional);
   if (winner && !ownWinner) return resolved('claimed', winner);
   return resolved('unanswered', winner, failedOpen);
 }
@@ -250,8 +257,13 @@ function settledSendKeys(
 /**
  * Exactly one reply per inbound message, or a recorded decline (M12), through
  * five layers: `replyTo` stamped at the transport, the positional net, the
- * TTL'd claim, the recorded decision, and the ledger idempotency key at the
- * send site. The claim fails OPEN; every other layer fails closed.
+ * TTL'd claim, the recorded decision, and a reply-state check at the send site
+ * itself. The claim fails OPEN; every other layer fails closed.
+ *
+ * The ledger's idempotency key is a sixth layer with a stated limit: effects
+ * are keyed PER DELIVERY (`event/memoryStore.ts` `listEffects(deliveryId)`),
+ * so it dedupes a retried attempt inside one delivery and the send-site
+ * reply-state check is what carries the guarantee across deliveries.
  */
 export const axMindChat = (
   options: Readonly<AxMindChatOptions>
@@ -407,6 +419,33 @@ export const axMindChat = (
     return step!;
   };
 
+  /**
+   * The message step a send under this key already produced. Both origins
+   * count: `appendMessage` writes the full body, `axMindReconcileChatSends`
+   * replays the ledger metadata, which is truncated at
+   * `METADATA_CONTENT_BYTES`.
+   */
+  const settledSendStep = async (
+    message: Readonly<AxMindChatMessage>,
+    content: string,
+    signal?: AbortSignal
+  ): Promise<Readonly<AxTrajectoryStep> | undefined> => {
+    const tail = await store.tailBackward(
+      { trajectoryId, limit: tailLimit * 4, types: ['message'] },
+      signal
+    );
+    return tail.steps.find(
+      (step) =>
+        step.source !== undefined &&
+        selfSources.includes(step.source) &&
+        text(step.data.to) === message.to &&
+        (message.replyTo
+          ? text(step.data.replyTo) === message.replyTo
+          : text(step.data.content) === message.content ||
+            text(step.data.content) === content)
+    );
+  };
+
   const send = async (
     message: Readonly<AxMindChatMessage>,
     signal?: AbortSignal
@@ -443,6 +482,23 @@ export const axMindChat = (
         'self_addressed'
       );
     }
+    if (message.replyTo) {
+      // THE LAST GUARD, and the only one a bare `send` tool call reaches:
+      // when the message answers something, the fact decides, not the caller.
+      const state = await replyState(message.replyTo, signal);
+      if (state.state !== 'unanswered') {
+        diagnose(
+          'reply-duplicate-suppressed',
+          `refused a second reply to ${message.replyTo} at the send site: already ${state.state}`,
+          state.evidenceStepId
+        );
+        throw new AxMindChatError(
+          `AxMindChat refuses a second reply to ${message.replyTo}: already ${state.state}`,
+          state.state === 'claimed' ? 'claimed' : 'already_answered',
+          state.evidenceStepId
+        );
+      }
+    }
     const effects = ledger();
     const content = axTrajectoryTruncateUtf8(
       message.content,
@@ -469,13 +525,20 @@ export const axMindChat = (
     });
     if (declared.status === 'succeeded') {
       // Key reuse returned the original record: this exact message already
-      // left the process. Converge the log instead of sending twice.
-      const [reconciled] = await axMindReconcileChatSends({
-        ...options,
-        effects: () => effects,
-      });
-      if (reconciled) return reconciled;
-      return appendMessage(message, signal);
+      // left the process. Converge the log to the ledger and hand back the
+      // step that send produced -- NEVER append a second one. The log is
+      // append-only with no update or delete path, so a phantom step would
+      // assert forever that the mind replied twice when it replied once.
+      await axMindReconcileChatSends(
+        { ...options, effects: () => effects },
+        signal
+      );
+      const existing = await settledSendStep(message, content, signal);
+      if (existing) return existing;
+      throw new AxMindChatError(
+        `AxMindChat already sent ${idempotencyKey} and no message step names it`,
+        'already_answered'
+      );
     }
     if (declared.status !== 'intent') {
       diagnose(
