@@ -1961,6 +1961,7 @@ import {
   AxMediaNotSupportedError,
   AxTokenLimitError,
 } from './util/apicall.js';
+import { axAssertPersistableValue } from './util/persistable.js';
 import {
   AxRateLimiterTokenUsage,
   type AxRateLimiterTokenUsageOptions,
@@ -2184,6 +2185,7 @@ export { axApplyMCPAuthentication };
 export { axApplyOpenAIChatAudioRequest };
 export { axAssertDigestStrength };
 export { axAssertHarnessStampFresh };
+export { axAssertPersistableValue };
 export { axAttachCausalCandidateEvidence };
 export { axAttenuateAuthority };
 export { axAudioFormatFromMimeType };
