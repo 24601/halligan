@@ -291,6 +291,13 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
   - TS paths: `src/ax/authority/types.ts`, `src/ax/authority/evidence.ts`, `src/ax/authority/skillProvenance.ts`, `src/ax/authority/index.ts`
   - Impact: Adds AxSkillProvenance with a deterministic model-free extraction from the effect ledger and authorization receipts, a capped and truncation-flagged accumulator, an fnv1a64 identity digest, and a retrieval-time re-check resolving eight failure kinds through a policy record to admit, downgrade, park or drop. Guidance defaults to an annotated advisory and executables to park; an absent host axis is skipped rather than failed and absent provenance admits. No behaviour change when no artifact carries provenance.
   - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+- `axir-2026-09-02-skillstate-actor-memory-mode-frozen-skill-spec-plus-typed-state-` [axagent] skillState actor memory mode: frozen skill spec plus typed state as the actor prompt substrate
+  - Status: open
+  - Source PR: #94
+  - Source commit: `5e087d2298084e8d4028a571728f3ad6c060cd3d`
+  - TS paths: `src/ax/agent/skillState.ts`
+  - Impact: Adds an opt-in second prompt substrate to the actor loop. Under actorMemoryMode 'skillState' the prompt is a frozen skill spec, the declared state contract, the typed working-state document, the read-only receipt roster and the latest observation; the action log is neither replayed nor rendered nor checkpoint-summarized. The actor emits an optional typed RFC-6902 statePatch and a rationale that is digested and discarded; AxSkillStateRuntime validates the patch through the working-state kernel and host checker and commits it through AxProgramStateStore.compareAndSet under the configured fence, recording one transition per ACCEPTED transition with a non-optional committedRevision and a schema/authority/fence/invariant rejection vocabulary. The actor prompt measurement now reads the same value record the turn sends. Default behaviour is unchanged when actorMemoryMode is unset.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 - `axir-2026-09-02-typed-evidence-observations-guard-predicates-and-evidence-guards` [runtime] Typed evidence observations, guard predicates, and evidence guards at the host-authority boundary
   - Status: open
   - Source PR: #85
