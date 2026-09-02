@@ -28,9 +28,15 @@ import {
   type AxGuardEvaluation,
   type AxGuardFailureCode,
   type AxGuardOp,
+  type AxHarnessEntry,
+  type AxHarnessGateDecision,
+  type AxHarnessTree,
   AxInMemoryDemandStore,
   AxJSRuntime,
   type AxJSRuntimeSpeculationEvent,
+  type AxLearningReceipt,
+  type AxLearningRecord,
+  type AxLearningStore,
   type AxMetricFn,
   type AxMetricResult,
   type AxMultiMetricFn,
@@ -38,14 +44,20 @@ import {
   type AxProgrammable,
   type AxProgramSource,
   ax,
+  axAssertPersistableValue,
   axCollectGrantRequirements,
+  axCreateLearningEngineState,
   axDemandEventObserver,
   axEvaluateGuards,
   axEventComponentManager,
   axExecutableSkillRef,
+  axInMemoryLearningStore,
   axIsEvidenceRequirement,
   axIsGuardPredicateFailure,
+  axLearningEngineIngest,
   axProgramSourceRuntimeProtocol,
+  axReportSchema,
+  axScoreWindowProcessor,
   axSelectExecutableSkills,
   f,
   flow,
@@ -53,6 +65,7 @@ import {
   optimize,
   programSource,
   react,
+  runAxLearningStoreConformance,
 } from './index.js';
 import type { Equal, Expect, Flatten } from './util/typetest.js';
 
@@ -869,6 +882,7 @@ void cutOperator;
 
 // @ts-expect-error a guard failure has no value channel.
 void guardEvaluation.failures[0]?.value;
+
 // === Track B3 optimizer evidence modules ===
 // These import from './index.js' on purpose: the point is to prove the
 // GENERATED public barrel actually re-exports them, not merely that the modules
@@ -1012,3 +1026,32 @@ const playbookEvolveError = new AxAgentPlaybookEvolveError(
 const isPlaybookEvolveError: boolean =
   axIsAgentPlaybookEvolveError(playbookEvolveError);
 void isPlaybookEvolveError;
+// === Learning surface public API ===
+const learningStore: AxLearningStore = axInMemoryLearningStore({
+  maxRecordsPerScenario: 100,
+});
+void learningStore.capabilities.compareAndSet;
+void runAxLearningStoreConformance;
+
+const learningEngine = axCreateLearningEngineState({
+  scenario: 'support-triage',
+  processor: axScoreWindowProcessor({ batchSize: 2, maxScore: 0 }),
+  sampleFields: ['input', 'output', 'failure'],
+});
+declare const someLearningRecord: AxLearningRecord;
+void axLearningEngineIngest(learningEngine, someLearningRecord);
+
+declare const someReceipt: AxLearningReceipt;
+void someReceipt.artifactRef?.contentId;
+
+const harnessTree: AxHarnessTree = [
+  { id: 'tone', kind: 'instruction', config: { text: 'Answer briefly.' } },
+];
+const harnessEntry: AxHarnessEntry | undefined = harnessTree[0];
+void harnessEntry;
+
+declare const harnessGate: AxHarnessGateDecision;
+void harnessGate.metrics.taskSetDigest;
+
+void axReportSchema({ score: { type: 'number', min: 0, max: 1 } });
+void axAssertPersistableValue({ ok: true }, 'payload');

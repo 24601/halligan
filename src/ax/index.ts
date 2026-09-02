@@ -1601,6 +1601,87 @@ import {
   axWorkerRuntime,
 } from './funcs/worker.runtime.js';
 import {
+  type AxLearningStoreConformanceFactory,
+  type AxLearningStoreConformanceFactoryOptions,
+  type AxLearningStoreConformanceReport,
+  runAxLearningStoreConformance,
+} from './learn/conformance.js';
+import {
+  AxInMemoryLearningStore,
+  type AxInMemoryLearningStoreOptions,
+  axInMemoryLearningStore,
+} from './learn/memoryStore.js';
+import {
+  type AxLearningBatch,
+  type AxLearningDecision,
+  type AxLearningEngineDecisionEntry,
+  type AxLearningEngineOptions,
+  type AxLearningEngineState,
+  type AxLearningEngineStep,
+  type AxLearningNeverReason,
+  type AxLearningProcessor,
+  type AxLearningReferenceResolution,
+  type AxLearningReportContext,
+  type AxLearningTrainingSample,
+  type AxLearningTrainingUnit,
+  type AxScoreWindowProcessorOptions,
+  axCreateLearningEngineState,
+  axLearningEligibility,
+  axLearningEngineAcknowledge,
+  axLearningEngineBuildBatch,
+  axLearningEngineIngest,
+  axLearningEngineNeverReasons,
+  axLearningEngineReady,
+  axScoreWindowProcessor,
+} from './learn/processor.js';
+import {
+  type AxLearningInteractionInput,
+  type AxLearningReportRecordInput,
+  axCreateLearningInteractionRecord,
+  axCreateLearningReportRecord,
+  axLearningFailureFrom,
+  axLearningReceiptFrom,
+  axLearningRecordContent,
+} from './learn/records.js';
+import {
+  type AxReportFieldSchema,
+  type AxReportFieldType,
+  type AxReportSchema,
+  axReportSchema,
+} from './learn/reportSchema.js';
+import {
+  type AxHarnessBulletConfig,
+  type AxHarnessEntry,
+  type AxHarnessEntryKind,
+  type AxHarnessGateDecision,
+  type AxHarnessGateMetrics,
+  type AxHarnessTree,
+  type AxLearningAppendResult,
+  type AxLearningArtifactRef,
+  type AxLearningInteractionPayload,
+  type AxLearningInteractionRecord,
+  type AxLearningReceipt,
+  type AxLearningRecord,
+  AxLearningRecordConflictError,
+  type AxLearningRecordId,
+  AxLearningRecordValidationError,
+  type AxLearningRelease,
+  AxLearningReleaseConflictError,
+  type AxLearningReportInput,
+  type AxLearningReportPayload,
+  type AxLearningReportRecord,
+  AxLearningReportValidationError,
+  type AxLearningScalar,
+  type AxLearningStore,
+  type AxLearningStoreCapabilities,
+  type AxLearningStorePage,
+  type AxLearningStorePageEntry,
+  type AxLearningTreeDelivery,
+  type AxLearningValue,
+  axIsLearningRecordConflictError,
+  axIsLearningReleaseConflictError,
+} from './learn/types.js';
+import {
   AxMCPAppBridge,
   type AxMCPAppBridgeOptions,
   type AxMCPAppContextUpdate,
@@ -1961,6 +2042,7 @@ import {
   AxMediaNotSupportedError,
   AxTokenLimitError,
 } from './util/apicall.js';
+import { axAssertPersistableValue } from './util/persistable.js';
 import {
   AxRateLimiterTokenUsage,
   type AxRateLimiterTokenUsageOptions,
@@ -2076,6 +2158,7 @@ export { AxInMemoryAgentSessionStore };
 export { AxInMemoryBalancerStatsStore };
 export { AxInMemoryDemandStore };
 export { AxInMemoryEventStore };
+export { AxInMemoryLearningStore };
 export { AxInMemoryProgramStateStore };
 export { AxInMemoryRejectedCandidateLedger };
 export { AxInMemoryTrajectoryBlobStore };
@@ -2086,6 +2169,10 @@ export { AxInteractionTimelineSchema };
 export { AxInteractionTimelineVersion };
 export { AxJSRuntime };
 export { AxJSRuntimePermission };
+export { AxLearningRecordConflictError };
+export { AxLearningRecordValidationError };
+export { AxLearningReleaseConflictError };
+export { AxLearningReportValidationError };
 export { AxMCPAppBridge };
 export { AxMCPClient };
 export { AxMCPDPoPProofFactory };
@@ -2184,6 +2271,7 @@ export { axApplyMCPAuthentication };
 export { axApplyOpenAIChatAudioRequest };
 export { axAssertDigestStrength };
 export { axAssertHarnessStampFresh };
+export { axAssertPersistableValue };
 export { axAttachCausalCandidateEvidence };
 export { axAttenuateAuthority };
 export { axAudioFormatFromMimeType };
@@ -2219,6 +2307,9 @@ export { axCreateFlowTextLogger };
 export { axCreateGeminiLiveAudioApi };
 export { axCreateGrokRealtimeApi };
 export { axCreateJSRuntime };
+export { axCreateLearningEngineState };
+export { axCreateLearningInteractionRecord };
+export { axCreateLearningReportRecord };
 export { axCreateOpenAIRealtimeApi };
 export { axCreateRuntimeAdmissionReceipt };
 export { axCreateRuntimeCapabilities };
@@ -2277,6 +2368,7 @@ export { axHarnessPortId };
 export { axHarnessRecipe };
 export { axHarnessRecipeVersion };
 export { axHarnessStamp };
+export { axInMemoryLearningStore };
 export { axInferComponentClass };
 export { axIpwPairedDifference };
 export { axIpwScore };
@@ -2294,6 +2386,8 @@ export { axIsGuardPredicateFailure };
 export { axIsHarnessPortId };
 export { axIsHarnessRecipeError };
 export { axIsHarnessStampStale };
+export { axIsLearningRecordConflictError };
+export { axIsLearningReleaseConflictError };
 export { axIsMutationTaxonomyError };
 export { axIsOpenAIChatAudioModel };
 export { axIsOpenAIRealtimeModel };
@@ -2308,6 +2402,15 @@ export { axIsTrajectoryBlobError };
 export { axIsTrajectoryCursorError };
 export { axIsTrajectoryQueryError };
 export { axKnownComponentKinds };
+export { axLearningEligibility };
+export { axLearningEngineAcknowledge };
+export { axLearningEngineBuildBatch };
+export { axLearningEngineIngest };
+export { axLearningEngineNeverReasons };
+export { axLearningEngineReady };
+export { axLearningFailureFrom };
+export { axLearningReceiptFrom };
+export { axLearningRecordContent };
 export { axMCPAPIKeyAuthentication };
 export { axMCPAppToolMeta };
 export { axMCPBasicAuthentication };
@@ -2370,6 +2473,7 @@ export { axRejectedCandidatePrior };
 export { axRenewPreferenceEvidence };
 export { axReplaceOptimizedProgramSnapshot };
 export { axReportRuntimeCapabilityContradictions };
+export { axReportSchema };
 export { axResolveAIProfileFeatures };
 export { axResolveAIProfileId };
 export { axResolveGeminiLiveAudioConfig };
@@ -2392,6 +2496,7 @@ export { axRuntimePrimitives };
 export { axRuntimeProtocolFromToken };
 export { axSampleByInclusion };
 export { axScoreProvidersForRequest };
+export { axScoreWindowProcessor };
 export { axSelectCodeRuntime };
 export { axSelectExecutableSkills };
 export { axSelectOptimalProvider };
@@ -2451,6 +2556,7 @@ export { programSource };
 export { react };
 export { refine };
 export { runAxEventStoreConformance };
+export { runAxLearningStoreConformance };
 export { runAxTrajectoryStoreConformance };
 export { s };
 
@@ -3182,14 +3288,21 @@ export type { AxGuardFailure };
 export type { AxGuardFailureCode };
 export type { AxGuardOp };
 export type { AxHarnessAtom };
+export type { AxHarnessBulletConfig };
+export type { AxHarnessEntry };
+export type { AxHarnessEntryKind };
+export type { AxHarnessGateDecision };
+export type { AxHarnessGateMetrics };
 export type { AxHarnessPortId };
 export type { AxHarnessRecipe };
 export type { AxHarnessStamp };
+export type { AxHarnessTree };
 export type { AxIField };
 export type { AxIRRuntimeCapabilities };
 export type { AxIRRuntimeCapabilitiesInput };
 export type { AxInMemoryDemandStoreOptions };
 export type { AxInMemoryEventStoreOptions };
+export type { AxInMemoryLearningStoreOptions };
 export type { AxInMemoryTrajectoryStoreOptions };
 export type { AxInputFunctionType };
 export type { AxInteractionEvent };
@@ -3211,6 +3324,41 @@ export type { AxJSRuntimeSpeculationOptions };
 export type { AxJSRuntimeSpeculationPolicy };
 export type { AxJudgeForwardOptions };
 export type { AxJudgeOptions };
+export type { AxLearningAppendResult };
+export type { AxLearningArtifactRef };
+export type { AxLearningBatch };
+export type { AxLearningDecision };
+export type { AxLearningEngineDecisionEntry };
+export type { AxLearningEngineOptions };
+export type { AxLearningEngineState };
+export type { AxLearningEngineStep };
+export type { AxLearningInteractionInput };
+export type { AxLearningInteractionPayload };
+export type { AxLearningInteractionRecord };
+export type { AxLearningNeverReason };
+export type { AxLearningProcessor };
+export type { AxLearningReceipt };
+export type { AxLearningRecord };
+export type { AxLearningRecordId };
+export type { AxLearningReferenceResolution };
+export type { AxLearningRelease };
+export type { AxLearningReportContext };
+export type { AxLearningReportInput };
+export type { AxLearningReportPayload };
+export type { AxLearningReportRecord };
+export type { AxLearningReportRecordInput };
+export type { AxLearningScalar };
+export type { AxLearningStore };
+export type { AxLearningStoreCapabilities };
+export type { AxLearningStoreConformanceFactory };
+export type { AxLearningStoreConformanceFactoryOptions };
+export type { AxLearningStoreConformanceReport };
+export type { AxLearningStorePage };
+export type { AxLearningStorePageEntry };
+export type { AxLearningTrainingSample };
+export type { AxLearningTrainingUnit };
+export type { AxLearningTreeDelivery };
+export type { AxLearningValue };
 export type { AxLlmQueryBudgetState };
 export type { AxLlmQueryPromptMode };
 export type { AxLoggerData };
@@ -3479,6 +3627,9 @@ export type { AxRejectedCandidateLedgerRef };
 export type { AxRejectedCandidateLedgerStore };
 export type { AxRelevanceHints };
 export type { AxRenderedPrompt };
+export type { AxReportFieldSchema };
+export type { AxReportFieldType };
+export type { AxReportSchema };
 export type { AxResolvedAgentPlaybookConfig };
 export type { AxResolvedAgentPlaybookLearn };
 export type { AxResolvedAutoUpgrade };
@@ -3522,6 +3673,7 @@ export type { AxRuntimeProtocol };
 export type { AxRuntimeSelection };
 export type { AxRuntimeTimeoutEnforcement };
 export type { AxSamplePickerOptions };
+export type { AxScoreWindowProcessorOptions };
 export type { AxSelectExecutableSkillsOptions };
 export type { AxSelectedExecutableSkill };
 export type { AxSelectedPreferenceEvidence };

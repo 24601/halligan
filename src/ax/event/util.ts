@@ -1,4 +1,5 @@
 import { sha256 } from '../util/crypto.js';
+import { axAssertPersistableValue } from '../util/persistable.js';
 import type {
   AxEventContinuation,
   AxEventEffect,
@@ -91,43 +92,12 @@ export async function axEventCanonicalDigest(value: unknown): Promise<string> {
   return sha256(axEventCanonicalJson(value));
 }
 
-function assertPersistable(
-  value: unknown,
-  path: string,
-  seen: Set<object>
-): void {
-  if (
-    value === null ||
-    typeof value === 'string' ||
-    typeof value === 'boolean'
-  ) {
-    return;
-  }
-  if (typeof value === 'number') {
-    if (!Number.isFinite(value)) {
-      throw new Error(`Event value at ${path} must be a finite number`);
-    }
-    return;
-  }
-  if (typeof value !== 'object') {
-    throw new Error(`Event value at ${path} is not persistable`);
-  }
-  if (seen.has(value)) throw new Error(`Event value at ${path} is cyclic`);
-  seen.add(value);
-  if (Array.isArray(value)) {
-    value.forEach((item, index) =>
-      assertPersistable(item, `${path}[${index}]`, seen)
-    );
-  } else {
-    const proto = Object.getPrototypeOf(value);
-    if (proto !== Object.prototype && proto !== null) {
-      throw new Error(`Event value at ${path} must be a plain object`);
-    }
-    for (const [key, item] of Object.entries(value)) {
-      assertPersistable(item, `${path}.${key}`, seen);
-    }
-  }
-  seen.delete(value);
+/**
+ * Thin alias over the shared check so this module's error strings and call
+ * sites stay byte-identical after the extraction to `util/persistable.ts`.
+ */
+function assertPersistable(value: unknown, path: string): void {
+  axAssertPersistableValue(value, path, { label: 'Event value' });
 }
 
 export function axValidateEventEnvelope(
@@ -145,10 +115,10 @@ export function axValidateEventEnvelope(
     throw new Error('AxEventEnvelope.time must be an ISO-8601 timestamp');
   }
   if (envelope.data !== undefined) {
-    assertPersistable(envelope.data, 'data', new Set());
+    assertPersistable(envelope.data, 'data');
   }
   if (envelope.extensions !== undefined) {
-    assertPersistable(envelope.extensions, 'extensions', new Set());
+    assertPersistable(envelope.extensions, 'extensions');
   }
 }
 
@@ -166,7 +136,7 @@ function validateBoundedEffectValue(
   field: string,
   maximum: number
 ): void {
-  assertPersistable(value, field, new Set());
+  assertPersistable(value, field);
   const bytes = axEventValueSizeBytes(value);
   if (bytes > maximum) {
     throw new Error(
