@@ -118,7 +118,7 @@
       "type": "skill-md",
       "description": "This skill helps an LLM generate correct verifier-gated working state code using @ax-llm/ax. Use when the user asks about AxWorkingState, goal ledgers, statePatch, state checkers, tool receipts, parked deltas, or long-horizon agent state.",
       "url": "ax-agent-state/SKILL.md",
-      "digest": "sha256:d7765a34746a7f518f1783f07182e8a450d0b5fafbb9314ad16bd2f8650c6b83"
+      "digest": "sha256:2364038dbe0e1cb5acc986b08e4f081c41957de1ed986dd7cf4398e69636bf90"
     },
     {
       "name": "ax-playbook",

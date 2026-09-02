@@ -136,6 +136,9 @@ classified against one goal and applied to another.
   never be harder than assertion.
 - `id`, `createdTurn`, `updatedTurn` and `expects` are immutable after
   creation. Removing a `done` goal is refused: it is part of the audit record.
+- A goal created and closed in ONE patch is held to the `expects` it declares
+  in that patch, and closing a goal that exists in neither the ledger nor an
+  admissible same-patch `goal_add` parks `no_supporting_receipt`.
 
 ## Receipts and the Roster
 
@@ -190,8 +193,10 @@ budget-bounded** — the same contract `AxEventEffect.status: 'parked'` carries.
 
 - It lands in `document.parked` (rendered into the read-only prompt region)
   and on the trace, and it produces one harness-authored guidance entry.
-- The retained record is the op KIND and a sanitized bounded path. The model's
-  `value` is never retained and never reaches the guidance log.
+- The retained record is the op KIND and the harness's own canonical path,
+  rebuilt from the classification (`/goals/<id>/status`, `/facts/<root>`,
+  `/facts/<undeclared>`, `/<reserved>`). Neither the model's pointer text nor
+  its `value` is retained, and neither reaches the guidance log.
 - `appendGuidanceEntry` collapses consecutive identical entries, so repeated
   identical parks show as ONE guidance entry, not N. The per-park record lives
   in `document.parked` and on the trace.
