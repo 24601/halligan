@@ -9,6 +9,17 @@ export function axTrajectoryId(prefix: string): string {
   return axEventId(prefix);
 }
 
+/**
+ * Shared knob guard: a non-finite or non-positive override falls back. Not
+ * `ax`-prefixed, so it stays out of the generated package index -- it is an
+ * internal helper for projection.ts and rollups.ts, not public API.
+ * Callers that need a whole number must still floor AND clamp the result: a
+ * value in (0, 1) is positive and floors to zero.
+ */
+export function positiveOr(value: number, fallback: number): number {
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
 /** UTF-8 byte length, which is the only size a spill policy may reason about. */
 export function axTrajectoryUtf8ByteLength(value: string): number {
   return encoder.encode(value).byteLength;

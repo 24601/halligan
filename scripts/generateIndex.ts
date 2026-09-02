@@ -110,6 +110,18 @@ const internalExportNames = new Set([
   'axIsOpenAIPromptCachingEnabled',
   'axResolveOpenAIPromptCacheKey',
   'axIsGPT56Family',
+  // Trajectory projection internals: shared between projection.ts and
+  // rollups.ts across the module boundary, deliberately NOT public API. Listed
+  // so a later rename to an `ax` prefix cannot silently publish them.
+  'ScanCursor',
+  'checkMeta',
+  'endSeqOf',
+  'narrativeTypes',
+  'oneLine',
+  'positiveOr',
+  'scanForward',
+  'seqAtIndex',
+  'stepText',
 ]);
 
 function hasValidPrefix(name: string): boolean {

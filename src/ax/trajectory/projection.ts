@@ -13,6 +13,7 @@ import {
   type AxTrajectoryTypeRegistry,
   axTrajectoryMaxStepIds,
 } from './types.js';
+import { positiveOr } from './util.js';
 
 /** Documented knob #1. A block at tier k covers fanout^k filtered steps. */
 export const axTrajectoryDefaultFanout = 10;
@@ -26,10 +27,6 @@ export const axTrajectoryMinRecentSteps = 20;
 export const axTrajectoryScanPageSteps = 512;
 
 const CHARS_PER_TOKEN = 4;
-
-function positive(value: number, fallback: number): number {
-  return Number.isFinite(value) && value > 0 ? value : fallback;
-}
 
 /**
  * budget = min(fraction * window, maxTokens). A bigger window is not
@@ -53,7 +50,7 @@ export function axTrajectoryContextBudget(
     : 0;
   const raw = options.fraction ?? 0.6;
   const fraction = Number.isFinite(raw) && raw > 0 ? Math.min(1, raw) : 0.6;
-  const cap = positive(
+  const cap = positiveOr(
     options.maxTokens ?? axTrajectoryDefaultBudgetTokens,
     axTrajectoryDefaultBudgetTokens
   );
@@ -69,7 +66,7 @@ export function axTrajectoryRecentSize(
   budgetTokens: number,
   tokensPerStep: number = axTrajectoryTokensPerStep
 ): number {
-  const perStep = positive(tokensPerStep, axTrajectoryTokensPerStep);
+  const perStep = positiveOr(tokensPerStep, axTrajectoryTokensPerStep);
   const budget = Number.isFinite(budgetTokens) ? Math.max(0, budgetTokens) : 0;
   return Math.max(
     axTrajectoryMinRecentSteps,
@@ -176,6 +173,28 @@ interface AssembleContext {
   readonly fanout: number;
   readonly startIndex: number;
   readonly signal?: AbortSignal;
+  /** Mutable descent budget. See `axTrajectoryDescentBudget`. */
+  readonly budget: { left: number };
+}
+
+/**
+ * Nodes the staircase may visit before the rest of the pyramid is reported as
+ * one gap instead of probed. A missing COARSE block forks into F children, so
+ * an unsealed or deleted subtree costs O(N / F) store round-trips per wake
+ * without this -- measured at 1,104 `getBlock` calls to emit a single gap
+ * section over a 10k-step log with its blocks dropped. F^2 per pyramid level
+ * pays for a full straddle descent at every tier with room to spare, and the
+ * healthy fully-sealed case costs one probe per section (~24 at 10k).
+ */
+export function axTrajectoryDescentBudget(
+  cut0: number,
+  fanout: number
+): number {
+  const depth = Math.max(
+    1,
+    Math.ceil(Math.log(Math.max(cut0, 1)) / Math.log(fanout))
+  );
+  return fanout * fanout * (depth + 1);
 }
 
 /** RFC 7.8, one row of the table per branch. */
@@ -185,19 +204,33 @@ async function assemble(
   out: AxTrajectoryProjectionSection[]
 ): Promise<void> {
   context.signal?.throwIfAborted();
-  // Prune BEFORE descent: without this the descent forks once per node over
-  // the whole empty pre-enable tree on every single call.
+  // Prune BEFORE descent, and before the budget: without this the descent
+  // forks once per node over the whole empty pre-enable tree on every single
+  // call, and a free prune must never be starved by a paid one.
   if (segment.end <= context.startIndex) {
     pushGap(out, segment.start, segment.end, 'pre-enable');
     return;
   }
+  if (context.budget.left <= 0) {
+    pushGap(out, segment.start, segment.end, 'missing');
+    return;
+  }
+  context.budget.left -= 1;
   const block = await context.rollups?.getBlock(
     context.trajectoryId,
     segment.tier,
     segment.start,
     context.signal
   );
-  if (block && block.end === segment.end) {
+  // All three coordinates, not just `end`: a block filed under the wrong key
+  // by a buggy or hostile store port would otherwise print under a range it
+  // does not cover, and the citation guard is keyed on that range.
+  if (
+    block &&
+    block.tier === segment.tier &&
+    block.start === segment.start &&
+    block.end === segment.end
+  ) {
     out.push({ kind: 'summary', block });
     return;
   }
@@ -240,7 +273,27 @@ export function narrativeTypes(
   // A requested machinery or unknown type is dropped rather than honoured:
   // this is the NARRATIVE projection, and I6 is enforced here, not by
   // trusting every caller to pass the right list.
-  return requested.filter((type) => allowed.has(type));
+  const kept = requested.filter((type) => allowed.has(type));
+  if (requested.length > 0 && kept.length === 0) {
+    // Every store matcher reads [] as "matches nothing", so silently returning
+    // it hands the caller an empty projection with `toIndex: 0` and no way to
+    // tell that from an empty log.
+    throw new AxTrajectoryQueryError(
+      `no narrative type among [${requested.join(', ')}]`,
+      'unsupported_types'
+    );
+  }
+  return kept;
+}
+
+/**
+ * The render is newline-delimited and its frames are what tell a summary from
+ * testimony, so no single interpolated value may span lines. Applied per FIELD
+ * as well as per line: a newline inside one field would otherwise split the
+ * step's own frame.
+ */
+export function oneLine(text: string): string {
+  return text.replace(/\r\n|\r|\n/g, '\\n');
 }
 
 /** Never prints a spilled field's truncated head (invariant I7). */
@@ -258,7 +311,9 @@ export function stepText(step: Readonly<AxTrajectoryStep>): string {
       continue;
     }
     parts.push(
-      `${field}=${typeof value === 'string' ? value : JSON.stringify(value)}`
+      `${oneLine(field)}=${
+        typeof value === 'string' ? oneLine(value) : JSON.stringify(value)
+      }`
     );
   }
   return parts.join(' ');
@@ -283,9 +338,12 @@ function renderSections(
       continue;
     }
     const block = section.block;
-    lines.push(`[${block.start}-${block.end}] ${block.summary}`);
+    // `summary` and `themes` are model output. Unescaped, a summary carrying
+    // the recent-stream header forges verbatim testimony inside the section
+    // that exists to say "this is a pointer, not testimony".
+    lines.push(`[${block.start}-${block.end}] ${oneLine(block.summary)}`);
     if (block.themes.length > 0) {
-      lines.push(`  themes: ${block.themes.join(', ')}`);
+      lines.push(`  themes: ${block.themes.map(oneLine).join(', ')}`);
     }
   }
   lines.push('# Recent (verbatim, oldest first)');
@@ -344,10 +402,20 @@ export async function scanForward(
   types: readonly string[],
   from: ScanCursor,
   endSeq: number,
-  onPage?: (steps: readonly Readonly<AxTrajectoryStep>[], index: number) => void
+  onPage?: (
+    steps: readonly Readonly<AxTrajectoryStep>[],
+    index: number
+  ) => boolean | undefined
 ): Promise<ScanCursor> {
-  const page = Math.floor(
-    positive(options.scanPageSteps ?? axTrajectoryScanPageSteps, 512)
+  // Clamped, not just floored: a page of 0 -- which every value in (0, 1)
+  // floors to -- makes `to === seq`, so the cursor never advances and the loop
+  // spins forever on already-resolved promises, which starves the event loop
+  // so thoroughly that even the abort timer below can never be scheduled.
+  const page = Math.max(
+    1,
+    Math.floor(
+      positiveOr(options.scanPageSteps ?? axTrajectoryScanPageSteps, 512)
+    )
   );
   let index = from.index;
   let seq = from.seq;
@@ -358,9 +426,12 @@ export async function scanForward(
       { trajectoryId: options.trajectoryId, fromSeq: seq, toSeq: to, types },
       options.signal
     );
-    onPage?.(steps, index);
+    const stop = onPage?.(steps, index) === true;
     index += steps.length;
     seq = to;
+    // A visitor that has what it came for stops the walk: without this,
+    // first-time enablement pays two FULL O(N) passes over the raw log.
+    if (stop) break;
   }
   return { index, seq };
 }
@@ -381,8 +452,19 @@ export async function endSeqOf(
 export function checkMeta(
   meta: Readonly<AxTrajectoryRollupMeta>,
   fanout: number,
-  types: readonly string[]
+  types: readonly string[],
+  endSeq: number
 ): void {
+  // A checkpoint past the end of the log is a rollup store bound to a DIFFERENT
+  // life: a fork, a restore from backup, or a rebuilt log under a reused id.
+  // Trusting it makes the projection report history that was never lived --
+  // `total` comes straight from `sealedIndex` when the scan has nothing to do.
+  if (meta.sealedSeq > endSeq || meta.sealedIndex > endSeq) {
+    throw new AxTrajectoryRollupError(
+      `rollup meta is sealed to seq ${meta.sealedSeq} / index ${meta.sealedIndex}, past the log's ${endSeq} steps`,
+      'meta_conflict'
+    );
+  }
   if (meta.fanout !== fanout) {
     throw new AxTrajectoryRollupError(
       `rollup meta was built with fanout ${meta.fanout}, not ${fanout}`,
@@ -405,7 +487,7 @@ export async function axProjectTrajectory(
   const types = narrativeTypes(registry, options.types);
   const fanout = Math.max(
     2,
-    Math.floor(positive(options.fanout ?? axTrajectoryDefaultFanout, 10))
+    Math.floor(positiveOr(options.fanout ?? axTrajectoryDefaultFanout, 10))
   );
   const budgetTokens = Math.max(
     0,
@@ -418,13 +500,13 @@ export async function axProjectTrajectory(
         axTrajectoryRecentSize(budgetTokens, options.tokensPerStep)
     )
   );
+  const endSeq = await endSeqOf(options);
   const meta = await options.rollups?.loadMeta(
     options.trajectoryId,
     options.signal
   );
-  if (meta) checkMeta(meta, fanout, types);
+  if (meta) checkMeta(meta, fanout, types, endSeq);
 
-  const endSeq = await endSeqOf(options);
   const scanned =
     options.filteredCount !== undefined
       ? { index: Math.max(0, Math.floor(options.filteredCount)), seq: endSeq }
@@ -447,6 +529,7 @@ export async function axProjectTrajectory(
     fanout,
     startIndex,
     ...(options.signal ? { signal: options.signal } : {}),
+    budget: { left: axTrajectoryDescentBudget(cut0, fanout) },
   };
   const life: AxTrajectoryProjectionSection[] = [];
   for (const segment of decompose(cut0, fanout)) {
@@ -517,6 +600,7 @@ export async function seqAtIndex(
         if (at + offset === target - 1)
           found = { index: target, seq: step.seq + 1 };
       });
+      return found.seq > 0;
     }
   );
   return target === 0 ? { index: 0, seq: 0 } : found;

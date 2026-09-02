@@ -28,6 +28,7 @@ export {
   AxInMemoryTrajectoryStore,
 } from './memoryStore.js';
 export type {
+  AxTrajectoryContextBudgetOptions,
   AxTrajectoryProjection,
   AxTrajectoryProjectionOptions,
   AxTrajectoryProjectionSection,
@@ -39,6 +40,7 @@ export {
   axTrajectoryContextBudget,
   axTrajectoryDefaultBudgetTokens,
   axTrajectoryDefaultFanout,
+  axTrajectoryDescentBudget,
   axTrajectoryMinRecentSteps,
   axTrajectoryRecentSize,
   axTrajectoryScanPageSteps,
@@ -66,6 +68,8 @@ export {
   AxInMemoryTrajectoryRollupStore,
   axBuildTrajectoryRollups,
   axDeterministicTrajectorySummarizer,
+  axTrajectoryMaxSummaryBytes,
+  axTrajectoryMaxThemes,
   axTrajectoryProgramSummarizer,
   axTrajectoryRollupSignature,
 } from './rollups.js';

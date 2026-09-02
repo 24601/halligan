@@ -1974,6 +1974,7 @@ import {
   axTrajectoryContextBudget,
   axTrajectoryDefaultBudgetTokens,
   axTrajectoryDefaultFanout,
+  axTrajectoryDescentBudget,
   axTrajectoryMinRecentSteps,
   axTrajectoryRecentSize,
   axTrajectoryScanPageSteps,
@@ -1999,6 +2000,8 @@ import {
   type AxTrajectorySummarizerResult,
   axBuildTrajectoryRollups,
   axDeterministicTrajectorySummarizer,
+  axTrajectoryMaxSummaryBytes,
+  axTrajectoryMaxThemes,
   axTrajectoryProgramSummarizer,
   axTrajectoryRollupSignature,
 } from './trajectory/rollups.js';
@@ -2614,10 +2617,13 @@ export { axTrajectoryCompactData };
 export { axTrajectoryContextBudget };
 export { axTrajectoryDefaultBudgetTokens };
 export { axTrajectoryDefaultFanout };
+export { axTrajectoryDescentBudget };
 export { axTrajectoryId };
 export { axTrajectoryInlineBytes };
 export { axTrajectoryInvalidFieldPath };
 export { axTrajectoryMaxStepIds };
+export { axTrajectoryMaxSummaryBytes };
+export { axTrajectoryMaxThemes };
 export { axTrajectoryMinRecentSteps };
 export { axTrajectoryProgramSummarizer };
 export { axTrajectoryRecentSize };

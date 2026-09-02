@@ -232,7 +232,11 @@ export class AxTrajectoryQueryError extends Error {
       | 'unbounded_read'
       | 'too_many_ids'
       | 'invalid_range'
-      | 'unknown_trajectory',
+      | 'unknown_trajectory'
+      // A requested type set that no narrative type survives. Additive: the
+      // projection has to fail loudly where every matcher reads [] as
+      // "matches nothing".
+      | 'unsupported_types',
     options?: ErrorOptions
   ) {
     super(message, options);

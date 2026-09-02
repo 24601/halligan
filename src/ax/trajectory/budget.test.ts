@@ -36,34 +36,43 @@ import { describe, expect, it } from 'vitest';
  * and sealing). Neither half is understandable in an afternoon inside the
  * other.
  *
- * Measured at this cap raise: types 461, util 141, registry 171, spill 158,
- * log 483, memoryStore 507, conformance 676, index 134, projection 494,
- * rollups 560 -- 3,785 in total. conformance.ts remains the biggest single
+ * The A2 REVIEW pass restates it once more, for the five defects the
+ * adversarial review found and the guards that close them: a bounded staircase
+ * descent (`axTrajectoryDescentBudget`), attempt-bounded rather than
+ * success-bounded sealing, clamped scan pages, per-value one-lining in the
+ * renderer so model output cannot forge a verbatim frame, a checkpoint checked
+ * against the log, and a seal-time summary clip. Each is a few lines of code
+ * and a paragraph saying what it is defending against, which is the ratio this
+ * directory has had from the start.
+ *
+ * Measured at this cap raise: types 465, util 151, registry 171, spill 158,
+ * log 483, memoryStore 507, conformance 676, index 138, projection 577,
+ * rollups 596 -- 3,922 in total. conformance.ts remains the biggest single
  * overrun of the RFC's estimate (470): it is seventeen named cases, and the
  * A1 review's B1, Mn3, Mn4, Mn5 and Mn6 each added a normative assertion the
  * kit could not previously make.
  */
 const CAPS: readonly (readonly [string, number])[] = [
   ['src/ax/trajectory/types.ts', 480],
-  ['src/ax/trajectory/util.ts', 150],
+  ['src/ax/trajectory/util.ts', 160], // raised from 150 by the shared knob guard
   ['src/ax/trajectory/registry.ts', 190],
   ['src/ax/trajectory/spill.ts', 175], // raised from 170
   ['src/ax/trajectory/log.ts', 500], // new: the shared index + read primitives
   ['src/ax/trajectory/memoryStore.ts', 520], // lowered from 720
   ['src/ax/trajectory/conformance.ts', 700], // raised from 470
   ['src/ax/trajectory/index.ts', 150], // raised from 110 by the A2 exports
-  ['src/ax/trajectory/projection.ts', 520], // new: RFC 4.8 read path
+  ['src/ax/trajectory/projection.ts', 600], // raised from 520 by the A2 review fixes
   ['src/ax/trajectory/rollups.ts', 600], // new: RFC 4.8 cache + sealing path
   ['src/tools/trajectory/jsonl.ts', 830], // lowered from 940
 ];
 
 /**
- * Directory ceiling for src/ax/trajectory, restated by lane A2. RFC 5.1's
- * A1+A2 estimate was 2,900; the shipped lane measures 3,785. The reason is in
- * the header comment above and in docs/TRAJECTORY.md. Lane A3 owns
- * src/ax/mind and must not raise this one.
+ * Directory ceiling for src/ax/trajectory, restated by lane A2 and again by
+ * its review pass. RFC 5.1's A1+A2 estimate was 2,900; the shipped lane
+ * measures 3,922. The reason is in the header comment above and in
+ * docs/TRAJECTORY.md. Lane A3 owns src/ax/mind and must not raise this one.
  */
-const TRAJECTORY_DIRECTORY_CAP = 3_860;
+const TRAJECTORY_DIRECTORY_CAP = 3_990;
 
 // vitest runs this workspace with cwd = src/ax, so the repo root is derived
 // from this file rather than from the process.

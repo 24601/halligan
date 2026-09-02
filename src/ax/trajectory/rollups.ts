@@ -15,10 +15,11 @@ import {
 import { axTrajectoryTypeRegistry } from './registry.js';
 import { axResolveTrajectorySteps } from './spill.js';
 import { AxTrajectoryRollupError } from './types.js';
+import { axTrajectoryTruncateUtf8, positiveOr } from './util.js';
 
-function positive(value: number, fallback: number): number {
-  return Number.isFinite(value) && value > 0 ? value : fallback;
-}
+/** Derived: bytes kept from one block summary, and from one theme. */
+export const axTrajectoryMaxSummaryBytes = 600;
+export const axTrajectoryMaxThemes = 5;
 
 export interface AxTrajectoryRollupBlock {
   readonly tier: number;
@@ -207,7 +208,7 @@ export function axTrajectoryProgramSummarizer(
   options: Readonly<AxTrajectoryProgramSummarizerOptions>
 ): AxTrajectorySummarizer {
   const program = ax(options.signature ?? axTrajectoryRollupSignature);
-  const maxEntryChars = positive(options.maxEntryChars ?? 4_000, 4_000);
+  const maxEntryChars = positiveOr(options.maxEntryChars ?? 4_000, 4_000);
   return Object.freeze({
     id: options.id ?? options.ai.getName(),
     promptVersion: options.promptVersion ?? '1',
@@ -290,8 +291,15 @@ export interface AxTrajectoryBuildRollupsOptions
   extends AxTrajectoryProjectionOptions {
   readonly rollups: AxTrajectoryRollupStore;
   readonly summarizer: AxTrajectorySummarizer;
-  /** Max blocks sealed per call so one wakeup cannot stall. Default 8. */
+  /**
+   * Max summarizer ATTEMPTS per call -- sealed plus failed -- so one wakeup
+   * cannot stall. Default 8. Bounding successes alone would let a summarizer
+   * that is failing (a provider outage, say) drain the whole log at one
+   * provider request per `fanout` steps.
+   */
   readonly maxBlocks?: number;
+  /** Derived escape hatch: bytes kept from one summary. Default 600. */
+  readonly maxSummaryBytes?: number;
   /** Explicit offline backfill below startIndex. Default false. */
   readonly backfill?: boolean;
 }
@@ -313,6 +321,14 @@ async function sealBlock(
   inputs: readonly Readonly<{ id: string; text: string }>[],
   allowedIds: ReadonlySet<string>
 ): Promise<boolean> {
+  // A summarizer whose output does not shrink is not summarizing, and a
+  // provider-backed one cannot be trusted to self-limit: without a seal-time
+  // clip the staircase stays logarithmic in SECTIONS while its rendered size
+  // grows with the log, which is the number the budget is spent in.
+  const maxSummaryBytes = positiveOr(
+    options.maxSummaryBytes ?? axTrajectoryMaxSummaryBytes,
+    axTrajectoryMaxSummaryBytes
+  );
   const result = await options.summarizer.summarize({
     tier,
     start,
@@ -332,8 +348,10 @@ async function sealBlock(
       start,
       end,
       n: end - start,
-      summary: result.summary,
-      themes: [...(result.themes ?? [])],
+      summary: axTrajectoryTruncateUtf8(result.summary, maxSummaryBytes),
+      themes: (result.themes ?? [])
+        .slice(0, axTrajectoryMaxThemes)
+        .map((theme) => axTrajectoryTruncateUtf8(theme, maxSummaryBytes)),
       stepIds: cited.length > 0 ? cited : [...allowedIds],
       summarizerId: options.summarizer.id,
       promptVersion: options.summarizer.promptVersion,
@@ -352,7 +370,7 @@ export async function axBuildTrajectoryRollups(
   const types = narrativeTypes(registry, options.types);
   const fanout = Math.max(
     2,
-    Math.floor(positive(options.fanout ?? axTrajectoryDefaultFanout, 10))
+    Math.floor(positiveOr(options.fanout ?? axTrajectoryDefaultFanout, 10))
   );
   const maxBlocks = Math.max(1, Math.floor(options.maxBlocks ?? 8));
   const endSeq = await endSeqOf(options);
@@ -361,7 +379,7 @@ export async function axBuildTrajectoryRollups(
     options.signal
   );
   if (meta) {
-    checkMeta(meta, fanout, types);
+    checkMeta(meta, fanout, types, endSeq);
   } else {
     // Forward-only enablement, SNAPPED DOWN to a fanout boundary: an unsnapped
     // marker leaves the straddling block permanently unbuildable, which is a
@@ -391,6 +409,10 @@ export async function axBuildTrajectoryRollups(
   let sealed = 0;
   let skipped = 0;
   let failed = 0;
+  // `maxBlocks` bounds summarizer ATTEMPTS. Counting only successes makes
+  // every guard below a no-op the moment the summarizer starts failing, and
+  // the call then drains the whole log at one provider request per block.
+  const attempted = () => sealed + failed;
   let cursor: ScanCursor = { index: meta.sealedIndex, seq: meta.sealedSeq };
   let checkpoint: ScanCursor = cursor;
   let stalled = false;
@@ -440,10 +462,15 @@ export async function axBuildTrajectoryRollups(
     }
   };
 
-  const page = Math.floor(
-    positive(options.scanPageSteps ?? axTrajectoryScanPageSteps, 512)
+  // Clamped, not just floored: a page of 0 -- which every value in (0, 1)
+  // floors to -- never advances the cursor and spins the loop forever.
+  const page = Math.max(
+    1,
+    Math.floor(
+      positiveOr(options.scanPageSteps ?? axTrajectoryScanPageSteps, 512)
+    )
   );
-  while (cursor.seq < endSeq && sealed < maxBlocks) {
+  while (cursor.seq < endSeq && attempted() < maxBlocks) {
     options.signal?.throwIfAborted();
     const to = Math.min(endSeq, cursor.seq + page);
     const steps = await options.store.read(
@@ -470,7 +497,7 @@ export async function axBuildTrajectoryRollups(
       });
     }
     cursor = { index: cursor.index + resolved.length, seq: to };
-    while (pending.length >= fanout && sealed < maxBlocks) await flush();
+    while (pending.length >= fanout && attempted() < maxBlocks) await flush();
   }
 
   const sealedIndex = Math.max(meta.sealedIndex, checkpoint.index);
@@ -488,7 +515,7 @@ export async function axBuildTrajectoryRollups(
       skipped += delta.skipped;
       failed += delta.failed;
     },
-    () => sealed < maxBlocks
+    () => attempted() < maxBlocks
   );
   if (
     sealedIndex !== meta.sealedIndex ||
