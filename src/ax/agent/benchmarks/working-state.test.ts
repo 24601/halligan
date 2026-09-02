@@ -18,8 +18,9 @@ import {
   renderWorkingStateTable,
 } from './workingStateMetrics.js';
 import {
-  AX_WORKING_STATE_HORIZONS,
+  AX_WORKING_STATE_BENCH_HORIZONS,
   type AxWorkingStateScenarioResult,
+  AX_WORKING_STATE_BENCH_MAX_HORIZON as MAX_HORIZON,
   runWorkingStateScenario,
   runWorkingStateSweep,
 } from './workingStateScenarios.js';
@@ -54,10 +55,10 @@ const pick = (horizon: number, arm: 'baseline' | 'working-state') => {
 
 describe('working-state benchmark', () => {
   beforeAll(async () => {
-    sweep = await runWorkingStateSweep();
+    sweep = await runWorkingStateSweep(AX_WORKING_STATE_BENCH_HORIZONS);
     if (process.env.AX_PRINT_METRICS === '1') {
       console.log(renderWorkingStateTable(rowsOf(sweep)));
-      for (const horizon of AX_WORKING_STATE_HORIZONS) {
+      for (const horizon of AX_WORKING_STATE_BENCH_HORIZONS) {
         const overhead = axWorkingStatePromptOverhead(rowsOf(sweep), horizon);
         console.log(
           `prompt-char overhead @${horizon}: ${(overhead! * 100).toFixed(1)}%`
@@ -69,7 +70,7 @@ describe('working-state benchmark', () => {
   it('A1: a scripted false completion parks and the goal stays pending at every horizon', () => {
     // No claim about the run's REPORT: under the default `observe` policy the
     // gate constrains a side document, not the answer the run returns.
-    for (const horizon of AX_WORKING_STATE_HORIZONS) {
+    for (const horizon of AX_WORKING_STATE_BENCH_HORIZONS) {
       const result = pick(horizon, 'working-state');
       expect([horizon, result.row.falseCompletionsParked >= 1]).toEqual([
         horizon,
@@ -94,7 +95,7 @@ describe('working-state benchmark', () => {
   }, 120_000);
 
   it('A3: the working-state arm performs zero state-recovery steps at every horizon', () => {
-    for (const horizon of AX_WORKING_STATE_HORIZONS) {
+    for (const horizon of AX_WORKING_STATE_BENCH_HORIZONS) {
       expect([
         horizon,
         pick(horizon, 'working-state').row.stateRecoverySteps,
@@ -102,23 +103,23 @@ describe('working-state benchmark', () => {
     }
   });
 
-  it('A4: the baseline performs at least one state-recovery step at horizon 100', () => {
+  it('A4: the baseline performs at least one state-recovery step at the largest measured horizon', () => {
     // Without this the comparison in A3 would be vacuous.
-    expect(pick(100, 'baseline').row.stateRecoverySteps).toBeGreaterThanOrEqual(
-      1
-    );
+    expect(
+      pick(MAX_HORIZON, 'baseline').row.stateRecoverySteps
+    ).toBeGreaterThanOrEqual(1);
   });
 
-  it('A5: accuracy at horizon 100 is not worse with working state than without', () => {
+  it('A5: accuracy at the largest measured horizon is not worse with working state than without', () => {
     // Asserted only as NOT WORSE. The scenario is authored, so a "better"
     // claim would be measuring the author, not the mechanism.
-    expect(pick(100, 'working-state').row.accuracy).toBeGreaterThanOrEqual(
-      pick(100, 'baseline').row.accuracy
-    );
+    expect(
+      pick(MAX_HORIZON, 'working-state').row.accuracy
+    ).toBeGreaterThanOrEqual(pick(MAX_HORIZON, 'baseline').row.accuracy);
   });
 
   it('A6: prompt-character overhead is reported and below the declared ceiling', () => {
-    const overhead = axWorkingStatePromptOverhead(rowsOf(sweep), 100);
+    const overhead = axWorkingStatePromptOverhead(rowsOf(sweep), MAX_HORIZON);
     expect(overhead).toBeDefined();
     // PR 1 ADDS prompt characters. Measuring and bounding that is the honest
     // form of the claim; asserting a reduction here would be false.
@@ -140,7 +141,7 @@ describe('working-state benchmark', () => {
     // measured value. That gap is bounded here and closing it exactly is PR
     // 2's measured-equals-sent refactor, not this PR's.
     const check = (arm: 'baseline' | 'working-state') => {
-      const measured = pick(100, arm).promptCheck!;
+      const measured = pick(MAX_HORIZON, arm).promptCheck!;
       return {
         measured,
         gapRatio:
