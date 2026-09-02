@@ -624,7 +624,11 @@ export const axApplyHarnessMutations = (
           `axApplyHarnessMutations: create ${id} requires an options object`
         );
       }
-      next = [...next, { id, ...mutation.options } as AxHarnessEntry];
+      // The mutation's `id` wins over anything in `options`: the type forbids
+      // an `id` there, but a JS caller can still pass one, and an entry whose
+      // id disagreed with the mutation that created it would be unaddressable
+      // by every later mutation.
+      next = [...next, { ...mutation.options, id } as AxHarnessEntry];
       continue;
     }
 

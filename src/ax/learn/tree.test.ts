@@ -575,6 +575,24 @@ describe('axApplyHarnessMutations', () => {
     ).toThrow(AxHarnessAdmissionError);
   });
 
+  it('keeps the mutation id when a JS caller smuggles one into create options', () => {
+    // The type forbids `id` in the options; a plain JS caller can still pass
+    // one, and an entry addressed by a different id than the mutation that
+    // created it would be unreachable by every later mutation.
+    const created = axApplyHarnessMutations(base, [
+      {
+        op: 'create',
+        id: 's1',
+        options: {
+          id: 'somethingElse',
+          kind: 'skill',
+          config: { skillId: 'new-skill', name: 'New', content: 'body' },
+        },
+      } as unknown as AxHarnessMutation,
+    ]);
+    expect(created.map((e) => e.id)).toEqual(['i1', 'b1', 's1']);
+  });
+
   it('refuses a create on an existing id and a remove of a missing id', () => {
     expect(() =>
       axApplyHarnessMutations(base, [
