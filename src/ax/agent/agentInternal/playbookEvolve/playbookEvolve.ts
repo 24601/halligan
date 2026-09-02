@@ -14,6 +14,7 @@
  * `requireHeldOut` adds a fail-closed production promotion policy on top.
  */
 
+import type { AxAIService } from '../../../ai/types.js';
 import type { AxAuthorizationReceipt } from '../../../authority/types.js';
 import {
   estimateTokenCount,
@@ -83,7 +84,9 @@ import type {
   AxAgentPlaybookPruneProposal,
   AxAgentPlaybookRedundancyEntry,
   AxAgentPlaybookRedundancyReport,
+  AxAgentPlaybookSealedTestReport,
   AxAgentPlaybookSplitName,
+  AxAgentPlaybookTransferReport,
   AxAgentPlaybookVarianceBand,
   AxAgentPlaybookVarianceBandReport,
   AxAgentPlaybookVetoResult,
@@ -145,6 +148,19 @@ import {
   varianceBandFrom,
 } from './statistics.js';
 import { terminationReportOf } from './termination.js';
+import type { AxTransferPass, AxTransferSplit } from './transfer.js';
+import {
+  DEFAULT_TRANSFER_REGRESSION_FLOOR,
+  runTransferPass,
+  splitScoreOfBatch,
+  transferCellsFrom,
+  transferComparisonMade,
+  transferReportFrom,
+  transferRequiredMetricCalls,
+  transferSplitsOf,
+  transferVerdict,
+  validateTransferOptions,
+} from './transfer.js';
 import { evaluateValidity, registeredFunctionNames } from './validity.js';
 import { mineWeakness } from './weaknessMiner.js';
 
@@ -310,6 +326,62 @@ function assertRequiredHeldOut<IN extends AxGenIn>(args: {
 }
 
 /**
+ * The sealed test's disjointness proof (RFC 7.8). Same machinery and same
+ * message shape as `assertRequiredHeldOut`, under its own error code: a sealed
+ * set that overlaps a split the run selected on is not a sealed test, it is a
+ * second reading of a selection split wearing the word 'sealed'.
+ *
+ * Runs at option validation, BEFORE any evaluation, so the failure costs
+ * nothing and cannot be mistaken for a measurement.
+ */
+function assertSealedTestDisjoint<IN extends AxGenIn>(args: {
+  sealed: readonly AxAgentEvalTask<IN>[];
+  train: readonly AxAgentEvalTask<IN>[];
+  validation?: readonly AxAgentEvalTask<IN>[];
+  taskId?: (task: Readonly<AxAgentEvalTask<IN>>) => string | undefined;
+}): void {
+  const fail = (message: string): never => {
+    throw new AxAgentPlaybookEvolveError(
+      'sealed_test_invalid',
+      'sealed_test',
+      message
+    );
+  };
+  if (args.sealed.length === 0) {
+    fail('sealedTest must contain at least one task.');
+  }
+  const idOf = args.taskId ?? ((task: AxAgentEvalTask<IN>) => task.id);
+  const ids = (
+    split: 'sealedTest' | 'train' | 'validation',
+    tasks: readonly AxAgentEvalTask<IN>[]
+  ) =>
+    tasks.map((task, index) => {
+      const raw = idOf(task);
+      const id = typeof raw === 'string' ? raw.trim() : '';
+      if (!id) {
+        fail(
+          `sealedTest cannot prove disjointness: ${split}[${index}] has no semantic task id; set task.id or provide taskId.`
+        );
+      }
+      return id;
+    });
+  const selectionIds = new Set([
+    ...ids('train', args.train),
+    ...ids('validation', args.validation ?? []),
+  ]);
+  const overlaps = [
+    ...new Set(
+      ids('sealedTest', args.sealed).filter((id) => selectionIds.has(id))
+    ),
+  ];
+  if (overlaps.length > 0) {
+    fail(
+      `sealedTest requires tasks disjoint from train and validation; overlapping task id(s): ${overlaps.join(', ')}.`
+    );
+  }
+}
+
+/**
  * Options whose presence turns on an evidence path. Every one of them is
  * meaningless with `verify: false` — the trust-batch path accepts every
  * proposal with no evaluation at all — so combining them fails closed rather
@@ -326,6 +398,8 @@ const EVIDENCE_OPTION_KEYS = [
   'classifyTermination',
   'maxDiscardRedraws',
   'prune',
+  'transfer',
+  'sealedTest',
   'promotionAuthority',
   // A reject-only hook has nothing to reject on the trust-batch path: that
   // path accepts every proposal with no evaluation, so no nomination is ever
@@ -466,12 +540,22 @@ function validateEvidenceOptions(
       'gates.controlArmMargin has no effect without gates.controlArm; a margin with no control-arm gate configures nothing.'
     );
   }
-  if (gates?.transfer && gates.transfer !== 'off') {
+  if (
+    gates?.transfer &&
+    gates.transfer !== 'off' &&
+    (options?.transfer?.targets?.length ?? 0) === 0
+  ) {
+    // A required (or warned) transfer gate with no target to evaluate is a gate
+    // that can never read anything. Fail closed at validation, exactly as the
+    // control-arm gate does.
     throw new AxAgentPlaybookEvolveError(
       'transfer_target_invalid',
       'transfer',
       'gates.transfer needs a transfer configuration with at least one target.'
     );
+  }
+  if (options?.transfer) {
+    validateTransferOptions(options.transfer, hasHeldOut);
   }
   if (gates?.interval === 'require' && !options?.varianceBand) {
     // A required gate that silently becomes a weaker gate is exactly the
@@ -597,6 +681,14 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
     verify,
     (normalized.validation?.length ?? 0) > 0
   );
+  if (options?.sealedTest) {
+    assertSealedTestDisjoint({
+      sealed: options.sealedTest,
+      train: normalized.train,
+      ...(normalized.validation ? { validation: normalized.validation } : {}),
+      ...(options.taskId ? { taskId: options.taskId } : {}),
+    });
+  }
   const evidenceEnabled = activeEvidenceOptions(options).length > 0;
   const usesBuiltInJudge = options?.metric === undefined;
   const maxDiscardRedraws =
@@ -788,7 +880,15 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
      * neither starve the search nor be hidden from the denominator.
      */
     armBudget?: AxAgentEvalBudget,
-    metricTaskOf?: (task: AxAgentEvalTask<IN>) => AxAgentEvalTask<IN>
+    metricTaskOf?: (task: AxAgentEvalTask<IN>) => AxAgentEvalTask<IN>,
+    /**
+     * The transfer matrix is the only caller that swaps the backbone: a cell is
+     * the SAME artifact and the SAME metric on a DIFFERENT service, so the
+     * service is the one thing a cell overrides and everything else — budget
+     * accounting, termination classification, attempt capture — stays identical
+     * to every other phase.
+     */
+    aiOverride?: Readonly<AxAIService>
   ): Promise<AxAgentEvalBatchResult<IN, OUT>> => {
     const handle = ledger.phase(phase);
     const spendFrom = armBudget ?? budget;
@@ -796,6 +896,7 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
     try {
       const result = await runAgentEvalBatch<IN, OUT>({
         ...batchArgs,
+        ...(aiOverride ? { ai: aiOverride } : {}),
         budget: spendFrom,
         tasks,
         split,
@@ -1043,6 +1144,78 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
         level: intervalSettings.level,
       });
       if (band) varianceBands.push(band);
+    }
+  }
+
+  // ---- Phase 3: transfer anchors on the UNEVOLVED artifact ----
+  // Runs before mining and before the curate loop, so a cell's anchor is the
+  // target's own reading of the artifact the run started from. Borrowing the
+  // primary model's baseline instead would attribute the model gap to the
+  // playbook, which is the exact confusion per-cell reporting exists to remove.
+  const transferOptions = options?.transfer;
+  const transferSplits: readonly AxTransferSplit[] = transferOptions
+    ? transferSplitsOf(transferOptions, (validationTasks?.length ?? 0) > 0)
+    : [];
+  const transferFloor =
+    transferOptions?.regressionFloor ?? DEFAULT_TRANSFER_REGRESSION_FLOOR;
+  const transferExpectedCells =
+    (transferOptions?.targets.length ?? 0) * transferSplits.length;
+  const tasksForTransferSplit = (split: AxTransferSplit) =>
+    split === 'current' ? trainTasks : (validationTasks ?? []);
+  /**
+   * A SEPARATE counter, like the control arm's. Transfer runs on services the
+   * caller owns and the run's own budget never paid for; charging it to the
+   * search would let a transfer matrix starve the candidates it exists to
+   * judge. Its spend still lands in `accounting.metricCalls`.
+   */
+  const transferBudget: AxAgentEvalBudget = { remaining: 0 };
+  let transferAnchors: readonly AxTransferPass[] = [];
+  let transferFailure: string | undefined;
+  if (transferOptions) {
+    const required = transferRequiredMetricCalls({
+      targetCount: transferOptions.targets.length,
+      splits: transferSplits,
+      trainCount: trainTasks.length,
+      heldOutCount: validationTasks?.length ?? 0,
+      runsPerTask,
+    });
+    if (
+      transferOptions.maxMetricCalls !== undefined &&
+      transferOptions.maxMetricCalls < required
+    ) {
+      // Fail closed BEFORE any mutation: half a matrix is worse than none,
+      // because the cells that did run look like the whole answer.
+      throw new AxAgentPlaybookEvolveError(
+        'budget_insufficient',
+        'transfer',
+        `transfer needs ${required} metric calls for ${transferExpectedCells} cell(s) (anchor + candidate pass, ${runsPerTask} run(s) per task); transfer.maxMetricCalls is ${transferOptions.maxMetricCalls}.`
+      );
+    }
+    transferBudget.remaining = transferOptions.maxMetricCalls ?? required;
+    progress(
+      'transfer',
+      `anchor pass: ${transferOptions.targets.length} target(s) x ${transferSplits.join(', ')} on the unevolved artifact`
+    );
+    try {
+      transferAnchors = await runTransferPass<IN, OUT>({
+        targets: transferOptions.targets,
+        splits: transferSplits,
+        tasksFor: tasksForTransferSplit,
+        evaluate: (args) =>
+          runPhaseBatch(
+            'transfer',
+            args.tasks,
+            args.split,
+            undefined,
+            undefined,
+            transferBudget,
+            undefined,
+            args.ai
+          ),
+      });
+    } catch (error) {
+      if (options?.abortSignal?.aborted) throw error;
+      transferFailure = `the transfer anchor pass threw: ${error instanceof Error ? error.message : String(error)}`;
     }
   }
 
@@ -2394,6 +2567,65 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
   // which keeps `playbookSnapshot` byte-identical to the legacy contract.
   const evolvedSnapshot = captureSnapshot(playbookHandle);
 
+  // ---- Phase 8: transfer candidates on the FINAL artifact ----
+  // Same targets, same splits, same tasks, same metric — only the artifact
+  // moved. That is what makes the per-cell delta a reading of the playbook and
+  // not of the backbone.
+  let transfer: AxAgentPlaybookTransferReport | undefined;
+  if (transferOptions) {
+    let candidates: readonly AxTransferPass[] = [];
+    if (!transferFailure) {
+      progress(
+        'transfer',
+        `candidate pass: ${transferOptions.targets.length} target(s) x ${transferSplits.join(', ')} on the final artifact`
+      );
+      try {
+        candidates = await runTransferPass<IN, OUT>({
+          targets: transferOptions.targets,
+          splits: transferSplits,
+          tasksFor: tasksForTransferSplit,
+          evaluate: (args) =>
+            runPhaseBatch(
+              'transfer',
+              args.tasks,
+              args.split,
+              undefined,
+              undefined,
+              transferBudget,
+              undefined,
+              args.ai
+            ),
+        });
+      } catch (error) {
+        if (options?.abortSignal?.aborted) throw error;
+        transferFailure = `the transfer candidate pass threw: ${error instanceof Error ? error.message : String(error)}`;
+      }
+    }
+    transfer = transferFailure
+      ? // A target that could not be evaluated at all makes the WHOLE matrix
+        // `not_run` rather than a partial one: the cells that did run would
+        // otherwise read as the complete answer, and a required gate would pass
+        // on a matrix missing exactly the target that broke.
+        { status: 'not_run', reason: transferFailure }
+      : transferReportFrom({
+          floor: transferFloor,
+          cells: transferCellsFrom({
+            anchors: transferAnchors,
+            candidates,
+            floor: transferFloor,
+            seedFor: (split) =>
+              split === 'current' ? currentSeed() : heldOutSeed(),
+            resamples: intervalSettings.resamples,
+            level: intervalSettings.level,
+          }),
+          accounting: accountingForPhases(
+            ledger.assemble({ evolveOnlyMetricCalls: usedCalls() }),
+            ['transfer']
+          ),
+          expectedCells: transferExpectedCells,
+        });
+  }
+
   /**
    * Phase 9. Runs inside `load(baseline) … finally load(evolved)` (§7.1), which
    * is what makes "on the unevolved program" true rather than asserted, and
@@ -2597,6 +2829,69 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
   // that produces no observable output is the silent absence this machinery
   // exists to remove.
   let rolledBackReason: string | undefined;
+  /** Which run-level gate decided. Carried into the I8 cascade verbatim. */
+  let rolledBackGate: 'transfer' | 'control_arm' = 'control_arm';
+  const dryRun = options?.apply === false;
+  /**
+   * A run-level gate rescinds a live accepted set. A dry run applied nothing
+   * and a run that accepted nothing changed nothing, so in both cases the
+   * finding is reported and nothing is rolled back — relabelling either as
+   * `rolled_back` would tell the caller an artifact went live and was withdrawn
+   * and would run the I8 cascade over a state that never existed.
+   */
+  const rollbackAvailable = accepted.length > 0 && !dryRun;
+  const rollbackSuffix =
+    accepted.length === 0
+      ? '; no candidate was accepted, so there is no artifact change to roll back'
+      : dryRun
+        ? '; this run was a dry run (apply: false), so nothing was applied for a run-level gate to roll back'
+        : '';
+
+  // The transfer gate is evaluated FIRST: a per-cell regression on another
+  // backbone is a statement about the artifact itself, and a run that fails it
+  // should say so under the transfer gate rather than under whichever gate
+  // happened to be checked first.
+  const transferGateMode = options?.gates?.transfer ?? 'off';
+  if (transfer && transfer.status !== 'not_run') {
+    if (transfer.regressedCells.length > 0) {
+      // Emitted whatever the gate mode is, including 'off': a measured
+      // regression on another backbone is a finding, not a gate artifact.
+      const worst = [...transfer.cells]
+        .filter((cell) => cell.regressed)
+        .sort((a, b) => a.delta - b.delta)[0]!;
+      runWarnings.push({
+        code: 'transfer_cell_regressed',
+        message: `${transfer.regressedCells.length} of ${transfer.cells.length} transfer cell(s) regressed beyond the ${transfer.floor} floor: ${transfer.regressedCells.join(', ')}; worst delta ${worst.delta.toFixed(3)}. No average is reported: an average over these cells would hide it.`,
+        scope: `${worst.targetId}:${worst.split}`,
+      });
+    }
+  }
+  if (transferGateMode !== 'off') {
+    const verdict = transferVerdict({
+      report: transfer ?? {
+        status: 'not_run',
+        reason: 'transfer option not supplied',
+      },
+    });
+    if (!verdict.passed) {
+      if (transferGateMode === 'require' && rollbackAvailable) {
+        rolledBackGate = 'transfer';
+        rolledBackReason = `transfer gate failed: ${verdict.detail}`;
+      } else if (
+        // `transfer_cell_regressed` is already on the record above; a second
+        // copy of the same finding is noise. Only the "there was nothing to
+        // read" case still needs a warning of its own here.
+        !transfer ||
+        !transferComparisonMade(transfer)
+      ) {
+        runWarnings.push({
+          code: 'transfer_unmeasured',
+          message: `${verdict.detail}${rollbackSuffix}`,
+        });
+      }
+    }
+  }
+
   const controlGateMode = options?.gates?.controlArm ?? 'off';
   if (
     (control.status === 'partial' || control.status === 'completed') &&
@@ -2618,32 +2913,28 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
       report: control,
     });
     if (!verdict.passed) {
-      // A dry run applied nothing, so there is no live artifact change for a
-      // run-level gate to rescind: relabelling it `rolled_back` would tell a
-      // caller who asked for `apply: false` that the artifact went live and was
-      // then withdrawn, and would run the I8 cascade over a state that was
-      // always going to be thrown away. I1 pins `applied` for a dry run.
-      const dryRun = options?.apply === false;
-      if (controlGateMode === 'require' && accepted.length > 0 && !dryRun) {
+      // The FIRST failing run-level gate owns the rollback reason: a caller
+      // reading `rolledBackReason` must see the gate that decided, not the last
+      // one that also happened to fail.
+      if (
+        controlGateMode === 'require' &&
+        rollbackAvailable &&
+        !rolledBackReason
+      ) {
+        rolledBackGate = 'control_arm';
         rolledBackReason = `control_arm gate failed: ${verdict.detail}`;
       } else {
         // A run that accepted nothing has no artifact change for a run-level
         // gate to reject, and calling its unchanged baseline 'rolled_back'
         // would label a perfectly good artifact as poison. The finding is still
         // on the record, in `control` and in this warning.
-        const suffix =
-          accepted.length === 0
-            ? '; no candidate was accepted, so there is no artifact change to roll back'
-            : dryRun
-              ? '; this run was a dry run (apply: false), so nothing was applied for a run-level gate to roll back'
-              : '';
         runWarnings.push({
           // `not_beaten` asserts a comparison happened. When the arm did not
           // run, threw, or measured nothing, that assertion would be false.
           code: controlArmComparisonMade(control)
             ? 'control_arm_not_beaten'
             : 'control_arm_unmeasured',
-          message: `${verdict.detail}${suffix}`,
+          message: `${verdict.detail}${rollbackSuffix}`,
           scope: 'heldOut',
         });
       }
@@ -2680,13 +2971,13 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
       if (!outcome.accepted) continue;
       const evidence = outcome.evidence
         ? supersedeEvidenceReceipt(outcome.evidence, {
-            gate: 'control_arm',
+            gate: rolledBackGate,
             reason: rolledBackReason,
           })
         : undefined;
       const promotion = outcome.promotion
         ? rescindPromotion(outcome.promotion, {
-            gate: 'control_arm',
+            gate: rolledBackGate,
             reason: rolledBackReason,
           })
         : undefined;
@@ -2711,6 +3002,127 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
         'AxAgent.playbook().evolve(): exact dry-run rollback failed.'
       );
     }
+  }
+
+  // ---- Phase 11: the sealed test ----
+  // AFTER the run-level verdict and after the rollback, so there is no branch
+  // in which a sealed reading could reach a gate, a threshold, an accept
+  // decision or a rollback. `influencedNoDecision: true` is a literal type; this
+  // placement is what makes it true rather than merely asserted.
+  let sealedTest: AxAgentPlaybookSealedTestReport | undefined;
+  const sealedTasks = options?.sealedTest;
+  if (sealedTasks?.length) {
+    sealedTest = await (async (): Promise<AxAgentPlaybookSealedTestReport> => {
+      const liveSnapshot = captureSnapshot(playbookHandle);
+      const finalSnapshot =
+        applied === 'rolled_back'
+          ? baselineSnapshot
+          : (evolvedSnapshot ?? liveSnapshot);
+      if (
+        !playbookHandle ||
+        !baselineSnapshot ||
+        !finalSnapshot ||
+        !liveSnapshot
+      ) {
+        return {
+          status: 'not_run',
+          reason:
+            'the playbook handle produced no snapshot, so neither the baseline nor the final artifact could be put in front of the sealed split',
+        };
+      }
+      const baselineState = snapshotStateOf(baselineSnapshot);
+      const finalState = snapshotStateOf(finalSnapshot);
+      const liveState = snapshotStateOf(liveSnapshot);
+      if (finalState.digest === baselineState.digest) {
+        // Same artifact on both sides. Running it anyway would spend
+        // `2 x |sealed| x runsPerTask` calls to measure run-to-run noise and
+        // then report it under a field a reader takes for the run's result.
+        return {
+          status: 'not_run',
+          reason: `the run produced no artifact change (applied: ${applied}, ${accepted.length} accepted), so a sealed-test delta would measure run-to-run noise rather than the run`,
+        };
+      }
+      const sealedBudget: AxAgentEvalBudget = {
+        remaining: 2 * sealedTasks.length * runsPerTask,
+      };
+      const evaluateSealed = () =>
+        runPhaseBatch(
+          'sealed_test',
+          sealedTasks,
+          'slice',
+          'sealed_test',
+          undefined,
+          sealedBudget
+        );
+      const pass = async (
+        target: typeof baselineState,
+        label: 'baseline' | 'final'
+      ) => {
+        progress(
+          'sealed_test',
+          `${label} artifact on ${sealedTasks.length} sealed task(s)`
+        );
+        return withRestoredArtifact({
+          handle: playbookHandle,
+          restoreTo: target,
+          returnTo: liveState,
+          run: evaluateSealed,
+        });
+      };
+      const baselinePass = await pass(baselineState, 'baseline');
+      if (baselinePass.status === 'restore_failed') {
+        return { status: 'not_run', reason: baselinePass.reason };
+      }
+      const finalPass = await pass(finalState, 'final');
+      if (finalPass.status === 'restore_failed') {
+        return { status: 'not_run', reason: finalPass.reason };
+      }
+      const baselineBatch = baselinePass.value;
+      const finalBatch = finalPass.value;
+      const sealedSeed =
+        intervalSettings.seed ??
+        seedFromDigest(
+          canonicalDigest(sealedTasks.map((task) => task.id ?? ''))
+        );
+      const delta = finalBatch.mean - baselineBatch.mean;
+      const interval = intervalFor(
+        baselineBatch.records,
+        finalBatch.records,
+        sealedSeed
+      );
+      if (!interval) {
+        runWarnings.push({
+          code: 'interval_unresolved',
+          message:
+            'the sealed test carries no paired interval: its baseline and final passes could not be aligned task by task, so the interval is reported with clusters 0 and resamples 0 rather than as a computed comparison',
+          scope: 'sealed_test',
+        });
+      }
+      return {
+        status: 'completed',
+        baseline: splitScoreOfBatch(baselineBatch),
+        final: splitScoreOfBatch(finalBatch),
+        delta,
+        interval:
+          interval ??
+          ({
+            point: delta,
+            lower: delta,
+            upper: delta,
+            level: intervalSettings.level,
+            resamples: 0,
+            unit: 'task',
+            clusters: 0,
+            seed: sealedSeed,
+            direction: 'unresolved',
+          } as AxAgentPlaybookInterval),
+        influencedNoDecision: true,
+        accounting: accountingForPhases(
+          ledger.assemble({ evolveOnlyMetricCalls: usedCalls() }),
+          ['sealed_test']
+        ),
+      };
+    })();
   }
 
   progress(
@@ -2744,16 +3156,22 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
           'the harness_term arm was excluded, so this run cannot attribute its gain to the bullet rather than to any text of the same size in the playbook slot',
       });
     }
-    runWarnings.push({
-      code: 'transfer_not_run',
-      message:
-        'no transfer targets were configured, so per-cell regressions on other backbones are unmeasured',
-    });
-    runWarnings.push({
-      code: 'sealed_test_not_run',
-      message:
-        'no sealed test was configured; every held-out number here is a selection number',
-    });
+    if (!transfer || transfer.status === 'not_run') {
+      runWarnings.push({
+        code: 'transfer_not_run',
+        message: transfer
+          ? `the transfer matrix did not produce a reading: ${transfer.reason}`
+          : 'no transfer targets were configured, so per-cell regressions on other backbones are unmeasured',
+      });
+    }
+    if (!sealedTest || sealedTest.status === 'not_run') {
+      runWarnings.push({
+        code: 'sealed_test_not_run',
+        message: sealedTest
+          ? `the sealed test did not run: ${sealedTest.reason}; every held-out number here is a selection number`
+          : 'no sealed test was configured; every held-out number here is a selection number',
+      });
+    }
     if (!options?.promotionAuthority && accepted.length > 0) {
       // The default stays permissive — a promotion without a grant is allowed —
       // but it is never silent. Restricted to accepts for the same reason
@@ -2817,6 +3235,8 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
     accounting,
     applied,
     ...(varianceBand ? { varianceBand } : {}),
+    ...(transfer ? { transfer } : {}),
+    ...(sealedTest ? { sealedTest } : {}),
     ...(redundancy ? { redundancy } : {}),
     ...(finalOverhead ? { overhead: finalOverhead } : {}),
     ...(rolledBackReason ? { rolledBackReason } : {}),

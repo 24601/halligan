@@ -35,6 +35,7 @@ import type {
   AxAgentPlaybookReachProbe,
   AxAgentPlaybookRedundancyReport,
   AxAgentPlaybookSealedTestReport,
+  AxAgentPlaybookTransferOptions,
   AxAgentPlaybookTransferReport,
   AxAgentPlaybookUsageTap,
   AxAgentPlaybookValidityOptions,
@@ -393,6 +394,29 @@ export type AxAgentPlaybookEvolveOptions<IN extends AxGenIn = AxGenIn> = {
    * cannot raise the current-task mean by `minHeldInGain`.
    */
   prune?: AxAgentPlaybookPruneOptions;
+  /**
+   * Per-cell transfer: the unevolved artifact and then the final artifact,
+   * evaluated on EVERY caller-supplied target service, on every configured
+   * split, each cell carrying its own paired interval and its own regression
+   * floor. There is deliberately no average anywhere in the report — an average
+   * is what hides a single catastrophic cell.
+   *
+   * The largest budget multiplier here: it costs
+   * `|targets| x Sum(splits) x runsPerTask x 2` metric calls from its OWN
+   * counter, and requires the caller to own N extra `AxAIService`s.
+   */
+  transfer?: AxAgentPlaybookTransferOptions;
+  /**
+   * A split evaluated EXACTLY ONCE, after the run-level verdict, on the
+   * baseline artifact and the final artifact — never read by a gate, a
+   * threshold, an accept decision or a rollback. It must be disjoint from
+   * `train` and `validation` by semantic task id.
+   *
+   * This is the only non-selection number `evolve()` can produce: `heldOut` is
+   * re-anchored to the accepted candidate after every accept, so a held-out
+   * delta is a SELECTION number.
+   */
+  sealedTest?: readonly AxAgentEvalTask<IN>[];
   /**
    * Promotion capability. The GRANT binds the playbook ("this principal may
    * promote into this artifact"), never the candidate: `AxResourceScope` is

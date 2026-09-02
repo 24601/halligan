@@ -1,14 +1,15 @@
 {
   "kind": "program_contract",
   "name": "playbook-evidence-gate",
-  "notes": "TS-derived contract for the playbook evidence gate chain and for batch completeness under environment-failure discards. The generated targets do not yet implement this behavior, so they run the fixture through the program_contract shape and assert nothing about it; the executable assertions live in the consumer named below and are recorded as an open AxIR backlog entry. The contracts are chosen so that a stub cannot satisfy them: a curate-threshold implementation rejects the zero-gain prune, an eagerly-evaluated chain invokes a host-call gate on a candidate gate 1 already rejected, a break-based batch loop produces a shorter record list, and a budget-shaped rejection string fails the environment-incomplete case.",
+  "notes": "TS-derived contract for the playbook evidence gate chain, for batch completeness under environment-failure discards, and for the per-cell transfer matrix. The generated targets do not yet implement this behavior, so they run the fixture through the program_contract shape and assert nothing about it; the executable assertions live in the consumer named below and are recorded as an open AxIR backlog entry. The contracts are chosen so that a stub cannot satisfy them: a curate-threshold implementation rejects the zero-gain prune, an eagerly-evaluated chain invokes a host-call gate on a candidate gate 1 already rejected, a break-based batch loop produces a shorter record list, a budget-shaped rejection string fails the environment-incomplete case, and a transfer implementation that averages its cells passes the regressing-cell case it must fail.",
   "source": {
     "tsDerived": true,
     "consumer": "scripts/playbook-evidence-conformance.test.ts",
     "reference": [
       "src/ax/agent/agentInternal/playbookEvolve/gates.ts",
       "src/ax/agent/agentInternal/playbookEvolve/evalHarness.ts",
-      "src/ax/agent/agentInternal/playbookEvolve/termination.ts"
+      "src/ax/agent/agentInternal/playbookEvolve/termination.ts",
+      "src/ax/agent/agentInternal/playbookEvolve/transfer.ts"
     ],
     "name": "playbook-evidence-gate",
     "observed": {}
@@ -208,6 +209,214 @@
         "truncatedAtTaskIndex": 2,
         "exhausted": true,
         "complete": false
+      }
+    }
+  ],
+  "transfer_cells": [
+    {
+      "name": "a-regressing-cell-rejects-despite-a-positive-average",
+      "floor": 0.02,
+      "expectedCells": 2,
+      "cells": [
+        {
+          "targetId": "sonnet",
+          "split": "heldOut",
+          "anchor": {
+            "mean": 0.3,
+            "executedRuns": 2,
+            "discardedRuns": 0,
+            "expectedRuns": 2,
+            "complete": true
+          },
+          "candidate": {
+            "mean": 0.8,
+            "executedRuns": 2,
+            "discardedRuns": 0,
+            "expectedRuns": 2,
+            "complete": true
+          },
+          "intervalClusters": 2
+        },
+        {
+          "targetId": "nano",
+          "split": "heldOut",
+          "anchor": {
+            "mean": 0.86,
+            "executedRuns": 2,
+            "discardedRuns": 0,
+            "expectedRuns": 2,
+            "complete": true
+          },
+          "candidate": {
+            "mean": 0.5,
+            "executedRuns": 2,
+            "discardedRuns": 0,
+            "expectedRuns": 2,
+            "complete": true
+          },
+          "intervalClusters": 2
+        }
+      ],
+      "expected": {
+        "status": "completed",
+        "regressedCells": ["nano:heldOut"],
+        "passed": false,
+        "comparisonMade": true,
+        "cellDeltaAverageIsPositive": true,
+        "reportKeys": [
+          "accounting",
+          "cells",
+          "floor",
+          "regressedCells",
+          "status"
+        ]
+      }
+    },
+    {
+      "name": "the-floor-is-a-tolerance-not-a-sign",
+      "floor": 0.5,
+      "expectedCells": 2,
+      "cells": [
+        {
+          "targetId": "sonnet",
+          "split": "heldOut",
+          "anchor": {
+            "mean": 0.3,
+            "executedRuns": 2,
+            "discardedRuns": 0,
+            "expectedRuns": 2,
+            "complete": true
+          },
+          "candidate": {
+            "mean": 0.8,
+            "executedRuns": 2,
+            "discardedRuns": 0,
+            "expectedRuns": 2,
+            "complete": true
+          },
+          "intervalClusters": 2
+        },
+        {
+          "targetId": "nano",
+          "split": "heldOut",
+          "anchor": {
+            "mean": 0.86,
+            "executedRuns": 2,
+            "discardedRuns": 0,
+            "expectedRuns": 2,
+            "complete": true
+          },
+          "candidate": {
+            "mean": 0.5,
+            "executedRuns": 2,
+            "discardedRuns": 0,
+            "expectedRuns": 2,
+            "complete": true
+          },
+          "intervalClusters": 2
+        }
+      ],
+      "expected": {
+        "status": "completed",
+        "regressedCells": [],
+        "passed": true,
+        "comparisonMade": true
+      }
+    },
+    {
+      "name": "an-incomplete-cell-fails-closed-even-with-a-positive-delta",
+      "floor": 0.02,
+      "expectedCells": 1,
+      "cells": [
+        {
+          "targetId": "nano",
+          "split": "heldOut",
+          "anchor": {
+            "mean": 0.3,
+            "executedRuns": 2,
+            "discardedRuns": 0,
+            "expectedRuns": 2,
+            "complete": true
+          },
+          "candidate": {
+            "mean": 0.9,
+            "executedRuns": 1,
+            "discardedRuns": 0,
+            "expectedRuns": 2,
+            "complete": false
+          },
+          "intervalClusters": 2
+        }
+      ],
+      "expected": {
+        "status": "partial",
+        "regressedCells": [],
+        "passed": false,
+        "comparisonMade": false
+      }
+    },
+    {
+      "name": "an-unpaired-cell-carries-no-interval-a-gate-may-read",
+      "floor": 0.02,
+      "expectedCells": 1,
+      "cells": [
+        {
+          "targetId": "nano",
+          "split": "heldOut",
+          "anchor": {
+            "mean": 0.3,
+            "executedRuns": 2,
+            "discardedRuns": 0,
+            "expectedRuns": 2,
+            "complete": true
+          },
+          "candidate": {
+            "mean": 0.9,
+            "executedRuns": 2,
+            "discardedRuns": 0,
+            "expectedRuns": 2,
+            "complete": true
+          },
+          "intervalClusters": 0
+        }
+      ],
+      "expected": {
+        "status": "partial",
+        "regressedCells": [],
+        "passed": false,
+        "comparisonMade": false
+      }
+    },
+    {
+      "name": "a-missing-cell-is-not-a-pass",
+      "floor": 0.02,
+      "expectedCells": 2,
+      "cells": [
+        {
+          "targetId": "sonnet",
+          "split": "heldOut",
+          "anchor": {
+            "mean": 0.3,
+            "executedRuns": 2,
+            "discardedRuns": 0,
+            "expectedRuns": 2,
+            "complete": true
+          },
+          "candidate": {
+            "mean": 0.8,
+            "executedRuns": 2,
+            "discardedRuns": 0,
+            "expectedRuns": 2,
+            "complete": true
+          },
+          "intervalClusters": 2
+        }
+      ],
+      "expected": {
+        "status": "partial",
+        "regressedCells": [],
+        "passed": false,
+        "comparisonMade": false
       }
     }
   ],

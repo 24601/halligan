@@ -1004,6 +1004,20 @@ export type AxAgentPlaybookEvidenceWarningCode =
   | 'control_arm_unmeasured'
   | 'harness_term_not_run'
   | 'transfer_not_run'
+  /**
+   * A transfer cell regressed beyond the floor while `gates.transfer` was only
+   * `'warn'` (or while the run had no accepted set to roll back). Without it a
+   * warn-mode transfer gate would produce no observable output at all, which is
+   * the silent absence this machinery exists to remove.
+   */
+  | 'transfer_cell_regressed'
+  /**
+   * A run-level transfer gate had nothing to read: no cell was produced, a cell
+   * left its split incomplete, or a cell's anchor and candidate passes could
+   * not be paired. Kept distinct from `transfer_cell_regressed`, which asserts
+   * that a cell was measured and got worse.
+   */
+  | 'transfer_unmeasured'
   | 'cost_unknown'
   | 'tokens_unobservable'
   | 'high_environment_discard_rate'
