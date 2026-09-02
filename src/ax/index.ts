@@ -1742,6 +1742,15 @@ import {
   runAxLearningStoreConformance,
 } from './learn/conformance.js';
 import {
+  type AxHarnessFailureAdvance,
+  type AxHarnessFailureEntry,
+  type AxHarnessFailureManifest,
+  type AxHarnessFailureObservation,
+  axAdvanceHarnessFailureManifest,
+  axHarnessFailureFingerprint,
+  axNormalizeHarnessFailureCause,
+} from './learn/manifest.js';
+import {
   AxInMemoryLearningStore,
   type AxInMemoryLearningStoreOptions,
   axInMemoryLearningStore,
@@ -2599,6 +2608,7 @@ export { axAIWebLLMCreativeConfig };
 export { axAIWebLLMDefaultConfig };
 export { axActorSkillView };
 export { axAdmitHarnessTree };
+export { axAdvanceHarnessFailureManifest };
 export { axAnalyzeChatPromptRequirements };
 export { axAnalyzeRequestRequirements };
 export { axApplyEventEffectTransition };
@@ -2722,6 +2732,7 @@ export { axGetSupportedAIModels };
 export { axGlobals };
 export { axGoogleGeminiLiveAudioDefaults };
 export { axHarnessContentId };
+export { axHarnessFailureFingerprint };
 export { axHarnessLooksLikeCredential };
 export { axHarnessPortId };
 export { axHarnessRecipe };
@@ -2852,6 +2863,7 @@ export { axModelInfoWebLLM };
 export { axNextMindPace };
 export { axNormalizeAppliedServiceTier };
 export { axNormalizeAxIRRuntimeCapabilities };
+export { axNormalizeHarnessFailureCause };
 export { axNormalizeOpenAIUsage };
 export { axNormalizeRequestedServiceTier };
 export { axNormalizeTrajectoryTimestamp };
@@ -3771,6 +3783,10 @@ export type { AxHarnessBulletConfig };
 export type { AxHarnessEntry };
 export type { AxHarnessEntryInspection };
 export type { AxHarnessEntryKind };
+export type { AxHarnessFailureAdvance };
+export type { AxHarnessFailureEntry };
+export type { AxHarnessFailureManifest };
+export type { AxHarnessFailureObservation };
 export type { AxHarnessGateDecision };
 export type { AxHarnessGateMetrics };
 export type { AxHarnessInstallTarget };

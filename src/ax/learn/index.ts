@@ -9,6 +9,17 @@ export type {
   AxLearningStoreConformanceReport,
 } from './conformance.js';
 export { runAxLearningStoreConformance } from './conformance.js';
+export type {
+  AxHarnessFailureAdvance,
+  AxHarnessFailureEntry,
+  AxHarnessFailureManifest,
+  AxHarnessFailureObservation,
+} from './manifest.js';
+export {
+  axAdvanceHarnessFailureManifest,
+  axHarnessFailureFingerprint,
+  axNormalizeHarnessFailureCause,
+} from './manifest.js';
 export type { AxInMemoryLearningStoreOptions } from './memoryStore.js';
 export {
   AxInMemoryLearningStore,
