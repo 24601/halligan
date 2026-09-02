@@ -2,8 +2,8 @@
 
 `agent.playbook().evolve()` grows a context artifact and gates it. This document
 is the contract for the evidence that gating produces: what is measured, who
-owns each input, what fails closed, what is merely reported, and — the part most
-easily got wrong — which numbers are selection numbers rather than results.
+owns each input, what fails closed, what is merely reported, and (the part most
+easily got wrong) which numbers are selection numbers rather than results.
 
 Every option here is **default-off**. A call configuring none of them behaves
 exactly as it did before this machinery existed, including the value of
@@ -25,19 +25,19 @@ reproduction, and any claim that evolving a harness is self-improvement.
 ## Migration note: three required result properties and `outcome.kind`
 
 `AxAgentPlaybookEvolveResult` gained three **required** properties and
-`AxAgentPlaybookEvolveOutcome` gained a required `kind`. Construction sites —
-host test doubles, adapters, fixtures — must supply them.
+`AxAgentPlaybookEvolveOutcome` gained a required `kind`. Construction sites
+(host test doubles, adapters, fixtures) must supply them.
 
-- `control: AxAgentPlaybookControlArmReport` — `{ status: 'not_run', reason }`
+- `control: AxAgentPlaybookControlArmReport`, `{ status: 'not_run', reason }`
   when no arm was configured. A run without a matched-budget comparison says so
   on the record instead of omitting the field.
-- `accounting: AxAgentPlaybookComputeAccounting` — every model call the run
+- `accounting: AxAgentPlaybookComputeAccounting`, every model call the run
   made, under one defined denominator.
-- `applied: 'live' | 'dry_run' | 'rolled_back'` — a three-state discriminant,
+- `applied: 'live' | 'dry_run' | 'rolled_back'`, a three-state discriminant,
   **not** a boolean. `false` conflated "you asked for a dry run, the snapshot is
   a safe draft" with "a run-level gate rejected this artifact, the snapshot is
   poison".
-- `outcome.kind: 'curate' | 'prune'` — `'curate'` for every legacy path.
+- `outcome.kind: 'curate' | 'prune'`, `'curate'` for every legacy path.
 
 For a test double, the smallest honest value of each is the visible-absence one:
 
@@ -70,11 +70,11 @@ selected by `outcome.kind`.
 |---|---|---|---|---|---|
 | 1 | `gain` | free | always `require` | `revalComplete && currentGain >= currentGainThreshold` | `revalComplete && -currentGain <= maxCurrentLoss` |
 | 2 | `held_out` | free | `require` when a held-out set exists | `revalHeldOut - heldOut >= -epsilon` | `-(revalHeldOut - heldOut) <= maxHeldOutLoss` |
-| 3 | `retention` | free | `require` when `retentionPolicy` set | worst/mean historical loss within thresholds | identical — a prune pays the full retention price |
+| 3 | `retention` | free | `require` when `retentionPolicy` set | worst/mean historical loss within thresholds | identical; a prune pays the full retention price |
 | 4 | `validity` | free | `gates.validity` | every required predicate `pass` on **both** splits | identical |
 | 5 | `interval` | free | `gates.interval` | current `direction === 'positive'` and `point > band.spread`; held-out `direction !== 'negative'` | current and held-out `direction !== 'negative'` |
 | 6 | `reach` | free | `gates.reach` | `gateEligible && reachedTasks > 0`, i.e. `host_probe` only | `skipped` |
-| 7 | `prune_size` | free | `skipped` for curate, always `require` for prune | — | `tokensBefore - tokensAfter >= minTokenReduction` |
+| 7 | `prune_size` | free | `skipped` for curate, always `require` for prune | n/a | `tokensBefore - tokensAfter >= minTokenReduction` |
 | 8 | `veto` | one host call per veto | `require` when `promotionVeto` set | every veto explicitly declines | identical |
 | 9 | `authority` | one `axAuthorize` call | `require` when `promotionAuthority` set | `allow` receipt whose `resource.id === nomination.resourceId` | identical |
 
@@ -85,8 +85,8 @@ Contract notes, not commentary:
   the gate that exists to refute "the prompt just got longer" is satisfied by
   the prompt getting longer.
 - **A prune's own thresholds are recorded** in `prune.appliedThresholds`, so the
-  retention receipt's `thresholds.minCurrentGain` — which describes the
-  retention *policy* — cannot be read as the rule the prune was judged by.
+  retention receipt's `thresholds.minCurrentGain` (which describes the
+  retention *policy*) cannot be read as the rule the prune was judged by.
 - **`revalComplete` is false when the evaluation was environment-incomplete**,
   and the rejection reason is then
   `evaluation incomplete due to environment failures (<n> tasks)` rather than
@@ -193,13 +193,13 @@ Three responses, in increasing cost:
    and is not.
 3. **Offer a real sealed test.** `sealedTest` is disjoint from `train` and
    `validation` by the same semantic-id machinery, evaluated **once** in phase
-   11 — after the run-level verdict — on the baseline artifact and the final
+   11 (after the run-level verdict) on the baseline artifact and the final
    artifact. `influencedNoDecision: true` is a literal type: there is no
    inhabitant of the report in which it influenced anything, and the gate chain
    has no branch that reads it. When the final artifact's digest equals the
-   baseline's — nothing accepted, or the accepted set rolled back — the report
+   baseline's (nothing accepted, or the accepted set rolled back), the report
    is `not_run` with that reason rather than a delta that measures run-to-run
-   noise. So is a pass that could not finish the whole split — the metric budget
+   noise. So is a pass that could not finish the whole split: the metric budget
    ran out, or every attempt at one sealed task was discarded. A prefix mean is
    not a test number, and a pass that scored nothing at all has a `mean` of `0`
    that would otherwise be published as the run's `delta`. Both refusals fire
@@ -207,12 +207,12 @@ Three responses, in increasing cost:
    at `2 x |sealed| x runsPerTask x (1 + maxDiscardRedraws)` precisely because
    a discarded attempt is re-drawn from the same counter.
    A restore failure around phase 11 throws `sealed_test_failed` in phase
-   `sealed_test` — never `control_arm_failed`, which would name a phase a run
+   `sealed_test`, never `control_arm_failed`, which would name a phase a run
    configuring only `sealedTest` never ran.
 
 A held-out delta from `evolve()` is a **selection** number and must not be
 reported as a test number. If a PR claims an improvement, the sealed-test delta
-— or an explicit statement that none was run — goes in the Evaluation section.
+(or an explicit statement that none was run) goes in the Evaluation section.
 
 ## Termination, discard, and re-draw
 
@@ -220,7 +220,7 @@ reported as a test number. If a PR claims an improvement, the sealed-test delta
 means `policy_failure`. A program that reliably drives a tool into a timeout
 **is** worse and must not be laundered out of the denominator; Ax never infers
 `environment_failure` on its own. A classifier that throws raises
-`classifier_invalid` — a classifier that cannot classify returns `undefined`.
+`classifier_invalid`; a classifier that cannot classify returns `undefined`.
 
 - Discarded attempts consume budget and are **never scored as zeros**.
 - One attempt, one vote: a 50-turn trajectory and a 2-turn trajectory count the
@@ -246,7 +246,7 @@ The documented host recipe is to scan `prediction.actionLog` for the
 `[<bulletId>]` prefix `renderPlaybook` emits. A counterfactual reach of `1.0` is
 the *expected* reading for evolve-curated bullets, not a good one; the receipt
 labels it rather than suppressing it. A probe that throws makes the split
-`unmeasured` and emits `reach_probe_failed` — the run is not aborted, because
+`unmeasured` and emits `reach_probe_failed`; the run is not aborted, because
 reach is evidence, not scoring.
 
 ## Validity predicates
@@ -291,8 +291,8 @@ to a win and contains a target that got materially worse.
   by task.
 - `transfer_cell_regressed` is emitted whatever the gate mode is, including
   `off`. A measured regression on another backbone is a finding, not a gate
-  artifact. When a non-`off` gate failed on it and rolled nothing back — a dry
-  run, or a run that accepted nothing — the same warning carries the gate's
+  artifact. When a non-`off` gate failed on it and rolled nothing back (a dry
+  run, or a run that accepted nothing), the same warning carries the gate's
   verdict and the reason nothing was rolled back, so a failing gate is never
   indistinguishable from `gates.transfer: 'off'`. Only an unreadable matrix
   falls through to `transfer_unmeasured`, and `transfer_not_run` is then
@@ -302,14 +302,14 @@ to a win and contains a target that got materially worse.
   anchors already scored, on services the caller owns and the run's budget never
   paid for.
 - After a run-level rollback `result.transfer` is returned **unchanged**. It
-  describes the artifact that was withdrawn — a record of what was measured, not
+  describes the artifact that was withdrawn: a record of what was measured, not
   of what is live. The five fields that move together are listed under
   *Promotion authority*; `transfer` is deliberately not one of them.
 
 ## Pruning, and the mutation primitive
 
 A removal is a mutation and pays an addition's price: the same re-evaluation,
-the same retention receipt, the same gate chain — in its loss-tolerance variant,
+the same retention receipt, the same gate chain, in its loss-tolerance variant,
 because a removal cannot raise the current-task mean by `minHeldInGain`.
 
 The prune applies through a snapshot transform that validates its own output
@@ -326,7 +326,7 @@ ceiling**, not every prunable bullet.
   host could not have pre-granted.
 - The **veto** is the only channel that sees the candidate. Reject-only,
   conjunctive, fail-closed: a veto that throws, times out, or returns anything
-  that is not `false` / `{ vetoed: false }` — `undefined` included — is a veto.
+  that is not `false` / `{ vetoed: false }` (`undefined` included) is a veto.
 - `promotionDigest` is **receipt metadata, not consent**. It identifies what was
   promoted; it authorizes nothing.
 - All five denial codes are recorded, not thrown, including `cancelled`.
@@ -341,9 +341,9 @@ ceiling**, not every prunable bullet.
   the gate that decided.
 
 Hosts supplying any of the four callbacks run
-`runAxAgentPlaybookEvidenceConformance` first. It makes **real** host calls —
+`runAxAgentPlaybookEvidenceConformance` first. It makes **real** host calls:
 two veto invocations and one genuine `axAuthorize` against the caller's live
-`AxAuthorityContext` — so `axPlaybookEvidenceConformanceOperation` on
+`AxAuthorityContext`, so `axPlaybookEvidenceConformanceOperation` on
 `axPlaybookEvidenceConformanceResource` must be pre-granted, or the kit's own
 request is denied and it asserts nothing.
 
@@ -357,15 +357,15 @@ the legacy number sees exactly what it saw before.
 
 Cost is caller-owned through `costFor`. Ax has no provider cost field and never
 estimates one: with no hook, `costUsd` is `undefined`, `costBasis` is
-`'unknown'`, and `cost_unknown` is emitted **when a candidate was accepted** —
-restricting it to accepts is deliberate, because a warning that fires on every
+`'unknown'`, and `cost_unknown` is emitted **when a candidate was accepted**.
+Restricting it to accepts is deliberate, because a warning that fires on every
 run is one a reviewer learns to skip.
 
 Token totals come from `AxTokenUsage.totalTokens` only. A phase whose calls are
 structurally unobservable (`mining`, `judge`) reads `tokensBasis:
 'unobservable'` and can be filled by a caller-owned `usageTap`; a phase that
 simply reported nothing reads `'unreported'`. Ax never wraps a caller's
-`AxAIService` to obtain usage — ownership stays with the caller.
+`AxAIService` to obtain usage; ownership stays with the caller.
 
 `result.overhead` reports the accepted artifact's turn, call and token cost
 against the anchor it was actually compared with, per split, through the same
@@ -391,8 +391,8 @@ overhead exceeds `overheadWarnRatio`.
 - Transfer measures the targets the caller supplied. It says nothing about a
   backbone that was not in the matrix.
 - Everything here is bounded harness adaptation. It is not recursive
-  self-improvement: `evolve()` does not modify its own optimizer, its own
-  evaluator, or its own gate.
+  self-improvement: `evolve()` modifies neither its own optimizer nor its own
+  evaluator nor its own gate.
 
 ## Evaluation
 
