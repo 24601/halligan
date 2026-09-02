@@ -137,6 +137,26 @@ describe('mind durability evaluation', () => {
     expect(report.naiveGuardBaseline.duplicateSends).toBeGreaterThan(0);
     expect(report.watchdogBaseline.withoutWatchdogWakes).toBe(0);
     expect(report.watchdogBaseline.withWatchdogWakes).toBeGreaterThan(0);
+    // MEASURED, not arithmetic: an hour of event time at a 300_000 ms window
+    // cannot produce more wakes than it has windows, and a hand-written
+    // `Math.floor(3_600_000 / WATCHDOG_MS)` could never come in under it.
+    expect(report.watchdogBaseline.withWatchdogWakes).toBeLessThanOrEqual(
+      Math.ceil(3_600_000 / 300_000) * 2
+    );
+  });
+
+  it('measures liveness per row rather than asserting it', () => {
+    // The paired claim "row X left the mind dead" is only falsifiable if
+    // `mindAlive` comes from a mind that actually ran. A literal would make
+    // every row identical here; a measurement does not.
+    expect(report.rows.every((row) => row.mindAlive)).toBe(true);
+    const windows = new Set(
+      report.rows.map((row) => row.recoveryWatchdogWindows)
+    );
+    expect(windows.size).toBeGreaterThan(1);
+    expect(report.rows.some((row) => row.recoveryWatchdogWindows > 0)).toBe(
+      true
+    );
   });
 
   it.each([

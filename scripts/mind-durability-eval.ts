@@ -12,6 +12,8 @@ import {
   type AxMindChatTransport,
   type AxMindEffectLedger,
   type AxMindSendReceipt,
+  type AxProgrammable,
+  AxSignature,
   type AxTrajectoryAppendReceipt,
   type AxTrajectoryAppendRequest,
   AxTrajectoryCursorError,
@@ -28,8 +30,10 @@ import {
   axMindPaceStepData,
   axMindPaceStepType,
   axMindReconcileChatSends,
+  axMindStaticArtifacts,
   axNextMindPace,
   axRecoverMindPacerState,
+  mind,
 } from '../src/ax/index.js';
 
 export const AX_MIND_DURABILITY_HONESTY =
@@ -393,6 +397,106 @@ function effectCounts(effects: readonly Readonly<AxEventEffect>[]) {
   };
 }
 
+/**
+ * Liveness MEASURED, never asserted. Every row reported `mindAlive: true` as a
+ * literal, which made the paired assertion "row X left the mind dead"
+ * unfalsifiable for the rows that never built one. This starts a REAL `AxMind`
+ * over the row's own post-crash store and reports whether a thinker step
+ * actually ran BEYOND the bootstrap wake, plus how many watchdog windows it
+ * took. Nothing here is arithmetic: a store the crash left unusable produces a
+ * mind that never wakes, and this returns `false`.
+ */
+async function measureAliveAfter(
+  it: Bed
+): Promise<Readonly<{ alive: boolean; watchdogWindows: number }>> {
+  const wakes: string[] = [];
+  const startedAt = it.clock.now();
+  let firstWakeAt: number | undefined;
+  const instance = mind({
+    id: 'durability-liveness',
+    trajectoryId: TRAJECTORY,
+    store: it.store,
+    clock: it.clock,
+    artifacts: axMindStaticArtifacts({
+      revision: 'durability',
+      persona: 'a mind checking whether it is still alive',
+      thinkerPrompts: {},
+      goals: [],
+      skills: [],
+    }),
+    thinkers: [
+      {
+        name: 'liveness',
+        kind: 'monolith',
+        subscription: {
+          triggerSelf: false,
+          watchdogMs: WATCHDOG_MS,
+          maxInFlight: 4,
+        },
+        ai: {} as never,
+        program: livenessProgram((type) => {
+          wakes.push(type);
+          if (type !== 'ax.mind.bootstrap' && firstWakeAt === undefined) {
+            firstWakeAt = it.clock.now();
+          }
+        }),
+        context: (request) => ({ context: request.projection.render }),
+      },
+    ],
+    budget: { contextWindowTokens: 8_000 },
+    allowVolatileTrajectory: true,
+    tickMs: 1_000,
+    sourcePollMs: 1_000,
+  });
+  await instance.start();
+  // Two watchdog windows of event time, in grid-sized steps.
+  for (let round = 0; round < 120 && firstWakeAt === undefined; round++) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    it.clock.advanceBy(WATCHDOG_MS / 12);
+  }
+  await instance.close({ drain: false, timeoutMs: 200 });
+  return Object.freeze({
+    alive: firstWakeAt !== undefined,
+    watchdogWindows:
+      firstWakeAt === undefined
+        ? 0
+        : Math.ceil((firstWakeAt - startedAt) / WATCHDOG_MS),
+  });
+}
+
+/** A model-free program that records the event type each wake arrived on. */
+function livenessProgram(onWake: (eventType: string) => void) {
+  const signature = new AxSignature('context:string -> reply?:string');
+  return {
+    getId: () => 'liveness-probe',
+    setId: () => undefined,
+    getSignature: () => signature,
+    getTraces: () => [],
+    setDemos: () => undefined,
+    applyOptimization: () => undefined,
+    getOptimizableComponents: () => [],
+    applyOptimizedComponents: () => undefined,
+    getUsage: () => [],
+    getChatLog: () => [],
+    resetUsage: () => undefined,
+    forward: async (_ai: unknown, _values: unknown, options: any) => {
+      onWake(String(options?.eventContext?.ingress?.event?.type ?? 'unknown'));
+      return { reply: 'ok' };
+    },
+    streamingForward: async function* () {},
+  } as unknown as AxProgrammable<any, any>;
+}
+
+/** One measurement, two reported fields, so neither can drift from the other. */
+function aliveFields(
+  measured: Readonly<{ alive: boolean; watchdogWindows: number }>
+): Readonly<{ mindAlive: boolean; recoveryWatchdogWindows: number }> {
+  return Object.freeze({
+    mindAlive: measured.alive,
+    recoveryWatchdogWindows: measured.watchdogWindows,
+  });
+}
+
 const chatFor = (
   it: Bed,
   sender: string,
@@ -432,9 +536,8 @@ async function rowC4(): Promise<AxMindDurabilityRow> {
     stepsLost: delivered.includes(trigger.stepId) ? 0 : 1,
     duplicateSends: 0,
     ...effectCounts(await it.ledger.listEffects()),
-    recoveryWatchdogWindows: 0,
+    ...aliveFields(await measureAliveAfter(it)),
     transportCalls: 0,
-    mindAlive: true,
     note: 'the per-consumer durable cursor republished the step; publish is at-least-once and the event store dedupes by scoped identity',
   };
 }
@@ -567,9 +670,8 @@ async function transportRow(
     stepsLost: 0,
     duplicateSends: fault.duplicates(),
     ...effectCounts(effects),
-    recoveryWatchdogWindows: 0,
+    ...aliveFields(await measureAliveAfter(it)),
     transportCalls: fault.sent.length,
-    mindAlive: true,
     note: `${note} (indeterminate=${indeterminate}, secondAttemptSent=${secondAttemptSent}, effects=${effects.map((one) => one.status).join('/')})`,
   };
 }
@@ -930,12 +1032,62 @@ async function naiveGuardBaseline(): Promise<
   };
 }
 
-/** The declared liveness baseline: the same broken chain with no watchdog. */
-function watchdogBaseline(): AxMindDurabilityReport['watchdogBaseline'] {
-  // A trigger that never became an event is C1: nothing arms a wake, so the
-  // only thing that can revive the mind is the watchdog duty.
-  const withWatchdogWakes = Math.floor(3_600_000 / WATCHDOG_MS);
-  return { withWatchdogWakes, withoutWatchdogWakes: 0 };
+/**
+ * The declared liveness baseline, MEASURED: one REAL mind over one hour of
+ * event time with the watchdog on, and the same mind with it off. This used to
+ * be `Math.floor(3_600_000 / WATCHDOG_MS)` versus `0` -- arithmetic restating
+ * the constants, which is exactly the kind of number a baseline must not be.
+ */
+async function watchdogBaseline(): Promise<
+  AxMindDurabilityReport['watchdogBaseline']
+> {
+  const measure = async (watchdogMs: number): Promise<number> => {
+    const it = await bed();
+    let wakes = 0;
+    const instance = mind({
+      id: `durability-watchdog-${watchdogMs}`,
+      trajectoryId: TRAJECTORY,
+      store: it.store,
+      clock: it.clock,
+      artifacts: axMindStaticArtifacts({
+        revision: 'durability',
+        persona: 'a mind with nothing to react to',
+        thinkerPrompts: {},
+        goals: [],
+        skills: [],
+      }),
+      thinkers: [
+        {
+          name: 'liveness',
+          kind: 'monolith',
+          subscription: { triggerSelf: false, watchdogMs, maxInFlight: 4 },
+          ai: {} as never,
+          // A trigger that never became an event is C1: nothing arms a wake,
+          // so the watchdog duty is the only thing that can revive the mind.
+          program: livenessProgram((type) => {
+            if (type !== 'ax.mind.bootstrap') wakes++;
+          }),
+          context: (request) => ({ context: request.projection.render }),
+        },
+      ],
+      budget: { contextWindowTokens: 8_000 },
+      allowVolatileTrajectory: true,
+      tickMs: 1_000,
+      sourcePollMs: 1_000,
+    });
+    await instance.start();
+    const rounds = 240;
+    for (let round = 0; round < rounds; round++) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      it.clock.advanceBy(3_600_000 / rounds);
+    }
+    await instance.close({ drain: false, timeoutMs: 200 });
+    return wakes;
+  };
+  return {
+    withWatchdogWakes: await measure(WATCHDOG_MS),
+    withoutWatchdogWakes: await measure(0),
+  };
 }
 
 export async function runMindDurabilityEvaluation(): Promise<
@@ -977,7 +1129,7 @@ export async function runMindDurabilityEvaluation(): Promise<
     rows: Object.freeze(rows),
     concurrency: await concurrency(),
     naiveGuardBaseline: await naiveGuardBaseline(),
-    watchdogBaseline: watchdogBaseline(),
+    watchdogBaseline: await watchdogBaseline(),
   });
 }
 
