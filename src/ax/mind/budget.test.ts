@@ -105,15 +105,29 @@ import { describe, expect, it } from 'vitest';
  *   the shipped total on main was already 5_516 before this pass touched
  *   anything.
  *
- * Measured at this raise: types 607, pacer 284, health 138, routes 314,
+ * The adversarial review of PR #103 raises two of those again, and lowers
+ * `mind.ts`'s measured total by dropping a parameter:
+ *
+ * - `types.ts` 615 -> 630: the `closing` member of `AxMindLivenessError`'s
+ *   closed union with the comment that says why an ordinary host shutdown
+ *   cannot share `close_from_inside`'s label (review M3), and the
+ *   `siblingSignals` opt-in that keeps the supervisor pattern buildable after
+ *   the sibling rule (review minor 2). Both are contract surface, so both
+ *   carry the doc comment the convention asks for.
+ * - `routes.ts` 320 -> 330: the sibling-inert class became DECLARED rather
+ *   than inferred from `spillFields`/`visibleWork`/`conversational` (review
+ *   minor 1), and the doc now reconciles its vocabulary with RFC 7.4's
+ *   different use of "payload-carrying" (review minor 3).
+ *
+ * Measured at this raise: types 623, pacer 284, health 138, routes 321,
  * sources 594, chat 785, salience 163, skills 134, context 138, step 168,
- * subruns 140, thinkers 540, mind 1_471, index 174 -- 5_650 in total.
+ * subruns 140, thinkers 540, mind 1_468, index 174 -- 5_670 in total.
  */
 const CAPS: readonly (readonly [string, number])[] = [
-  ['src/ax/mind/types.ts', 615], // raised from 430, 480, then 600
+  ['src/ax/mind/types.ts', 630], // raised from 430, 480, 600, then 615
   ['src/ax/mind/pacer.ts', 300], // raised from 200, then 270
   ['src/ax/mind/health.ts', 150], // raised from 130
-  ['src/ax/mind/routes.ts', 320], // raised from 250, then 270
+  ['src/ax/mind/routes.ts', 330], // raised from 250, 270, then 320
   ['src/ax/mind/sources.ts', 610], // raised from 330, then 560
   ['src/ax/mind/chat.ts', 800], // raised from 280, then 680
   ['src/ax/mind/salience.ts', 180], // raised from 130

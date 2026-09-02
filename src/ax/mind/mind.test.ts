@@ -20,6 +20,7 @@ import {
   type AxTrajectoryStore,
 } from '../trajectory/types.js';
 import { AxMind, type AxMindOptions, mind } from './mind.js';
+import { axMindPaceStepType } from './pacer.js';
 import { axMindMonolith, axMindResponder } from './thinkers.js';
 import {
   AxInMemoryMindOwnershipStore,
@@ -1225,7 +1226,7 @@ describe('AxMind step deadline hygiene', () => {
     await instance.close({ drain: false, timeoutMs: 200 });
   });
 
-  it('closing aborts the settle path rather than appending into a closed mind', async () => {
+  it('is inert on a second close, and a delivery that arrives afterwards appends nothing', async () => {
     const clock = new AxManualEventClock(1_000);
     const store = await seed(clock);
     const program = probeProgram();
@@ -1234,11 +1235,150 @@ describe('AxMind step deadline hygiene', () => {
     await pumpUntil(clock, () => program.calls.length > 0);
     await instance.close({ drain: false, timeoutMs: 200 });
     const settledAt = (await typesIn(store)).length;
-    // A second close is inert, and nothing else lands: the lifetime signal is
-    // already aborted, so a late settle stops at the store boundary.
+    // This one is satisfied by `settleDelivery`'s own `closed` guard, which is
+    // why the two tests below exist: they are the ones that reach the signal.
     await instance.close({ drain: false, timeoutMs: 200 });
     await settle(clock, 5, 10);
     expect((await typesIn(store)).length).toBe(settledAt);
+  });
+});
+
+/**
+ * The settle takes the MIND's lifetime signal and nothing else. Both halves of
+ * that sentence are load-bearing and each has a test here: a closing mind must
+ * stop mid-settle, and a delivery the runtime cancelled must still record its
+ * outcome. Mutating the signal argument to `undefined` fails the first; passing
+ * the delivery's signal into it fails the second.
+ */
+describe('AxMind settle signal discipline', () => {
+  /** Parks the FIRST work probe issued after the thinker's program has run. */
+  function gatedProbeStore(
+    store: AxTrajectoryStore,
+    ready: () => boolean
+  ): Readonly<{
+    store: AxTrajectoryStore;
+    parked: () => boolean;
+    release: () => void;
+  }> {
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let parked = false;
+    const tailBackward: AxTrajectoryStore['tailBackward'] = async (
+      request,
+      signal
+    ) => {
+      // `axMindWorkProbe` is the settle's first `await`, and it is the only
+      // limit-1 tail the mind issues; parking it puts the settle INSIDE the
+      // store when `close()` lands, which is the state the signal exists for.
+      if (!parked && ready() && request.limit === 1) {
+        parked = true;
+        await gate;
+      }
+      return store.tailBackward(request, signal);
+    };
+    const gated = new Proxy(store, {
+      get(target, property, _receiver) {
+        if (property === 'tailBackward') return tailBackward;
+        const value = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    return Object.freeze({
+      store: gated,
+      parked: () => parked,
+      release: () => release?.(),
+    });
+  }
+
+  it('stops a settle that is already inside the store when the mind closes', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const base = await seed(clock);
+    let ran = false;
+    const program = probeProgram(async () => {
+      ran = true;
+      return {};
+    });
+    const gate = gatedProbeStore(base, () => ran);
+    const diagnostics: AxMindDiagnostic[] = [];
+    const instance = mind(
+      baseOptions(gate.store, [thinkerWith('worker', program)], {
+        onDiagnostic: (one) => diagnostics.push(one),
+      })
+    );
+    await instance.start();
+    await pumpUntil(clock, () => gate.parked());
+    expect(gate.parked()).toBe(true);
+    const before = await typesIn(base);
+    // `close()` aborts the lifetime SYNCHRONOUSLY, before it awaits the
+    // runtime drain, so the parked settle is released into an aborted signal.
+    const closing = instance.close({ drain: false, timeoutMs: 200 });
+    gate.release();
+    await closing;
+    await settle(clock, 5, 10);
+    const after = await typesIn(base);
+    // THE assertion: none of the settle's four outcome appends land. Without
+    // the signal the probe resolves and `idle` + `mind-wake` are written into
+    // a mind that is already gone.
+    expect(after.length).toBe(before.length);
+    expect(after.some((step) => step.type === axMindPaceStepType)).toBe(false);
+    // And the failure is CLASSIFIED, not swallowed: the fallback names the
+    // shutdown reason, distinct from the `close_from_inside` refusal.
+    const armed = diagnostics.filter(
+      (one) => one.code === 'liveness-fallback-armed'
+    );
+    expect(armed.length).toBeGreaterThan(0);
+    expect(armed.some((one) => /is closing/.test(one.message))).toBe(true);
+  });
+
+  it('still records the outcome of a delivery whose own signal was cancelled', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const store = await seed(clock);
+    let release: (() => void) | undefined;
+    const parked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let captured: Readonly<{ deliveryId?: string }> | undefined;
+    const signature = new AxSignature('context:string -> reply?:string');
+    const base = probeProgram();
+    const holding = {
+      ...base,
+      getSignature: () => signature,
+      forward: async (_ai: unknown, _values: unknown, options: any) => {
+        captured ??= options?.eventContext;
+        await parked;
+        return {};
+      },
+    } as unknown as AxProgrammable<any, any>;
+    const worker = thinkerWith('worker', holding);
+    const instance = mind(baseOptions(store, [worker]));
+    await instance.start();
+    await pumpUntil(clock, () => captured !== undefined);
+    expect(captured?.deliveryId).toBeTruthy();
+    const before = await typesIn(store);
+    // The runtime aborts a delivery's controller on `cancelRun` and on a
+    // lapsed claim heartbeat WHILE THE MIND IS OPEN. Settling under it would
+    // make the outcome step, the pace step and the ladder's arm conditional on
+    // the run surviving -- exactly the wakes most worth recording.
+    const cancelled = new AbortController();
+    cancelled.abort(new Error('the runtime cancelled this run'));
+    const quiet = probeProgram(async () => ({}));
+    await instance.runThinkerStep(worker, quiet, ai, { context: 'x' }, {
+      eventContext: captured,
+      abortSignal: cancelled.signal,
+    } as never);
+    const seen = new Set(before.map((step) => step.stepId));
+    const fresh = (await typesIn(store)).filter(
+      (step) => !seen.has(step.stepId)
+    );
+    // Both halves of RFC 7.5 step 8 land: the outcome step and its pace step.
+    expect(fresh.filter((step) => step.type === 'idle')).toHaveLength(1);
+    expect(
+      fresh.filter((step) => step.type === axMindPaceStepType)
+    ).toHaveLength(1);
+    release?.();
+    await instance.close({ drain: false, timeoutMs: 200 });
   });
 });
 

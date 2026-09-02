@@ -26,6 +26,15 @@ export interface AxMindSubscription {
    * advancing THIS consumer's cursor; nothing is dropped. Default 4.
    */
   readonly maxInFlight?: number;
+  /**
+   * Opt back IN to a sibling's wake-signal-class steps, by type. The supervisor
+   * pattern -- one thinker watching another's `error` steps -- is otherwise
+   * unbuildable, because the sibling rule refuses those wakes above the
+   * subscription. Declaring a type here re-opens the loop it closes, so the
+   * thinker that asks for it owns bounding its own answer (an `error` answered
+   * with an `error` is unbounded again). Absent means the rule applies.
+   */
+  readonly siblingSignals?: readonly string[];
 }
 
 /** The conservative subscription: reacts to others, never to itself. */
@@ -568,11 +577,18 @@ export class AxMindLivenessError extends Error {
   readonly code = 'mind_liveness';
   constructor(
     message: string,
+    /**
+     * `close_from_inside` is an AUTHORITY REFUSAL -- a thinker tried to close
+     * its own mind -- and `closing` is an ordinary host shutdown. Sharing one
+     * label between them would make the discriminant unable to tell the two
+     * apart, which is the only reason the union is closed.
+     */
     readonly reason:
       | 'stalled'
       | 'pacer_parked'
       | 'source_failed'
-      | 'close_from_inside',
+      | 'close_from_inside'
+      | 'closing',
     options?: ErrorOptions
   ) {
     super(message, options);

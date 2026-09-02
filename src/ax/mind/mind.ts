@@ -256,10 +256,11 @@ export class AxMind {
   private started = false;
   private closed = false;
   /**
-   * Aborted by `close()`. Every settle takes it, so the probe read and the
-   * outcome/pace appends a closing mind is still holding stop at the store
-   * boundary instead of racing the shutdown. It is MERGED with the caller's
-   * signal, never substituted for it.
+   * Aborted by `close()`, and the ONLY signal a settle takes. The probe read
+   * and the outcome/pace appends a closing mind is still holding stop at the
+   * store boundary instead of racing the shutdown; a cancelled or claim-lapsed
+   * delivery still records its outcome, because losing the run is not a reason
+   * to lose the audit trail of it.
    */
   private readonly lifetime = new AbortController();
   private toolDepth = 0;
@@ -979,10 +980,12 @@ export class AxMind {
     if (error === undefined && output !== undefined && thinker.sinks?.length) {
       return output;
     }
-    // The DELIVERY's signal, never the step deadline's: the deadline has just
-    // been aborted in the `finally` above, and settling under it would abort
-    // the outcome append of every step that used its whole budget.
-    await this.settleDelivery(deliveryId, options?.abortSignal);
+    // The settle takes NEITHER the step deadline (aborted in the `finally`
+    // above) NOR the delivery's own signal: the runtime aborts a delivery on a
+    // cancelled run and on a lapsed claim heartbeat while the mind is still
+    // open, and settling under it would drop the outcome step, the pace step
+    // and the ladder's arm for exactly the wakes worth recording.
+    await this.settleDelivery(deliveryId);
     if (error !== undefined) throw error;
     return output;
   }
@@ -992,21 +995,20 @@ export class AxMind {
    * `mind-settle` sink, and from the tick's reaper, so the identity of the
    * caller cannot decide whether the ladder advances.
    */
-  private async settleDelivery(
-    deliveryId: string,
-    signal?: AbortSignal
-  ): Promise<void> {
+  private async settleDelivery(deliveryId: string): Promise<void> {
     const step = this.pending.get(deliveryId);
     if (!step || step.settled) return;
     step.settled = true;
     this.pending.delete(deliveryId);
     if (this.closed) return;
     try {
+      // The MIND's lifetime signal, and nothing else. It is the one condition
+      // under which the appends below must not land.
       await this.settleStep(
         step,
         step.output,
         step.error,
-        mergeAbortSignals(signal, this.lifetime.signal)
+        this.lifetime.signal
       );
     } catch (thrown) {
       // The settle is the arming path, so it has to survive its own failure:
@@ -1453,11 +1455,11 @@ export class AxMind {
     this.closed = true;
     // Aborted BEFORE the runtime drains: a settle already inside a store read
     // stops there rather than appending into a mind that is going away.
+    // `closing`, NOT `close_from_inside`: a host shutting the mind down and a
+    // thinker trying to close its own mind are different events, and a host
+    // that inspects `reason` on an aborted store call has to tell them apart.
     this.lifetime.abort(
-      new AxMindLivenessError(
-        `AxMind ${this.id} is closing`,
-        'close_from_inside'
-      )
+      new AxMindLivenessError(`AxMind ${this.id} is closing`, 'closing')
     );
     await this.runtime.close(options ?? { drain: true });
     // Nothing can settle after this, so the records are released rather than

@@ -220,8 +220,9 @@ describe('axMindSiblingWakeSuppressed', () => {
     ]) {
       expect(axMindSiblingWakeSuppressed(type, registry)).toBe(false);
     }
-    // Derived from registry facts, not from a literal list: a host type that
-    // carries content is outside the class, and a host wake signal is inside.
+    // Derived from DECLARED registry facts, not from a literal list and not
+    // from storage/pacing/UI flags: a host type that carries content is
+    // outside the class, and a host wake signal is inside.
     const hosted = axTrajectoryTypeRegistry([
       {
         type: 'host.note',
@@ -237,9 +238,28 @@ describe('axMindSiblingWakeSuppressed', () => {
         carriesSource: false,
         wakeSignal: true,
       },
+      {
+        // A short enum payload: too small to be worth spilling, not "work",
+        // not a conversation -- and it still says something a sibling reads.
+        // Inferring the class from those three flags swept it in silently.
+        type: 'host.vote',
+        stepClass: 'narrative',
+        wakeable: true,
+        carriesSource: true,
+      },
+      {
+        type: 'host.quiet',
+        stepClass: 'narrative',
+        wakeable: true,
+        carriesSource: true,
+        siblingInert: true,
+      },
     ]);
     expect(axMindSiblingWakeSuppressed('host.note', hosted)).toBe(false);
     expect(axMindSiblingWakeSuppressed('host.ping', hosted)).toBe(true);
+    // THE minor-1 row: declared, so a host opts in rather than discovering it.
+    expect(axMindSiblingWakeSuppressed('host.vote', hosted)).toBe(false);
+    expect(axMindSiblingWakeSuppressed('host.quiet', hosted)).toBe(true);
     // An unregistered type is not wakeable at all, so it never reaches here.
     expect(axMindSiblingWakeSuppressed('host.unknown', registry)).toBe(false);
   });
@@ -285,6 +305,28 @@ describe('the sibling rule inside the route predicate', () => {
     expect(alone(stepEvent({ type: 'idle', source: 'alpha' }))).toBe(true);
     // And a thinker's OWN idle is still refused by the self rule.
     expect(alone(stepEvent({ type: 'idle', source: 'beta' }))).toBe(false);
+  });
+
+  it('lets a declared supervisor opt back in to a sibling signal', () => {
+    // The supervisor pattern: suppression happens in `authorize`, ABOVE the
+    // subscription, so without this opt-in a thinker that watches a sibling
+    // fail cannot be built at all.
+    const supervisor = axMindWakeRoute(
+      thinker('beta', { siblingSignals: ['error'] }),
+      target('t').target,
+      { registry, sourceId: SOURCE, tickMs: 100, siblings: ['alpha'] }
+    ).authorize as (ingress: Readonly<AxEventIngress>) => boolean;
+    expect(supervisor(stepEvent({ type: 'error', source: 'alpha' }))).toBe(
+      true
+    );
+    // Narrow, not a blanket disable: the type it did NOT declare is still
+    // refused, and its own error still never re-triggers it.
+    expect(supervisor(stepEvent({ type: 'idle', source: 'alpha' }))).toBe(
+      false
+    );
+    expect(supervisor(stepEvent({ type: 'error', source: 'beta' }))).toBe(
+      false
+    );
   });
 
   it('reads the launchedBy identity when the type carries no source', () => {

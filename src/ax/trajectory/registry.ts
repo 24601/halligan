@@ -63,6 +63,9 @@ export const axDefaultTrajectoryTypes: readonly Readonly<AxTrajectoryTypeDescrip
       ...narrative,
       wakeable: true,
       visibleWork: false,
+      // The only NARRATIVE row with no content field at all: "I looked and
+      // there was nothing" says nothing a sibling has to read.
+      siblingInert: true,
     }),
     d('message', 'narrative', {
       ...narrative,

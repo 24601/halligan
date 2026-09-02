@@ -75,30 +75,34 @@ export function axMindPendingClass(
 /**
  * May a step of this type wake a SIBLING thinker of the mind that wrote it?
  *
- * Two registry facts, one rule. (a) The WAKE-SIGNAL CLASS carries no payload
- * to read: `wakeSignal: true` machinery (`mind-wake`, `mind-idle`,
- * `manual-trigger`) plus any wakeable type with no content at all (`idle`).
- * (b) A `neverRetriggersSelf` type (`error`) is one the registry already
- * forbids feeding back to its own writer.
+ * Three DECLARED registry facts, one rule -- never an inference from
+ * `spillFields`/`visibleWork`/`conversational`, which are a storage, a pacing
+ * and a UI concern and would silently sweep a host's short-payload type into
+ * the inert class. (a) `wakeSignal: true` machinery (`mind-wake`, `mind-idle`,
+ * `manual-trigger`) is a pure signal. (b) `siblingInert: true` (`idle`) says
+ * so in the descriptor. (c) A `neverRetriggersSelf` type (`error`) is one the
+ * registry already forbids feeding back to its own writer.
  *
- * Feeding either to the writer's SIBLING is the same loop with one more actor
- * in it, and it is unbounded in TOKENS: two thinkers on the default
+ * Feeding any of them to the writer's SIBLING is the same loop with one more
+ * actor in it, and it is unbounded in TOKENS: two thinkers on the default
  * subscription each answer the other's `idle` with an `idle` of their own
  * forever. Payload-carrying types (`message`, `action`, `observation`,
  * `merge`, `thought`) say something a sibling has to read and are untouched.
+ *
+ * Vocabulary note: RFC 7.4's pending-policy table uses "payload-carrying" for
+ * `wakeSignal: false` and so counts `idle` and `error` inside it. That is the
+ * QUEUE-VS-COALESCE axis; this is the has-a-reader axis, and the two disagree
+ * on exactly those two rows by design.
  */
 export function axMindSiblingWakeSuppressed(
   stepType: string,
   registry: AxTrajectoryTypeRegistry
 ): boolean {
   const descriptor = registry.describe(stepType);
-  if (descriptor.wakeSignal === true) return true;
-  if (descriptor.neverRetriggersSelf === true) return true;
   return (
-    descriptor.wakeable &&
-    descriptor.visibleWork !== true &&
-    descriptor.conversational !== true &&
-    !descriptor.spillFields?.length
+    descriptor.wakeSignal === true ||
+    descriptor.siblingInert === true ||
+    descriptor.neverRetriggersSelf === true
   );
 }
 
@@ -187,6 +191,9 @@ function suppression(
       const sibling =
         writer !== undefined &&
         siblings.includes(writer) &&
+        // The supervisor's opt-in, consulted BEFORE the class: a thinker that
+        // declares it watches a sibling's `error` steps is built, not refused.
+        thinker.subscription.siblingSignals?.includes(type) !== true &&
         axMindSiblingWakeSuppressed(type, registry);
       if (sibling) {
         onDiagnostic?.({

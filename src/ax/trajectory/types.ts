@@ -103,6 +103,8 @@ export interface AxTrajectoryTypeDescriptor {
   readonly carriesSource: boolean;
   /** Never re-triggers its own writer, even under triggerSelf. */
   readonly neverRetriggersSelf?: boolean;
+  /** Carries nothing a SIBLING writer's reader has to act on. Declared, never inferred. */
+  readonly siblingInert?: boolean;
   /** String fields eligible for size-based blob spill. */
   readonly spillFields?: readonly string[];
   /** Counts as visible work for pacing. */
