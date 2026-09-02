@@ -2390,6 +2390,51 @@ describe('agent.playbook().evolve() evidence receipt and gates', () => {
     );
   });
 
+  it('scopes each receipt accounting to that candidate, not the running total', async () => {
+    // Candidate 2's receipt must not carry candidate 1's calls: a receipt read
+    // in isolation has to state what THAT candidate cost.
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(
+      { train: TASKS, validation: VALIDATION_TASKS },
+      {
+        metric: async () => 0.2, // reject every candidate so several are evaluated
+        maxProposals: 2,
+        gates: { validity: 'warn' },
+      }
+    );
+    const perCandidate = TASKS.length + VALIDATION_TASKS.length;
+    expect(result.outcomes.length).toBeGreaterThan(0);
+    for (const outcome of result.outcomes) {
+      expect(outcome.evidence?.accounting.metricCalls).toBe(perCandidate);
+      expect(
+        outcome.evidence?.accounting.phases.find(
+          (phase: any) => phase.name === 'judge'
+        )
+      ).toBeUndefined();
+    }
+    // The run total still counts every candidate.
+    expect(result.accounting.metricCalls).toBeGreaterThanOrEqual(
+      perCandidate * result.outcomes.length
+    );
+  });
+
+  it('does not repeat the same run-level warning once per candidate', async () => {
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(
+      { train: TASKS, validation: VALIDATION_TASKS },
+      {
+        metric: async () => 0.2,
+        maxProposals: 2,
+        gates: { validity: 'warn' },
+      }
+    );
+    const keys = (result.warnings ?? []).map(
+      (w: any) => `${w.code}|${w.scope ?? ''}`
+    );
+    expect(new Set(keys).size).toBe(keys.length);
+    expect(keys).toContain('held_out_reused_for_selection|heldOut');
+  });
+
   it('reports the interval as unresolved rather than as an effect', async () => {
     const { ag } = makeAgent();
     const result = await ag.playbook().evolve(TASKS, {

@@ -24,6 +24,7 @@ import type {
 import { createAgentOptimizeMetric } from '../optimizer.js';
 import {
   accountingForPhases,
+  candidateAccounting,
   createAccountingLedger,
   overheadReportFrom,
   overheadSplitFrom,
@@ -825,6 +826,7 @@ export async function evolveAgentPlaybook<
   let anchorHeldOutRecords = baselineHeldOutBatch?.records;
   let heldOutSelectionComparisons = 0;
   const runWarnings: AxAgentPlaybookEvidenceWarning[] = [];
+  const seenRunWarnings = new Set<string>();
   const registered = registeredFunctionNames(s);
   const nowIso = () => new Date(nowFn()).toISOString();
   const currentSeed = () =>
@@ -1000,6 +1002,10 @@ export async function evolveAgentPlaybook<
         continue;
       }
 
+      // Snapshot before this candidate's own evaluations so its receipt carries
+      // ITS cost, not the running total of every candidate before it.
+      const candidateSpendBefore = usedCalls();
+      const candidateStartedAt = nowFn();
       const revalTrain = await runPhaseBatch(
         'candidate_eval',
         trainTasks,
@@ -1414,17 +1420,31 @@ export async function evolveAgentPlaybook<
           ...(overhead ? { overhead } : {}),
           gates: gateReport,
           promotion: { status: 'not_required', nomination },
-          accounting: accountingForPhases(
-            ledger.assemble({ evolveOnlyMetricCalls: usedCalls() }),
-            ['candidate_eval']
-          ),
+          accounting: candidateAccounting({
+            metricCalls: usedCalls() - candidateSpendBefore,
+            usage: [
+              ...revalTrain.usage,
+              ...(revalHeldOutBatch?.usage ?? []),
+              ...candidateRetentionBatches.flatMap(({ batch }) => batch.usage),
+            ],
+            wallClockMs: nowFn() - candidateStartedAt,
+            usesBuiltInJudge,
+          }),
           selectionComparisons: heldOutSelectionComparisons,
           level: intervalSettings.level,
           warnings,
           decision: legacyAccept && chainAccepts ? 'accepted' : 'rejected',
         });
         candidateWarnings = warnings;
-        runWarnings.push(...warnings);
+        // The run-level list is a summary, not a concatenation: the same
+        // disclosure repeated once per candidate is noise a reader learns to
+        // skip, which is how a real warning gets missed.
+        for (const warning of warnings) {
+          const key = `${warning.code}|${warning.scope ?? ''}`;
+          if (seenRunWarnings.has(key)) continue;
+          seenRunWarnings.add(key);
+          runWarnings.push(warning);
+        }
       }
 
       const accept =
