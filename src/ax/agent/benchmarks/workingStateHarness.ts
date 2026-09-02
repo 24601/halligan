@@ -9,15 +9,18 @@
  * distinguish a real dispatch from a fabricated one, which is exactly the
  * distinction the receipt gate exists to make.
  *
- * Test-only helper — not exported from `src/ax/index.ts`.
+ * Test-only helper. It lives under `benchmarks/` beside the other
+ * measurement scaffolding rather than in the shipped `agentInternal/` tree,
+ * and its `ax*` exports are listed in `internalExportNames` so the generated
+ * barrel never carries them.
  */
 
 import { AxMockAIService } from '../../ai/mock/api.js';
-import type { AxCodeRuntime, AxCodeSession } from '../rlm.js';
 import {
   AX_HOST_SNIPPET_MARKER,
   AX_INPUTS_PATCH_GLOBAL,
-} from './sharedSession.js';
+} from '../agentInternal/sharedSession.js';
+import type { AxCodeRuntime, AxCodeSession } from '../rlm.js';
 
 export type AxWorkingStateScript = Readonly<{
   distiller: readonly string[];

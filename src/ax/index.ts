@@ -202,10 +202,6 @@ import type {
   AxRankModulesOptions,
   AxRelevanceHints,
 } from './agent/agentInternal/relevanceRanker.js';
-import type {
-  AxAgentToolReceiptBinding,
-  AxAgentToolReceiptObservation,
-} from './agent/agentInternal/runtimeGlobals.js';
 import {
   AxAgentSharedRuntimeSession,
   type AxEvidenceDescriptor,
@@ -3038,8 +3034,6 @@ export type { AxAgentStreamingForwardOptions };
 export type { AxAgentStructuredClarification };
 export type { AxAgentTestCompletionPayload };
 export type { AxAgentTestResult };
-export type { AxAgentToolReceiptBinding };
-export type { AxAgentToolReceiptObservation };
 export type { AxAgentTrajectoryClassifier };
 export type { AxAgentTrajectoryTermination };
 export type { AxAgentTrajectoryTerminationKind };

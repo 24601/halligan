@@ -85,6 +85,15 @@ const internalExportNames = new Set([
   'axCreateEvaluatingRuntime',
   'axCreateScriptedMock',
   'axWorkingStateHarnessUsage',
+  // Working-state harness plumbing: the sink contract between the dispatch
+  // site and the loop, and the config gate the agent constructor runs. Not
+  // public API — hosts configure receipts through `AxWorkingStateConfig`.
+  'AxAgentToolReceiptBinding',
+  'AxAgentToolReceiptObservation',
+  'axValidateWorkingStateConfig',
+  // Bare lowercase pointer parser shared by statePatch.ts and workingState.ts.
+  // Listed deliberately: it is module plumbing, not public API.
+  'parseStatePatchPointer',
   'AxMutableDiscoveryPromptState',
   'AxMutableSkillsPromptState',
   'AxNormalizedAgentEvalDataset',

@@ -26,10 +26,6 @@ import { AxMockAIService } from '../../ai/mock/api.js';
 import type { AxAIService } from '../../ai/types.js';
 import { AxInMemoryProgramStateStore } from '../../event/memoryStore.js';
 import { AxManualEventClock } from '../../event/types.js';
-import {
-  axCreateEvaluatingRuntime,
-  axWorkingStateHarnessUsage,
-} from '../agentInternal/workingStateHarness.js';
 import type { AxAgentFunction } from '../index.js';
 import { agent } from '../index.js';
 import {
@@ -39,6 +35,10 @@ import {
   type AxWorkingStateTraceStep,
   axWorkingStateTraceDigest,
 } from '../workingState.js';
+import {
+  axCreateEvaluatingRuntime,
+  axWorkingStateHarnessUsage,
+} from './workingStateHarness.js';
 import {
   type AxWorkingStateArm,
   type AxWorkingStateBenchRow,

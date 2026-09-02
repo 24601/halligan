@@ -17,7 +17,7 @@ import {
   type AxWorkingStateScript,
   axCreateEvaluatingRuntime,
   axCreateScriptedMock,
-} from './agentInternal/workingStateHarness.js';
+} from './benchmarks/workingStateHarness.js';
 import type { AxAgentFunction } from './index.js';
 import { agent } from './index.js';
 import {

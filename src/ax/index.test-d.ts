@@ -1115,11 +1115,22 @@ void axWorkingState<WorkingStateFacts>(
 );
 void axIsWorkingStateError(new Error('x'));
 
-// Benchmark scaffolding must stay internal: `AxWorkingStateBenchRow` and the
-// offline harness are listed in `internalExportNames`, so the generated barrel
-// does not carry them.
-type WorkingStateBarrel = typeof import('./index.js');
+// Benchmark scaffolding and harness plumbing must stay internal: these names
+// are listed in `internalExportNames`, so the generated barrel does not carry
+// them. A `keyof typeof import(...)` test cannot express this — a type-only
+// export never appears in a module's `keyof`, so that form passes whatever the
+// barrel exports. The assertion here is the resolution failure itself: if the
+// barrel ever exported one of these names, its `@ts-expect-error` would have
+// nothing to suppress and this file would stop compiling.
 type BenchRowIsNotPublic =
-  'AxWorkingStateBenchRow' extends keyof WorkingStateBarrel ? never : true;
-const benchRowIsNotPublic: BenchRowIsNotPublic = true;
+  // @ts-expect-error the package root must not export the benchmark row type
+  import('./index.js').AxWorkingStateBenchRow;
+const benchRowIsNotPublic: BenchRowIsNotPublic | undefined = undefined;
 void benchRowIsNotPublic;
+
+type ReceiptBindingIsNotPublic =
+  // @ts-expect-error the package root must not export the receipt sink contract
+  import('./index.js').AxAgentToolReceiptBinding;
+const receiptBindingIsNotPublic: ReceiptBindingIsNotPublic | undefined =
+  undefined;
+void receiptBindingIsNotPublic;
