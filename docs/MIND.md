@@ -411,7 +411,7 @@ ceiling; the shipped total is higher, and each raise has a reason:
 
 | file | cap | reason |
 |---|---|---|
-| `types.ts` | 630 | the context-request record, the whole artifact source with its change and receipt records, and the in-memory ownership store, which are RFC 4.9/4.10 declarations the pacing lane deferred for want of a consumer; then the `wake-suppressed-sibling` diagnostic code and the loop its absence hides; then the `closing` member of `AxMindLivenessError`'s closed union and the `siblingSignals` supervisor opt-in, both contract surface carrying the comment that says which failure they close |
+| `types.ts` | 619 | the context-request record, the whole artifact source with its change and receipt records, and the in-memory ownership store, which are RFC 4.9/4.10 declarations the pacing lane deferred for want of a consumer; then the `wake-suppressed-sibling` diagnostic code and the loop its absence hides; then the `closing` member of `AxMindLivenessError`'s closed union and the `siblingSignals` supervisor opt-in, both contract surface carrying the comment that says which failure they close |
 | `pacer.ts` | 300 | the fuse derived from the descent cost, plus `parkedUntil` |
 | `health.ts` | 150 | the derived stalled threshold |
 | `routes.ts` | 330 | the `wake-suppressed-self` diagnostic (a suppressed wake creates no delivery and no step, so nothing else can see the decision), then `axMindSiblingWakeSuppressed` and the sibling branch of the route predicate that close the unbounded two-thinker `idle` runaway, then the DECLARED sibling-inert class and the note reconciling its vocabulary with RFC §7.4's |
@@ -422,17 +422,56 @@ ceiling; the shipped total is higher, and each raise has a reason:
 | `context.ts` | 160 | new: the pure wake classification, synthetic trigger and routing-signal table, extracted so the hint policy is reviewable without the runtime |
 | `step.ts` | 180 | new: a thinker rendered as an `AxEventTarget`, the delegating `AxProgrammable` wrapper that brackets one run, and the trailing `mind-settle` sink |
 | `subruns.ts` | 150 | new: fork → run → merge with the depth and spend caps, plus the bound on an unsummarized merge content |
-| `thinkers.ts` | 560 | the monolith, the responder, `AxMindDeterministicProgram`, the function menu and the prompt assembly |
-| `mind.ts` | 1_490 | RFC 5.1 gives this file five deliverables at once and none of the surface they need: the options record is 90 lines, the start sequence is seven steps with five typed refusals, and the context assembly carries the dead-letter path M19 depends on. The review raise adds the idempotent delivery-keyed settle, the liveness-fallback arm (M7 layer (b)), the tick's reaper and the named sub-run owner; the follow-up adds the lifetime `AbortController` and the signal threaded through the whole settle path, where the settle takes that signal and NOTHING else, because a delivery the runtime cancelled must still record its outcome |
+| `thinkers.ts` | 514 | the monolith, the responder, `AxMindDeterministicProgram`, the function menu and the prompt assembly |
+| `mind.ts` | 1_469 | RFC 5.1 gives this file five deliverables at once and none of the surface they need: the options record is 90 lines, the start sequence is seven steps with five typed refusals, and the context assembly carries the dead-letter path M19 depends on. The review raise adds the idempotent delivery-keyed settle, the liveness-fallback arm (M7 layer (b)), the tick's reaper and the named sub-run owner; the follow-up adds the lifetime `AbortController` and the signal threaded through the whole settle path, where the settle takes that signal and NOTHING else, because a delivery the runtime cancelled must still record its outcome |
 | `index.ts` | 175 | the barrel grew with the runtime |
 
-The DIRECTORY ceiling is **5,700** non-blank production lines against RFC 5.1's
-3,050, measured at 5,650 (`main` was already at 5,516 before the Track A
-follow-up pass). That is a real miss against RFC 11's definition of done, stated here
+The DIRECTORY ceiling is **5,641** non-blank production lines against RFC 5.1's
+3,050, and it is the MEASURED total with no headroom, so growth has to argue
+for itself. That is a real miss against RFC 11's definition of done, stated here
 rather than left to be discovered: the estimate costed the declaration surface
 and the shipped files carry the implementation too, at 80 columns with a doc
-comment on each non-obvious policy. Raising either again needs the same
-treatment: a reason per file, here and in the cap table.
+comment on each non-obvious policy. Raising it needs the same treatment as
+before: a reason per file, here and in the cap table.
+
+## Size budget
+
+RFC 5.1 budgeted this directory at 2,970 production lines against a 3,050
+ceiling. The 2026-09-02 pass measured it, applied the safe trims, and states the
+remainder as an exception. **Before 5,675 non-blank production lines. After
+5,641. Budget 3,050.** Tests are not budgeted and total 7,239.
+
+| trim | lines | why it was safe |
+|---|---|---|
+| `AxMindDeterministicProgram` extends `AxProgram` | 26 | it hand-wrote `getTraces`, `setDemos`, `applyOptimization`, `getOptimizableComponents`, `applyOptimizedComponents`, `getUsage`, `getChatLog`, `resetUsage`, `getId`, `setId` and `getSignature` as empty or trivial methods; `AxProgram` already defines every one with the same semantics, and the constructor restores the `ax-mind-deterministic` id it would otherwise report as `root` |
+| `AxMindOptions.summarizer` | 4 | declared and never read: `axProjectTrajectory` takes no summarizer, so a host that passed one got silence |
+| `AxMindThinker.inputSignature` | 3 | inert: `axMindThinkerTarget` always sets `mapInput`, and `validateEventTarget` refuses to combine `mapInput` with declarative input plans, which is the only path that reads it |
+| `AxMindLivenessError`'s `pacer_parked` | 1 | never thrown, asserted or documented; a member nothing constructs weakens a closed discriminant |
+
+Examined and REJECTED, with the harm removal would cause: `AxMindArtifactSource.write`
+with its change and receipt records (about 22 lines) has no in-tree caller, but it is
+the receipted self-authorship channel the Authority section names as the only way
+goals and prompt artifacts may be written; `batchSize` and `maxItems` are the
+documented bounds on a drain pass and the injection buffer; the read-back-and-throw
+blocks in `mind.ts`, `chat.ts` and `salience.ts` throw three separately catchable
+typed errors on purpose; and the conditional spreads throughout are what
+`exactOptionalPropertyTypes` demands.
+
+**The justified exception: 2,591 lines over budget.** The estimate costed the
+DECLARATION surface; every file also carries the implementation RFC 5.1's own
+contents column assigns to it, at 80 columns, with a doc comment on each
+non-obvious policy. Three quarters of the overshoot is `mind.ts` (1,469),
+`chat.ts` (785), `types.ts` (619) and `sources.ts` (594). `mind.ts` carries the
+five deliverables RFC 5.1 names at once plus the guards two adversarial reviews
+added: the idempotent delivery-keyed settle reached from three places,
+`armLivenessFallback` (M7 layer (b)), `reapAbandonedSteps`, `resolveSubRunOwner`
+and the lifetime `AbortController`. `chat.ts` is the exactly-one-reply guarantee
+(M12) as five layers, plus the ledgered send's branch per non-`intent` status
+and `axMindReconcileChatSends` for crash C10; cutting a layer reintroduces the
+duplicate reply. `types.ts` and `sources.ts` are contract surface and the
+nothing-is-ever-dropped drain, which are declarations and cursor bookkeeping
+rather than logic that could be denser. The caps and the ceiling are now the
+measured numbers with no headroom, which is what keeps this honest.
 
 ## Conformance fixtures
 

@@ -5,19 +5,14 @@ import type {
 } from '../agent/agentInternal/memoriesTypes.js';
 import type { AxAgentCatalogSkill } from '../agent/agentInternal/skillsTypes.js';
 import type { AxAIService, AxFunction } from '../ai/types.js';
-import type { AxOptimizableComponent } from '../dsp/optimizable.js';
-import type { AxOptimizedProgram } from '../dsp/optimizer.js';
+import { AxProgram } from '../dsp/program.js';
 import type { AxSignature } from '../dsp/sig.js';
 import { ax } from '../dsp/template.js';
 import type {
-  AxChatLogEntry,
   AxGenStreamingOut,
-  AxProgramDemos,
   AxProgramForwardOptions,
   AxProgrammable,
   AxProgramStreamingForwardOptions,
-  AxProgramTrace,
-  AxProgramUsage,
 } from '../dsp/types.js';
 import type { AxEventSink } from '../event/types.js';
 import { oneLine } from '../trajectory/projection.js';
@@ -41,16 +36,21 @@ import {
 
 /**
  * Base for thinkers that must run without a model: retrieval, deterministic
- * routers, and every test in this package. It implements the whole
- * `AxProgrammable` surface over one `run`, so a model-free thinker still
- * composes as an event target and an `optimize()` subject.
+ * routers, and every test in this package. Only `forward` and
+ * `streamingForward` are the mind's business; `AxProgram` already carries the
+ * tunable and usable halves of `AxProgrammable`, and a deterministic run
+ * pushes no usage record, so its empty defaults are the honest ones.
  */
 export abstract class AxMindDeterministicProgram<IN, OUT>
+  extends AxProgram<IN, OUT>
   implements AxProgrammable<IN, OUT>
 {
-  private id = 'ax-mind-deterministic';
-
-  constructor(private readonly signature: Readonly<AxSignature>) {}
+  constructor(signature: Readonly<AxSignature>) {
+    super(signature);
+    // `AxProgram` starts at the shared `root` id; a model-free thinker keeps
+    // the name it always reported so a trace naming it still resolves.
+    this.setId('ax-mind-deterministic');
+  }
 
   abstract run(values: IN, signal?: AbortSignal): Promise<OUT>;
 
@@ -70,34 +70,6 @@ export abstract class AxMindDeterministicProgram<IN, OUT>
     const delta = await this.forward(ai, values, options);
     yield { version: 0, index: 0, delta: delta as never };
   }
-
-  getSignature(): AxSignature {
-    return this.signature as AxSignature;
-  }
-  getId(): string {
-    return this.id;
-  }
-  setId(id: string): void {
-    this.id = id;
-  }
-  getTraces(): AxProgramTrace<IN, OUT>[] {
-    return [];
-  }
-  setDemos(_demos: readonly AxProgramDemos<IN, OUT>[]): void {}
-  applyOptimization(_optimized: AxOptimizedProgram<OUT>): void {}
-  getOptimizableComponents(): readonly AxOptimizableComponent[] {
-    return [];
-  }
-  applyOptimizedComponents(_updates: Readonly<Record<string, string>>): void {}
-  getUsage(): AxProgramUsage[] {
-    // A deterministic program spends nothing, and says so rather than
-    // reporting a usage record a cost report would then have to explain.
-    return [];
-  }
-  getChatLog(): readonly AxChatLogEntry[] {
-    return [];
-  }
-  resetUsage(): void {}
 }
 
 /**
