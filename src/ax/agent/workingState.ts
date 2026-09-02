@@ -167,6 +167,16 @@ export type AxWorkingStateClassifiedOp = Readonly<{
   class: AxWorkingStateDeltaClass;
   /** Goal id the op targets, resolved from the PATH, when goal-scoped. */
   goalId?: string;
+  /**
+   * Harness-authored pointer built from the CLASSIFICATION, never from the
+   * model's own path text. This is the only pointer that may reach the
+   * trusted guidance channel or the read-only roster: every segment comes
+   * from a closed vocabulary (`goals`, `facts`, the enumerated goal fields,
+   * a `GOAL_ID_PATTERN`-validated goal id, a host-declared fact root, or a
+   * `<...>` placeholder), so a hostile path cannot launder text into the
+   * highest-authority prompt region.
+   */
+  canonicalPath: string;
   /** Kernel verdict before the checker runs. */
   kernelVerdict: 'admissible' | 'park' | 'forbidden';
   kernelReason?:
@@ -613,7 +623,9 @@ const DEFAULT_MAX_PARKS_PER_GOAL = 3;
 const DEFAULT_MAX_PARKS_PER_RUN = 12;
 const DEFAULT_MAX_EVIDENCE_BYTES = 4_096;
 const DEFAULT_MAX_COMPLETION_INTERLOCKS = 2;
-const MAX_GUIDANCE_PATH_CHARS = 128;
+const CANONICAL_GUARD_PATH = '/<guard>';
+const CANONICAL_RESERVED_PATH = '/<reserved>';
+const CANONICAL_UNDECLARED_FACT_PATH = '/facts/<undeclared>';
 const MAX_GOAL_TEXT_CHARS = 512;
 
 const RESERVED_ROOTS = new Set(['schemaVersion', 'parked']);
@@ -710,11 +722,14 @@ type ClassifierDeps = Readonly<{
   expectsAllowlist: readonly string[];
 }>;
 
+/** A classification before its harness-authored pointer is derived. */
+type ClassifiedShape = Omit<AxWorkingStateClassifiedOp, 'canonicalPath'>;
+
 function forbid(
   op: AxStatePatchOp,
   reason: AxWorkingStateClassifiedOp['kernelReason'],
   goalId?: string
-): AxWorkingStateClassifiedOp {
+): ClassifiedShape {
   return {
     op,
     class: 'reserved',
@@ -725,15 +740,71 @@ function forbid(
 }
 
 /**
- * Classify one op against the CLOSED delta table. Anything no row matches is
- * `forbidden` — the table is closed, not open, so an unrecognized path shape
- * can never be silently admitted.
+ * Derive the pointer the harness is willing to show, from the CLASSIFICATION
+ * rather than from the model's path string. Every segment is harness- or
+ * host-owned: a literal, a `GOAL_ID_PATTERN`-validated goal id, one of the
+ * enumerated goal fields, a fact root declared by `stateSignature`, or a
+ * `<...>` placeholder. Nothing the model authored survives.
+ */
+function canonicalPathFor(
+  entry: ClassifiedShape,
+  deps: ClassifierDeps
+): string {
+  if (entry.class === 'guard') return CANONICAL_GUARD_PATH;
+  const segments = parseStatePatchPointer(entry.op.path) ?? [];
+  if (entry.class === 'fact_write') {
+    const root = segments[1];
+    return entry.kernelVerdict === 'admissible' &&
+      root !== undefined &&
+      deps.factRoots.has(root)
+      ? `/facts/${root}`
+      : CANONICAL_UNDECLARED_FACT_PATH;
+  }
+  const goalId =
+    entry.goalId !== undefined && GOAL_ID_PATTERN.test(entry.goalId)
+      ? entry.goalId
+      : undefined;
+  if (goalId === undefined) return CANONICAL_RESERVED_PATH;
+  switch (entry.class) {
+    case 'goal_add':
+    case 'goal_remove':
+      return `/goals/${goalId}`;
+    case 'goal_complete':
+    case 'goal_block':
+    case 'goal_retract':
+      return `/goals/${goalId}/status`;
+    case 'goal_edit': {
+      const field = segments[2];
+      return field === 'goal' || field === 'blocker'
+        ? `/goals/${goalId}/${field}`
+        : `/goals/${goalId}/<reserved>`;
+    }
+    case 'evidence_append':
+      return `/goals/${goalId}/evidence/-`;
+    default:
+      return `/goals/${goalId}/<reserved>`;
+  }
+}
+
+/**
+ * Classify one op against the CLOSED delta table and attach its harness-owned
+ * pointer. Anything no row matches is `forbidden` — the table is closed, not
+ * open, so an unrecognized path shape can never be silently admitted.
  */
 function classifyOp(
   op: AxStatePatchOp,
   deps: ClassifierDeps,
   citedRefsByGoal: ReadonlyMap<string, readonly string[]>
 ): AxWorkingStateClassifiedOp {
+  const shape = classifyOpShape(op, deps, citedRefsByGoal);
+  return { ...shape, canonicalPath: canonicalPathFor(shape, deps) };
+}
+
+function classifyOpShape(
+  op: AxStatePatchOp,
+  deps: ClassifierDeps,
+  citedRefsByGoal: ReadonlyMap<string, readonly string[]>
+): ClassifiedShape {
   // `test` is a guard: always admissible, never checker-visible, never parked.
   if (op.op === 'test') {
     return { op, class: 'guard', kernelVerdict: 'admissible' };
@@ -1631,7 +1702,7 @@ export class AxWorkingState<S = Record<string, unknown>> {
     // code, the op KIND, a sanitized bounded pointer and the goal id. The
     // model's `value` never appears, because `guidanceLog` is the highest
     // authority prompt region.
-    const path = entry ? sanitizePointer(entry.op.path) : '/';
+    const path = entry ? entry.canonicalPath : '/';
     const goalId =
       entry?.goalId && GOAL_ID_PATTERN.test(entry.goalId)
         ? entry.goalId
@@ -1661,7 +1732,7 @@ export class AxWorkingState<S = Record<string, unknown>> {
       : 1;
     return {
       // The model's `value` is deliberately not retained.
-      op: { op: entry.op.op, path: sanitizePointer(entry.op.path) },
+      op: { op: entry.op.op, path: entry.canonicalPath },
       reason,
       ...(extra?.failureCode ? { failureCode: extra.failureCode } : {}),
       ...(extra?.evidence !== undefined
@@ -2094,13 +2165,6 @@ export class AxWorkingState<S = Record<string, unknown>> {
       // Observability is fail-soft, like `onFunctionCall`.
     }
   }
-}
-
-function sanitizePointer(pointer: string): string {
-  // Only pointer-legal characters survive, bounded so a hostile path cannot
-  // pad the trusted guidance channel.
-  const cleaned = pointer.replace(/[^A-Za-z0-9_./:~-]/g, '');
-  return truncate(cleaned.length > 0 ? cleaned : '/', MAX_GUIDANCE_PATH_CHARS);
 }
 
 function goalIdFromPointer(pointer: string): string | undefined {
