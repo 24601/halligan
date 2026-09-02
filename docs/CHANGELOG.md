@@ -14,9 +14,9 @@
 
 ### Features
 
-* **type safety**: Enhanced type inference for fluent field arrays and optional fields
-* **API consistency**: Fluent API now purely fluent without nested function calls
-* **documentation**: Updated comprehensive guides for pure fluent API usage
+* type safety: Enhanced type inference for fluent field arrays and optional fields
+* API consistency: Fluent API now purely fluent without nested function calls
+* documentation: Updated comprehensive guides for pure fluent API usage
 
 ### Migration Guide
 
@@ -3012,7 +3012,7 @@ for commit guidelines.
   ([14ba73c](https://github.com/ax-llm/ax/commit/14ba73cc1fc80436c2073c85f5717215d03655a5))
 - signature parser
   ([a149361](https://github.com/ax-llm/ax/commit/a149361263cae6e4bdc8a425f1abadd38ef9da56))
-- streamlined the llm apis
+- simplified the llm apis
   ([0bbc8b0](https://github.com/ax-llm/ax/commit/0bbc8b0729ef95657642ae3459fb43f5bbc666ff))
 - system prompt fixes
   ([b56201c](https://github.com/ax-llm/ax/commit/b56201caf00df323925d2864f5c70f9ff70ee234))

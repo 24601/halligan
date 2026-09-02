@@ -23,15 +23,6 @@
   },
   "deferred": {
     "README.md": "owned by another lane this week; scheduled for the second anti-tell rewrite pass",
-    "docs/ARCHITECTURE.md": "not yet rewritten; queued for the next anti-tell pass, tells are counted and reported, not suppressed",
-    "docs/AUDIO.md": "not yet rewritten; queued for the next anti-tell pass, tells are counted and reported, not suppressed",
-    "docs/AXIR_BACKLOG.md": "not yet rewritten; queued for the next anti-tell pass, tells are counted and reported, not suppressed",
-    "docs/AXIR_GATES.md": "not yet rewritten; queued for the next anti-tell pass, tells are counted and reported, not suppressed",
-    "docs/AXIR_VERIFICATION.md": "not yet rewritten; queued for the next anti-tell pass, tells are counted and reported, not suppressed",
-    "docs/CHANGELOG.md": "not yet rewritten; queued for the next anti-tell pass, tells are counted and reported, not suppressed",
-    "docs/CLAUDE.md": "not yet rewritten; queued for the next anti-tell pass, tells are counted and reported, not suppressed",
-    "docs/EVENT_RUNTIME.md": "not yet rewritten; queued for the next anti-tell pass, tells are counted and reported, not suppressed",
-    "docs/MIND.md": "owned by another lane this week; scheduled for the second anti-tell rewrite pass",
     "src/ax/skills/ax-playbook.md": "owned by another lane this week; scheduled for the second anti-tell rewrite pass"
   }
 }

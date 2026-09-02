@@ -1,4 +1,4 @@
-# AxMind — the persistent-agency runtime
+# AxMind: the persistent-agency runtime
 
 `src/ax/mind/` is what makes an agent persistent: thinkers that wake from
 appends to a trajectory, from a paced spontaneity ladder, and from a liveness
@@ -50,7 +50,7 @@ inner-life block, cheap enough to run on every inbound message.
 **A sibling thinker never wakes on another thinker's contentless step.**
 Self-suppression alone is per thinker: it stops a thinker re-triggering on its
 OWN writing and nothing else, so two thinkers on the default subscription used
-to answer each other's `idle` steps forever — an unbounded, token-spending
+to answer each other's `idle` steps forever, an unbounded, token-spending
 ping-pong with no work in it. The route predicate now refuses that wake by the
 step's WRITER IDENTITY, exactly as it refuses the self-loop, and reports it as
 the `wake-suppressed-sibling` diagnostic (a suppressed wake creates no delivery
@@ -58,7 +58,7 @@ and no step, so there is nowhere else to see it).
 
 The suppressed class is read off DECLARED registry facts by
 `axMindSiblingWakeSuppressed`, never listed by hand and never inferred from
-`spillFields`, `visibleWork` or `conversational` — those are a storage, a
+`spillFields`, `visibleWork` or `conversational`, because those are a storage, a
 pacing and a UI concern, and inferring from them would sweep a host's
 short-payload type (a `vote` carrying one enum) silently into the class:
 
@@ -75,7 +75,7 @@ QUEUE-VS-COALESCE axis. This table is the has-a-reader axis, and the two
 disagree on exactly those two rows by design.
 
 Payload-carrying types (`message`, `action`, `observation`, `merge`, `thought`)
-wake a sibling normally — that is the whole point of a second thinker. So does
+wake a sibling normally, which is the whole point of a second thinker. So does
 an EXTERNAL writer of any of the suppressed types: suppression is by writer
 identity, so a host or a person appending an `idle` still wakes everyone. A
 single-thinker mind has no siblings, so its dispatch is unchanged.
@@ -85,11 +85,11 @@ The supervisor pattern keeps its escape hatch. Suppression happens in
 sibling fail could otherwise not be built at all. `subscription.siblingSignals`
 names the types it opts back in to (`['error']` for a supervisor). It re-opens
 the loop the rule closes, so a thinker that declares it owns bounding its own
-answer — a supervisor that replies to an `error` with an `error` is unbounded
+answer. A supervisor that replies to an `error` with an `error` is unbounded
 again.
 
-`mind.test.ts` asserts both halves against a step-ceiling store — the runaway
-starves the event loop synchronously, so vitest's own timeout never fires and
+`mind.test.ts` asserts both halves against a step-ceiling store, because the
+runaway starves the event loop synchronously, so vitest's own timeout never fires and
 the bound has to live in the store the runaway writes to.
 
 Third-party text reaches a thinker QUOTED. `axMindQuote` one-lines, bounds and
@@ -124,9 +124,9 @@ Row 4 has a sibling half: `axMindSiblingWakeSuppressed(step.type)` and a
 Nothing is ever dropped. The append-only log IS the backlog, so a deferral
 costs latency and never a wake.
 
-The published event carries step IDENTITY and CLASSIFICATION only —
-`{stepId, trajectoryId, seq, type, ts, source?, runId?, triggerStep?, coalesced?}`
-— never step content. That keeps every event far inside `maxEventBytes` and
+The published event carries step IDENTITY and CLASSIFICATION only
+(`{stepId, trajectoryId, seq, type, ts, source?, runId?, triggerStep?, coalesced?}`),
+never step content. That keeps every event far inside `maxEventBytes` and
 leaves the store as the single place content lives.
 
 ## Pacing
@@ -144,7 +144,7 @@ Defaults: `baseMs 5_000`, `factor 2`, `capMs 300_000`, `hold 3`,
 | `spontaneous` | `error` | `level+1` immediately, no dwell | `0` | `arm(delay(level'))` |
 | `watchdog` | `visible` | `0` | `0` | `arm(0)` |
 | `watchdog` | otherwise | as `spontaneous` | as `spontaneous` | as `spontaneous` |
-| any | `noop` | unchanged | unchanged | **`unchanged` — leave the running timer alone** |
+| any | `noop` | unchanged | unchanged | **`unchanged`, leave the running timer alone** |
 | any | any, at `maxWakesPerHour` | `parked: 'rate_fuse'` | unchanged | **`unchanged`** plus a `mind-error` step |
 
 `unchanged` is the subtlest requirement in the ladder: re-arming on a no-op
@@ -153,11 +153,11 @@ silently resets the backoff on every outgoing reply.
 **Cost model.** The model-independent metric is *spontaneous wakes per hour
 while idle*: 12/hr at `capMs = 300_000`, 6/hr at 600 000, both measured with
 the ladder fully descended. A day that starts from engagement costs more,
-because the descent is real spend — `npm run mind:pacer:eval` reports the
+because the descent is real spend. `npm run mind:pacer:eval` reports the
 24-hour average beside the steady rate for exactly that reason.
 
 **The fuse** is `ceil(3_600_000/capMs * 1.5) + hold * levels` when
-`maxWakesPerHour` is not stated — 39 on the shipped defaults. Deriving it from
+`maxWakesPerHour` is not stated: 39 on the shipped defaults. Deriving it from
 the steady-state term alone parked a default-configured mind under eight
 minutes into every quiet period, so the documented 12/hr steady state was a
 state the shipped default could never occupy.
@@ -179,7 +179,7 @@ mode; an always-alive loop that owns an injected clock is not.
   never became a delivery stays due.
 - A **parked** thinker has no pace duty at all. `parkedUntil` is the first
   moment the fuse can read differently, and the runtime arms exactly one
-  re-evaluation there — never none (which would need the watchdog to un-park)
+  re-evaluation there, never none (which would need the watchdog to un-park)
   and never one per tick (which would make the spend ceiling the highest spend
   rate the mind can reach).
 - The **watchdog duty** synthesizes `ax.mind.idle` after a quiet-while-free
@@ -190,24 +190,24 @@ mode; an always-alive loop that owns an injected clock is not.
   only contend for the same deliveries, and the measured consequence of that
   contention is a claim going stale mid-model-call and aborting a run that was
   doing nothing wrong.
-- The step's **settle** — the work probe AFTER, the outcome step and the pace
-  decision — runs once per delivery, from whichever of three places gets there
+- The step's **settle** (the work probe AFTER, the outcome step and the pace
+  decision) runs once per delivery, from whichever of three places gets there
   first: the run itself, a trailing `mind-settle` sink installed after the
   thinker's own sinks, or the tick's reaper. A thinker whose effect IS a sink
   (the shipped responder replies from one) would otherwise have every answering
   wake recorded as `idle`, because sinks run after `forward` resolves.
-- A delivery that terminalises with no pace decision — a dead-lettered context
+- A delivery that terminalises with no pace decision (a dead-lettered context
   assembly, a settle that throws, a delivery abandoned between assembly and
-  forward — re-arms **one** wake at the thinker's own `capMs`, and the tick's
+  forward) re-arms **one** wake at the thinker's own `capMs`, and the tick's
   reaper releases its in-flight record. The arm is a runtime guarantee, so a
   throw anywhere in the orchestration degrades to a delay, never silence.
-- The two typed projection failures — `AxTrajectoryRollupError('meta_conflict')`
-  and `AxTrajectoryQueryError('unsupported_types')` — dead-letter the delivery
+- The two typed projection failures, `AxTrajectoryRollupError('meta_conflict')`
+  and `AxTrajectoryQueryError('unsupported_types')`, dead-letter the delivery
   BEFORE any model call, and the thinker still wakes again.
 - A wake that fails past its attempt budget appends NOTHING -- nothing ran --
   so `deadLetters()` is the only place a host can see one.
 - Every liveness bug degrades to a `<= watchdogMs` delay, never a dead mind. A
-  hung step holds the watchdog off — long runs are legitimate — but is bounded
+  hung step holds the watchdog off (long runs are legitimate) but is bounded
   by its own `maxWallClockMs`.
 
 **Health is LAG**, newest appended versus newest processed, and never liveness.
@@ -266,7 +266,7 @@ the JUDGMENT ("does it need a reply"). The rows are a PRIORITY order:
 ## Salience injection
 
 An inbound message that arrives while a subscribed thinker is mid-run is
-offered once, GLOBALLY by source step — the block runs once per busy subscribed
+offered once, GLOBALLY by source step: the block runs once per busy subscribed
 thinker, and N subscribers meant N identical injections of one message.
 
 Two costs, stated rather than hidden:
@@ -279,7 +279,7 @@ Two costs, stated rather than hidden:
 - A turn that calls **no** host function never sees mid-run salience. Coverage
   is best-effort mid-run and guaranteed at the next step, because the item
   stays in the buffer and the next projection includes the message. The
-  alternative — interrupting a running actor — is worse, and ax deliberately
+  alternative, interrupting a running actor, is worse, and ax deliberately
   has no such seam.
 
 Third-party text is fenced and byte-bounded inside the guidance: it lands in a
@@ -289,7 +289,7 @@ as data and clipped, and the `feedback` step recording the injection is
 
 ## Authority
 
-**Host-owned — not reachable from a thinker program at COMPILE TIME.** The
+**Host-owned, not reachable from a thinker program at COMPILE TIME.** The
 narrowing below is a TypeScript one: a thinker that casts its way back to the
 concrete store gets the write methods at runtime, exactly as any cast does. The
 guarantee is that a thinker cannot reach them by accident, and that a thinker
@@ -297,8 +297,8 @@ that reaches them on purpose says so in a diff a reviewer can see:
 
 1. Trajectory contents. There is no update, delete, rewrite or compact method
    on the store or on `AxMind`; `append` stamps the writer itself. The handle a
-   thinker gets in `AxMindContextRequest.store` is an `AxTrajectoryReader` —
-   the read primitives and nothing else — so `append`, `create`, `fork`,
+   thinker gets in `AxMindContextRequest.store` is an `AxTrajectoryReader`,
+   the read primitives and nothing else, so `append`, `create`, `fork`,
    `merge` and `saveCursor` are not reachable at compile time either.
 2. The step-type registry, including `stepClass`, `wakeable`, `carriesSource`
    and `neverRetriggersSelf`.
@@ -315,9 +315,9 @@ that reaches them on purpose says so in a diff a reviewer can see:
 10. Its own restart. `AxMind.close()` is not a tool, and it is refused while a
     thinker step is running.
 
-**Model-owned — genuine self-authorship, all of it host-mediated:** what to do
+**Model-owned, genuine self-authorship, all of it host-mediated:** what to do
 next (the function menu, with routing signals as HINTS and no hardcoded
-priority ladder — that is how you get stuck loops); its memories, through
+priority ladder, which is how you get stuck loops); its memories, through
 `memoriesCatalog` / `onMemoriesSearch`; its goals and values as `AxMindGoal`
 records using `AxACEBulletLifecycle` vocabulary verbatim, written only through
 `AxMindArtifactSource.write` with an out-of-band receipt; which skills are in
@@ -347,8 +347,8 @@ proposal instead of applying one.
 | C13 | during rollup sealing | sealed blocks are immutable and index-keyed; the frontier recomputes | idempotent per summarizer |
 | C14 | cursor beyond end / identity changed / store shrank | `AxTrajectoryCursorError` pauses THAT consumer and reports | **fails closed, loudly** |
 
-Rows C1–C3 and C14 are proved by `npm run trajectory:durability:eval`; rows
-C4–C14 by `npm run mind:durability:eval`.
+Rows C1-C3 and C14 are proved by `npm run trajectory:durability:eval`; rows
+C4-C14 by `npm run mind:durability:eval`.
 
 ## What this does NOT promise
 
@@ -390,7 +390,7 @@ npm run mind:durability:eval   # crash rows C4-C14, with fault injection
 ```
 
 > This is a deterministic zero-cost mechanism evaluation with fault injection.
-> It is bounded machinery evidence — pacing, liveness, idempotency, projection
+> It is bounded machinery evidence: pacing, liveness, idempotency, projection
 > shape and size, store conformance, and crash classification. It is not a
 > held-out model comparison. It says nothing about whether the mind thinks
 > well, chooses good routes, or writes useful memories, and no claim of that
@@ -411,7 +411,7 @@ ceiling; the shipped total is higher, and each raise has a reason:
 
 | file | cap | reason |
 |---|---|---|
-| `types.ts` | 630 | the context-request record, the whole artifact source with its change and receipt records, and the in-memory ownership store — RFC 4.9/4.10 declarations the pacing lane deferred for want of a consumer; then the `wake-suppressed-sibling` diagnostic code and the loop its absence hides; then the `closing` member of `AxMindLivenessError`'s closed union and the `siblingSignals` supervisor opt-in, both contract surface carrying the comment that says which failure they close |
+| `types.ts` | 630 | the context-request record, the whole artifact source with its change and receipt records, and the in-memory ownership store, which are RFC 4.9/4.10 declarations the pacing lane deferred for want of a consumer; then the `wake-suppressed-sibling` diagnostic code and the loop its absence hides; then the `closing` member of `AxMindLivenessError`'s closed union and the `siblingSignals` supervisor opt-in, both contract surface carrying the comment that says which failure they close |
 | `pacer.ts` | 300 | the fuse derived from the descent cost, plus `parkedUntil` |
 | `health.ts` | 150 | the derived stalled threshold |
 | `routes.ts` | 330 | the `wake-suppressed-self` diagnostic (a suppressed wake creates no delivery and no step, so nothing else can see the decision), then `axMindSiblingWakeSuppressed` and the sibling branch of the route predicate that close the unbounded two-thinker `idle` runaway, then the DECLARED sibling-inert class and the note reconciling its vocabulary with RFC §7.4's |
@@ -423,7 +423,7 @@ ceiling; the shipped total is higher, and each raise has a reason:
 | `step.ts` | 180 | new: a thinker rendered as an `AxEventTarget`, the delegating `AxProgrammable` wrapper that brackets one run, and the trailing `mind-settle` sink |
 | `subruns.ts` | 150 | new: fork → run → merge with the depth and spend caps, plus the bound on an unsummarized merge content |
 | `thinkers.ts` | 560 | the monolith, the responder, `AxMindDeterministicProgram`, the function menu and the prompt assembly |
-| `mind.ts` | 1_490 | RFC 5.1 gives this file five deliverables at once and none of the surface they need: the options record is 90 lines, the start sequence is seven steps with five typed refusals, and the context assembly carries the dead-letter path M19 depends on. The review raise adds the idempotent delivery-keyed settle, the liveness-fallback arm (M7 layer (b)), the tick's reaper and the named sub-run owner; the follow-up adds the lifetime `AbortController` and the signal threaded through the whole settle path — the settle takes that signal and NOTHING else, because a delivery the runtime cancelled must still record its outcome |
+| `mind.ts` | 1_490 | RFC 5.1 gives this file five deliverables at once and none of the surface they need: the options record is 90 lines, the start sequence is seven steps with five typed refusals, and the context assembly carries the dead-letter path M19 depends on. The review raise adds the idempotent delivery-keyed settle, the liveness-fallback arm (M7 layer (b)), the tick's reaper and the named sub-run owner; the follow-up adds the lifetime `AbortController` and the signal threaded through the whole settle path, where the settle takes that signal and NOTHING else, because a delivery the runtime cancelled must still record its outcome |
 | `index.ts` | 175 | the barrel grew with the runtime |
 
 The DIRECTORY ceiling is **5,700** non-blank production lines against RFC 5.1's
@@ -444,8 +444,8 @@ not read them; `src/ax/mind/fixtures.test.ts` is what runs them.
 
 `ir/conformance/axevent/mind-wake-source-routing.json` IS portable, and pins
 only what the Core IR matcher can express. `event_route_commands`
-(`ir/axcore/event.axir`) matches on `sources` and `types` alone — there is no
+(`ir/axcore/event.axir`) matches on `sources` and `types` alone. There is no
 subject matching, no extension matching and no `authorize` predicate in the
-portable layer — so the mind's self-suppression is pinned in TypeScript by
+portable layer, so the mind's self-suppression is pinned in TypeScript by
 `src/ax/mind/routes.test.ts` instead. A fixture claiming to cover it would be a
 fixture nothing runs. Both gaps are filed in the AxIR backlog.

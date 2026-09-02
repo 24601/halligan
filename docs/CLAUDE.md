@@ -47,23 +47,23 @@ commands from the root.
 
 ## Model Selection
 
-When you name a model anywhere (examples, defaults, tests), use a **current** generation —
-newer beats biggest. The provider enums are the source of truth for what's current:
+When you name a model anywhere (examples, defaults, tests), use a **current** generation.
+Newer beats biggest. The provider enums are the source of truth for what's current:
 `src/ax/ai/openai/chat_types.ts`, `src/ax/ai/google-gemini/types.ts`,
 `src/ax/ai/anthropic/types.ts`. Prefer a newer small/cheap model (e.g. `gpt-5.4-mini`,
 `gemini-3.5-flash`) over an old flagship (`gpt-4o`, `gemini-2.x`); never pin a dated
 `-preview` when a stable newer one exists. (See also `AGENTS.md`.)
 
-# 🧪 TESTING GUIDE
+# TESTING GUIDE
 
 ## Test Framework & Overview
 
-- **Primary Framework**: Vitest (configured in root)
-- **Type Testing**: TypeScript definition files (`.test-d.ts`)
-- **Lint/Format**: Biome for code quality
-- **Coverage**: C8 integration with Vitest
+- Primary Framework: Vitest (configured in root)
+- Type Testing: TypeScript definition files (`.test-d.ts`)
+- Lint/Format: Biome for code quality
+- Coverage: C8 integration with Vitest
 
-## 🚀 Quick Test Commands
+## Quick Test Commands
 
 ### Running Tests Globally
 
@@ -94,7 +94,7 @@ npx vitest --watch
 npx vitest --coverage
 ```
 
-## 📋 Main Workspace Test Commands (`@ax-llm/ax`)
+## Main Workspace Test Commands (`@ax-llm/ax`)
 
 All commands should be run from the repository root:
 
@@ -114,13 +114,13 @@ npm run fix:lint --workspace=@ax-llm/ax           # Fix linting only
 npm run fix:format --workspace=@ax-llm/ax         # Fix formatting only
 ```
 
-## 🎯 Test Categories
+## Test Categories
 
 ### 1. Unit Tests (`.test.ts` files)
 
-- **Location**: Throughout `src/ax/` directory
-- **Purpose**: Test individual functions, classes, and modules
-- **Key Areas**:
+- Location: Throughout `src/ax/` directory
+- Purpose: Test individual functions, classes, and modules
+- Key Areas:
   - Signature parsing and validation (`dsp/sig.test.ts`, `dsp/parser.test.ts`)
   - AI service integrations (`ai/*.test.ts`)
   - Flow orchestration (`flow/*.test.ts`)
@@ -128,23 +128,23 @@ npm run fix:format --workspace=@ax-llm/ax         # Fix formatting only
 
 ### 2. Type Definition Tests (`.test-d.ts` files)
 
-- **Location**: `src/ax/**/*.test-d.ts` (e.g. `index.test-d.ts`,
+- Location: `src/ax/**/*.test-d.ts` (e.g. `index.test-d.ts`,
   `dsp/sigtypes.test-d.ts`, `agent/agent.test-d.ts`)
-- **Purpose**: Validate TypeScript type inference and type safety
-- **Testing**: Multi-modal types, signature parsing, optional fields
-- **Note**: These test compile-time type behavior, not runtime
-- **Runner**: `npm run test:type-tests` in `src/ax` (tsc with
+- Purpose: Validate TypeScript type inference and type safety
+- Testing: Multi-modal types, signature parsing, optional fields
+- Note: These test compile-time type behavior, not runtime
+- Runner: `npm run test:type-tests` in `src/ax` (tsc with
   `tsconfig.typetests.json`; part of `npm test`). Use the `Equal`/`Expect`
   witnesses from `src/ax/util/typetest.ts` plus `@ts-expect-error` for
   negative cases
 
 ### 3. Integration Tests
 
-- **Examples**: `src/examples/` directory serves as integration tests
-- **Usage**: `npm run tsx ./src/examples/<example-file>.ts`
-- **Purpose**: Test real-world usage patterns and end-to-end functionality
+- Examples: `src/examples/` directory serves as integration tests
+- Usage: `npm run tsx ./src/examples/<example-file>.ts`
+- Purpose: Test real-world usage patterns and end-to-end functionality
 
-## 🔍 Key Test Files to Know
+## Key Test Files to Know
 
 ### Core Framework Tests
 
@@ -174,7 +174,7 @@ npx vitest run src/ax/dsp/streaming-optional.test.ts
 npx vitest run src/ax/mem/memory.test.ts
 ```
 
-## 🐛 Test-Driven Development Workflow
+## Test-Driven Development Workflow
 
 ### When Adding New Features
 
@@ -200,7 +200,7 @@ npm run test:unit --workspace=@ax-llm/ax        # All unit tests
 npm run fix --workspace=@ax-llm/ax              # Auto-fix lint/format issues
 ```
 
-## 📊 Test Coverage & Quality
+## Test Coverage & Quality
 
 ### Coverage Reports
 
@@ -215,13 +215,13 @@ open coverage/index.html
 
 ### Quality Checks
 
-- **Minimum Coverage**: Aim for >80% coverage on new code
-- **Critical Paths**: Signature parsing, AI communication, streaming must be
+- Minimum Coverage: Aim for >80% coverage on new code
+- Critical Paths: Signature parsing, AI communication, streaming must be
   100%
-- **Type Safety**: All public APIs must have type tests
-- **Performance**: Include performance regression tests for core operations
+- Type Safety: All public APIs must have type tests
+- Performance: Include performance regression tests for core operations
 
-## ⚡ Performance Testing
+## Performance Testing
 
 ### Benchmarking
 
@@ -239,7 +239,7 @@ npx vitest run --reporter=verbose src/ax/mem/
 - Test with multiple concurrent requests
 - Monitor token usage and response times
 
-## 🚨 Common Test Issues & Solutions
+## Common Test Issues & Solutions
 
 ### Test Failures
 
@@ -259,7 +259,7 @@ npm run build --workspace=@ax-llm/ax
 - Check Node.js version >= 20
 - Verify workspace structure with `npm run --workspace=@ax-llm/ax`
 
-## 📝 Writing Good Tests
+## Writing Good Tests
 
 ### Test Structure
 
@@ -311,25 +311,25 @@ npm run dev --workspace=@ax-llm/ax
 
 ### Structure
 
-- **Top-level code**: Put all code at the top level, no function wrappers
-- **Direct execution**: Code should run immediately when file is executed
-- **No try-catch blocks**: It's just a demo, don't add error handling clutter
-- **No IIFE wrappers**: Top-level await works fine with modern Node.js/tsx
-- **Minimal console logs**: Only essential output, avoid verbose logging
-- **No fallback logic**: Keep examples clean and focused on the main
+- Top-level code: Put all code at the top level, no function wrappers
+- Direct execution: Code should run immediately when file is executed
+- No try-catch blocks: It's just a demo, don't add error handling clutter
+- No IIFE wrappers: Top-level await works fine with modern Node.js/tsx
+- Minimal console logs: Only essential output, avoid verbose logging
+- No fallback logic: Keep examples clean and focused on the main
   functionality
-- **Public vs Private functions**: Only functions or classes exported publicly
+- Public vs Private functions: Only functions or classes exported publicly
   outside the library should be prefixed with Ax or ax not internal functions.
 
 ### Code Style
 
-- **Export reusable components**: Export generators, signatures, or functions
+- Export reusable components: Export generators, signatures, or functions
   that other examples might use
-- **Save minimal data**: Only save essential data (like demos), not complex
+- Save minimal data: Only save essential data (like demos), not complex
   config objects
-- **Import and reuse**: Import exported components in other examples rather than
+- Import and reuse: Import exported components in other examples rather than
   recreating them
-- **Clean separation**: Optimize once, save demos, use anywhere
+- Clean separation: Optimize once, save demos, use anywhere
 
 ### Example Creation Guidelines
 
@@ -356,15 +356,15 @@ await fs.writeFile("demos.json", JSON.stringify(demos, null, 2));
 
 ### Key Principles
 
-- **It just works**: Don't overthink it, modern Node.js handles top-level await
+- It just works: Don't overthink it, modern Node.js handles top-level await
   fine
-- **No abstractions**: Avoid function wrappers, IIFEs, or unnecessary error
+- No abstractions: Avoid function wrappers, IIFEs, or unnecessary error
   handling
-- **Focus on functionality**: Show the core feature, not error handling patterns
-- **Reusable components**: Export what others might want to import and use
-- **Minimal persistence**: Save only what's needed, not metadata or complex
+- Focus on functionality: Show the core feature, not error handling patterns
+- Reusable components: Export what others might want to import and use
+- Minimal persistence: Save only what's needed, not metadata or complex
   configs
-- **Clean and direct**: No try-catch blocks, minimal logging, no fallback
+- Clean and direct: No try-catch blocks, minimal logging, no fallback
   complexity
 
 ## Code Standards & Architecture
@@ -445,16 +445,16 @@ const dynamicSig = s("userInput:string -> responseText:string")
 // Use ai({ name: "openai", apiKey: "..." }) instead of constructor calls.
 ```
 
-## 🔧 Signatures and AxGen Deep Dive
+## Signatures and AxGen Deep Dive
 
 ### Understanding Signatures
 
 Signatures define the input/output structure for LLM interactions. They specify:
 
-- **Input fields**: What data the LLM receives
-- **Output fields**: What structured data the LLM should return
-- **Field types**: String, number, array, class (enum), etc.
-- **Field descriptions**: Help the LLM understand context
+- Input fields: What data the LLM receives
+- Output fields: What structured data the LLM should return
+- Field types: String, number, array, class (enum), etc.
+- Field descriptions: Help the LLM understand context
 
 ### String-Based Function Syntax
 
@@ -537,18 +537,18 @@ const dynamicSig = s("baseField:string -> baseOutput:string")
 
 **CRITICAL - Field Naming Requirements**:
 
-- **NEVER use generic field names** like `text`, `result`, `value`, `item`,
+- NEVER use generic field names like `text`, `result`, `value`, `item`,
   `data`, `input`, `output`
-- **ALWAYS use descriptive field names** that indicate the content's purpose:
+- ALWAYS use descriptive field names that indicate the content's purpose:
   - ✅ Good: `documentText`, `userQuestion`, `responseText`, `summaryText`,
     `emailContent`
   - ✅ Good: `processedResult`, `analysisOutput`, `categoryType`,
     `confidenceScore`
   - ✅ Good: `inputData`, `outputResult`, `dataItem`, `iterationCount`
   - ❌ Bad: `text`, `result`, `value`, `item`, `data`, `input`, `output`
-- **Signature validation will reject generic names** - this is enforced at
+- Signature validation will reject generic names - this is enforced at
   runtime
-- **Use context-specific names** that make the field's role clear in the
+- Use context-specific names that make the field's role clear in the
   signature
 
 ### Working with AxGen Instances
@@ -677,12 +677,12 @@ const classification = await classifier.forward(llm, {
 
 #### 2. Core Components
 
-- **AxAI**: Main AI interface for model-lab and core LLM providers (use `ai()` factory
+- AxAI: Main AI interface for model-lab and core LLM providers (use `ai()` factory
   function)
-- **AxAgent**: Agent framework with inter-agent communication (use `agent()`
+- AxAgent: Agent framework with inter-agent communication (use `agent()`
   factory function)
-- **AxFlow**: AI workflow orchestration engine for complex multi-step processes
-- **GEPA / BootstrapFewShot**: Optimizers for prompt and demo improvement
+- AxFlow: AI workflow orchestration engine for complex multi-step processes
+- GEPA / BootstrapFewShot: Optimizers for prompt and demo improvement
 
 #### 3. Streaming & Multi-modal
 
@@ -753,11 +753,11 @@ export * from "./prompts/index.js";
 
 ## Dependencies & Constraints
 
-- **Node.js**: >= 20
-- **Runtime**: ES Modules only
-- **Core Dependencies**: Minimal, zero-dependencies philosophy
-- **Peer Dependencies**: Handle LLM SDKs as peer deps where possible
-- **Browser Compatibility**: **CRITICAL** - Do not add filesystem calls (`fs`,
+- Node.js: >= 20
+- Runtime: ES Modules only
+- Core Dependencies: Minimal, zero-dependencies philosophy
+- Peer Dependencies: Handle LLM SDKs as peer deps where possible
+- Browser Compatibility: **CRITICAL** - Do not add filesystem calls (`fs`,
   `path`, `os`) or other Node.js-specific APIs to the main library (`src/ax/`).
   The library must run in browser environments. Use only web-standard APIs and
   platform-agnostic code. Node.js-specific functionality should be in examples
@@ -830,7 +830,7 @@ PINECONE_API_KEY=your_key_here
 7. **Agent Composition**: Agents can call other agents for complex workflows
 8. **Streaming Handling**: Always handle both success and error states in
    streams
-9. **Type Safety**: Leverage TypeScript's type system for compile-time
+9. **Type Safety**: Use TypeScript's type system for compile-time
    validation
 10. **Variable Naming**: Use `llm` instead of `ai` to avoid naming conflicts
     with factory function
@@ -846,16 +846,16 @@ PINECONE_API_KEY=your_key_here
 
 ## Current Best Practices (v13.0.24+)
 
-- **Always use** factory functions: `ai()`, `agent()` for better type safety
-- **Always use** `s()` function for string-based signatures (not constructors)
-- **Always use** `ax()` function for generators (not template literals)
-- **Import pattern**: `import { ai, agent, s, ax, f } from '@ax-llm/ax'`
-- **Field naming**: Use descriptive names like `userQuestion`, `emailText`,
+- Always use factory functions: `ai()`, `agent()` for better type safety
+- Always use `s()` function for string-based signatures (not constructors)
+- Always use `ax()` function for generators (not template literals)
+- Import pattern: `import { ai, agent, s, ax, f } from '@ax-llm/ax'`
+- Field naming: Use descriptive names like `userQuestion`, `emailText`,
   `responseText`
-- **Variable naming**: Use `llm` instead of `ai` to avoid naming conflicts
-- **Dynamic fields**: Use `f.<type>()` helpers with signature methods for
+- Variable naming: Use `llm` instead of `ai` to avoid naming conflicts
+- Dynamic fields: Use `f.<type>()` helpers with signature methods for
   dynamic field creation
-- **Type safety**: Leverage string-based functions for full TypeScript inference
+- Type safety: Use string-based functions for full TypeScript inference
 
 ## Documentation Guidelines
 

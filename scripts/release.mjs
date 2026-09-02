@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { execFileSync, spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -25,6 +25,47 @@ const publicationWorkflows = [
     fields: ['--raw-field', 'dry_run=false'],
   },
 ];
+
+const changelogFile = 'CHANGELOG.md';
+
+/**
+ * Rewrite em and en dashes in changelog prose. The house copy rule in
+ * `tools/copy/skills/anti-tell-copy/SKILL.md` forbids both characters with no
+ * allowlist, and changelog entries are generated from commit subjects, so a
+ * subject carrying a dash would otherwise land in the file unedited. An em dash
+ * becomes a colon, an unspaced en dash between two word characters becomes a hyphen
+ * so numeric ranges survive, and any other en dash becomes a comma.
+ */
+export function normalizeChangelogDashes(text) {
+  return text
+    .replace(/[ \t]*\u2014[ \t]*(\n?)/g, (_match, newline) =>
+      newline ? ':\n' : ': '
+    )
+    .replace(/(\w)\u2013(\w)/g, '$1-$2')
+    .replace(/[ \t]*\u2013[ \t]*(\n?)/g, (_match, newline) =>
+      newline ? ',\n' : ', '
+    );
+}
+
+/**
+ * Normalise only the section the changelog generator just prepended. Entries
+ * already in the file are history and are left byte-identical.
+ */
+export function normalizeAddedChangelogSection(before, after) {
+  if (before && after.endsWith(before)) {
+    const added = after.slice(0, after.length - before.length);
+    return normalizeChangelogDashes(added) + before;
+  }
+  return normalizeChangelogDashes(after);
+}
+
+function readChangelog(file) {
+  try {
+    return readFileSync(file, 'utf8');
+  } catch {
+    return null;
+  }
+}
 
 function commandText(command, args) {
   return [command, ...args].join(' ');
@@ -326,7 +367,21 @@ function prepare(increment = 'patch') {
     '--ci',
   ]);
   run('npm', ['run', 'axir:generate-packages']);
+  const changelogPath = path.join(repoRoot, changelogFile);
+  const changelogBefore = readChangelog(changelogPath);
   run('npm', ['exec', '--', 'release-it', '--no-increment', '--ci']);
+  const changelogAfter = readChangelog(changelogPath);
+  if (changelogAfter !== null) {
+    const normalized = normalizeAddedChangelogSection(
+      changelogBefore ?? '',
+      changelogAfter
+    );
+    if (normalized !== changelogAfter) {
+      writeFileSync(changelogPath, normalized);
+      run('git', ['add', changelogFile]);
+      run('git', ['commit', '--amend', '--no-edit']);
+    }
+  }
   verifyPreparedRelease(version, branch);
 
   run('git', ['push', '--set-upstream', 'origin', branch]);
