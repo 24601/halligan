@@ -214,6 +214,85 @@ describe('AxJSONLTrajectoryStore on-disk contract', () => {
     expect(drained.steps.map((step) => step.seq)).toEqual([0, 1, 2]);
   });
 
+  it('resumes a durable cursor at the right record after an interior drop', async () => {
+    const clock = new AxManualEventClock(5_000);
+    const directory = root();
+    const store = newStore(directory, clock);
+    const { trajectoryId } = await store.create({});
+    const written: string[] = [];
+    for (let index = 0; index < 6; index++) {
+      const receipt = await store.append({
+        trajectoryId,
+        type: 'run',
+        data: { index },
+      });
+      written.push(receipt.stepId);
+    }
+    const drained = await store.readFrom(undefined, trajectoryId, {
+      maxSteps: 4,
+    });
+    await store.saveCursor('drainer', drained.cursor);
+    store.close();
+
+    // A record the consumer had ALREADY processed becomes unreadable, with
+    // its byte length preserved so every later frame keeps its offset. The
+    // tolerant parse drops it, which renumbers every following seq down by
+    // one: `seq` alone is not a durable position.
+    const path = join(
+      directory,
+      encodeURIComponent(trajectoryId),
+      'steps.jsonl'
+    );
+    const lines = readFileSync(path, 'utf8').split('\n');
+    lines[1] = 'x'.repeat(lines[1]!.length);
+    writeFileSync(path, lines.join('\n'));
+
+    const reopened = newStore(directory, clock);
+    const cursor = await reopened.loadCursor('drainer', trajectoryId);
+    expect(cursor?.seq).toBe(4);
+    const resumed = await reopened.readFrom(cursor, trajectoryId, {});
+    // Positioning from cursor.seq would have started one record too far and
+    // silently never delivered a committed step. C14 must not fail open.
+    expect(resumed.steps.map((step) => step.stepId)).toEqual(written.slice(3));
+    expect(resumed.corrupt).toBe(1);
+  });
+
+  it('rejects a durable cursor no longer on a frame boundary', async () => {
+    const clock = new AxManualEventClock(5_000);
+    const directory = root();
+    const store = newStore(directory, clock);
+    const { trajectoryId } = await store.create({});
+    for (let index = 0; index < 6; index++) {
+      await store.append({ trajectoryId, type: 'run', data: { index } });
+    }
+    const drained = await store.readFrom(undefined, trajectoryId, {
+      maxSteps: 4,
+    });
+    await store.saveCursor('drainer', drained.cursor);
+    store.close();
+
+    // Same drop, but the replacement is a different length, so every later
+    // frame moved and the saved offset now points into the middle of one.
+    // There is no safe record to resume at, so C14 fails closed and loudly.
+    const path = join(
+      directory,
+      encodeURIComponent(trajectoryId),
+      'steps.jsonl'
+    );
+    const lines = readFileSync(path, 'utf8').split('\n');
+    lines[1] = '{"broken":true}';
+    writeFileSync(path, lines.join('\n'));
+
+    const reopened = newStore(directory, clock);
+    const cursor = await reopened.loadCursor('drainer', trajectoryId);
+    await expect(
+      reopened.readFrom(cursor, trajectoryId, {})
+    ).rejects.toMatchObject({
+      name: 'AxTrajectoryCursorError',
+      reason: 'not_a_frame_boundary',
+    });
+  });
+
   it('keeps spilled blobs in their own directory and rehydrates them', async () => {
     const clock = new AxManualEventClock(5_000);
     const directory = root();

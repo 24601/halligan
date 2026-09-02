@@ -50,6 +50,15 @@ export interface AxTrajectoryDurabilityRow {
     | 'gap'
     | 'rejected'
     | 'not-applicable';
+  /**
+   * Committed steps after a saved cursor that a resume neither delivered nor
+   * refused -- the C14 fail-open this evaluation exists to catch. `null` on a
+   * row that saves no cursor. Two-sided with `cursorStepsDelivered`, because
+   * "nothing skipped" is also satisfied by delivering nothing at all.
+   */
+  readonly cursorStepsSkipped: number | null;
+  readonly cursorStepsDelivered: number | null;
+  /** Derived from the measured counters, never passed in by the caller. */
   readonly classification: string;
   readonly expected: string;
 }
@@ -188,6 +197,12 @@ async function seed(store: AxTrajectoryStore, count: number) {
   return trajectoryId;
 }
 
+/** The measured half of a row, before it is classified. */
+type Measured = Omit<
+  AxTrajectoryDurabilityRow,
+  'classification' | 'expected' | 'crashRow' | 'store' | 'faultInjected'
+>;
+
 async function measure(
   harness: Harness,
   trajectoryId: string,
@@ -195,8 +210,9 @@ async function measure(
   crashRow: string,
   faultInjected: boolean,
   expected: string,
-  classification: string,
-  cursorResumption: AxTrajectoryDurabilityRow['cursorResumption']
+  classify: (measured: Measured) => string,
+  cursorResumption: AxTrajectoryDurabilityRow['cursorResumption'],
+  cursor?: Readonly<{ skipped: number; delivered: number }>
 ): Promise<AxTrajectoryDurabilityRow> {
   const store = harness.reopen();
   const steps = await allSteps(store, trajectoryId);
@@ -204,19 +220,38 @@ async function measure(
     maxSteps: 10_000,
   });
   const ids = steps.map((step) => step.stepId);
-  return {
-    crashRow,
-    store: harness.kind,
-    faultInjected,
+  const measured: Measured = {
     stepsLost: Math.max(0, committedBefore - steps.length),
     danglingRefs: await danglingRefCount(store, steps),
     orphanBlobs: orphanBlobCount(harness, steps),
     corruptFramesDropped: drained.corrupt,
     doubleAppends: ids.length - new Set(ids).size,
     cursorResumption,
-    classification,
+    cursorStepsSkipped: cursor ? cursor.skipped : null,
+    cursorStepsDelivered: cursor ? cursor.delivered : null,
+  };
+  return {
+    crashRow,
+    store: harness.kind,
+    faultInjected,
+    ...measured,
+    // Classifying from what was measured is the difference between evidence
+    // and a label: passing the expected string in makes the check vacuous.
+    classification: classify(measured),
     expected,
   };
+}
+
+/** Every clean row's classification, derived from the counters themselves. */
+function classifyClean(measured: Measured): string {
+  if (measured.stepsLost !== 0)
+    return `${measured.stepsLost} committed steps lost`;
+  if (measured.danglingRefs !== 0)
+    return `${measured.danglingRefs} dangling refs`;
+  if (measured.corruptFramesDropped !== 0) {
+    return `${measured.corruptFramesDropped} corrupt frames`;
+  }
+  return 'every committed step readable';
 }
 
 async function cursorRow(
@@ -246,10 +281,119 @@ async function cursorRow(
     crashRow,
     true,
     `AxTrajectoryCursorError(${expectedReason})`,
-    `AxTrajectoryCursorError(${reason})`,
-    reason === expectedReason ? 'rejected' : 'gap'
+    () => `AxTrajectoryCursorError(${reason})`,
+    reason === expectedReason ? 'rejected' : 'gap',
+    // A rejected cursor delivers nothing on purpose; what matters is that it
+    // did not silently hand back the wrong record.
+    { skipped: 0, delivered: 0 }
   );
   return row;
+}
+
+/**
+ * C14 through the durable-cursor path the mind's backpressure rides on. An
+ * interior frame becomes unreadable AFTER a consumer saved its cursor, which
+ * is the one case `seq` cannot survive: the tolerant parse renumbers every
+ * later record down, so positioning from `seq` names a different one.
+ *
+ * `replacement` decides which half is exercised. Same byte length keeps every
+ * later frame where it was, so the saved byte offset still names a boundary
+ * and the resume must deliver exactly the undelivered records. A different
+ * length moves them, so no safe record exists and C14 must fail closed.
+ */
+async function interiorDropRow(
+  clock: AxManualEventClock,
+  crashRow: string,
+  replacement: (line: string) => string,
+  expectedReason: string
+): Promise<AxTrajectoryDurabilityRow> {
+  const directory = mkdtempSync(join(tmpdir(), 'ax-trajectory-cursor-'));
+  let current = new AxJSONLTrajectoryStore({ directory, clock, fsync: false });
+  const harness: Harness = {
+    get store() {
+      return current;
+    },
+    kind: 'jsonl',
+    reopen: () => {
+      current.close();
+      current = new AxJSONLTrajectoryStore({ directory, clock, fsync: false });
+      return current;
+    },
+    listBlobRefs: () =>
+      readdirSync(join(directory, 'blobs')).map((file) =>
+        decodeURIComponent(file.replace(/\.blob$/, ''))
+      ),
+    tearDown: () => {
+      current.close();
+      rmSync(directory, { recursive: true, force: true });
+    },
+  } as Harness;
+  try {
+    const trajectoryId = await seed(current, 6);
+    const all = await allSteps(current, trajectoryId);
+    const drained = await current.readFrom(undefined, trajectoryId, {
+      maxSteps: 4,
+    });
+    const delivered = new Set(drained.steps.map((step) => step.stepId));
+    await current.saveCursor('drainer', drained.cursor);
+    current.close();
+
+    const path = join(
+      directory,
+      encodeURIComponent(trajectoryId),
+      'steps.jsonl'
+    );
+    const lines = readFileSync(path, 'utf8').split('\n');
+    // Line 1 is a record the consumer had ALREADY processed.
+    const dropped = lines[1]!;
+    lines[1] = replacement(dropped);
+    writeFileSync(path, lines.join('\n'));
+
+    current = new AxJSONLTrajectoryStore({ directory, clock, fsync: false });
+    const cursor = await current.loadCursor('drainer', trajectoryId);
+    let reason = 'accepted';
+    let resumedIds: string[] = [];
+    try {
+      const resumed = await current.readFrom(cursor, trajectoryId, {
+        maxSteps: 10_000,
+      });
+      resumedIds = resumed.steps.map((step) => step.stepId);
+    } catch (error) {
+      reason = String((error as { reason?: unknown }).reason ?? 'unknown');
+    }
+    const survivors = new Set(
+      (await allSteps(current, trajectoryId)).map((step) => step.stepId)
+    );
+    // Committed, survived the fault, was never delivered, and the resume
+    // neither handed it over nor refused: that is a silent skip.
+    const skipped =
+      reason === 'accepted'
+        ? all.filter(
+            (step) =>
+              survivors.has(step.stepId) &&
+              !delivered.has(step.stepId) &&
+              !resumedIds.includes(step.stepId)
+          ).length
+        : 0;
+    return await measure(
+      harness,
+      trajectoryId,
+      // The fault destroys one already-processed record on purpose; bytes it
+      // ate are not a durability failure, exactly as in the truncation study.
+      all.length - 1,
+      crashRow,
+      true,
+      expectedReason,
+      () =>
+        reason === 'accepted'
+          ? 'resumed'
+          : `AxTrajectoryCursorError(${reason})`,
+      reason === 'accepted' ? 'exact' : 'rejected',
+      { skipped, delivered: resumedIds.length }
+    );
+  } finally {
+    harness.tearDown();
+  }
 }
 
 async function conformanceCounts() {
@@ -404,7 +548,7 @@ export async function runTrajectoryDurabilityEvaluation(): Promise<AxTrajectoryD
           'baseline-no-fault',
           false,
           'every committed step readable',
-          'every committed step readable',
+          classifyClean,
           'exact'
         )
       );
@@ -454,7 +598,7 @@ export async function runTrajectoryDurabilityEvaluation(): Promise<AxTrajectoryD
           'C1-before-append-returns',
           true,
           'rejected(blob_write_failed)',
-          c1Classification,
+          () => c1Classification,
           'exact'
         )
       );
@@ -477,7 +621,10 @@ export async function runTrajectoryDurabilityEvaluation(): Promise<AxTrajectoryD
           'C3-torn-trailing-frame',
           true,
           'the partial frame is dropped and counted; the record before it is intact',
-          'the partial frame is dropped and counted; the record before it is intact',
+          (measured) =>
+            measured.corruptFramesDropped >= 1 && measured.stepsLost === 0
+              ? 'the partial frame is dropped and counted; the record before it is intact'
+              : `${measured.corruptFramesDropped} corrupt frames, ${measured.stepsLost} committed steps lost`,
           'exact'
         )
       );
@@ -530,8 +677,13 @@ export async function runTrajectoryDurabilityEvaluation(): Promise<AxTrajectoryD
         c2Committed,
         'C2-blob-then-crash',
         true,
-        'one orphan blob, zero dangling refs',
-        'one orphan blob, zero dangling refs',
+        '1 orphan blob, zero dangling refs',
+        (measured) =>
+          `${measured.orphanBlobs ?? 'unobservable'} orphan blob${
+            measured.orphanBlobs === 1 ? '' : 's'
+          }, ${
+            measured.danglingRefs === 0 ? 'zero' : measured.danglingRefs
+          } dangling refs`,
         'exact'
       )
     );
@@ -550,6 +702,23 @@ export async function runTrajectoryDurabilityEvaluation(): Promise<AxTrajectoryD
           token: `${cursor.token!.split(':')[0]}:99999999`,
         }),
         'shrank'
+      )
+    );
+
+    rows.push(
+      await interiorDropRow(
+        clock,
+        'C14-cursor-interior-frame-dropped',
+        (line) => 'x'.repeat(line.length),
+        'resumed'
+      )
+    );
+    rows.push(
+      await interiorDropRow(
+        clock,
+        'C14-cursor-not-a-frame-boundary',
+        () => '{"dropped":true}',
+        'AxTrajectoryCursorError(not_a_frame_boundary)'
       )
     );
 
@@ -586,19 +755,71 @@ export function assertTrajectoryDurabilityEvaluation(
       `the two stores report different conformance assertion counts (${report.conformance.memoryAssertions} vs ${report.conformance.jsonlAssertions})`
     );
   }
+  // Equal counts only mean something if the implementations genuinely differ.
+  if (
+    report.conformance.memoryDurability === report.conformance.jsonlDurability
+  ) {
+    fail('both conformance runs used the same durability class');
+  }
+  const find = (crashRow: string, store: AxTrajectoryEvalStoreKind) =>
+    report.rows.find(
+      (row) => row.crashRow === crashRow && row.store === store
+    ) ?? fail(`no row for ${crashRow}/${store}`);
+
   for (const row of report.rows) {
     const label = `${row.crashRow}/${row.store}`;
+    // The headline claim. It was the one metric the shipped gate did not
+    // assert, so a store that lost every committed step printed green.
+    if (row.stepsLost !== 0)
+      fail(`${label} lost ${row.stepsLost} committed steps`);
     if (row.danglingRefs !== 0) fail(`${label} produced a dangling blob ref`);
     if (row.doubleAppends !== 0) fail(`${label} double-appended a step`);
     if (row.classification !== row.expected) {
-      fail(`${label} classified as "${row.classification}"`);
+      fail(
+        `${label} classified as "${row.classification}", expected "${row.expected}"`
+      );
+    }
+    if (row.cursorStepsSkipped !== null && row.cursorStepsSkipped !== 0) {
+      fail(
+        `${label} silently skipped ${row.cursorStepsSkipped} committed steps on resume`
+      );
     }
   }
+
+  // C2's counter-metric to "0 dangling refs": a store that wrote the step line
+  // before the blob would show 1 dangling ref and 0 orphan blobs here.
+  if (find('C2-blob-then-crash', 'jsonl').orphanBlobs !== 1) {
+    fail('C2 did not leave exactly one orphan blob');
+  }
+  for (const store of ['memory', 'jsonl'] as const) {
+    // C3's counter-metric to "0 steps lost": an implementation that glued the
+    // fragment onto the previous record would report 0 corrupt frames.
+    if (find('C3-torn-trailing-frame', store).corruptFramesDropped < 1) {
+      fail(`C3/${store} did not count the torn frame it dropped`);
+    }
+  }
+  // C14's counter-metric to "0 skipped": skipping nothing is also satisfied by
+  // delivering nothing, so the recoverable case must actually have delivered.
+  const interior = find('C14-cursor-interior-frame-dropped', 'jsonl');
+  if ((interior.cursorStepsDelivered ?? 0) <= 0) {
+    fail('C14 interior-drop resumed without delivering any committed step');
+  }
+
   if (report.truncation.gluedFramesTotal !== 0) {
     fail('a truncated log glued two records into a step nobody wrote');
   }
   if (report.truncation.stepsLostBeyondTruncation !== 0) {
     fail('recovery did not return exactly the complete records that survived');
+  }
+  // Two-sided: "0 glued" is also satisfied by a study that never cut a record,
+  // so the mid-record probes must really have dropped a fragment each.
+  const midRecord = report.truncation.probes.filter(
+    (probe) => !probe.atRecordBoundary
+  );
+  if (midRecord.length < 3)
+    fail('the truncation study cut no mid-record offset');
+  if (midRecord.some((probe) => probe.corruptFramesDropped < 1)) {
+    fail('a mid-record truncation dropped no fragment, so it cut nothing');
   }
 }
 
