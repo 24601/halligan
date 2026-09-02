@@ -7,7 +7,9 @@ describe('GEPA evidence manifest evaluation', () => {
 
     // ---- Claim 1: durability and asymmetric rollback ----------------------
     expect(result.ledgerSurvivedRollback).toBe(true);
-    expect(result.ledgerSurvivedProcessBoundary).toBe(true);
+    // Named for what it measures: a serialize/drop/replay store rebuild in
+    // this process, which stands in for a restart and is not one.
+    expect(result.ledgerSurvivedStoreRebuild).toBe(true);
     // THE BASELINE, asserted: with the mechanism off, the rollback retains
     // nothing. Without this, "survived" is a claim about a value that was
     // never at risk.
@@ -132,6 +134,13 @@ describe('GEPA evidence manifest evaluation', () => {
     );
 
     // ---- Budget -----------------------------------------------------------
+    // Zero calls is DERIVED from two measurements, not asserted against
+    // itself. The optimizers really did reach for the AI service they were
+    // handed (so the counter is live, and a wrapper that saw nothing would
+    // prove nothing), and every one of those reads resolved to `undefined`, so
+    // there was no provider function to invoke.
+    expect(result.budget.providerSurfaceReads).toBeGreaterThan(0);
+    expect(result.budget.providerResolvedCallable).toBe(false);
     expect(result.budget.providerCalls).toBe(0);
     expect(result.budget.providerTokens).toBe(0);
     expect(result.budget.costUsd).toBe(0);

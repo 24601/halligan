@@ -32,10 +32,11 @@ import { AxManualEventClock } from '../src/ax/event/types.js';
  * CLAIMS, each measured by FAULT INJECTION rather than by a happy path:
  *
  *  1. DURABILITY / ASYMMETRIC ROLLBACK. A rejected-candidate ledger entry
- *     survives an artifact rollback and a serialize -> deserialize process
- *     boundary, while the causal evidence history's divergent-history refusal
- *     still fires. Baseline: the same rollback with no ledger, where the only
- *     record of the rejection is the artifact that was just rewound.
+ *     survives an artifact rollback and a serialize -> replay STORE REBUILD
+ *     (an in-process stand-in for a restart, not a real process boundary),
+ *     while the causal evidence history's divergent-history refusal still
+ *     fires. Baseline: the same rollback with no ledger, where the only record
+ *     of the rejection is the artifact that was just rewound.
  *  2. REFUSAL COMPLETENESS. Every fail-closed rule in the evidence path is
  *     exercised and produces the named error code. Baseline: the same input
  *     with the offending field corrected, which must be ACCEPTED — a refusal
@@ -54,10 +55,42 @@ import { AxManualEventClock } from '../src/ax/event/types.js';
  *     assumed.
  *
  * There is no AI service, no provider, no network, and no wall-clock
- * dependency: `forward` is a table lookup and every clock is injected.
+ * dependency: `forward` is a table lookup and every clock is injected. The
+ * zero-call claim is MEASURED, not asserted: the AI services handed to every
+ * optimizer in this file are counting proxies, and `budget.providerCalls`
+ * reports the number of property reads they saw (§12/M7-minor).
  */
 
 const digest = (character: string) => `sha256:${character.repeat(64)}`;
+
+/**
+ * Every touch of the provider surface, counted.
+ *
+ * `{} as AxAIService` makes zero provider calls STRUCTURALLY true, but
+ * asserting a literal `0` against itself proves nothing about the code under
+ * test. This proxy behaves exactly like the empty object it wraps — every read
+ * still returns `undefined` — and records what was read. That turns the
+ * zero-call claim into a derivation from two measurements: the optimizers DID
+ * reach for the AI service (`providerSurfaceReads > 0`, so the counter is
+ * live), and every one of those reads resolved to `undefined`, so no provider
+ * function existed to invoke. A future change that hands these optimizers a
+ * real service, or that makes any read resolve to a callable, fails the
+ * evaluation instead of passing it silently.
+ */
+let providerSurfaceReads = 0;
+const providerSurfaceProperties = new Set<string>();
+let providerResolvedCallable = false;
+
+const countingAI = (): AxAIService =>
+  new Proxy({} as AxAIService, {
+    get(target, property, receiver) {
+      providerSurfaceReads += 1;
+      if (typeof property === 'string') providerSurfaceProperties.add(property);
+      const value = Reflect.get(target, property, receiver);
+      if (typeof value === 'function') providerResolvedCallable = true;
+      return value;
+    },
+  });
 
 /** Host receipt registry. Binds one canonical payload per receipt id. */
 function hostReceipts(): {
@@ -623,8 +656,8 @@ async function runAdmission(
   const events: any[] = [];
   const checkpoints: any[] = [];
   const optimizer = new AxGEPA({
-    studentAI: {} as AxAIService,
-    teacherAI: {} as AxAIService,
+    studentAI: countingAI(),
+    teacherAI: countingAI(),
     numTrials: 3,
     minibatch: false,
     mergeMax: 0,
@@ -737,8 +770,14 @@ async function measureAdmission() {
 // ------------------------------------------------------------- durability
 
 /**
- * Claim 1 — the ledger survives an artifact rollback AND a process boundary,
- * and the causal history's refusal still fires.
+ * Claim 1 — the ledger survives an artifact rollback AND a store rebuild, and
+ * the causal history's refusal still fires.
+ *
+ * "Store rebuild", not "process boundary": FAULT 2 below serializes the
+ * store's contents and replays them into a fresh store IN THIS PROCESS. That
+ * is the reconstruction a durable host store performs across a restart, and it
+ * is the strongest claim a zero-cost evaluation can make — the field is named
+ * for what it measures rather than for what it stands in for (§12/M6-minor).
  */
 async function measureDurability() {
   const receipts = hostReceipts();
@@ -835,16 +874,17 @@ async function measureDurability() {
   const baselineRetainsNothing =
     noLedger.rejectedCandidateLedgerRef === undefined;
 
-  // FAULT 2: a process boundary. Serialize the store's contents, drop the
-  // store, and rebuild it — which is what a durable host store does across a
-  // restart, and what the in-memory one deliberately does not.
+  // FAULT 2: a store rebuild. Serialize the store's contents, drop the store,
+  // and replay them into a fresh one — the reconstruction a durable host store
+  // performs across a restart, and what the in-memory one deliberately does
+  // not. This runs IN PROCESS: it is a stand-in for a restart, not one.
   const exported = JSON.stringify(await store.list({ now: clock.now() }));
   const restarted = new AxInMemoryRejectedCandidateLedger({ clock });
   for (const raw of JSON.parse(exported) as AxRejectedCandidateLedgerEntry[]) {
     await restarted.record(axRejectedCandidateLedgerEntry(raw));
   }
   const afterRestart = await restarted.list({ now: clock.now() });
-  const survivedProcessBoundary =
+  const survivedStoreRebuild =
     afterRestart.length === 2 &&
     afterRestart.every((row) => row.diagnosis.startsWith('rejected: proposed'));
 
@@ -874,7 +914,7 @@ async function measureDurability() {
 
   return {
     ledgerSurvivedRollback: survivedRollback,
-    ledgerSurvivedProcessBoundary: survivedProcessBoundary,
+    ledgerSurvivedStoreRebuild: survivedStoreRebuild,
     baselineRetainsNothingWithoutLedger: baselineRetainsNothing,
     divergentHistoryStillRefused,
     entriesAfterTtl: afterTtl,
@@ -966,7 +1006,7 @@ export async function evaluateGepaEvidenceManifests() {
 
   const result = {
     claim:
-      'Rejected-candidate evidence survives artifact rollback and a process boundary; every evidence-path refusal fires on its own fault and on nothing else; attribution is never manufactured; admission is reported at batch and run level; and a fully instrumented manifest still replays.',
+      'Rejected-candidate evidence survives artifact rollback and a store rebuild (serialize, drop, replay — an in-process stand-in for a restart); every evidence-path refusal fires on its own fault and on nothing else; attribution is never manufactured; admission is reported at batch and run level; and a fully instrumented manifest still replays.',
     declaredBaseline:
       'The same operations with the mechanism off: a rollback with no ledger ref (nothing is retained), the same records with the offending field corrected (accepted), and a legacy version-3 manifest.',
     honesty:
@@ -979,7 +1019,16 @@ export async function evaluateGepaEvidenceManifests() {
     admission,
     ...artifact,
     budget: {
+      // DERIVED from the two measurements below, not declared: the service was
+      // read, and every read resolved to `undefined`, so nothing was callable.
       providerCalls: 0,
+      providerSurfaceReads,
+      providerSurfaceProperties: [...providerSurfaceProperties].sort(),
+      providerResolvedCallable,
+      // Implied by zero calls rather than separately instrumented: with no
+      // provider touched there is no usage record to read, and reporting a
+      // measured-looking zero for something nothing counted is the fabrication
+      // `costUsd: undefined` exists to prevent.
       providerTokens: 0,
       costUsd: 0,
       // §8.11 prescribes 2000. Raised to 10 s and recorded as a deviation for
@@ -998,11 +1047,13 @@ export async function evaluateGepaEvidenceManifests() {
   // is an evaluation that gets tuned until it passes.
   if (
     !result.ledgerSurvivedRollback ||
-    !result.ledgerSurvivedProcessBoundary ||
+    !result.ledgerSurvivedStoreRebuild ||
     !result.divergentHistoryStillRefused ||
     !result.instrumentedArtifactRevalidates ||
     result.entriesAfterTtl !== 0 ||
     result.instrumentedArtifactBytes >= result.maxArtifactBytes ||
+    result.budget.providerResolvedCallable ||
+    result.budget.providerSurfaceReads === 0 ||
     elapsedWallTimeMs > result.budget.maxWallTimeMs
   ) {
     throw new Error(
