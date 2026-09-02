@@ -1901,6 +1901,30 @@
       "verification": null
     },
     {
+      "id": "axir-2026-09-02-agent-playbook-evolve-per-cell-transfer-matrix-with-a-regression",
+      "status": "open",
+      "title": "Agent playbook evolve: per-cell transfer matrix with a regression floor, and a sealed test evaluated once after the run-level verdict",
+      "createdAt": "2026-09-02",
+      "sourcePR": 104,
+      "sourceCommit": "1c6d8a0fe7c2914bb609a717fbaadc0aa3915671",
+      "tsPaths": [
+        "src/ax/agent/agentInternal/playbookEvolve/transfer.ts",
+        "src/ax/agent/agentInternal/playbookEvolve/playbookEvolve.ts",
+        "src/ax/agent/agentInternal/playbookEvolve/playbookEvolveTypes.ts",
+        "src/ax/agent/agentInternal/playbookEvolve/playbookEvidenceTypes.ts"
+      ],
+      "portableSurface": "axagent",
+      "impact": "Adds two default-off evidence options to agent.playbook().evolve(). Portable TS behavior changes: (1) transfer evaluates every caller-supplied AxAIService target on every configured split twice — an anchor pass before any mutation and a candidate pass on the final artifact — and reports ONE CELL PER (target, split) with its own paired interval and a per-cell regression floor (default 0.02); the report carries no mean/average field by contract, and gates.transfer: 'require' triggers the existing run-level rollback, whose I8 cascade now names the deciding gate instead of a hard-coded control_arm. The transfer verdict fails closed on a missing planned cell, an incomplete pass, or an unpairable anchor/candidate pair, and a target that throws makes the whole matrix not_run. (2) sealedTest is proven disjoint from train and validation by semantic task id and is evaluated EXACTLY ONCE in phase 11, after the run-level verdict and after the rollback, on the baseline artifact and then the final artifact inside digest-verified restore brackets; no gate, threshold, accept decision or rollback reads it, and a run whose final artifact digest equals the baseline's reports not_run rather than a delta that measures run-to-run noise. Both spend from their own metric counters, so neither moves the legacy metricCallsUsed and neither can starve the search; an insufficient transfer.maxMetricCalls raises budget_insufficient before any mutation. AxAgentPlaybookEvidenceWarningCode gains transfer_cell_regressed and transfer_unmeasured. Generated packages keep the legacy gate; the new options are TypeScript-first.",
+      "suggestedAxirWork": [
+        "Add or update the TS-derived conformance fixture.",
+        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
+        "Run npm run axir:conformance:check and npm run test:axir."
+      ],
+      "completedAt": null,
+      "completedByCommit": null,
+      "verification": null
+    },
+    {
       "id": "axir-2026-09-02-agent-playbook-evolve-termination-classification-per-attempt-evi",
       "status": "open",
       "title": "Agent playbook evolve: termination classification, per-attempt evidence, bootstrap intervals, variance band, validity conjuncts, reach instrumentation, gate chain and evidence receipt",
