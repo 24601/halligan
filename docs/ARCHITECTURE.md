@@ -7,10 +7,12 @@ AxIR into language-agnostic Python, Java, C++, Go, and Rust libraries.
 For compiler and IR details, see [`docs/COMPILER.md`](./COMPILER.md). For
 audio and realtime usage, see [`docs/AUDIO.md`](./AUDIO.md). For reward-scored
 candidate selection and feedback rounds, see [`docs/REFINE.md`](./REFINE.md).
+For the append-only agent life log and its context projection, see
+[`docs/TRAJECTORY.md`](./TRAJECTORY.md).
 
 ## System Shape
 
-Ax has seven main runtime surfaces:
+Ax has eight main runtime surfaces:
 
 1. **AxAI**: provider clients, model catalog metadata, chat, streaming,
    embeddings, transcribe/speak, audio/realtime operations, routing, and
@@ -30,7 +32,11 @@ Ax has seven main runtime surfaces:
    serialized artifacts, and optimizer engines including GEPA.
 6. **AxEventRuntime**: a protocol-neutral durable-inbox and explicit-route layer
    for observing, invalidating, waking, and resuming Ax programs.
-7. **AxIR generated libraries**: Python, Java, C++, Go, and Rust packages emitted from
+7. **AxTrajectory**: an append-only agent life log with declared step
+   classification, digest-verified blob spill, bounded filtered reads, durable
+   per-consumer cursors, a fork/merge DAG, and a tiered-rollup context
+   projection with drill-down.
+8. **AxIR generated libraries**: Python, Java, C++, Go, and Rust packages emitted from
    the shared portable semantics.
 
 These surfaces are connected by the shared Ax program contract: `forward`,
