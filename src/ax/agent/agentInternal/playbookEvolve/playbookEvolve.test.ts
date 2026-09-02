@@ -2767,7 +2767,11 @@ describe('agent.playbook().evolve() matched-budget control arm', () => {
       (sum: number, phase: any) => sum + phase.metricCalls,
       0
     );
-    expect(armSpend).toBeGreaterThan(0);
+    // Pinned, not merely "greater than zero": best_of_n runs 2 samples over
+    // the 1-task deciding split, self_refine runs 1 initial pass + 1 round, and
+    // harness_term runs once — 5 calls, on top of the run's own 6.
+    expect(armSpend).toBe(5);
+    expect(withArm.accounting.metricCalls).toBe(11);
     expect(withArm.accounting.metricCalls).toBe(
       withArm.metricCallsUsed + armSpend
     );
