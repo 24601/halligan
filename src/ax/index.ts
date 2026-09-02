@@ -1756,10 +1756,6 @@ import {
   axHarnessEvolve,
 } from './learn/evolve.js';
 import {
-  type AxHarnessFailureAdvance,
-  type AxHarnessFailureEntry,
-  type AxHarnessFailureManifest,
-  type AxHarnessFailureObservation,
   axAdvanceHarnessFailureManifest,
   axHarnessFailureFingerprint,
   axNormalizeHarnessFailureCause,
@@ -1831,6 +1827,10 @@ import {
   type AxHarnessEntryInspection,
   type AxHarnessEntryKind,
   AxHarnessEvolveConfigError,
+  type AxHarnessFailureAdvance,
+  type AxHarnessFailureEntry,
+  type AxHarnessFailureManifest,
+  type AxHarnessFailureObservation,
   type AxHarnessGateDecision,
   type AxHarnessGateMetrics,
   type AxHarnessInstallation,

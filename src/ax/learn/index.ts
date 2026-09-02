@@ -23,12 +23,6 @@ export type {
   AxHarnessSelector,
 } from './evolve.js';
 export { axHarnessEvolve } from './evolve.js';
-export type {
-  AxHarnessFailureAdvance,
-  AxHarnessFailureEntry,
-  AxHarnessFailureManifest,
-  AxHarnessFailureObservation,
-} from './manifest.js';
 export {
   axAdvanceHarnessFailureManifest,
   axHarnessFailureFingerprint,
@@ -101,6 +95,10 @@ export type {
   AxHarnessEntry,
   AxHarnessEntryInspection,
   AxHarnessEntryKind,
+  AxHarnessFailureAdvance,
+  AxHarnessFailureEntry,
+  AxHarnessFailureManifest,
+  AxHarnessFailureObservation,
   AxHarnessGateDecision,
   AxHarnessGateMetrics,
   AxHarnessInstallation,

@@ -11,47 +11,12 @@
  */
 
 import { axEventCanonicalDigest } from '../event/util.js';
-
-export interface AxHarnessFailureObservation {
-  readonly taskId: string;
-  readonly stage: 'run' | 'metric' | 'apply';
-  readonly cause: string;
-  /**
-   * Which tree was installed when this failure was observed.
-   *
-   * The manifest describes ONE side. An evolve step evaluates both, so the
-   * producer tags each observation and the caller decides which side to fold
-   * in — a manifest advanced from a mixed set tells the proposer the candidate
-   * is failing tasks the baseline failed. `side` is deliberately NOT part of
-   * the fingerprint: the same fault on the same task has one identity, so a
-   * fault that survives a mutation is `persisting`, not `new`.
-   */
-  readonly side?: 'current' | 'candidate';
-}
-
-export interface AxHarnessFailureEntry {
-  /** First 16 hex characters of the canonical digest of the normalized triple. */
-  readonly fingerprint: string;
-  readonly taskId: string;
-  readonly stage: AxHarnessFailureObservation['stage'];
-  /** Normalized, at most 200 characters. */
-  readonly cause: string;
-  readonly firstSeenStep: number;
-  readonly lastSeenStep: number;
-  readonly count: number;
-}
-
-export interface AxHarnessFailureManifest {
-  readonly step: number;
-  readonly entries: readonly Readonly<AxHarnessFailureEntry>[];
-}
-
-export interface AxHarnessFailureAdvance {
-  readonly manifest: Readonly<AxHarnessFailureManifest>;
-  readonly new: readonly string[];
-  readonly persisting: readonly string[];
-  readonly fixed: readonly string[];
-}
+import type {
+  AxHarnessFailureAdvance,
+  AxHarnessFailureEntry,
+  AxHarnessFailureManifest,
+  AxHarnessFailureObservation,
+} from './types.js';
 
 const MAX_CAUSE_CHARS = 200;
 

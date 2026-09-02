@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
-  type AxHarnessFailureObservation,
   axAdvanceHarnessFailureManifest,
   axHarnessFailureFingerprint,
   axNormalizeHarnessFailureCause,
 } from './manifest.js';
+import type { AxHarnessFailureObservation } from './types.js';
 
 const observation = (
   overrides: Partial<AxHarnessFailureObservation> = {}

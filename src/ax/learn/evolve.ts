@@ -42,11 +42,7 @@ import { type AxEventClock, AxSystemEventClock } from '../event/types.js';
 import { axEventCanonicalDigest } from '../event/util.js';
 
 import { axApplyHarnessTree, axCurrentHarnessInstallation } from './apply.js';
-import {
-  type AxHarnessFailureManifest,
-  type AxHarnessFailureObservation,
-  axAdvanceHarnessFailureManifest,
-} from './manifest.js';
+import { axAdvanceHarnessFailureManifest } from './manifest.js';
 import type { AxLearningBatch } from './processor.js';
 import type { AxLearningSurface } from './releases.js';
 import {
@@ -58,6 +54,8 @@ import {
 import {
   type AxHarnessEntryKind,
   AxHarnessEvolveConfigError,
+  type AxHarnessFailureManifest,
+  type AxHarnessFailureObservation,
   type AxHarnessGateDecision,
   type AxHarnessGateMetrics,
   type AxHarnessInstallTarget,
