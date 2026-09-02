@@ -88,12 +88,12 @@ const scoreByAnswer = async ({ prediction }: any) =>
  * reflector/curator are stubbed to add one marker bullet — so an accepted
  * proposal deterministically flips the executor onto the good path.
  */
-function makeAgent() {
+function makeAgent(playbookOptions?: Readonly<{ maxSectionSize?: number }>) {
   const ai = evolveScriptedAI();
   const ag = agent('question:string -> answer:string', {
     ai,
     directResponse: 'off',
-    playbook: { learn: false },
+    playbook: { learn: false, ...(playbookOptions ?? {}) },
     maxTurns: 4,
   }) as any;
   const engine: any = (ag.getPlaybook().inner as any).engine;
@@ -198,6 +198,77 @@ describe('agent.playbook().evolve()', () => {
     });
     expect(result.metricCallsUsed).toBeGreaterThan(0);
     expect(events.some((e) => e.startsWith('mining'))).toBe(true);
+  });
+
+  it('records and warns when an accepted curate proposal evicts a bullet', async () => {
+    // The silent-loss channel is on the ADD path: `pruneSectionForAddition`
+    // drops the lowest-ranked unprotected bullet on section overflow with no
+    // receipt and no gate. Seeded DEPRECATED so it fills the section without
+    // rendering — the actor still fails, so the weakness is still mined.
+    const { ag } = makeAgent({ maxSectionSize: 1 });
+    const handle = ag.getPlaybook();
+    const seeded = {
+      id: 'seeded-1',
+      section: 'failures_to_avoid',
+      content: 'an older lesson that section overflow will silently drop',
+      helpfulCount: 0,
+      harmfulCount: 0,
+      createdAt: '2025-01-01T00:00:00.000Z',
+      updatedAt: '2025-01-01T00:00:00.000Z',
+      evidence: { lifecycle: { status: 'deprecated' as const } },
+    };
+    const playbook = {
+      version: 1,
+      sections: { failures_to_avoid: [seeded] },
+      stats: {
+        bulletCount: 1,
+        helpfulCount: 0,
+        harmfulCount: 0,
+        tokenEstimate: 12,
+      },
+      updatedAt: '2025-01-01T00:00:00.000Z',
+    };
+    handle.load({
+      playbook,
+      artifact: { playbook, feedback: [], history: [] },
+    });
+
+    const result = await ag.playbook().evolve(
+      { train: TASKS, validation: [TASKS[0]!] },
+      {
+        metric: scoreByAnswer,
+        maxProposals: 1,
+        // Any evidence option turns the instrumentation on; the eviction diff
+        // costs one extra `getState()` and is deliberately not free.
+        gates: { validity: 'warn' },
+      }
+    );
+
+    expect(result.outcomes[0]?.accepted).toBe(true);
+    expect(result.outcomes[0]?.evictions).toEqual([
+      {
+        bulletId: 'seeded-1',
+        section: 'failures_to_avoid',
+        weaknessId: result.outcomes[0]?.proposal.weaknessId,
+        cause: 'section_overflow',
+      },
+    ]);
+    const warning = result.warnings?.find(
+      (entry) => entry.code === 'curate_eviction'
+    );
+    expect(warning?.message).toContain('seeded-1@failures_to_avoid');
+    expect(warning?.message).toContain('paid no gate');
+    expect(
+      result.outcomes[0]?.evidence?.warnings.some(
+        (entry) => entry.code === 'curate_eviction'
+      )
+    ).toBe(true);
+    // The eviction really happened: the seeded bullet is gone from the live
+    // artifact, which is the loss the receipt now names.
+    const liveIds = Object.values(ag.getPlaybook().getState().playbook.sections)
+      .flat()
+      .map((bullet: any) => bullet.id);
+    expect(liveIds).not.toContain('seeded-1');
   });
 
   it('keeps the permissive default when no held-out set is provided', async () => {

@@ -27,7 +27,10 @@ import type {
   AxAgentPlaybookEvidenceWarning,
   AxAgentPlaybookIntervalOptions,
   AxAgentPlaybookOverheadReport,
+  AxAgentPlaybookPromotionAuthority,
   AxAgentPlaybookPromotionRecord,
+  AxAgentPlaybookPromotionVeto,
+  AxAgentPlaybookPruneOptions,
   AxAgentPlaybookPruneProposal,
   AxAgentPlaybookReachProbe,
   AxAgentPlaybookRedundancyReport,
@@ -381,6 +384,35 @@ export type AxAgentPlaybookEvolveOptions<IN extends AxGenIn = AxGenIn> = {
   usageTap?: AxAgentPlaybookUsageTap;
   /** Warn when the accepted artifact's relative overhead exceeds this. Default 0.25. */
   overheadWarnRatio?: number;
+  /**
+   * First-class REMOVE / DEPRECATE proposals after the curate loop, gated by a
+   * leave-one-out held-out sweep and a rendered-size reduction the prune must
+   * actually deliver. Default off. A removal is a mutation and pays the same
+   * price as an addition: the same re-evaluation, the same retention receipt,
+   * the same gate chain — in its loss-tolerance variant, because a removal
+   * cannot raise the current-task mean by `minHeldInGain`.
+   */
+  prune?: AxAgentPlaybookPruneOptions;
+  /**
+   * Promotion capability. The GRANT binds the playbook ("this principal may
+   * promote into this artifact"), never the candidate: `AxResourceScope` is
+   * matched by exact identity BEFORE the host authorizer runs, so
+   * `resourceId` must be a value the host could pre-grant. Per-candidate
+   * consent is `promotionVeto`, which is the only channel that sees the
+   * nomination.
+   */
+  promotionAuthority?: AxAgentPlaybookPromotionAuthority;
+  /**
+   * Reject-only, conjunctive, fail-closed per-candidate consent. One veto or
+   * many; ANY veto blocks the promotion and none can cause one. A veto that
+   * throws, times out, or returns anything that is not `false` /
+   * `{ vetoed: false }` — `undefined` included — is a veto.
+   */
+  promotionVeto?:
+    | AxAgentPlaybookPromotionVeto
+    | readonly AxAgentPlaybookPromotionVeto[];
+  /** Per-veto deadline. Default 30_000ms, matching `axAuthorize`'s. */
+  promotionVetoTimeoutMs?: number;
   /** Injected clock for durations and latency ceilings. Default `Date.now`. */
   now?: () => number;
 };

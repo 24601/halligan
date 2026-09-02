@@ -195,6 +195,16 @@ import type {
   AxAgentPlaybookRetentionSlice,
   AxAgentPlaybookWeakness,
 } from './agent/agentInternal/playbookEvolve/playbookEvolveTypes.js';
+import type {
+  AxPromotionAuthorityOutcome,
+  AxPromotionVetoOutcome,
+} from './agent/agentInternal/playbookEvolve/promotion.js';
+import type {
+  AxPruneBulletRef,
+  AxPruneChange,
+  AxPruneThresholds,
+  AxPruneTransform,
+} from './agent/agentInternal/playbookEvolve/pruning.js';
 import { axClassifyAxServiceTermination } from './agent/agentInternal/playbookEvolve/termination.js';
 import type {
   AxModuleRankInput,
@@ -4219,9 +4229,15 @@ export type { AxProgramStreamingForwardOptionsWithModels };
 export type { AxProgramTrace };
 export type { AxProgramUsage };
 export type { AxProgrammable };
+export type { AxPromotionAuthorityOutcome };
+export type { AxPromotionVetoOutcome };
 export type { AxPromptMetrics };
 export type { AxPromptTemplateOptions };
 export type { AxProviderMetadata };
+export type { AxPruneBulletRef };
+export type { AxPruneChange };
+export type { AxPruneThresholds };
+export type { AxPruneTransform };
 export type { AxRLMConfig };
 export type { AxRankDocumentsOptions };
 export type { AxRankModulesOptions };
