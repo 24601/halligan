@@ -7,6 +7,7 @@ import type { AxSha256Digest, AxSha256Digest64 } from './digests.js';
 import { axSha256Digest64Sync } from './digests.js';
 import { axHarnessRecipe, axHarnessStamp } from './harnessRecipe.js';
 import type {
+  AxRejectedCandidateGateReading,
   AxRejectedCandidateLedgerEntry,
   AxRejectedCandidateLedgerRef,
 } from './rejectedCandidateLedger.js';
@@ -56,6 +57,16 @@ const entry = (
     ...overrides,
   });
 
+const validGateReading: AxRejectedCandidateGateReading = {
+  parentScore: 3,
+  childScore: 2.5,
+  threshold: 0,
+  estimator: 'sum',
+  admittedRows: 5,
+  discardedRows: 1,
+  gate: 'reflective_mutation',
+};
+
 describe('axRejectedCandidateLedgerEntry', () => {
   it('refuses an entry with no expiry clause', () => {
     expect(() => entry({ expiresWhen: [] })).toThrowError(
@@ -87,6 +98,44 @@ describe('axRejectedCandidateLedgerEntry', () => {
         entry({ expiresWhen: [{ kind: 'after_ms', ttlMs }] })
       ).toThrowError(expect.objectContaining({ code: 'retention_exceeded' }));
     }
+  });
+
+  it('refuses an entry whose gate reading is missing or malformed', () => {
+    // The constructor is documented as the ONLY sanctioned one, and the gate
+    // reading is the evidence a later reader uses to decide whether the
+    // rejection still means anything. A bare spread turned `undefined` into
+    // `{}` and rendered as `undefined` in the prior block text.
+    for (const gateReading of [
+      undefined,
+      null,
+      { ...validGateReading, gate: 'made_up' },
+      { ...validGateReading, estimator: 'ols' },
+      { ...validGateReading, parentScore: Number.NaN },
+      { ...validGateReading, childScore: Number.POSITIVE_INFINITY },
+      { ...validGateReading, admittedRows: Number.NaN },
+      { ...validGateReading, stderr: Number.NaN },
+    ] as unknown as AxRejectedCandidateGateReading[]) {
+      expect(() => entry({ gateReading })).toThrowError(
+        expect.objectContaining({
+          name: 'AxRejectedCandidateLedgerError',
+          code: 'invalid_gate_reading',
+        })
+      );
+    }
+    // ...and a well-formed reading, including an absent optional stderr, is
+    // still accepted.
+    expect(entry({ gateReading: validGateReading }).gateReading.gate).toBe(
+      'reflective_mutation'
+    );
+    expect(
+      entry({
+        gateReading: {
+          ...validGateReading,
+          estimator: 'ipw_hajek',
+          stderr: 0.1,
+        },
+      }).gateReading.stderr
+    ).toBe(0.1);
   });
 
   it('refuses a candidate digest below identity strength', () => {
@@ -226,11 +275,64 @@ describe('axIsRejectedCandidateExpired', () => {
     ).toBe(true);
   });
 
-  it('expires an entry when the context field is unknown', () => {
-    // FAIL-OPEN. The context comes from the READER, and GEPA's own proposer
-    // prior has no defined source for a task-set digest, so "unknown" must
-    // resolve toward forgetting. The opposite rule made the guarantee
-    // sidestepped by simply not passing a context.
+  it('expires an entry when the model_changed context field is unknown', () => {
+    // FAIL-OPEN, asserted one clause at a time. A combined fixture cannot
+    // distinguish the two branches: with both a `model_changed` and a
+    // `task_set_changed` clause present, inverting either one alone still
+    // leaves the other firing, and every assertion still reads `true`.
+    const built = entry({
+      expiresWhen: [
+        { kind: 'after_ms', ttlMs: 1_000_000 },
+        { kind: 'model_changed', boundModelId: 'gpt-5' },
+      ],
+    });
+    // Unknown ⇒ forget. The context comes from the READER, so the opposite
+    // rule would be sidestepped by simply not passing a context.
+    expect(axIsRejectedCandidateExpired(built, 1_000, {})).toBe(true);
+    // Known and different ⇒ forget.
+    expect(
+      axIsRejectedCandidateExpired(built, 1_000, { boundModelId: 'gpt-5-mini' })
+    ).toBe(true);
+    // Known and equal ⇒ the entry still applies, and an unrelated context
+    // field does not resurrect it either.
+    expect(
+      axIsRejectedCandidateExpired(built, 1_000, { boundModelId: 'gpt-5' })
+    ).toBe(false);
+    expect(
+      axIsRejectedCandidateExpired(built, 1_000, {
+        boundModelId: 'gpt-5',
+        taskSetDigest: digest('c'),
+      })
+    ).toBe(false);
+  });
+
+  it('expires an entry when the task_set_changed context field is unknown', () => {
+    const built = entry({
+      expiresWhen: [
+        { kind: 'after_ms', ttlMs: 1_000_000 },
+        { kind: 'task_set_changed', taskSetDigest: digest('c') },
+      ],
+    });
+    expect(axIsRejectedCandidateExpired(built, 1_000, {})).toBe(true);
+    expect(
+      axIsRejectedCandidateExpired(built, 1_000, {
+        taskSetDigest: digest('d'),
+      })
+    ).toBe(true);
+    expect(
+      axIsRejectedCandidateExpired(built, 1_000, {
+        taskSetDigest: digest('c'),
+      })
+    ).toBe(false);
+    expect(
+      axIsRejectedCandidateExpired(built, 1_000, {
+        boundModelId: 'anything',
+        taskSetDigest: digest('c'),
+      })
+    ).toBe(false);
+  });
+
+  it('expires an entry on any clause, so two clauses do not mask each other', () => {
     const built = entry({
       expiresWhen: [
         { kind: 'after_ms', ttlMs: 1_000_000 },
@@ -238,10 +340,6 @@ describe('axIsRejectedCandidateExpired', () => {
         { kind: 'task_set_changed', taskSetDigest: digest('c') },
       ],
     });
-    expect(axIsRejectedCandidateExpired(built, 1_000, {})).toBe(true);
-    expect(
-      axIsRejectedCandidateExpired(built, 1_000, { boundModelId: 'gpt-5' })
-    ).toBe(true);
     expect(
       axIsRejectedCandidateExpired(built, 1_000, {
         boundModelId: 'gpt-5',
@@ -656,6 +754,41 @@ describe('axMergeRejectedCandidateLedgerRefs', () => {
       digest('c'),
     ]);
     expect(merged.omittedDigestCount).toBe(0);
+  });
+
+  it('refuses a ref member that is not an identity digest', () => {
+    // `invalid_digest` is a declared code, so it must be reachable — an
+    // unreachable enum member is the pattern §12/B6 cut `tool.new` for. A ref
+    // is a pointer set into a store keyed by identity digests, so a
+    // correlation-strength or malformed member can never resolve.
+    for (const bad of [
+      'sha256-64:e3b0c44298fc1c14',
+      'fnv1a64:cbf29ce484222325',
+      'not-a-digest',
+    ] as unknown as AxSha256Digest[]) {
+      expect(() =>
+        axMergeRejectedCandidateLedgerRefs(
+          ref({ entryDigests: [digest('a'), bad] }),
+          undefined
+        )
+      ).toThrowError(
+        expect.objectContaining({
+          name: 'AxRejectedCandidateLedgerError',
+          code: 'invalid_digest',
+        })
+      );
+    }
+    // The structural guard recognizes it as a ledger error, not a stray Error.
+    let thrown: unknown;
+    try {
+      axMergeRejectedCandidateLedgerRefs(
+        ref({ entryDigests: ['nope' as unknown as AxSha256Digest] }),
+        undefined
+      );
+    } catch (error) {
+      thrown = error;
+    }
+    expect(axIsRejectedCandidateLedgerError(thrown)).toBe(true);
   });
 
   it('refuses to union references from different stores', () => {

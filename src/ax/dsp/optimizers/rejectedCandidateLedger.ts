@@ -5,6 +5,7 @@ import {
   type AxSha256Digest64,
   axAssertDigestStrength,
   axCompareCodeUnits,
+  axIsSha256Digest,
   axSha256Digest,
 } from './digests.js';
 import type { AxHarnessStamp } from './harnessRecipe.js';
@@ -110,6 +111,7 @@ export class AxRejectedCandidateLedgerError extends Error {
     | 'empty_expiry'
     | 'expiry_requires_ttl'
     | 'invalid_digest'
+    | 'invalid_gate_reading'
     | 'store_id_mismatch'
     | 'retention_exceeded';
 
@@ -129,6 +131,7 @@ const LEDGER_ERROR_CODES: ReadonlySet<string> = new Set([
   'empty_expiry',
   'expiry_requires_ttl',
   'invalid_digest',
+  'invalid_gate_reading',
   'store_id_mismatch',
   'retention_exceeded',
 ]);
@@ -225,6 +228,63 @@ export function axRejectedCandidateLedgerEntry(
     }
   }
 
+  // The doc above calls this "the only sanctioned constructor"; a bare
+  // `Object.freeze({ ...input.gateReading })` would turn `gateReading:
+  // undefined` into `{}` and render as `undefined` inside the prior block.
+  // The reading is the evidence a later reader uses to decide whether the
+  // rejection still means anything, so it is validated rather than copied.
+  const gateReading = input.gateReading as
+    | Readonly<AxRejectedCandidateGateReading>
+    | undefined;
+  if (!gateReading || typeof gateReading !== 'object') {
+    throw new AxRejectedCandidateLedgerError({
+      code: 'invalid_gate_reading',
+      message:
+        'entry.gateReading is required: an entry with no gate reading records a refusal with no evidence',
+    });
+  }
+  if (
+    gateReading.gate !== 'reflective_mutation' &&
+    gateReading.gate !== 'system_merge'
+  ) {
+    throw new AxRejectedCandidateLedgerError({
+      code: 'invalid_gate_reading',
+      message: `entry.gateReading.gate must be 'reflective_mutation' or 'system_merge', received ${JSON.stringify(gateReading.gate)}`,
+    });
+  }
+  if (
+    gateReading.estimator !== 'sum' &&
+    gateReading.estimator !== 'ipw_hajek'
+  ) {
+    throw new AxRejectedCandidateLedgerError({
+      code: 'invalid_gate_reading',
+      message: `entry.gateReading.estimator must be 'sum' or 'ipw_hajek', received ${JSON.stringify(gateReading.estimator)}`,
+    });
+  }
+  for (const field of [
+    'parentScore',
+    'childScore',
+    'threshold',
+    'admittedRows',
+    'discardedRows',
+  ] as const) {
+    if (!Number.isFinite(gateReading[field])) {
+      throw new AxRejectedCandidateLedgerError({
+        code: 'invalid_gate_reading',
+        message: `entry.gateReading.${field} must be a finite number, received ${String(gateReading[field])}`,
+      });
+    }
+  }
+  if (
+    gateReading.stderr !== undefined &&
+    !Number.isFinite(gateReading.stderr)
+  ) {
+    throw new AxRejectedCandidateLedgerError({
+      code: 'invalid_gate_reading',
+      message: `entry.gateReading.stderr must be a finite number when present, received ${String(gateReading.stderr)}`,
+    });
+  }
+
   const diagnosis = String(input.diagnosis ?? '').slice(
     0,
     AX_REJECTED_DIAGNOSIS_MAX_CHARS
@@ -248,7 +308,7 @@ export function axRejectedCandidateLedgerEntry(
     ...(input.mutation === undefined ? {} : { mutation: input.mutation }),
     predictedDeltas: boundedDeltas(input.predictedDeltas),
     observedDeltas: boundedDeltas(input.observedDeltas),
-    gateReading: Object.freeze({ ...input.gateReading }),
+    gateReading: Object.freeze({ ...gateReading }),
     ...(input.harness === undefined ? {} : { harness: input.harness }),
     expiresWhen: Object.freeze(
       expiresWhen.map((clause) => Object.freeze({ ...clause }))
@@ -703,6 +763,19 @@ export function axMergeRejectedCandidateLedgerRefs(
 function normalizeRef(
   ref: Readonly<AxRejectedCandidateLedgerRef>
 ): AxRejectedCandidateLedgerRef {
+  // `invalid_digest` is declared, so it must be reachable: an unreachable enum
+  // member is the pattern §12/B6 cut `tool.new` for. A ref is a pointer set
+  // into a store keyed by identity digests, so a member that is not an
+  // identity digest can never resolve and is rejected here rather than
+  // silently carried into an artifact.
+  for (const entryDigest of ref.entryDigests) {
+    if (!axIsSha256Digest(String(entryDigest))) {
+      throw new AxRejectedCandidateLedgerError({
+        code: 'invalid_digest',
+        message: `ledger ref entryDigests must be identity-strength \`sha256:\` digests, received ${JSON.stringify(String(entryDigest))}`,
+      });
+    }
+  }
   const deduplicated = [...new Set(ref.entryDigests)];
   const overflow = Math.max(
     0,

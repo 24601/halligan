@@ -49,6 +49,26 @@ const KEY_SOURCES: ReadonlySet<string> = new Set([
 ]);
 const RESOLVERS: ReadonlySet<string> = new Set(['host_resolver', 'none']);
 
+/**
+ * COVERAGE NOTE for whoever wires this in.
+ *
+ * Three of these codes have no executable coverage in the module that declares
+ * them, because the policy that raises them lives in
+ * `causalCandidateEvidence.ts`, not here:
+ *
+ *   - `effects_missing` — a capability-surface candidate that declared no
+ *     effects at all;
+ *   - `runtime_requirements_missing` — a capability candidate with no runtime
+ *     requirement record;
+ *   - `effects_on_steering_surface` — an effect declaration attached to a
+ *     steering-only surface.
+ *
+ * This module validates a declaration in isolation and cannot know which
+ * surface a candidate touched or whether a manifest is complete. Do not assume
+ * these three rows are tested: the wiring commit owns their negative tests.
+ * The other three (`effects_invalid`, `unsafe_replay_without_resolver`,
+ * `idempotent_without_key`) are raised and tested here.
+ */
 export class AxCandidateEffectManifestError extends Error {
   readonly code:
     | 'effects_missing'
@@ -196,7 +216,12 @@ export function axDeclaresToolCapability(
   const capabilities = component.toolCapabilities;
   if (!Array.isArray(capabilities)) return false;
   return capabilities.some(
+    // A bare `'tool:'` names no tool, so it cannot be evidence that the
+    // component reaches one; requiring a non-empty name keeps the
+    // capability-surface test from being satisfiable by an empty declaration.
     (capability) =>
-      typeof capability === 'string' && capability.startsWith('tool:')
+      typeof capability === 'string' &&
+      capability.startsWith('tool:') &&
+      capability.length > 'tool:'.length
   );
 }

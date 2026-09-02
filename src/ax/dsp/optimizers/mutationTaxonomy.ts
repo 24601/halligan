@@ -89,6 +89,14 @@ export interface AxPatchTaxonomy {
 
 export type AxMutationEffort = 'minimal' | 'low' | 'medium' | 'high' | 'max';
 
+const MUTATION_EFFORTS: ReadonlySet<string> = new Set([
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'max',
+]);
+
 export interface AxMutationAnnotation {
   readonly depth: AxMutationDepth;
   readonly patch: AxPatchTaxonomy;
@@ -197,6 +205,8 @@ export class AxMutationTaxonomyError extends Error {
     | 'surface_incompatible'
     | 'unknown_component_kind'
     | 'empty_component_classes'
+    | 'unknown_depth'
+    | 'unknown_effort'
     | 'negative_cost';
   readonly patchType?: AxPatchType;
   readonly componentId?: string;
@@ -421,6 +431,29 @@ export function axValidateMutationAnnotation(
     throw new AxMutationTaxonomyError({
       code: 'empty_component_classes',
       message: `declared component classes [${declared.join(', ')}] do not match the classes actually touched [${touched.join(', ')}]`,
+      patchType: type,
+    });
+  }
+
+  // `depth` is the one field Ax cannot re-derive from the component surfaces,
+  // so an unchecked value passes validation and then silently lands in the
+  // histogram's `unannotated` bucket — a hole in §6.2's "an invalid annotation
+  // aborts the candidate". Every other host assertion in this function is
+  // either re-derived or rejected; these two now are too.
+  if (!MUTATION_DEPTHS.includes(annotation.depth)) {
+    throw new AxMutationTaxonomyError({
+      code: 'unknown_depth',
+      message: `depth ${JSON.stringify(annotation.depth)} is not one of ${MUTATION_DEPTHS.join(', ')}`,
+      patchType: type,
+    });
+  }
+  if (
+    annotation.effort !== undefined &&
+    !MUTATION_EFFORTS.has(annotation.effort)
+  ) {
+    throw new AxMutationTaxonomyError({
+      code: 'unknown_effort',
+      message: `effort ${JSON.stringify(annotation.effort)} is not one of ${[...MUTATION_EFFORTS].join(', ')}`,
       patchType: type,
     });
   }

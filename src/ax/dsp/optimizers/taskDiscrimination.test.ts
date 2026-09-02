@@ -116,6 +116,30 @@ describe('axResolveTaskDiscriminationOptions', () => {
 });
 
 describe('AxTaskStatTable', () => {
+  it('normalizes a hand-built resolved-options record instead of trusting it', () => {
+    // `AxResolvedTaskDiscriminationOptions` is a plain interface, so a caller
+    // can build one without going through `axResolveTaskDiscriminationOptions`.
+    // A `NaN` threshold would make `scalar >= threshold` false for every row
+    // and every task would look equally, permanently hard.
+    const table = axCreateTaskStatTable(2, {
+      successThreshold: Number.NaN,
+      explorationFloor: 0,
+      maxReportedTasks: -1,
+      maxInclusionSnapshots: -1,
+    });
+    table.record(0, 1, 1);
+    table.record(1, 0.1, 1);
+    // Re-resolved to the documented default of 0.5: the perfect row counts as
+    // a success and the 0.1 row does not.
+    expect(table.stats()[0]).toEqual({
+      index: 0,
+      successes: 1,
+      trials: 1,
+      lastSeenIteration: 1,
+    });
+    expect(table.stats()[1]?.successes).toBe(0);
+  });
+
   it('applies the success threshold and counts every admitted trial', () => {
     const table = axCreateTaskStatTable(4, options);
     table.record(0, 1, 1);
@@ -468,6 +492,26 @@ describe('axSampleByInclusion', () => {
 });
 
 describe('axIpwScore', () => {
+  it('rejects a duplicated task index in the inclusion set', () => {
+    // `new Map(entries)` would let the last duplicate win silently and the
+    // estimator would weight the row by whichever probability happened to be
+    // last. Every other index error in this module throws.
+    expect(() =>
+      axIpwScore(
+        [{ index: 0, value: 1 }],
+        [
+          { index: 0, probability: 0.5, successes: 0, trials: 1 },
+          { index: 0, probability: 1, successes: 0, trials: 1 },
+        ]
+      )
+    ).toThrowError(
+      expect.objectContaining({
+        name: 'AxTaskDiscriminationError',
+        code: 'unknown_task_index',
+      })
+    );
+  });
+
   it('reduces to the arithmetic mean under uniform inclusion', () => {
     // Uniform π means every weight is equal, so the Hájek ratio collapses to
     // the plain mean: the estimator adds nothing when the draw was uniform,

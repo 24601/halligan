@@ -147,6 +147,44 @@ describe('axValidateMutationAnnotation', () => {
     ).toThrowError(expect.objectContaining({ code: 'patch_class_mismatch' }));
   });
 
+  it('rejects a depth or effort outside the closed vocabulary', () => {
+    // `depth` is the one field Ax cannot re-derive from the surfaces, so an
+    // unchecked value validates and then lands silently in the histogram's
+    // `unannotated` bucket — the candidate is promoted while its annotation
+    // says nothing. `effort` is host-asserted for the same reason.
+    expect(() =>
+      axValidateMutationAnnotation(annotation({ depth: 'vibes' as never }), [
+        surface('instruction'),
+      ])
+    ).toThrowError(
+      expect.objectContaining({
+        name: 'AxMutationTaxonomyError',
+        code: 'unknown_depth',
+      })
+    );
+    expect(() =>
+      axValidateMutationAnnotation(annotation({ effort: 'extreme' as never }), [
+        surface('instruction'),
+      ])
+    ).toThrowError(
+      expect.objectContaining({
+        name: 'AxMutationTaxonomyError',
+        code: 'unknown_effort',
+      })
+    );
+    // An absent effort is still legal: unknown is not the same claim as wrong.
+    expect(
+      axValidateMutationAnnotation(annotation({ effort: undefined }), [
+        surface('instruction'),
+      ]).effort
+    ).toBeUndefined();
+    expect(
+      axValidateMutationAnnotation(annotation({ effort: 'high' }), [
+        surface('instruction'),
+      ]).effort
+    ).toBe('high');
+  });
+
   it('rejects a patch type GEPA cannot produce', () => {
     // `tool.new`, `tool.implementation_fix` and every `middleware.*` value are
     // deliberately absent from the union: GEPA replaces component STRINGS.

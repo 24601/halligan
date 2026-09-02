@@ -173,6 +173,21 @@ describe('axDeclaresToolCapability', () => {
     expect(axDeclaresToolCapability({ componentKind: 'program-source' })).toBe(
       false
     );
+    // A bare `tool:` names no tool, so it is not evidence that the component
+    // reaches one. Without the length check the capability-surface test is
+    // satisfiable by an empty declaration.
+    expect(
+      axDeclaresToolCapability({
+        componentKind: 'program-source',
+        toolCapabilities: ['tool:'],
+      })
+    ).toBe(false);
+    expect(
+      axDeclaresToolCapability({
+        componentKind: 'program-source',
+        toolCapabilities: ['tool:x'],
+      })
+    ).toBe(true);
   });
 
   it('is false for every steering surface, including the tool-text kinds', () => {

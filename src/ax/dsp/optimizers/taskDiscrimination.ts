@@ -211,7 +211,16 @@ export function axCreateTaskStatTable(
       `task stat table size must be a positive integer, received ${String(size)}`
     );
   }
-  return constructTaskStatTable(size, options);
+  // The resolved-options record is a plain interface, so a caller can build one
+  // by hand and skip `axResolveTaskDiscriminationOptions` entirely — a
+  // `successThreshold` of `NaN` would then make every `record` call count a
+  // failure and every task look equally hard. Re-resolving is idempotent
+  // (`finiteOr`/`clamp`), so a properly resolved record passes through
+  // unchanged and a hand-built one is normalized instead of trusted.
+  return constructTaskStatTable(
+    size,
+    axResolveTaskDiscriminationOptions(options)
+  );
 }
 
 export interface AxTaskInclusion {
@@ -463,6 +472,12 @@ export interface AxIpwEstimate {
    * APPROXIMATION and not a design-unbiased variance estimate. Report it; never
    * gate on it. If a real interval is needed, use a paired bootstrap over the
    * drawn sample.
+   *
+   * The approximation is CONSERVATIVE: it computes `Σ w²(y−ȳ)²` where the
+   * linearized Hájek variance carries `Σ (1−π_i)/π_i² (y_i−ȳ)²`, i.e. it drops
+   * the finite-population correction `(1−π_i) ≤ 1`, so it over-estimates
+   * rather than under-estimates. A reader may treat it as an upper bound and
+   * must not treat it as tight.
    */
   readonly stderr: number;
   readonly effectiveSampleSize: number;
@@ -480,9 +495,19 @@ function weightsFor(
   rows: readonly Readonly<{ index: number; value: number }>[],
   inclusions: readonly AxTaskInclusion[]
 ): number[] {
-  const byIndex = new Map(
-    inclusions.map((inclusion) => [inclusion.index, inclusion.probability])
-  );
+  const byIndex = new Map<number, number>();
+  for (const inclusion of inclusions) {
+    // `new Map(entries)` would let the last duplicate win silently, and a
+    // duplicated task index means the design is not what the caller thinks it
+    // is. Every other index error in this module throws; so does this one.
+    if (byIndex.has(inclusion.index)) {
+      throw new AxTaskDiscriminationError(
+        'unknown_task_index',
+        `task index ${String(inclusion.index)} appears more than once in the inclusion set`
+      );
+    }
+    byIndex.set(inclusion.index, inclusion.probability);
+  }
   return rows.map((row) => {
     const probability = byIndex.get(row.index);
     if (probability === undefined) {
