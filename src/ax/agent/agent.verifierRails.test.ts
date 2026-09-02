@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 import { AxMockAIService } from '../ai/mock/api.js';
 import {
@@ -11,6 +11,11 @@ import type { AxCodeRuntime } from './rlm.js';
 import type {
   AxAgentSkillCostProfile,
   AxAgentVerifierRail,
+} from './skillCost.js';
+import {
+  AX_DEFAULT_VERIFICATION_MAX_ROUNDS,
+  AX_MAX_RAIL_DIAGNOSTIC_CHARS,
+  AX_MAX_RAIL_DIAGNOSTICS_PER_RUN,
 } from './skillCost.js';
 
 const SKILL = {
@@ -76,6 +81,8 @@ function makeToolRuntime(toolCalls: number): AxCodeRuntime {
 
 interface Capture {
   systems: string[];
+  /** Executor USER prompts — where the rendered guidance log actually lands. */
+  users: string[];
 }
 
 function makeMockAI(capture: Capture) {
@@ -95,6 +102,7 @@ function makeMockAI(capture: Capture) {
       if (provided.includes('`Executor Request`')) {
         executorTurn++;
         capture.systems.push(system);
+        capture.users.push(String(req.chatPrompt[1]?.content ?? ''));
         return {
           results: [
             {
@@ -158,7 +166,7 @@ async function run(
   options: Record<string, unknown>,
   toolCalls = 2
 ): Promise<Capture> {
-  const capture: Capture = { systems: [] };
+  const capture: Capture = { systems: [], users: [] };
   const mockAI = makeMockAI(capture);
   const a = agent('query:string -> answer:string', {
     ai: mockAI,
@@ -175,8 +183,7 @@ async function run(
 describe('verifier rails', () => {
   it('fires after every tool call and surfaces only novel diagnostics', async () => {
     const seen: string[] = [];
-    const guidance: string[] = [];
-    await run({
+    const capture = await run({
       verifierRails: [
         rail('audit', (context) => {
           seen.push(context.qualifiedName);
@@ -190,16 +197,14 @@ describe('verifier rails', () => {
           ];
         }),
       ],
-      actorTurnCallback: (turn: { guidanceLog?: string }) => {
-        if (turn.guidanceLog) guidance.push(turn.guidanceLog);
-      },
     });
     // The rail saw both calls...
     expect(seen).toEqual(['utils.probe', 'utils.probe']);
-    // ...and the repeated fact was surfaced exactly once.
-    const injected = guidance.join('\n');
-    const occurrences = injected.split('the same fact every call').length - 1;
-    expect(occurrences).toBeLessThanOrEqual(1);
+    // ...and the repeated fact reached the NEXT executor turn's prompt exactly
+    // once. Asserting on the rendered prompt, not on a callback that never
+    // carried the guidance log, is what makes this test able to fail.
+    const injected = capture.users.at(-1) ?? '';
+    expect(injected.split('the same fact every call')).toHaveLength(2);
   });
 
   it('a throwing rail leaves the tool result unchanged and is disabled', async () => {
@@ -269,6 +274,110 @@ describe('verifier rails', () => {
     expect(last.rounds).toBe(1);
   });
 
+  it('counts a declared verification tool as a round with no rails at all', async () => {
+    // RFC 7.5's second half. `verificationTools` was a public option nothing
+    // read, so a host that set it got silence.
+    const events: AxAgentContextEvent[] = [];
+    await run(
+      {
+        skillPolicy: {
+          verificationBudget: {
+            maxRounds: 4,
+            verificationTools: ['utils.probe'],
+          },
+        },
+        onContextEvent: (event: AxAgentContextEvent) => events.push(event),
+      },
+      3
+    );
+    const budget = events.filter(
+      (event) => event.kind === 'verification_budget'
+    );
+    const last = budget[budget.length - 1];
+    if (last?.kind !== 'verification_budget') throw new Error('unreachable');
+    expect(last.rounds).toBe(3);
+    expect(last.status).toBe('within');
+  });
+
+  it('an unlisted tool name advances nothing', async () => {
+    const events: AxAgentContextEvent[] = [];
+    await run(
+      {
+        skillPolicy: {
+          verificationBudget: {
+            maxRounds: 4,
+            verificationTools: ['utils.somethingElse'],
+          },
+        },
+        onContextEvent: (event: AxAgentContextEvent) => events.push(event),
+      },
+      3
+    );
+    expect(
+      events.filter((event) => event.kind === 'verification_budget')
+    ).toHaveLength(0);
+  });
+
+  it('applies a default ceiling when rails are configured with no budget', async () => {
+    // The unbounded configuration the evaluation names as its baseline must not
+    // be reachable in production: an always-on hook needs a ceiling even when
+    // the host named none.
+    const fired: string[] = [];
+    const events: AxAgentContextEvent[] = [];
+    await run(
+      {
+        verifierRails: [
+          rail('count', () => {
+            fired.push('x');
+            return [];
+          }),
+        ],
+        onContextEvent: (event: AxAgentContextEvent) => events.push(event),
+      },
+      40
+    );
+    expect(fired).toHaveLength(AX_DEFAULT_VERIFICATION_MAX_ROUNDS);
+    const last = events
+      .filter((event) => event.kind === 'verification_budget')
+      .pop();
+    if (last?.kind !== 'verification_budget') throw new Error('unreachable');
+    expect(last.status).toBe('exceeded');
+    expect(last.maxRounds).toBe(AX_DEFAULT_VERIFICATION_MAX_ROUNDS);
+  });
+
+  it('bounds a rail that emits a fresh novel diagnostic on every call', async () => {
+    // Dedupe cannot bound a rail whose signature changes every call, and the
+    // guidance log neither caps nor truncates.
+    let call = 0;
+    const capture = await run(
+      {
+        verifierRails: [
+          rail('chatty', () => {
+            call += 1;
+            return [
+              {
+                signature: `chatty:${call}`,
+                code: 'chatty',
+                message: `novel fact ${call} ${'x'.repeat(5000)}`,
+                severity: 'info' as const,
+              },
+            ];
+          }),
+        ],
+        skillPolicy: { verificationBudget: { maxRounds: 200 } },
+      },
+      60
+    );
+    const injected = capture.users.at(-1) ?? '';
+    const distinct = injected.split('novel fact ').length - 1;
+    expect(distinct).toBeLessThanOrEqual(AX_MAX_RAIL_DIAGNOSTICS_PER_RUN);
+    expect(distinct).toBeGreaterThan(0);
+    // Each one is bounded too: a rail cannot grow the prompt by a novel.
+    expect(injected.length).toBeLessThanOrEqual(
+      AX_MAX_RAIL_DIAGNOSTICS_PER_RUN * (AX_MAX_RAIL_DIAGNOSTIC_CHARS + 200)
+    );
+  });
+
   it('leaves the executor prompt byte-identical when a budget is set', async () => {
     // The budget is counted by the runtime and is never stated in a prompt.
     const withoutBudget = await run({});
@@ -329,8 +438,24 @@ describe('per-skill cost accounting', () => {
   });
 
   it('produces no profiles at all without onSkillCost', async () => {
-    const onSkillCost = vi.fn();
-    await run({ onUsedSkills: () => {} });
-    expect(onSkillCost).not.toHaveBeenCalled();
+    // `onUsedSkills` alone must not start cost accounting: the used-skill
+    // records stay free of attributed cost and no profile is ever built.
+    const used: { id: string; tokensAttributed?: number; wallMs?: number }[] =
+      [];
+    await run({
+      onUsedSkills: (
+        skills: readonly {
+          id: string;
+          tokensAttributed?: number;
+          wallMs?: number;
+        }[]
+      ) => {
+        used.push(...skills);
+      },
+    });
+    const entry = used.find((skill) => skill.id === SKILL.id);
+    expect(entry).toBeDefined();
+    expect(entry?.tokensAttributed).toBeUndefined();
+    expect(entry?.wallMs).toBeUndefined();
   });
 });

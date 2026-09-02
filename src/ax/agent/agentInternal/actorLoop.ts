@@ -26,11 +26,13 @@ import {
 } from '../skillCatalog.js';
 import type {
   AxAgentSkillCostProfile,
+  AxAgentVerificationBudget,
   AxAgentVerificationBudgetState,
   AxAgentVerifierRail,
   AxAgentVerifierRailBinding,
 } from '../skillCost.js';
 import {
+  AX_DEFAULT_VERIFICATION_MAX_ROUNDS,
   axAttributeSkillCost,
   axInitialVerificationBudgetState,
   axRecordSkillLoad,
@@ -201,8 +203,17 @@ export async function runActorLoop<IN extends AxGenIn>(
     []) as readonly AxAgentVerifierRail[];
   let budgetState = axInitialVerificationBudgetState();
   const railSignaturesSeen = new Set<string>();
-  if (configuredRails.length > 0) {
-    const budget = skillPolicy?.verificationBudget;
+  const configuredBudget = skillPolicy?.verificationBudget;
+  // Rails are an always-on `afterToolCall` lifecycle hook. Without a budget the
+  // counter never advances, `status` never leaves `'within'`, and a rail that
+  // emits a fresh signature per call is unbounded for the whole run — so a
+  // ceiling is applied even when the host named none.
+  const budget: AxAgentVerificationBudget | undefined =
+    configuredBudget ??
+    (configuredRails.length > 0
+      ? { maxRounds: AX_DEFAULT_VERIFICATION_MAX_ROUNDS }
+      : undefined);
+  if (configuredRails.length > 0 || budget !== undefined) {
     s._verifierRailBinding = {
       rails: configuredRails,
       ...(budget ? { budget } : {}),

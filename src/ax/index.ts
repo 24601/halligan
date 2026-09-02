@@ -433,6 +433,7 @@ import {
   type AxAgentVerifierRailContext,
   axApplyVerificationBudget,
   axAttributeSkillCost,
+  axCountVerificationToolCall,
   axCreateSkillProvenanceAccumulator,
   axDedupeRailDiagnostics,
   axDefaultSkillRankingWeights,
@@ -2587,6 +2588,7 @@ export { axCollectGrantRequirements };
 export { axCompareCodeUnits };
 export { axComputeInclusionProbabilities };
 export { axConcatBase64 };
+export { axCountVerificationToolCall };
 export { axCreateCausalCandidateEvidenceManifest };
 export { axCreateDefaultColorLogger };
 export { axCreateDefaultOptimizerColorLogger };

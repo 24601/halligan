@@ -32,6 +32,7 @@ import {
 } from '../runtimeDiscovery.js';
 import {
   type AxAgentVerifierRailBinding,
+  axCountVerificationToolCall,
   axFireVerifierRails,
 } from '../skillCost.js';
 import { normalizeMemoriesInput } from './memoriesHelpers.js';
@@ -237,7 +238,11 @@ export function wrapFunction(
     outcome: Readonly<{ result?: unknown; error?: string }>,
     invocationSignal: AbortSignal | undefined
   ): Promise<void> => {
-    if (!rails || rails.rails.length === 0) return;
+    if (!rails) return;
+    // A declared verification tool costs a round whether or not any rail is
+    // configured (RFC 7.5), so this is counted before the rails-empty exit.
+    axCountVerificationToolCall(rails, normalizedQualifiedName);
+    if (rails.rails.length === 0) return;
     try {
       const signal =
         mergeAbortSignals(abortSignal, invocationSignal) ??

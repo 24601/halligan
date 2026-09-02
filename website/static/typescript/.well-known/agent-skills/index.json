@@ -69,7 +69,7 @@
       "type": "skill-md",
       "description": "This skill helps an LLM generate correct AxAgent memory retrieval, context-map, and dynamic skill-loading code using @ax-llm/ax. Use when the user asks about contextMap, AxAgentContextMap, onMemoriesSearch, memoriesCatalog, recall(...), inputs.memories, onLoadedMemories, onUsedMemories, onSkillsSearch, skillsCatalog, AxAgentCatalogSkill, discover({ skills }), onLoadedSkills, onUsedSkills, preloaded skills, preloading memories at forward time, relevanceRanking hints, loaded memory/skill IDs, or carrying memories across forward() calls.",
       "url": "ax-agent-memory-skills/SKILL.md",
-      "digest": "sha256:72f7aeed58f2b187675f46a01b078c22544e50930e6900755a6ecad84ec6db0e"
+      "digest": "sha256:a994926bd6eb3592604694c7b36b839e3667e76138635b2bc890d6238ad95ed4"
     },
     {
       "name": "ax-agent-observability",

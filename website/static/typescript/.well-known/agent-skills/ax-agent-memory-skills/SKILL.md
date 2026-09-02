@@ -579,7 +579,12 @@ by the runtime, not by the rail: each is bounded by `railTimeoutMs`, a rail that
 throws or overruns is swallowed and disabled for the rest of the run and named
 in `disabledRails`, and no rail can change a tool call's result, error, or
 timing. Only novel diagnostic signatures are surfaced; the dedupe against the
-run's seen set is what stops an always-on rail flooding the context.
+run's seen set is what stops an always-on rail repeating one fact, and a per-run
+cap of 32 distinct diagnostics at 400 chars each is what stops a rail whose
+signature changes every call. With rails set and no `verificationBudget` a
+default `maxRounds` of 32 applies, so the always-on configuration is bounded
+even when the host named no budget. `verificationTools` names tool calls that
+each cost one round, rails or no rails.
 
 ## Preloading Skills
 

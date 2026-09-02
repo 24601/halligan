@@ -179,7 +179,11 @@ export function axSkillValueScore(
  */
 export type AxAgentVerificationBudget = Readonly<{
   maxRounds: number;
-  /** Qualified tool names that also count as a verification round. */
+  /**
+   * Qualified tool names that also count as a verification round. Counted by
+   * `axCountVerificationToolCall` on the same `afterToolCall` boundary the
+   * rails fire on, whether or not any rail is configured.
+   */
   verificationTools?: readonly string[];
   /** Per-rail deadline. Default 5000. A rail that exceeds it is disabled. */
   railTimeoutMs?: number;
@@ -193,6 +197,21 @@ export type AxAgentVerificationBudgetState = Readonly<{
 }>;
 
 export const AX_DEFAULT_RAIL_TIMEOUT_MS = 5000;
+
+/**
+ * Applied when `verifierRails` are configured and the host set no
+ * `verificationBudget`. Without it the rails are unbounded: `status` never
+ * leaves `'within'`, every rail fires after every tool call, and a rail
+ * emitting a fresh signature per call grows the guidance log for the whole run.
+ * An always-on lifecycle hook must have a ceiling even when nobody named one.
+ */
+export const AX_DEFAULT_VERIFICATION_MAX_ROUNDS = 32;
+
+/** Per-run ceiling on distinct rail diagnostics injected into the guidance log. */
+export const AX_MAX_RAIL_DIAGNOSTICS_PER_RUN = 32;
+
+/** Per-diagnostic character bound. A rail cannot grow the prompt by a novel. */
+export const AX_MAX_RAIL_DIAGNOSTIC_CHARS = 400;
 
 export function axInitialVerificationBudgetState(): AxAgentVerificationBudgetState {
   return Object.freeze({
@@ -318,6 +337,29 @@ export type AxAgentRailOutcome = Readonly<{
  * what bounds it: awaiting an unbounded promise inside the tool-call observer
  * does not bound anything.
  */
+/**
+ * A rail's diagnostic is model-facing text produced by host code, and the
+ * guidance log has no truncation of its own. Bound it here, at the boundary,
+ * rather than trusting every rail author to be brief.
+ */
+function boundRailDiagnostic(
+  diagnostic: Readonly<AxAgentRailDiagnostic>
+): AxAgentRailDiagnostic {
+  const message = String(diagnostic.message ?? '');
+  const signature = String(diagnostic.signature ?? '');
+  if (
+    message.length <= AX_MAX_RAIL_DIAGNOSTIC_CHARS &&
+    signature.length <= AX_MAX_RAIL_DIAGNOSTIC_CHARS
+  ) {
+    return diagnostic;
+  }
+  return Object.freeze({
+    ...diagnostic,
+    signature: signature.slice(0, AX_MAX_RAIL_DIAGNOSTIC_CHARS),
+    message: message.slice(0, AX_MAX_RAIL_DIAGNOSTIC_CHARS),
+  });
+}
+
 export async function axRunVerifierRail(
   rail: Readonly<AxAgentVerifierRail>,
   context: Readonly<Omit<AxAgentVerifierRailContext, 'timeoutMs'>>,
@@ -361,7 +403,9 @@ export async function axRunVerifierRail(
       });
     }
     return Object.freeze({
-      diagnostics: Object.freeze(Array.isArray(outcome) ? [...outcome] : []),
+      diagnostics: Object.freeze(
+        Array.isArray(outcome) ? outcome.map(boundRailDiagnostic) : []
+      ),
       disable: false,
     });
   } catch (error) {
@@ -408,6 +452,32 @@ export type AxAgentVerifierRailBinding = Readonly<{
 }>;
 
 /**
+ * Count one settled tool call against the budget when its qualified name is in
+ * `budget.verificationTools`.
+ *
+ * RFC 7.5: "a round is one rail firing, OR one tool call whose `qualifiedName`
+ * is in `budget.verificationTools`." This is the second half, and it is
+ * independent of the rails — a host may declare its own verification tools and
+ * configure no rails at all.
+ */
+export function axCountVerificationToolCall(
+  binding: Readonly<AxAgentVerifierRailBinding>,
+  qualifiedName: string
+): void {
+  const budget = binding.budget;
+  if (!budget?.verificationTools?.includes(qualifiedName)) {
+    return;
+  }
+  const state = binding.getState();
+  if (state.status !== 'within') {
+    return;
+  }
+  const next = axApplyVerificationBudget(state, budget);
+  binding.setState(next);
+  binding.onStateChange?.(next);
+}
+
+/**
  * Fire every enabled rail for one settled tool call.
  *
  * The caller has already determined the tool call's result or error; nothing
@@ -450,11 +520,18 @@ export async function axFireVerifierRails(
       binding.seen,
       outcome.diagnostics
     );
-    for (const diagnostic of novel) {
+    // Dedupe alone does not bound a rail that emits a FRESH signature every
+    // call, and the guidance log neither caps nor truncates.
+    const headroom = Math.max(
+      0,
+      AX_MAX_RAIL_DIAGNOSTICS_PER_RUN - binding.seen.size
+    );
+    const admitted = novel.slice(0, headroom);
+    for (const diagnostic of admitted) {
       binding.seen.add(diagnostic.signature);
     }
-    if (novel.length > 0) {
-      binding.emit(novel);
+    if (admitted.length > 0) {
+      binding.emit(admitted);
     }
     if (state.status !== 'within') {
       break;

@@ -239,9 +239,22 @@ contract is enforced by the runtime, not by the rail:
   and is disabled for the remainder of the run;
 - rail outcomes never alter the tool call's own result, error, or timing.
 
-Only novel diagnostic signatures are surfaced. The dedupe against the run's seen
-set is the load-bearing half, not the injection: without it an always-on rail
-floods the context with the same fact on every tool call.
+Only novel diagnostic signatures are surfaced, and three bounds hold whether or
+not the host configured a budget, because an always-on lifecycle hook needs a
+ceiling even when nobody named one:
+
+- dedupe against the run's seen set — this is the load-bearing half, not the
+  injection: without it an always-on rail repeats the same fact every tool call;
+- **32 distinct diagnostics per run**, which is what bounds a rail whose
+  *signature* changes every call and which dedupe therefore cannot catch;
+- **400 characters** per diagnostic `signature` and `message`;
+- and, with `verifierRails` set and no `verificationBudget`, a **default
+  `maxRounds` of 32**, so the counter advances, `status` reaches `'exceeded'`,
+  and the rails stop. A host that wants more sets `verificationBudget` itself.
+
+`verificationTools` is the budget's second counting rule: a tool call whose
+`qualifiedName` is listed costs one round on the same `afterToolCall` boundary,
+whether or not any rail is configured.
 
 ## Kernel and indexed tiers
 
