@@ -948,7 +948,14 @@ export class AxEventRuntime {
           if (next === undefined) {
             await this.store.waitForWork(signal);
           } else if (next <= now) {
-            await Promise.resolve();
+            // A MACROTASK yield, never `Promise.resolve()`. Work is due now
+            // but this worker could not claim it -- another worker holds it,
+            // or strict ordering pins it behind an in-flight instance -- and a
+            // microtask-only retry starves the macrotask queue for as long as
+            // that lasts. MEASURED with `workerConcurrency: 2` (one worker per
+            // thinker, which is what `AxMind` configures): every timer in the
+            // process stops firing and the runtime never makes progress again.
+            await new Promise((resolve) => setTimeout(resolve, 0));
           } else {
             await this.clock.sleep(next - now, signal);
           }
