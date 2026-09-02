@@ -365,7 +365,7 @@ async function faultBoundaryAppend(
     // …and every stored interaction must correspond to a receipt the caller
     // holds, EXCEPT the post-commit variant, whose whole point is that the
     // write survived a crash on the way back. That record has no receipt, and
-    // the caller correctly saw a rejection instead of a fake one.
+    // the caller correctly saw a rejection instead of a fabricated one.
     const page = await store.page('support', {});
     const stored = page.entries.filter(
       (entry) => entry.record.kind === 'interaction'

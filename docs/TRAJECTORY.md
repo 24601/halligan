@@ -230,7 +230,7 @@ that sizes a scan page is clamped to at least one step.
 `axResolveTrajectoryCitations` batches within the 256-id ceiling and
 rehydrates spilled fields. A summarizer that cites an id outside its own
 block's index range has that citation dropped when the block is sealed, so
-coverage cannot be faked by a summarizer that read nothing.
+coverage cannot be claimed by a summarizer that read nothing.
 
 ### Deviations from RFC §4.8, recorded
 
