@@ -148,7 +148,8 @@
   },
   "workspaces": [
     "src/*",
-    "!src/data"
+    "!src/data",
+    "playground"
   ],
   "overrides": {
     "release-it": {

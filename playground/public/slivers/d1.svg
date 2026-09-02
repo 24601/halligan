@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="120" viewBox="0 0 240 120" role="img" aria-label="Life log rows feeding a tiered rollup pyramid beside a pacing ladder">
+  <g stroke="#8e8e92" fill="none" stroke-width="1">
+    <line x1="8" y1="16" x2="120" y2="16"/>
+    <line x1="8" y1="30" x2="120" y2="30"/>
+    <line x1="8" y1="44" x2="120" y2="44"/>
+    <line x1="8" y1="58" x2="120" y2="58"/>
+    <line x1="8" y1="72" x2="120" y2="72"/>
+    <line x1="8" y1="86" x2="120" y2="86"/>
+    <rect x="8" y="94" width="112" height="16"/>
+    <rect x="8" y="94" width="52" height="16"/>
+    <line x1="150" y1="12" x2="150" y2="112"/>
+    <line x1="150" y1="20" x2="196" y2="20"/>
+    <line x1="150" y1="36" x2="182" y2="36"/>
+    <line x1="150" y1="54" x2="182" y2="54"/>
+    <line x1="150" y1="74" x2="182" y2="74"/>
+    <line x1="150" y1="98" x2="182" y2="98"/>
+  </g>
+  <g fill="#14b8a6">
+    <rect x="2" y="27" width="4" height="4"/>
+    <rect x="2" y="55" width="4" height="4"/>
+    <rect x="2" y="83" width="4" height="4"/>
+  </g>
+  <rect x="146" y="50" width="8" height="8" fill="#141414"/>
+</svg>

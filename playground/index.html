@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src %PRY_STYLE_SRC%; font-src 'self'; img-src 'self' data:; worker-src 'self' blob:; connect-src 'self' https:; frame-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'"
+    />
+    <meta name="color-scheme" content="light dark" />
+    <meta
+      name="description"
+      content="Pry: live halligan subsystems running in your own tab. A mind, with no provider attached, waking itself."
+    />
+    <meta name="robots" content="index,follow" />
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+    <title>Pry — the halligan playground</title>
+  </head>
+  <body>
+    <div id="pry"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

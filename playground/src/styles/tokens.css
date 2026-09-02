@@ -1,0 +1,173 @@
+/* Transcribed from carcinize-corp/modyl-live room/style/tokens.json
+ * @ 64299862a33dd4b147711e3b28fc5e6b3556ad5f, applied per PR #255 styles/catalog.css
+ * @ 8f4d231e68342c17084391b3df16c73d99aeb510. Do not drift; re-transcribe.
+ * Pry is a separate repository and cannot import modyl-live: this file is a
+ * transcription of the values, not a copy of any code. */
+:root {
+  --font-sans:
+    "Geist", -apple-system, "SF Pro Text", "Inter", system-ui, sans-serif;
+  --font-mono:
+    "Geist Mono", ui-monospace, "SF Mono", "JetBrains Mono", monospace;
+
+  /* light -- true neutral white, never paper */
+  --ground: #ffffff;
+  --surface-1: #f5f5f7;
+  --surface-2: #ebebef;
+  --ink: #0a0a0a;
+  --ink-2: #43434a;
+  --ink-3: #6e6e73;
+  --hairline: rgba(0, 0, 0, 0.1);
+  --hairline-strong: rgba(0, 0, 0, 0.18);
+  --scrim: rgba(0, 0, 0, 0.55);
+  --ink-full: #141414;
+  --ink-read: #3a3a3d;
+  --ink-micro: #4e4e52;
+  --ink-receded-plus: #5d5d61;
+  --ink-receded: #6f6f73;
+  --ink-ghost: #8e8e92;
+  --wave-stroke: #c2c2c5;
+  --wave-stroke-live: #8e8e92;
+
+  /* accents -- semantic only, each with a mandatory non-colour twin */
+  --accent: #10b981;
+  --accent-warn: #f97316;
+  --accent-danger: #ef4444;
+  --accent-info: #14b8a6;
+
+  /* type scale (px) */
+  --text-display-size: 96px;
+  --text-display-line-height: 0.92;
+  --text-display-weight: 700;
+  --text-display-tracking: -0.035em;
+  --text-title-size: 56px;
+  --text-title-line-height: 1;
+  --text-title-weight: 700;
+  --text-title-tracking: -0.03em;
+  --text-bignum-size: 88px;
+  --text-bignum-line-height: 0.9;
+  --text-bignum-weight: 700;
+  --text-bignum-tracking: -0.04em;
+  --text-heading-28-size: 28px;
+  --text-heading-28-line-height: 1.15;
+  --text-heading-28-weight: 600;
+  --text-heading-28-tracking: -0.015em;
+  --text-heading-24-size: 24px;
+  --text-heading-24-line-height: 1.2;
+  --text-heading-24-weight: 600;
+  --text-heading-24-tracking: -0.015em;
+  --text-heading-20-size: 20px;
+  --text-heading-20-line-height: 1.25;
+  --text-heading-20-weight: 600;
+  --text-heading-20-tracking: -0.015em;
+  --text-lede-size: 18px;
+  --text-lede-line-height: 1.5;
+  --text-lede-weight: 600;
+  --text-lede-tracking: -0.01em;
+  --text-body-size: 14px;
+  --text-body-line-height: 1.6;
+  --text-body-weight: 400;
+  --text-body-tracking: 0;
+  --text-label-size: 12px;
+  --text-label-line-height: 1.35;
+  --text-label-weight: 500;
+  --text-label-tracking: 0;
+  --text-caption-size: 11px;
+  --text-caption-line-height: 1.4;
+  --text-caption-weight: 400;
+  --text-caption-tracking: 0;
+  --text-micro-size: 9.5px;
+  --text-micro-line-height: 1.35;
+  --text-micro-weight: 400;
+  --text-micro-tracking: 0.005em;
+  --text-mono-size: 13px;
+  --text-mono-line-height: 1.5;
+  --text-mono-weight: 400;
+  --text-mono-tracking: 0;
+  --measure: 68ch;
+  --measure-body: 68ch;
+
+  /* space -- 4px grid */
+  --space-4: 4px;
+  --space-8: 8px;
+  --space-12: 12px;
+  --space-16: 16px;
+  --space-24: 24px;
+  --space-32: 32px;
+  --space-48: 48px;
+  --space-64: 64px;
+  --space-96: 96px;
+  --space-128: 128px;
+  --gutter: 40px;
+  --column-gap: 24px;
+
+  /* radius / elevation */
+  --radius-rule: 0px;
+  --radius-control: 8px;
+  --radius-surface: 16px;
+  --radius-card: 20px;
+  --radius-pill: 999px;
+  --shadow: none;
+
+  /* motion -- one ease */
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --dur-micro: 150ms;
+  --dur-mark: 350ms;
+  --dur-handoff: 180ms;
+  --dur-state: 550ms;
+  --dur-reset: 600ms;
+  --dur-camera: 700ms;
+
+  /* chart ramp, in order; max 4 series per figure */
+  --chart-series-1: var(--ink);
+  --chart-series-2: var(--accent);
+  --chart-series-3: var(--surface-2);
+  --chart-series-4: var(--accent-info);
+  --chart-series-5: var(--accent-warn);
+  --chart-series-6: #e879a6;
+  --chart-max-series: 4;
+}
+
+:root[data-theme="dark"],
+:root.dark {
+  --ground: #000000;
+  --surface-1: #141416;
+  --surface-2: #1f1f23;
+  --ink: #f5f5f7;
+  --ink-2: #c7c7cc;
+  --ink-3: #8e8e93;
+  --hairline: rgba(255, 255, 255, 0.12);
+  --hairline-strong: rgba(255, 255, 255, 0.22);
+  --scrim: rgba(0, 0, 0, 0.62);
+  --ink-full: #f5f5f7;
+  --ink-read: #c2c2c6;
+  --ink-micro: #a6a6ab;
+  --ink-receded-plus: #9b9b9f;
+  --ink-receded: #84848a;
+  --ink-ghost: #64646a;
+  --wave-stroke: #4a4a4e;
+  --wave-stroke-live: #7a7a7e;
+}
+
+/* Pry's own tokens: three derived values, no new colour. */
+:root {
+  --stage-max: 1512px;
+  --hatch: repeating-linear-gradient(
+    45deg,
+    var(--ink-ghost) 0 1px,
+    transparent 1px 5px
+  );
+  --grid-cell: 4px;
+
+  /* Mechanical snap: zero overshoot. The house `--ease` overshoots by design
+   * for camera/state moves; an instrument's seal and snap must not. */
+  --ease-snap: cubic-bezier(0, 0, 0.2, 1);
+
+  /* The architectural crosshair grid. 64px pitch, --ink-ghost, subtle.
+   * Inline SVG so the mark is a real crosshair, not a ruled grid. */
+  --crosshair: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='64' height='64'%3E%3Cpath d='M32 27.5v9M27.5 32h9' stroke='%238e8e92' stroke-width='1' stroke-opacity='0.3'/%3E%3C/svg%3E");
+}
+
+:root[data-theme="dark"],
+:root.dark {
+  --crosshair: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='64' height='64'%3E%3Cpath d='M32 27.5v9M27.5 32h9' stroke='%2364646a' stroke-width='1' stroke-opacity='0.42'/%3E%3C/svg%3E");
+}
