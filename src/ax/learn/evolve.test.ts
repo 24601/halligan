@@ -113,7 +113,10 @@ async function harness() {
       idFactory: ids('rec'),
     },
   });
-  return { a, ai, store, surface, clock };
+  // The annotation is the point: a real AxAgent must structurally satisfy the
+  // evolve port, or this file stops compiling under `test:type-check`.
+  const evolveAgent: AxHarnessEvolveAgent = a;
+  return { a, ai, store, surface, clock, evolveAgent };
 }
 
 /** True while the CANDIDATE tree is the one installed on the agent. */
@@ -158,7 +161,7 @@ async function evolve(
   overrides: Readonly<Record<string, unknown>> = {}
 ) {
   return axHarnessEvolve({
-    agent: h.a as unknown as AxHarnessEvolveAgent,
+    agent: h.evolveAgent,
     ai: h.ai,
     surface: h.surface,
     tasks: { train: TRAIN, validation: VALIDATION },
@@ -219,10 +222,12 @@ describe(
         clock,
       });
       const ai = makeAI();
-      const a = agent('query:string -> answer:string', { ai });
+      const a: AxHarnessEvolveAgent = agent('query:string -> answer:string', {
+        ai,
+      });
       await expect(
         axHarnessEvolve({
-          agent: a as unknown as AxHarnessEvolveAgent,
+          agent: a,
           ai,
           surface,
           tasks: { train: TRAIN, validation: VALIDATION },
@@ -261,11 +266,13 @@ describe(
       );
       await store.promoteRelease('support', 'tainted', 'rel-1');
       const ai = makeAI();
-      const a = agent('query:string -> answer:string', { ai });
+      const a: AxHarnessEvolveAgent = agent('query:string -> answer:string', {
+        ai,
+      });
       const metric = vi.fn(() => 1);
       await expect(
         axHarnessEvolve({
-          agent: a as unknown as AxHarnessEvolveAgent,
+          agent: a,
           ai,
           surface,
           tasks: { train: TRAIN, validation: VALIDATION },

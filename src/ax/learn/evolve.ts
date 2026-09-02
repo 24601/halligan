@@ -24,6 +24,7 @@
 
 import type {
   AxAgentEvalDataset,
+  AxAgentEvalPrediction,
   AxAgentEvalTask,
   AxAgentJudgeOptions,
 } from '../agent/agentInternal/agentOptimizeTypes.js';
@@ -205,16 +206,28 @@ export interface AxHarnessEvolveOptions<
   readonly abortSignal?: AbortSignal;
 }
 
-/** The subset of the agent an evolve step drives. */
+/**
+ * The subset of the agent an evolve step drives, declared structurally so this
+ * module does not depend on the agent class.
+ *
+ * `_forwardForEvaluation` is required and typed rather than left as `unknown`:
+ * it is the separate evaluation walk that never enters `forwardPipeline`, and
+ * that separation is the structural half of why a verification step creates no
+ * interaction records. A port that did not require it would let a caller pass
+ * an object that compiles and then fails at the first episode.
+ */
 export interface AxHarnessEvolveAgent<
   IN extends AxGenIn = AxGenIn,
   OUT extends AxGenOut = AxGenOut,
 > extends AxHarnessInstallTarget {
+  _forwardForEvaluation(
+    ai: Readonly<AxAIService>,
+    task: Readonly<AxAgentEvalTask<IN>>,
+    options?: Readonly<{ abortSignal?: AbortSignal }>
+  ): Promise<AxAgentEvalPrediction<OUT>>;
   getLearn?():
     | { suspendRecording(): () => void; suppressedRecords: number }
     | undefined;
-  _forwardForEvaluation?: unknown;
-  __evolveTypes?: { in: IN; out: OUT };
 }
 
 export interface AxHarnessEvolveResult<OUT extends AxGenOut = AxGenOut> {
