@@ -946,3 +946,69 @@ void axRunRejectedCandidateLedgerConformance(
   () => new AxInMemoryRejectedCandidateLedger({ clock: b3Clock }),
   { clock: b3Clock }
 );
+
+// === Playbook evidence surface (Track B2) ===
+// These types are the contract a host reads off a completed evolve() run, so
+// they must be reachable from the package root, not only from the internal
+// module they are declared in.
+import {
+  type AxAgentPlaybookAttemptRecord,
+  type AxAgentPlaybookComputeAccounting,
+  type AxAgentPlaybookControlArmReport,
+  type AxAgentPlaybookEvidenceReceipt,
+  type AxAgentPlaybookEvidenceWarning,
+  AxAgentPlaybookEvolveError,
+  type AxAgentPlaybookInterval,
+  type AxAgentPlaybookReachProbe,
+  type AxAgentPlaybookTransferReport,
+  type AxAgentPlaybookValidityReport,
+  type AxAgentTrajectoryClassifier,
+  type AxAgentTrajectoryTermination,
+  axClassifyAxServiceTermination,
+  axIsAgentPlaybookEvolveError,
+} from './index.js';
+
+const playbookClassifier: AxAgentTrajectoryClassifier = ({ errorName }) =>
+  errorName === 'AxAIServiceTimeoutError'
+    ? { kind: 'environment_failure', cause: 'timeout' }
+    : undefined;
+void playbookClassifier;
+void axClassifyAxServiceTermination;
+
+const playbookProbe: AxAgentPlaybookReachProbe = ({ candidateBulletIds }) => ({
+  applicableAtDecidingStep: candidateBulletIds.length > 0,
+  invocations: 0,
+});
+void playbookProbe;
+
+declare const playbookReceipt: AxAgentPlaybookEvidenceReceipt;
+const playbookInterval: AxAgentPlaybookInterval =
+  playbookReceipt.intervals.current;
+const playbookValidity: AxAgentPlaybookValidityReport =
+  playbookReceipt.validity;
+const playbookAccounting: AxAgentPlaybookComputeAccounting =
+  playbookReceipt.accounting;
+const playbookWarnings: readonly AxAgentPlaybookEvidenceWarning[] =
+  playbookReceipt.warnings;
+void playbookInterval;
+void playbookValidity;
+void playbookAccounting;
+void playbookWarnings;
+
+declare const playbookTransfer: AxAgentPlaybookTransferReport;
+declare const playbookControl: AxAgentPlaybookControlArmReport;
+declare const playbookAttempt: AxAgentPlaybookAttemptRecord;
+declare const playbookTermination: AxAgentTrajectoryTermination;
+void playbookTransfer;
+void playbookControl;
+void playbookAttempt;
+void playbookTermination;
+
+const playbookEvolveError = new AxAgentPlaybookEvolveError(
+  'evidence_incomplete',
+  'candidate_eval',
+  'not enough evidence'
+);
+const isPlaybookEvolveError: boolean =
+  axIsAgentPlaybookEvolveError(playbookEvolveError);
+void isPlaybookEvolveError;

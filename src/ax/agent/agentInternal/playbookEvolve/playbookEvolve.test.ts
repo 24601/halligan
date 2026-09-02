@@ -1864,103 +1864,101 @@ describe('agent.playbook().evolve() legacy identity', () => {
     expect(result.control.reason).toBeTruthy();
   });
 
-  it('pins the exact reason string for every rejection branch', async () => {
-    const exactReason = async (data: any, options: any): Promise<string> => {
-      const { ag } = makeAgent();
-      const result = await ag.playbook().evolve(data, options);
-      return result.outcomes[0]!.reason;
-    };
-
-    // accept, no held-out set
-    expect(
-      await exactReason(TASKS, { metric: scoreByAnswer, maxProposals: 1 })
-    ).toBe('held-in improved (no held-out set provided — consider one)');
-
-    // accept, held-out present
-    expect(
-      await exactReason(
-        { train: TASKS, validation: VALIDATION_TASKS },
-        { metric: scoreByAnswer, maxProposals: 1 }
-      )
-    ).toBe('held-in improved, held-out non-regressing');
-
-    // held-in gain below the threshold, no retention policy
-    expect(
-      await exactReason(TASKS, { metric: async () => 0.2, maxProposals: 1 })
-    ).toBe('held-in gain 0.000 below 0.05');
-
-    // held-out regression
-    expect(
-      await exactReason(
-        { train: TASKS, validation: [{ ...TASKS[0]!, id: 'holdout' }] },
-        {
-          requireHeldOut: true,
-          maxProposals: 1,
-          metric: async ({ example, prediction }: any) =>
-            example.id === 'holdout'
-              ? prediction?.output?.answer === 'ok-fixed'
-                ? 0
-                : 1
-              : prediction?.output?.answer === 'ok-fixed'
-                ? 1
-                : 0.2,
-        }
-      )
-    ).toBe('held-out regressed -1.000');
-
-    // budget exhausted before validation
-    expect(
-      await exactReason(TASKS, {
-        metric: scoreByAnswer,
+  // One case per branch, each its own test: nine full evolve() runs in a
+  // single `it` is a wall-clock hazard under parallel load, and the point of
+  // the pinning is per-branch anyway.
+  it.each([
+    [
+      'accept without a held-out set',
+      TASKS,
+      { metric: scoreByAnswer, maxProposals: 1 },
+      'held-in improved (no held-out set provided — consider one)',
+    ],
+    [
+      'accept with a held-out set',
+      { train: TASKS, validation: VALIDATION_TASKS },
+      { metric: scoreByAnswer, maxProposals: 1 },
+      'held-in improved, held-out non-regressing',
+    ],
+    [
+      'held-in gain below the threshold',
+      TASKS,
+      { metric: async () => 0.2, maxProposals: 1 },
+      'held-in gain 0.000 below 0.05',
+    ],
+    [
+      'held-out regression',
+      { train: TASKS, validation: [{ ...TASKS[0]!, id: 'holdout' }] },
+      {
+        requireHeldOut: true,
         maxProposals: 1,
-        maxMetricCalls: 2,
-      })
-    ).toBe('metric_budget exhausted before validation');
-
-    // retention: current-task gain below the policy threshold
-    expect(
-      await exactReason(TASKS, {
+        metric: async ({ example, prediction }: any) =>
+          example.id === 'holdout'
+            ? prediction?.output?.answer === 'ok-fixed'
+              ? 0
+              : 1
+            : prediction?.output?.answer === 'ok-fixed'
+              ? 1
+              : 0.2,
+      },
+      'held-out regressed -1.000',
+    ],
+    [
+      'budget exhausted before validation',
+      TASKS,
+      { metric: scoreByAnswer, maxProposals: 1, maxMetricCalls: 2 },
+      'metric_budget exhausted before validation',
+    ],
+    [
+      'retention current-task gain below the policy threshold',
+      TASKS,
+      {
         metric: async () => 0.2,
         maxProposals: 1,
         retentionPolicy: retentionPolicy(1),
-      })
-    ).toBe('current-task gain 0.000 below 0.5');
-
-    // retention: historical loss over the stability threshold
-    expect(
-      await exactReason(TASKS, {
+      },
+      'current-task gain 0.000 below 0.5',
+    ],
+    [
+      'retention historical loss over the stability threshold',
+      TASKS,
+      {
         metric: retentionMetric({
           'history-refunds': 0,
           'history-routing': 0,
         }),
         maxProposals: 1,
         retentionPolicy: retentionPolicy(0),
-      })
-    ).toBe(
-      'historical loss exceeded retention threshold (worst 1.000, mean 1.000)'
-    );
-
-    // accept under a retention policy
-    expect(
-      await exactReason(TASKS, {
+      },
+      'historical loss exceeded retention threshold (worst 1.000, mean 1.000)',
+    ],
+    [
+      'accept under a retention policy',
+      TASKS,
+      {
         metric: retentionMetric({
           'history-refunds': 1,
           'history-routing': 1,
         }),
         maxProposals: 1,
         retentionPolicy: retentionPolicy(1),
-      })
-    ).toBe('current task improved, historical retention thresholds satisfied');
-
-    // trust batch
-    expect(
-      await exactReason(TASKS, {
-        metric: scoreByAnswer,
-        maxProposals: 1,
-        verify: false,
-      })
-    ).toBe('applied without verification (verify: false)');
-  });
+      },
+      'current task improved, historical retention thresholds satisfied',
+    ],
+    [
+      'trust batch',
+      TASKS,
+      { metric: scoreByAnswer, maxProposals: 1, verify: false },
+      'applied without verification (verify: false)',
+    ],
+  ])(
+    'pins the exact reason string for the %s branch',
+    async (_name, data, options, expected) => {
+      const { ag } = makeAgent();
+      const result = await ag.playbook().evolve(data as any, options as any);
+      expect(result.outcomes[0]!.reason).toBe(expected);
+    }
+  );
 });
 
 describe('agent.playbook().evolve() evidence option validation', () => {
@@ -2221,5 +2219,191 @@ describe('agent.playbook().evolve() variance band', () => {
       maxProposals: 1,
     });
     expect(result.varianceBand).toBeUndefined();
+  });
+});
+
+describe('agent.playbook().evolve() evidence receipt and gates', () => {
+  it('emits a receipt for every fully evaluated candidate, accepted or rejected', async () => {
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(
+      { train: TASKS, validation: VALIDATION_TASKS },
+      {
+        metric: scoreByAnswer,
+        maxProposals: 1,
+        gates: { validity: 'warn' },
+      }
+    );
+    const receipt = result.outcomes[0]!.evidence!;
+    expect(receipt.schema).toBe('ax-agent-playbook-evidence-v1');
+    expect(receipt.decision).toBe('accepted');
+    expect(receipt.kind).toBe('curate');
+    expect(receipt.digest).toMatch(/^fnv1a64:[0-9a-f]{16}$/);
+    expect(Object.isFrozen(receipt)).toBe(true);
+    // Every gate is on the record, including the skipped ones.
+    expect(receipt.gates.entries.map((e: any) => e.id)).toEqual([
+      'gain',
+      'held_out',
+      'retention',
+      'validity',
+      'interval',
+      'reach',
+      'prune_size',
+      'veto',
+      'authority',
+    ]);
+    expect(receipt.intervals.current.unit).toBe('task');
+    expect(receipt.termination.splits.length).toBeGreaterThan(0);
+    expect(receipt.promotion.status).toBe('not_required');
+    // A held-out reading always carries its contamination disclosure.
+    expect(receipt.heldOutContamination.sealed).toBe(false);
+    expect(
+      result.warnings?.some(
+        (w: any) => w.code === 'held_out_reused_for_selection'
+      )
+    ).toBe(true);
+  });
+
+  it('rejects a candidate on a required validity predicate and names it in the reason', async () => {
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(
+      { train: TASKS, validation: VALIDATION_TASKS },
+      {
+        metric: scoreByAnswer,
+        maxProposals: 1,
+        gates: { validity: 'require' },
+        // The fixture's runs complete normally, so force a failure through a
+        // ceiling the run cannot satisfy.
+        validity: { maxMeanLatencyMs: -1 },
+      }
+    );
+    expect(result.outcomes[0]?.accepted).toBe(false);
+    expect(result.outcomes[0]?.reason).toMatch(
+      /^validity gate failed: validity:latency_ceiling@current/
+    );
+    expect(result.outcomes[0]?.evidence?.decision).toBe('rejected');
+    expect(result.outcomes[0]?.evidence?.gates.failedGate).toBe('validity');
+    // Rejected means rolled back exactly, as before.
+    expect(ag.getPlaybook().getState().playbook.stats.bulletCount).toBe(0);
+  });
+
+  it('cannot satisfy a required reach gate on a counterfactual basis', async () => {
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(
+      { train: TASKS, validation: VALIDATION_TASKS },
+      {
+        metric: scoreByAnswer,
+        maxProposals: 1,
+        gates: { reach: 'require' },
+        // An evolve-curated bullet has no applicability tokens, so this basis
+        // reads 1.0 for every task — and still cannot pass the gate.
+        conditionsForTask: () => ['anything'],
+      }
+    );
+    expect(result.outcomes[0]?.accepted).toBe(false);
+    expect(result.outcomes[0]?.evidence?.gates.failedGate).toBe('reach');
+    const reach = result.outcomes[0]!.evidence!.reach;
+    expect(reach.basis).toBe('applicability_counterfactual');
+    expect(reach.counterfactual).toBe(true);
+    expect(reach.gateEligible).toBe(false);
+    expect(reach.splits[0]?.reachRate).toBe(1);
+    expect(
+      result.outcomes[0]?.evidence?.warnings.some(
+        (w: any) => w.code === 'reach_counterfactual_basis'
+      )
+    ).toBe(true);
+  });
+
+  it('accepts under a host probe that observes the bullet at the deciding step', async () => {
+    const { ag } = makeAgent();
+    const seen: string[] = [];
+    const result = await ag.playbook().evolve(
+      { train: TASKS, validation: VALIDATION_TASKS },
+      {
+        metric: scoreByAnswer,
+        maxProposals: 1,
+        gates: { reach: 'require' },
+        reachProbe: ({ candidateBulletIds }: any) => {
+          seen.push(...candidateBulletIds);
+          return { applicableAtDecidingStep: true, invocations: 1 };
+        },
+      }
+    );
+    expect(seen.length).toBeGreaterThan(0);
+    expect(result.outcomes[0]?.accepted).toBe(true);
+    const reach = result.outcomes[0]!.evidence!.reach;
+    expect(reach.basis).toBe('host_probe');
+    expect(reach.gateEligible).toBe(true);
+    expect(reach.splits.every((s: any) => s.reachRate === 1)).toBe(true);
+  });
+
+  it('does not fail the run when the reach probe throws', async () => {
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(
+      { train: TASKS, validation: VALIDATION_TASKS },
+      {
+        metric: scoreByAnswer,
+        maxProposals: 1,
+        gates: { reach: 'warn' },
+        reachProbe: () => {
+          throw new Error('probe exploded');
+        },
+      }
+    );
+    // Reach is evidence, not scoring: the run completes and the split is
+    // marked unmeasured.
+    expect(result.outcomes).toHaveLength(1);
+    expect(result.outcomes[0]?.evidence?.reach.gateEligible).toBe(false);
+    expect(
+      result.outcomes[0]?.evidence?.warnings.some(
+        (w: any) => w.code === 'reach_probe_failed'
+      )
+    ).toBe(true);
+  });
+
+  it('surfaces the absence of a control arm, transfer and sealed test', async () => {
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(TASKS, {
+      metric: scoreByAnswer,
+      maxProposals: 1,
+      gates: { validity: 'warn' },
+    });
+    const codes = (result.warnings ?? []).map((w: any) => w.code);
+    expect(codes).toContain('control_arm_not_run');
+    expect(codes).toContain('transfer_not_run');
+    expect(codes).toContain('sealed_test_not_run');
+    expect(codes).toContain('tokens_unobservable');
+    // cost_unknown fires only when a candidate was accepted, so it stays
+    // signal rather than firing on every run.
+    expect(codes).toContain('cost_unknown');
+  });
+
+  it('does not emit cost_unknown when nothing was accepted', async () => {
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(TASKS, {
+      metric: async () => 0.2, // never accepts
+      maxProposals: 1,
+      gates: { validity: 'warn' },
+    });
+    expect(result.outcomes[0]?.accepted).toBe(false);
+    expect((result.warnings ?? []).map((w: any) => w.code)).not.toContain(
+      'cost_unknown'
+    );
+  });
+
+  it('reports the interval as unresolved rather than as an effect', async () => {
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(TASKS, {
+      metric: scoreByAnswer,
+      maxProposals: 1,
+      gates: { validity: 'warn' },
+      intervalOptions: { resamples: 500, seed: 12_345 },
+    });
+    const interval = result.outcomes[0]!.evidence!.intervals.current;
+    expect(interval.seed).toBe(12_345);
+    expect(interval.resamples).toBe(500);
+    expect(interval.unit).toBe('task');
+    expect(['positive', 'negative', 'unresolved']).toContain(
+      interval.direction
+    );
   });
 });

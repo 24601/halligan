@@ -22,7 +22,12 @@ import type {
   AxAgentJudgeOptions,
 } from '../agentOptimizeTypes.js';
 import { createAgentOptimizeMetric } from '../optimizer.js';
-import { accountingForPhases, createAccountingLedger } from './accounting.js';
+import {
+  accountingForPhases,
+  createAccountingLedger,
+  overheadReportFrom,
+  overheadSplitFrom,
+} from './accounting.js';
 import {
   atMostWithFloatingPointTolerance,
   canonicalDigest,
@@ -34,11 +39,19 @@ import type {
   AxAgentEvalBudget,
 } from './evalHarness.js';
 import { runAgentEvalBatch } from './evalHarness.js';
+import { buildEvidenceReceipt } from './evidenceReceipt.js';
 import { clusterFailures } from './failureClusters.js';
+import { evaluateGateChain, gateChainAccepts } from './gates.js';
 import type {
   AxAgentPlaybookComputeAccounting,
   AxAgentPlaybookComputePhaseName,
   AxAgentPlaybookControlArmReport,
+  AxAgentPlaybookEvidenceReceipt,
+  AxAgentPlaybookEvidenceWarning,
+  AxAgentPlaybookGateReport,
+  AxAgentPlaybookInterval,
+  AxAgentPlaybookNomination,
+  AxAgentPlaybookOverheadSplit,
   AxAgentPlaybookSplitName,
   AxAgentPlaybookVarianceBand,
   AxAgentPlaybookVarianceBandReport,
@@ -59,17 +72,24 @@ import {
   buildProposal,
   currentPlaybookText,
 } from './proposals.js';
+import { createReachCollector } from './reach.js';
 import {
+  clustersFromPairedRecords,
+  pairedBootstrapInterval,
   seedFromDigest,
   validateIntervalOptions,
   varianceBandFrom,
 } from './statistics.js';
+import { terminationReportOf } from './termination.js';
+import { evaluateValidity, registeredFunctionNames } from './validity.js';
 import { mineWeakness } from './weaknessMiner.js';
 
 const DEFAULT_MAX_PROPOSALS = 4;
 const DEFAULT_EPSILON = 0.01;
 const DEFAULT_MIN_HELD_IN_GAIN = 0.05;
 const DEFAULT_SCORE_THRESHOLD = 0.7;
+const DEFAULT_MAX_ENVIRONMENT_DISCARD_RATE = 0.1;
+const DEFAULT_OVERHEAD_WARN_RATIO = 0.25;
 const MAX_RUNS_PER_TASK = 100;
 const MAX_METRIC_CALLS = 1_000_000;
 const RESTORATION_FAILURE = Symbol.for(
@@ -419,6 +439,10 @@ export async function evolveAgentPlaybook<
   const minHeldInGain = options?.minHeldInGain ?? DEFAULT_MIN_HELD_IN_GAIN;
   const currentGainThreshold = retentionPolicy?.minCurrentGain ?? minHeldInGain;
   const scoreThreshold = options?.scoreThreshold ?? DEFAULT_SCORE_THRESHOLD;
+  const maxEnvironmentDiscardRate =
+    options?.maxEnvironmentDiscardRate ?? DEFAULT_MAX_ENVIRONMENT_DISCARD_RATE;
+  const overheadWarnRatio =
+    options?.overheadWarnRatio ?? DEFAULT_OVERHEAD_WARN_RATIO;
   const currentTaskSetDigest = retentionPolicy
     ? canonicalDigest(trainTasks)
     : undefined;
@@ -517,7 +541,8 @@ export async function evolveAgentPlaybook<
     phase: AxAgentPlaybookComputePhaseName,
     tasks: readonly AxAgentEvalTask<IN>[],
     split: AxAgentPlaybookSplitName,
-    sliceName?: string
+    sliceName?: string,
+    reach?: { observe: (args: any) => void }
   ): Promise<AxAgentEvalBatchResult<IN, OUT>> => {
     const handle = ledger.phase(phase);
     const before = budget.remaining;
@@ -527,6 +552,21 @@ export async function evolveAgentPlaybook<
         tasks,
         split,
         ...(sliceName ? { sliceName } : {}),
+        ...(reach
+          ? {
+              onAttempt: (observed: any) =>
+                reach.observe({
+                  task: observed.task,
+                  ...(observed.prediction
+                    ? { prediction: observed.prediction }
+                    : {}),
+                  split: observed.split,
+                  ...(observed.sliceName
+                    ? { sliceName: observed.sliceName }
+                    : {}),
+                }),
+            }
+          : {}),
       });
       handle.addUsage(result.usage);
       return result;
@@ -777,6 +817,88 @@ export async function evolveAgentPlaybook<
   }
   miningPhase.close();
 
+  // ---- Evidence state carried across candidates ----
+  // The anchor a candidate is compared against is the LAST ACCEPTED state, not
+  // the original baseline — the same re-anchoring the legacy scalar scores do,
+  // which is exactly why `heldOut` is a selection split and not a sealed test.
+  let anchorTrainRecords = baselineTrain.records;
+  let anchorHeldOutRecords = baselineHeldOutBatch?.records;
+  let heldOutSelectionComparisons = 0;
+  const runWarnings: AxAgentPlaybookEvidenceWarning[] = [];
+  const registered = registeredFunctionNames(s);
+  const nowIso = () => new Date(nowFn()).toISOString();
+  const currentSeed = () =>
+    intervalSettings.seed ??
+    seedFromDigest(canonicalDigest(trainTasks.map((task) => task.id ?? '')));
+  const heldOutSeed = () =>
+    intervalSettings.seed ??
+    seedFromDigest(
+      canonicalDigest((validationTasks ?? []).map((task) => task.id ?? ''))
+    );
+  const intervalFor = (
+    anchor: readonly { task: object; score: number }[] | undefined,
+    candidate: readonly { task: object; score: number }[] | undefined,
+    seed: number
+  ): AxAgentPlaybookInterval | undefined => {
+    if (!anchor || !candidate) return undefined;
+    const clusters = clustersFromPairedRecords(anchor, candidate);
+    if (!clusters) return undefined;
+    return pairedBootstrapInterval({
+      clusters,
+      seed,
+      resamples: intervalSettings.resamples,
+      level: intervalSettings.level,
+    });
+  };
+  /** Bullet ids present in the playbook the evaluation actually rendered. */
+  const renderedBulletIdsNow = (): readonly string[] => {
+    try {
+      const sections = (playbookHandle?.getState?.() as any)?.playbook
+        ?.sections;
+      if (!sections) return [];
+      return Object.values(sections)
+        .flat()
+        .map((bullet: any) => bullet?.id)
+        .filter((id: unknown): id is string => typeof id === 'string');
+    } catch {
+      return [];
+    }
+  };
+  const bulletsById = (ids: readonly string[]): readonly any[] => {
+    try {
+      const sections = (playbookHandle?.getState?.() as any)?.playbook
+        ?.sections;
+      if (!sections) return [];
+      const wanted = new Set(ids);
+      return Object.values(sections)
+        .flat()
+        .filter((bullet: any) => wanted.has(bullet?.id));
+    } catch {
+      return [];
+    }
+  };
+  const splitDigestBasis: 'task_ids' | 'frozen_corpus' = retentionPolicy
+    ? 'frozen_corpus'
+    : 'task_ids';
+  /**
+   * Split digests are computed from FROZEN CORPUS values only when a retention
+   * policy already froze and cloned them. Otherwise they are digests of the
+   * semantic task ids: `canonicalSerialize` rejects class instances and cycles,
+   * so digesting a caller's raw task objects would turn a `gates.reach: 'warn'`
+   * run into a new throw. When a task has no semantic id the digests are empty
+   * and the receipt records the weaker binding rather than failing.
+   */
+  const splitDigestOf = (
+    tasks: readonly AxAgentEvalTask<IN>[] | undefined
+  ): string => {
+    if (!tasks?.length) return '';
+    if (retentionPolicy) return canonicalDigest(tasks);
+    const ids = tasks.map((task) => task.id);
+    return ids.every((id) => typeof id === 'string' && id.length > 0)
+      ? canonicalDigest(ids)
+      : '';
+  };
+
   // ---- Sequential propose -> (verify) accept/reject ----
   const outcomes: AxAgentPlaybookEvolveOutcome[] = [];
   const accepted: AxAppliedProposal[] = [];
@@ -842,6 +964,26 @@ export async function evolveAgentPlaybook<
       }
       inFlight = applied;
 
+      // The reach collector observes every attempt of THIS candidate's
+      // evaluation. It is created after the apply so the rendered playbook it
+      // reads is the one the evaluation will actually see.
+      const reachCollector = evidenceEnabled
+        ? createReachCollector({
+            ...(options?.reachProbe ? { probe: options.reachProbe } : {}),
+            ...(options?.conditionsForTask
+              ? { conditionsForTask: options.conditionsForTask }
+              : {}),
+            candidateBulletIds: applied.bulletIds,
+            candidateBullets: bulletsById(applied.bulletIds),
+            renderedBulletIds: renderedBulletIdsNow(),
+            now: nowFn,
+            nowIso: nowIso(),
+            ...(options?.reachProbeBudgetMs !== undefined
+              ? { probeBudgetMs: options.reachProbeBudgetMs }
+              : {}),
+          })
+        : undefined;
+
       // Trust-batch: keep the lesson without a gate.
       if (!verify) {
         accepted.push(applied);
@@ -861,7 +1003,9 @@ export async function evolveAgentPlaybook<
       const revalTrain = await runPhaseBatch(
         'candidate_eval',
         trainTasks,
-        'current'
+        'current',
+        undefined,
+        reachCollector
       );
       const candidateCurrentSequence = retentionPolicy
         ? ++retentionSequence
@@ -873,7 +1017,9 @@ export async function evolveAgentPlaybook<
         revalHeldOutBatch = await runPhaseBatch(
           'candidate_eval',
           validationTasks,
-          'heldOut'
+          'heldOut',
+          undefined,
+          reachCollector
         );
         revalHeldOut = revalHeldOutBatch.mean;
         if (retentionPolicy) {
@@ -1015,15 +1161,288 @@ export async function evolveAgentPlaybook<
           accepted,
         });
       }
-      const accept = revalComplete && gainOk && heldOutOk && retentionOk;
+      const legacyAccept = revalComplete && gainOk && heldOutOk && retentionOk;
+
+      // ---- Evidence conjuncts ----
+      let evidence: AxAgentPlaybookEvidenceReceipt | undefined;
+      let gateReport: AxAgentPlaybookGateReport | undefined;
+      let candidateWarnings: readonly AxAgentPlaybookEvidenceWarning[] = [];
+      if (evidenceEnabled) {
+        const terminationSplits = [revalTrain.termination];
+        if (revalHeldOutBatch) {
+          terminationSplits.push(revalHeldOutBatch.termination);
+        }
+        const termination = terminationReportOf(terminationSplits);
+
+        const validity = evaluateValidity({
+          inputs: [
+            { split: 'current', records: revalTrain.records },
+            ...(revalHeldOutBatch
+              ? ([
+                  { split: 'heldOut', records: revalHeldOutBatch.records },
+                ] as const)
+              : []),
+          ],
+          ...(options?.validity ? { options: options.validity } : {}),
+          ...(registered ? { registered } : {}),
+        });
+
+        const currentInterval = intervalFor(
+          anchorTrainRecords,
+          revalTrain.records,
+          currentSeed()
+        );
+        const heldOutInterval = intervalFor(
+          anchorHeldOutRecords,
+          revalHeldOutBatch?.records,
+          heldOutSeed()
+        );
+        const bandSpread = varianceBands?.find(
+          (band) => band.split === 'current'
+        )?.spread;
+
+        const reach = reachCollector?.report({
+          delta: currentGain,
+        });
+        candidateWarnings = reach?.warnings ?? [];
+
+        const overheadSplits: AxAgentPlaybookOverheadSplit[] = [];
+        const currentOverhead = overheadSplitFrom({
+          split: 'current',
+          anchor: anchorTrainRecords,
+          candidate: revalTrain.records,
+          seed: currentSeed(),
+          resamples: intervalSettings.resamples,
+          level: intervalSettings.level,
+        });
+        if (currentOverhead) overheadSplits.push(currentOverhead);
+        if (anchorHeldOutRecords && revalHeldOutBatch) {
+          const heldOutOverhead = overheadSplitFrom({
+            split: 'heldOut',
+            anchor: anchorHeldOutRecords,
+            candidate: revalHeldOutBatch.records,
+            seed: heldOutSeed(),
+            resamples: intervalSettings.resamples,
+            level: intervalSettings.level,
+          });
+          if (heldOutOverhead) overheadSplits.push(heldOutOverhead);
+        }
+        const overhead = overheadReportFrom(overheadSplits);
+
+        gateReport = evaluateGateChain({
+          kind: 'curate',
+          gain: {
+            revalComplete,
+            currentGain,
+            threshold: currentGainThreshold,
+            ...(termination.incompleteFromEnvironmentFailures
+              ? {
+                  incompleteFromEnvironmentFailures: true,
+                  tasksWithNoScoredAttempt: termination.splits.reduce(
+                    (sum, split) => sum + split.tasksWithNoScoredAttempt,
+                    0
+                  ),
+                }
+              : {}),
+          },
+          ...(revalHeldOut !== undefined && heldOut !== undefined
+            ? {
+                heldOut: {
+                  delta: revalHeldOut - heldOut,
+                  tolerance: epsilon,
+                },
+              }
+            : {}),
+          ...(retentionPolicy
+            ? {
+                retention: {
+                  ok: retentionOk,
+                  detail: retentionReceipt
+                    ? `worst ${retentionReceipt.worstHistoricalLoss.toFixed(3)}, mean ${retentionReceipt.meanHistoricalLoss.toFixed(3)}`
+                    : 'retention receipt unavailable',
+                },
+              }
+            : {}),
+          validity: {
+            mode: options?.gates?.validity ?? 'off',
+            report: validity,
+          },
+          interval: {
+            mode: options?.gates?.interval ?? 'off',
+            ...(currentInterval ? { current: currentInterval } : {}),
+            ...(heldOutInterval ? { heldOut: heldOutInterval } : {}),
+            ...(bandSpread !== undefined ? { bandSpread } : {}),
+          },
+          ...(reach
+            ? {
+                reach: {
+                  mode: options?.gates?.reach ?? 'off',
+                  report: reach.report,
+                },
+              }
+            : {}),
+        });
+
+        const warnings: AxAgentPlaybookEvidenceWarning[] = [
+          ...candidateWarnings,
+        ];
+        if (currentInterval?.direction === 'unresolved') {
+          warnings.push({
+            code: 'interval_unresolved',
+            message: `the current-split interval [${currentInterval.lower.toFixed(3)}, ${currentInterval.upper.toFixed(3)}] contains zero; the delta is unresolved, not an effect`,
+            scope: 'current',
+          });
+        }
+        if (bandSpread !== undefined && Math.abs(currentGain) <= bandSpread) {
+          warnings.push({
+            code: 'delta_within_variance_band',
+            message: `delta ${currentGain.toFixed(3)} is within the unchanged-artifact band spread ${bandSpread.toFixed(3)}`,
+            scope: 'current',
+          });
+        }
+        if (termination.worstDiscardRate > maxEnvironmentDiscardRate) {
+          warnings.push({
+            code: 'high_environment_discard_rate',
+            message: `environment-failure discard rate ${termination.worstDiscardRate.toFixed(3)} exceeds ${maxEnvironmentDiscardRate}${runsPerTask === 1 ? ' at runsPerTask: 1, which has no redundancy at all' : ''}`,
+          });
+        }
+        if (termination.incompleteFromEnvironmentFailures) {
+          warnings.push({
+            code: 'evaluation_incomplete_environment',
+            message:
+              'a task ended with no scored attempt after re-draws were exhausted; the candidate cannot be promoted on incomplete evidence',
+          });
+        }
+        if (overhead?.worstRelativeDelta !== undefined) {
+          if (legacyAccept && overhead.worstRelativeDelta > overheadWarnRatio) {
+            warnings.push({
+              code: 'overhead_exceeds_gain',
+              message: `the accepted artifact costs ${(overhead.worstRelativeDelta * 100).toFixed(1)}% more turns/calls/tokens than the anchor; report it next to the gain`,
+            });
+          }
+        }
+        if (heldOut !== undefined) {
+          warnings.push({
+            code: 'held_out_reused_for_selection',
+            message: `heldOut has been re-anchored to an accepted candidate ${heldOutSelectionComparisons} time(s); this is a SELECTION split, not a sealed test, and the implied family-wise error rate at level ${intervalSettings.level} is ${(1 - intervalSettings.level ** heldOutSelectionComparisons).toFixed(3)}`,
+            scope: 'heldOut',
+          });
+        }
+
+        const nomination: AxAgentPlaybookNomination = (() => {
+          const candidateDigest = canonicalDigest({
+            proposal,
+            bulletIds: applied.bulletIds,
+          });
+          const splitDigests = {
+            current: splitDigestOf(trainTasks),
+            ...(validationTasks?.length
+              ? { heldOut: splitDigestOf(validationTasks) }
+              : {}),
+            slices: (retentionPolicy?.slices ?? []).map((slice, index) => ({
+              name: slice.name,
+              version: slice.version,
+              digest: sliceTaskSetDigests[index] ?? '',
+            })),
+          };
+          const judgeModel = revalTrain.usage.find(
+            (usage) => typeof usage?.ai === 'string'
+          );
+          const core = {
+            candidateDigest,
+            ...(retentionPolicy?.evaluatorId
+              ? { evaluatorId: retentionPolicy.evaluatorId }
+              : {}),
+            ...(judgeModel
+              ? { judgeModel: { ai: judgeModel.ai, model: judgeModel.model } }
+              : {}),
+            splitDigests,
+          };
+          const passed = (gateReport?.entries ?? [])
+            .filter((entry) => entry.status === 'pass')
+            .map((entry) => entry.id);
+          const failedGates = (gateReport?.entries ?? [])
+            .filter(
+              (entry) =>
+                entry.status === 'fail' || entry.status === 'unmeasured'
+            )
+            .map((entry) => entry.id);
+          return {
+            ...core,
+            splitDigestBasis,
+            // Receipt metadata and a post-hoc integrity value. NOT an
+            // authorization binding: a mid-run digest is a value no host could
+            // have pre-granted.
+            promotionDigest: canonicalDigest(core),
+            // Empty until a promotionAuthority names one. Ax never derives a
+            // resource id, because a derived id is one the host cannot grant.
+            resourceId: '',
+            gatesPassed: passed,
+            gatesFailed: failedGates,
+            nominated: legacyAccept && gateChainAccepts(gateReport!),
+          };
+        })();
+
+        const chainAccepts = gateChainAccepts(gateReport);
+        evidence = buildEvidenceReceipt({
+          kind: 'curate',
+          nomination,
+          intervals: {
+            current:
+              currentInterval ??
+              ({
+                point: currentGain,
+                lower: currentGain,
+                upper: currentGain,
+                level: intervalSettings.level,
+                resamples: 0,
+                unit: 'task',
+                clusters: 0,
+                seed: currentSeed(),
+                direction: 'unresolved',
+              } as AxAgentPlaybookInterval),
+            ...(heldOutInterval ? { heldOut: heldOutInterval } : {}),
+          },
+          reach: reach?.report ?? {
+            basis: 'rendered_only',
+            counterfactual: true,
+            gateEligible: false,
+            splits: [],
+          },
+          validity,
+          termination,
+          ...(overhead ? { overhead } : {}),
+          gates: gateReport,
+          promotion: { status: 'not_required', nomination },
+          accounting: accountingForPhases(
+            ledger.assemble({ evolveOnlyMetricCalls: usedCalls() }),
+            ['candidate_eval']
+          ),
+          selectionComparisons: heldOutSelectionComparisons,
+          level: intervalSettings.level,
+          warnings,
+          decision: legacyAccept && chainAccepts ? 'accepted' : 'rejected',
+        });
+        candidateWarnings = warnings;
+        runWarnings.push(...warnings);
+      }
+
+      const accept =
+        legacyAccept && (gateReport ? gateChainAccepts(gateReport) : true);
+      const gateRejection =
+        legacyAccept && gateReport?.failedGate
+          ? `${gateReport.failedGate} gate failed: ${gateReport.failedPredicate ?? ''}`
+          : undefined;
 
       outcomes.push({
         proposal,
         kind: 'curate',
+        ...(evidence ? { evidence } : {}),
         status: accept ? 'accepted' : 'rejected',
         accepted: accept,
         reason:
-          requireHeldOut && !revalTrain.complete
+          gateRejection ??
+          (requireHeldOut && !revalTrain.complete
             ? 'held-in evaluation incomplete or errored'
             : requireHeldOut && revalHeldOutBatch?.complete !== true
               ? 'held-out evaluation incomplete or errored'
@@ -1041,7 +1460,7 @@ export async function evolveAgentPlaybook<
                       : `held-in gain ${currentGain.toFixed(3)} below ${currentGainThreshold}`
                     : !heldOutOk
                       ? `held-out regressed ${((revalHeldOut ?? 0) - (heldOut ?? 0)).toFixed(3)}`
-                      : `historical loss exceeded retention threshold (worst ${retentionReceipt?.worstHistoricalLoss.toFixed(3)}, mean ${retentionReceipt?.meanHistoricalLoss.toFixed(3)})`,
+                      : `historical loss exceeded retention threshold (worst ${retentionReceipt?.worstHistoricalLoss.toFixed(3)}, mean ${retentionReceipt?.meanHistoricalLoss.toFixed(3)})`),
         heldIn: { before: heldIn, after: revalTrain.mean },
         ...(revalHeldOut !== undefined && heldOut !== undefined
           ? { heldOut: { before: heldOut, after: revalHeldOut } }
@@ -1073,6 +1492,9 @@ export async function evolveAgentPlaybook<
         accepted.push(applied);
         inFlight = undefined;
         heldIn = revalTrain.mean;
+        // The next candidate is compared against THIS candidate's records, so
+        // pairing stays reference-aligned and the re-anchoring is explicit.
+        anchorTrainRecords = revalTrain.records;
         if (retentionPolicy) {
           currentTaskAnchorSequence = candidateCurrentSequence;
           currentTaskAnchorEvidence = {
@@ -1083,6 +1505,10 @@ export async function evolveAgentPlaybook<
         }
         if (revalHeldOut !== undefined) {
           heldOut = revalHeldOut;
+          anchorHeldOutRecords = revalHeldOutBatch?.records;
+          // Every accept re-anchors the held-out split to the accepted
+          // candidate, which is exactly what makes it a selection split.
+          heldOutSelectionComparisons++;
           if (retentionPolicy) {
             heldOutAnchorSequence = candidateHeldOutSequence;
             heldOutAnchorEvidence = {
@@ -1150,6 +1576,44 @@ export async function evolveAgentPlaybook<
     status: 'not_run',
     reason: 'controlArm option not supplied',
   };
+  if (evidenceEnabled) {
+    // Absence is visible, never silent: a run with evidence machinery on that
+    // did NOT run a matched-budget arm says so on the record.
+    runWarnings.push({
+      code: 'control_arm_not_run',
+      message:
+        'no matched-budget control arm was configured, so this run cannot say whether simple test-time scaling reproduces the gain',
+    });
+    runWarnings.push({
+      code: 'transfer_not_run',
+      message:
+        'no transfer targets were configured, so per-cell regressions on other backbones are unmeasured',
+    });
+    runWarnings.push({
+      code: 'sealed_test_not_run',
+      message:
+        'no sealed test was configured; every held-out number here is a selection number',
+    });
+    if (accounting.costBasis === 'unknown' && accepted.length > 0) {
+      // Restricted to accepts on purpose: firing on every run is how "no
+      // winner is reported without its cost" decays into ignorable noise.
+      runWarnings.push({
+        code: 'cost_unknown',
+        message:
+          'a candidate was accepted with no costFor hook, so its cost is unknown; Ax has no provider cost field and never estimates one',
+      });
+    }
+    const unobservable = accounting.phases
+      .filter((phase) => phase.tokensBasis === 'unobservable')
+      .map((phase) => phase.name);
+    if (unobservable.length > 0) {
+      runWarnings.push({
+        code: 'tokens_unobservable',
+        message: `token totals for ${unobservable.join(', ')} cannot be observed without a usageTap; they are reported absent rather than as zero`,
+      });
+    }
+  }
+
   const varianceBand: AxAgentPlaybookVarianceBandReport | undefined =
     options?.varianceBand
       ? varianceBands && varianceBands.length > 0
@@ -1181,5 +1645,6 @@ export async function evolveAgentPlaybook<
     accounting,
     applied: options?.apply === false ? 'dry_run' : 'live',
     ...(varianceBand ? { varianceBand } : {}),
+    ...(runWarnings.length > 0 ? { warnings: runWarnings } : {}),
   };
 }

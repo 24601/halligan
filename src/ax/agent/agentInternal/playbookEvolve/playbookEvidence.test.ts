@@ -8,6 +8,12 @@ import {
 } from './accounting.js';
 import type { AxAgentEvalBudget } from './evalHarness.js';
 import { runAgentEvalBatch } from './evalHarness.js';
+import {
+  buildEvidenceReceipt,
+  evidenceReceiptDigest,
+  impliedFamilyWiseErrorRate,
+} from './evidenceReceipt.js';
+import { evaluateGateChain, GATE_ORDER, gateChainAccepts } from './gates.js';
 import type {
   AxAgentPlaybookAttemptRecord,
   AxAgentTrajectoryClassifier,
@@ -16,6 +22,7 @@ import {
   AxAgentPlaybookEvolveError,
   axIsAgentPlaybookEvolveError,
 } from './playbookEvidenceTypes.js';
+import { createReachCollector } from './reach.js';
 import {
   clustersFromPairedRecords,
   createSeededRandom,
@@ -31,6 +38,11 @@ import {
   isAssertionAttempt,
   totalTokensOf,
 } from './termination.js';
+import {
+  evaluateValidity,
+  registeredFunctionNames,
+  validityPredicateName,
+} from './validity.js';
 
 // --- local factories -------------------------------------------------------
 
@@ -1058,5 +1070,774 @@ describe('anchor-vs-candidate overhead', () => {
       })
     ).toBeUndefined();
     expect(overheadReportFrom([])).toBeUndefined();
+  });
+});
+
+// --- validity.ts -----------------------------------------------------------
+
+describe('validity conjuncts', () => {
+  const predictionOf = (over: Record<string, any> = {}) => ({
+    completionType: 'final' as const,
+    output: {},
+    actionLog: '',
+    functionCalls: [],
+    toolErrors: [],
+    turnCount: 1,
+    ...over,
+  });
+
+  const recordOf = (over: Record<string, any> = {}) => ({
+    task: { input: {}, criteria: 'c' },
+    score: 1,
+    passed: true,
+    prediction: predictionOf(over.prediction ?? {}),
+    ...(over.attempts ? { attempts: over.attempts } : {}),
+  });
+
+  const attemptOf = (over: Partial<AxAgentPlaybookAttemptRecord> = {}) =>
+    ({
+      attempt: 0,
+      redraw: 0,
+      score: 1,
+      termination: { kind: 'completed' },
+      callCount: 0,
+      turnCount: 1,
+      latencyMs: 10,
+      ...over,
+    }) as AxAgentPlaybookAttemptRecord;
+
+  const find = (report: any, id: string, split = 'current') =>
+    report.predicates.find((p: any) => p.id === id && p.split === split);
+
+  it('computes final_completion_rate from completionType', () => {
+    const report = evaluateValidity({
+      inputs: [
+        {
+          split: 'current',
+          records: [
+            recordOf(),
+            recordOf(),
+            recordOf({
+              prediction: { completionType: 'askClarification' },
+            }),
+          ],
+        },
+      ],
+    });
+    const predicate = find(report, 'final_completion_rate');
+    expect(predicate.observed).toBeCloseTo(2 / 3, 12);
+    expect(predicate.threshold).toBe(0.9);
+    expect(predicate.status).toBe('fail');
+    expect(report.failed).toBe('validity:final_completion_rate@current');
+  });
+
+  it('exports no predicate named output_schema_compliance', () => {
+    // Ax has no schema-validation outcome on a prediction, so a predicate with
+    // that name would be claiming a measurement that does not exist.
+    const report = evaluateValidity({
+      inputs: [{ split: 'current', records: [recordOf()] }],
+    });
+    expect(
+      report.predicates.some(
+        (p) => (p.id as string) === 'output_schema_compliance'
+      )
+    ).toBe(false);
+    expect(validityPredicateName('final_completion_rate', 'current')).toBe(
+      'validity:final_completion_rate@current'
+    );
+  });
+
+  it('detects assertion failures by error name and by cause name', () => {
+    const report = evaluateValidity({
+      inputs: [
+        {
+          split: 'current',
+          records: [
+            recordOf({
+              attempts: [
+                attemptOf({ errorName: 'AxAssertionError' }),
+                attemptOf({
+                  errorName: 'AxGenerateError',
+                  errorCauseName: 'AxStreamingAssertionError',
+                }),
+                attemptOf({}),
+                attemptOf({}),
+              ],
+            }),
+          ],
+        },
+      ],
+    });
+    const predicate = find(report, 'assertion_pass_rate');
+    expect(predicate.observed).toBeCloseTo(0.5, 12);
+    expect(predicate.status).toBe('fail');
+  });
+
+  it('reports assertion_pass_rate unmeasured without attempt records', () => {
+    const report = evaluateValidity({
+      inputs: [{ split: 'current', records: [recordOf()] }],
+    });
+    const predicate = find(report, 'assertion_pass_rate');
+    expect(predicate.status).toBe('unmeasured');
+    expect(predicate.observed).toBeUndefined();
+  });
+
+  it('computes unknown_function_call_rate in Ax from the registered set', () => {
+    // No host classifier: the rate is Ax's own reading.
+    const report = evaluateValidity({
+      inputs: [
+        {
+          split: 'current',
+          records: [
+            recordOf({
+              prediction: {
+                functionCalls: [
+                  { qualifiedName: 'db.search', name: 'search', arguments: {} },
+                  { qualifiedName: 'ghost.call', name: 'call', arguments: {} },
+                ],
+              },
+            }),
+          ],
+        },
+      ],
+      registered: new Set(['db.search']),
+    });
+    const predicate = find(report, 'unknown_function_call_rate');
+    expect(predicate.observed).toBeCloseTo(0.5, 12);
+    expect(predicate.status).toBe('fail');
+    expect(predicate.overriddenByHost).toBeUndefined();
+  });
+
+  it('is unmeasured when the registered set cannot be resolved', () => {
+    const report = evaluateValidity({
+      inputs: [
+        {
+          split: 'current',
+          records: [
+            recordOf({
+              prediction: {
+                functionCalls: [
+                  { qualifiedName: 'db.search', name: 'search', arguments: {} },
+                ],
+              },
+            }),
+          ],
+        },
+      ],
+    });
+    expect(find(report, 'unknown_function_call_rate').status).toBe(
+      'unmeasured'
+    );
+  });
+
+  it('records overriddenByHost when a classifier changes the computed value', () => {
+    // A classifier returning 'ok' for everything is recorded, not hidden.
+    const report = evaluateValidity({
+      inputs: [
+        {
+          split: 'current',
+          records: [
+            recordOf({
+              prediction: {
+                functionCalls: [
+                  { qualifiedName: 'ghost.call', name: 'call', arguments: {} },
+                ],
+              },
+            }),
+          ],
+        },
+      ],
+      registered: new Set(['db.search']),
+      options: { classifyFunctionCall: () => 'ok' },
+    });
+    const predicate = find(report, 'unknown_function_call_rate');
+    expect(predicate.observed).toBe(0);
+    expect(predicate.status).toBe('pass');
+    expect(predicate.overriddenByHost).toBe(true);
+  });
+
+  it('computes tool_error_rate from call errors and prediction toolErrors', () => {
+    const report = evaluateValidity({
+      inputs: [
+        {
+          split: 'current',
+          records: [
+            recordOf({
+              prediction: {
+                functionCalls: [
+                  {
+                    qualifiedName: 'db.search',
+                    name: 'search',
+                    arguments: {},
+                    error: 'timeout',
+                  },
+                  { qualifiedName: 'db.search', name: 'search', arguments: {} },
+                ],
+                toolErrors: ['sandbox unavailable'],
+              },
+            }),
+          ],
+        },
+      ],
+      registered: new Set(['db.search']),
+      options: { maxToolErrorRate: 0.1 },
+    });
+    const predicate = find(report, 'tool_error_rate');
+    expect(predicate.observed).toBeCloseTo(1, 12);
+    expect(predicate.status).toBe('fail');
+  });
+
+  it('names the failing predicate with its split and runs on both splits', () => {
+    const report = evaluateValidity({
+      inputs: [
+        { split: 'current', records: [recordOf({ attempts: [attemptOf()] })] },
+        {
+          split: 'heldOut',
+          records: [
+            recordOf({
+              attempts: [attemptOf()],
+              prediction: {
+                functionCalls: [
+                  {
+                    qualifiedName: 'db.search',
+                    name: 'search',
+                    arguments: {},
+                    error: 'boom',
+                  },
+                ],
+              },
+            }),
+          ],
+        },
+      ],
+      registered: new Set(['db.search']),
+      options: { maxToolErrorRate: 0 },
+    });
+    expect(report.predicates.some((p) => p.split === 'heldOut')).toBe(true);
+    expect(report.failed).toBe('validity:tool_error_rate@heldOut');
+  });
+
+  it('leaves token and latency ceilings off unless configured', () => {
+    const withoutCeilings = evaluateValidity({
+      inputs: [
+        { split: 'current', records: [recordOf({ attempts: [attemptOf()] })] },
+      ],
+    });
+    expect(find(withoutCeilings, 'token_ceiling')).toBeUndefined();
+    expect(find(withoutCeilings, 'latency_ceiling')).toBeUndefined();
+
+    const withCeilings = evaluateValidity({
+      inputs: [
+        {
+          split: 'current',
+          records: [
+            recordOf({
+              attempts: [attemptOf({ totalTokens: 900, latencyMs: 50 })],
+            }),
+          ],
+        },
+      ],
+      options: { maxMeanTotalTokens: 500, maxMeanLatencyMs: 100 },
+    });
+    expect(find(withCeilings, 'token_ceiling').status).toBe('fail');
+    expect(find(withCeilings, 'latency_ceiling').status).toBe('pass');
+  });
+
+  it('excludes discarded attempts from the assertion denominator', () => {
+    const report = evaluateValidity({
+      inputs: [
+        {
+          split: 'current',
+          records: [
+            recordOf({
+              attempts: [
+                attemptOf({}),
+                attemptOf({
+                  score: undefined,
+                  termination: {
+                    kind: 'environment_failure',
+                    cause: 'network',
+                  },
+                  errorName: 'AxAssertionError',
+                }),
+              ],
+            }),
+          ],
+        },
+      ],
+    });
+    expect(find(report, 'assertion_pass_rate').observed).toBe(1);
+  });
+
+  it('resolves the registered function set structurally or reports undefined', () => {
+    expect(
+      registeredFunctionNames({
+        options: { functions: [{ name: 'search', namespace: 'db' }] },
+      })
+    ).toEqual(new Set(['search', 'db.search']));
+    expect(registeredFunctionNames({})).toBeUndefined();
+    expect(
+      registeredFunctionNames({ options: { functions: [] } })
+    ).toBeUndefined();
+    expect(registeredFunctionNames(undefined)).toBeUndefined();
+  });
+});
+
+// --- reach.ts --------------------------------------------------------------
+
+describe('reach instrumentation', () => {
+  const task = (id: string) => ({ input: {}, criteria: 'c', id });
+  const clock = () => {
+    let value = 0;
+    return () => {
+      value += 1;
+      return value;
+    };
+  };
+
+  const collectorOf = (over: Record<string, any> = {}) =>
+    createReachCollector({
+      candidateBulletIds: ['b1'],
+      renderedBulletIds: ['b1', 'b2'],
+      now: clock(),
+      nowIso: '2026-01-01T00:00:00.000Z',
+      ...over,
+    });
+
+  it('sets gateEligible only for the host_probe basis', () => {
+    const probed = collectorOf({
+      probe: () => ({ applicableAtDecidingStep: true, invocations: 1 }),
+    });
+    probed.observe({ task: task('t1'), split: 'current' });
+    expect(probed.report().report).toMatchObject({
+      basis: 'host_probe',
+      counterfactual: false,
+      gateEligible: true,
+    });
+
+    const counterfactual = collectorOf({
+      conditionsForTask: () => [],
+      candidateBullets: [],
+    });
+    counterfactual.observe({ task: task('t1'), split: 'current' });
+    expect(counterfactual.report().report).toMatchObject({
+      basis: 'applicability_counterfactual',
+      counterfactual: true,
+      gateEligible: false,
+    });
+
+    const rendered = collectorOf();
+    rendered.observe({ task: task('t1'), split: 'current' });
+    expect(rendered.report().report).toMatchObject({
+      basis: 'rendered_only',
+      counterfactual: true,
+      gateEligible: false,
+    });
+  });
+
+  it('reports reachRate 1.0 for an unconstrained bullet AND labels it', () => {
+    // The honest-reporting case: an evolve-curated bullet has no applicability
+    // tokens, so isBulletApplicable returns true for every task. A 1.0
+    // appearing UNLABELLED in a receipt is the failure this asserts against —
+    // the assertion is on the label, not on the number.
+    const collector = collectorOf({
+      conditionsForTask: () => ['anything'],
+      candidateBullets: [
+        { id: 'b1', content: 'never call undeclared helpers', section: 's' },
+      ],
+    });
+    for (const id of ['t1', 't2', 't3']) {
+      collector.observe({ task: task(id), split: 'current' });
+    }
+    const { report, warnings } = collector.report({ delta: 0.2 });
+    expect(report.splits[0]?.reachRate).toBe(1);
+    expect(report.splits[0]?.counterfactual).toBe(true);
+    expect(report.gateEligible).toBe(false);
+    expect(warnings.map((w) => w.code)).toContain('reach_counterfactual_basis');
+  });
+
+  it('reports invocations per episode under the host probe', () => {
+    const collector = collectorOf({
+      probe: () => ({ applicableAtDecidingStep: true, invocations: 2 }),
+    });
+    collector.observe({ task: task('t1'), split: 'heldOut' });
+    collector.observe({ task: task('t2'), split: 'heldOut' });
+    const split = collector.report().report.splits[0]!;
+    expect(split.reachedTasks).toBe(2);
+    expect(split.invocationsPerEpisode).toBe(2);
+  });
+
+  it('marks the split unmeasured when the probe throws, without failing the run', () => {
+    const collector = collectorOf({
+      probe: () => {
+        throw new Error('probe exploded');
+      },
+    });
+    expect(() =>
+      collector.observe({ task: task('t1'), split: 'current' })
+    ).not.toThrow();
+    const { report, warnings } = collector.report({ delta: 0.2 });
+    expect(report.gateEligible).toBe(false);
+    expect(report.splits[0]?.reachRate).toBe(0);
+    expect(warnings.map((w) => w.code)).toContain('reach_probe_failed');
+  });
+
+  it('rejects a malformed observation rather than trusting it', () => {
+    const collector = collectorOf({
+      probe: () => ({ applicableAtDecidingStep: true, invocations: -1 }) as any,
+    });
+    collector.observe({ task: task('t1'), split: 'current' });
+    const { report, warnings } = collector.report();
+    expect(report.gateEligible).toBe(false);
+    expect(warnings.map((w) => w.code)).toContain('reach_probe_failed');
+  });
+
+  it('disables a probe that exceeds its cumulative budget', () => {
+    let now = 0;
+    const collector = createReachCollector({
+      candidateBulletIds: ['b1'],
+      renderedBulletIds: ['b1'],
+      now: () => {
+        now += 40;
+        return now;
+      },
+      nowIso: '2026-01-01T00:00:00.000Z',
+      probeBudgetMs: 50,
+      probe: () => ({ applicableAtDecidingStep: true, invocations: 1 }),
+    });
+    for (const id of ['t1', 't2', 't3']) {
+      collector.observe({ task: task(id), split: 'current' });
+    }
+    const { report, warnings } = collector.report();
+    expect(report.gateEligible).toBe(false);
+    expect(
+      warnings.find((w) => w.code === 'reach_probe_failed')?.message
+    ).toMatch(/cumulative budget/);
+  });
+
+  it('warns reach_zero_positive_delta when a host-probed reach is 0 and the delta is positive', () => {
+    const collector = collectorOf({
+      probe: () => ({ applicableAtDecidingStep: false, invocations: 0 }),
+    });
+    collector.observe({ task: task('t1'), split: 'current' });
+    const { warnings } = collector.report({ delta: 0.3 });
+    expect(warnings.map((w) => w.code)).toContain('reach_zero_positive_delta');
+  });
+
+  it('warns reach_unmeasured on a rendered-only basis with a positive delta', () => {
+    const collector = collectorOf();
+    collector.observe({ task: task('t1'), split: 'current' });
+    const { warnings } = collector.report({ delta: 0.3 });
+    expect(warnings.map((w) => w.code)).toContain('reach_unmeasured');
+  });
+});
+
+// --- gates.ts + evidenceReceipt.ts -----------------------------------------
+
+describe('gate chain', () => {
+  const baseInput = (over: Record<string, any> = {}): any => ({
+    kind: 'curate',
+    gain: { revalComplete: true, currentGain: 0.2, threshold: 0.05 },
+    ...over,
+  });
+
+  it('reports every gate including the skipped ones, in decision order', () => {
+    const report = evaluateGateChain(baseInput());
+    expect(report.entries.map((entry) => entry.id)).toEqual(GATE_ORDER);
+    expect(gateChainAccepts(report)).toBe(true);
+    const skipped = report.entries.filter(
+      (entry) => entry.status === 'skipped'
+    );
+    expect(skipped.length).toBeGreaterThan(0);
+    for (const entry of skipped) expect(entry.detail).toBeTruthy();
+  });
+
+  it('short-circuits on the first required failure in order', () => {
+    const report = evaluateGateChain(
+      baseInput({
+        gain: { revalComplete: true, currentGain: 0, threshold: 0.05 },
+        heldOut: { delta: -1, tolerance: 0.01 },
+      })
+    );
+    // Both gain and held_out fail; `gain` comes first in decision order.
+    expect(report.failedGate).toBe('gain');
+    expect(gateChainAccepts(report)).toBe(false);
+  });
+
+  it('passes a zero-gain prune under the loss-tolerance variant', () => {
+    // The decisive prune test: a removal with currentGain 0 and maxCurrentLoss
+    // 0 must reach the later gates, not be short-circuited by the curate
+    // threshold of 0.05. A curate-variant implementation fails here.
+    const report = evaluateGateChain({
+      kind: 'prune',
+      gain: { revalComplete: true, currentGain: 0, threshold: 0 },
+      heldOut: { delta: 0, tolerance: 0.01 },
+      pruneSize: {
+        tokensBefore: 120,
+        tokensAfter: 100,
+        minTokenReduction: 1,
+      },
+    });
+    expect(report.entries.find((entry) => entry.id === 'gain')?.status).toBe(
+      'pass'
+    );
+    expect(
+      report.entries.find((entry) => entry.id === 'prune_size')?.status
+    ).toBe('pass');
+    expect(gateChainAccepts(report)).toBe(true);
+  });
+
+  it('rejects a prune that loses more than the tolerance', () => {
+    const report = evaluateGateChain({
+      kind: 'prune',
+      gain: { revalComplete: true, currentGain: -0.2, threshold: 0 },
+      pruneSize: {
+        tokensBefore: 120,
+        tokensAfter: 100,
+        minTokenReduction: 1,
+      },
+    });
+    expect(report.failedGate).toBe('gain');
+    expect(
+      report.entries.find((entry) => entry.id === 'gain')?.detail
+    ).toContain('prune current-task loss');
+  });
+
+  it('rejects a prune that does not shrink the rendered playbook enough', () => {
+    const report = evaluateGateChain({
+      kind: 'prune',
+      gain: { revalComplete: true, currentGain: 0, threshold: 0 },
+      pruneSize: {
+        tokensBefore: 100,
+        tokensAfter: 100,
+        minTokenReduction: 1,
+      },
+    });
+    expect(report.failedGate).toBe('prune_size');
+  });
+
+  it('skips the reach gate for a prune because a removed bullet has no reach', () => {
+    const report = evaluateGateChain({
+      kind: 'prune',
+      gain: { revalComplete: true, currentGain: 0, threshold: 0 },
+      pruneSize: { tokensBefore: 10, tokensAfter: 1, minTokenReduction: 1 },
+      reach: {
+        mode: 'require',
+        report: {
+          basis: 'host_probe',
+          counterfactual: false,
+          gateEligible: true,
+          splits: [],
+        },
+      },
+    });
+    expect(report.entries.find((entry) => entry.id === 'reach')?.status).toBe(
+      'skipped'
+    );
+  });
+
+  it('names the environment-failure reason distinctly from the budget one', () => {
+    const report = evaluateGateChain(
+      baseInput({
+        gain: {
+          revalComplete: false,
+          currentGain: 0,
+          threshold: 0.05,
+          incompleteFromEnvironmentFailures: true,
+          tasksWithNoScoredAttempt: 1,
+        },
+      })
+    );
+    expect(report.failedPredicate).toBe(
+      'evaluation incomplete due to environment failures (1 tasks)'
+    );
+    expect(report.failedPredicate).not.toContain('metric_budget');
+  });
+
+  it('fails a required reach gate on any counterfactual basis', () => {
+    for (const basis of [
+      'applicability_counterfactual',
+      'rendered_only',
+    ] as const) {
+      const report = evaluateGateChain(
+        baseInput({
+          reach: {
+            mode: 'require',
+            report: {
+              basis,
+              counterfactual: true,
+              gateEligible: false,
+              splits: [
+                {
+                  split: 'current',
+                  basis,
+                  counterfactual: true,
+                  taskCount: 3,
+                  reachedTasks: 3,
+                  reachRate: 1,
+                },
+              ],
+            },
+          },
+        })
+      );
+      // reachRate is 1.0 and the gate still fails: the gate reads
+      // gateEligible, never the rate.
+      expect(report.failedGate).toBe('reach');
+      expect(report.entries.find((entry) => entry.id === 'reach')?.status).toBe(
+        'unmeasured'
+      );
+    }
+  });
+
+  it('carries the failing validity predicate verbatim into the report', () => {
+    const report = evaluateGateChain(
+      baseInput({
+        validity: {
+          mode: 'require',
+          report: {
+            predicates: [
+              {
+                id: 'tool_error_rate',
+                split: 'heldOut',
+                status: 'fail',
+                observed: 0.31,
+                threshold: 0.1,
+                name: 'validity:tool_error_rate@heldOut',
+              },
+            ],
+            required: ['tool_error_rate'],
+            failed: 'validity:tool_error_rate@heldOut',
+          },
+        },
+      })
+    );
+    expect(report.failedGate).toBe('validity');
+    expect(report.failedPredicate).toBe('validity:tool_error_rate@heldOut');
+  });
+
+  it('treats an unmeasured interval as a failure under require and a warning under warn', () => {
+    const required = evaluateGateChain(
+      baseInput({ interval: { mode: 'require' } })
+    );
+    expect(required.failedGate).toBe('interval');
+    const warned = evaluateGateChain(baseInput({ interval: { mode: 'warn' } }));
+    // 'warn' surfaces the unmeasured reading without rejecting the candidate.
+    expect(warned.failedGate).toBeUndefined();
+    expect(
+      warned.entries.find((entry) => entry.id === 'interval')?.status
+    ).toBe('unmeasured');
+  });
+
+  it('requires the point delta to beat the variance band when one is configured', () => {
+    const interval = {
+      point: 0.02,
+      lower: 0.01,
+      upper: 0.03,
+      level: 0.95,
+      resamples: 1_000,
+      unit: 'task' as const,
+      clusters: 3,
+      seed: 1,
+      direction: 'positive' as const,
+    };
+    const withinBand = evaluateGateChain(
+      baseInput({
+        interval: { mode: 'require', current: interval, bandSpread: 0.05 },
+      })
+    );
+    expect(withinBand.failedGate).toBe('interval');
+    const beatsBand = evaluateGateChain(
+      baseInput({
+        interval: { mode: 'require', current: interval, bandSpread: 0.005 },
+      })
+    );
+    expect(beatsBand.failedGate).toBeUndefined();
+    // Without a band the detail says so, so the weaker reading is visible.
+    const noBand = evaluateGateChain(
+      baseInput({ interval: { mode: 'warn', current: interval } })
+    );
+    expect(
+      noBand.entries.find((entry) => entry.id === 'interval')?.detail
+    ).toContain('excludes zero');
+  });
+});
+
+describe('evidence receipt', () => {
+  const interval = {
+    point: 0.2,
+    lower: 0.1,
+    upper: 0.3,
+    level: 0.95,
+    resamples: 1_000,
+    unit: 'task' as const,
+    clusters: 3,
+    seed: 7,
+    direction: 'positive' as const,
+  };
+  const nomination = {
+    candidateDigest: 'fnv1a64:aaaa',
+    splitDigests: { current: 'fnv1a64:bbbb', slices: [] },
+    splitDigestBasis: 'task_ids' as const,
+    promotionDigest: 'fnv1a64:cccc',
+    resourceId: '',
+    gatesPassed: [],
+    gatesFailed: [],
+    nominated: true,
+  };
+  const receiptArgs = (over: Record<string, any> = {}) =>
+    ({
+      kind: 'curate' as const,
+      nomination,
+      intervals: { current: interval },
+      reach: {
+        basis: 'rendered_only' as const,
+        counterfactual: true,
+        gateEligible: false,
+        splits: [],
+      },
+      validity: { predicates: [], required: [] },
+      termination: {
+        splits: [],
+        worstDiscardRate: 0,
+        incompleteFromEnvironmentFailures: false,
+      },
+      gates: { entries: [] },
+      promotion: { status: 'not_required' as const, nomination },
+      accounting: emptyAccounting(),
+      selectionComparisons: 3,
+      level: 0.95,
+      warnings: [],
+      decision: 'accepted' as const,
+      ...over,
+    }) as any;
+
+  it('digests every field except the digest and stays stable otherwise', () => {
+    const first = buildEvidenceReceipt(receiptArgs());
+    const same = buildEvidenceReceipt(receiptArgs());
+    const changed = buildEvidenceReceipt(receiptArgs({ decision: 'rejected' }));
+    expect(first.digest).toBe(same.digest);
+    expect(changed.digest).not.toBe(first.digest);
+    expect(evidenceReceiptDigest(first)).toBe(first.digest);
+  });
+
+  it('is recursively frozen', () => {
+    const receipt = buildEvidenceReceipt(receiptArgs());
+    expect(Object.isFrozen(receipt)).toBe(true);
+    expect(Object.isFrozen(receipt.intervals)).toBe(true);
+    expect(Object.isFrozen(receipt.heldOutContamination)).toBe(true);
+  });
+
+  it('always carries the held-out contamination disclosure', () => {
+    const receipt = buildEvidenceReceipt(receiptArgs());
+    expect(receipt.heldOutContamination.selectionComparisons).toBe(3);
+    // 1 - 0.95^3
+    expect(receipt.heldOutContamination.impliedFamilyWiseErrorRate).toBeCloseTo(
+      0.142625,
+      6
+    );
+    expect(receipt.heldOutContamination.sealed).toBe(false);
+    expect(impliedFamilyWiseErrorRate(0, 0.95)).toBe(0);
+    expect(impliedFamilyWiseErrorRate(4, 0.95)).toBeCloseTo(0.185, 3);
   });
 });
