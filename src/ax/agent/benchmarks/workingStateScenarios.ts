@@ -62,6 +62,21 @@ export const AX_WORKING_STATE_BENCH_HORIZONS: readonly number[] = [10, 25, 60];
 /** The largest horizon the in-suite benchmark measures. */
 export const AX_WORKING_STATE_BENCH_MAX_HORIZON = 60;
 
+/**
+ * The frozen procedure the `skill-state` arm executes. Constant for the run, so
+ * it rides the cached prompt prefix rather than the dynamic tail.
+ */
+const BENCH_SKILL = {
+  id: 'warehouse-pipeline',
+  name: 'Warehouse order pipeline',
+  content: [
+    'Pick every order in the task, one per turn.',
+    "After a pick returns, record the fact and close that order's goal by",
+    'citing the newest inventory.pick receipt ref from the Receipt Roster.',
+    'Answer a status question from the working state, never from memory.',
+  ].join('\n'),
+};
+
 /** One probe every PROBE_PERIOD work turns. */
 const PROBE_PERIOD = 5;
 /** The turn index whose proposal is a receipt-free completion claim. */
@@ -153,32 +168,49 @@ function buildProposer(): AxWorkingStateProposer {
         ],
       };
     }
-    const observed = /"order":"(o\d+)","status":"picked"/.exec(
-      input.observation
+    const statePatch = buildEnvironmentPatch(
+      input.observation,
+      input.receiptRoster
     );
-    if (!observed) return { statePatch: [] };
-    const orderId = observed[1]!;
-    const goalId = `g_${orderId}`;
-    const ref = /^(r\d+)\s+inventory\.pick\s/m.exec(input.receiptRoster)?.[1];
-    const refs = input.receiptRoster
-      .split('\n')
-      .map((line) => /^(r\d+)\s+inventory\.pick\s+turn (\d+)$/.exec(line))
-      .filter((match): match is RegExpExecArray => match !== null);
-    const newest = refs[0]?.[1] ?? ref;
-    if (!newest) return { statePatch: [] };
     return {
-      statePatch: [
-        { op: 'add', path: `/facts/orders/${orderId}`, value: 'picked' },
-        {
-          op: 'add',
-          path: `/goals/${goalId}/evidence/-`,
-          value: { kind: 'tool_receipt', ref: newest },
-        },
-        { op: 'replace', path: `/goals/${goalId}/status`, value: 'done' },
-      ],
-      rationale: `receipt ${newest} proves ${orderId} was picked`,
+      statePatch,
+      ...(statePatch.length > 0
+        ? { rationale: 'the roster proves the pick' }
+        : {}),
     };
   };
+}
+
+/**
+ * Build the patch the environment PROVES from what the prompt shows: the newest
+ * `inventory.pick` receipt in the read-only roster, and the order id in the
+ * observation. Shared by the deterministic proposer (`working-state`) and the
+ * actor itself (`skill-state`), so both arms record the same deltas and the
+ * comparison is about the SUBSTRATE, not about what got written.
+ */
+function buildEnvironmentPatch(
+  observationText: string,
+  rosterText: string
+): unknown[] {
+  const observed = /"order":"(o\d+)","status":"picked"/.exec(observationText);
+  if (!observed) return [];
+  const orderId = observed[1]!;
+  const refs = rosterText
+    .split('\n')
+    .map((line) => /^(r\d+)\s+inventory\.pick\s+turn (\d+)$/.exec(line.trim()))
+    .filter((match): match is RegExpExecArray => match !== null);
+  const newest =
+    refs[0]?.[1] ?? /(r\d+)\s+inventory\.pick\s/.exec(rosterText)?.[1];
+  if (!newest) return [];
+  return [
+    { op: 'add', path: `/facts/orders/${orderId}`, value: 'picked' },
+    {
+      op: 'add',
+      path: `/goals/g_${orderId}/evidence/-`,
+      value: { kind: 'tool_receipt', ref: newest },
+    },
+    { op: 'replace', path: `/goals/g_${orderId}/status`, value: 'done' },
+  ];
 }
 
 type MockOutcome = {
@@ -202,7 +234,22 @@ function buildScenarioMock(plan: readonly Step[]): MockOutcome {
   let probesAnswered = 0;
   let probesCorrect = 0;
   let recovering: number | undefined;
+  let actorPatchCalls = 0;
   const sentPromptChars: number[] = [];
+
+  /**
+   * The skillState actor's own patch. It sees ONE prompt, so the roster and the
+   * observation are both read out of it. On the scripted false-completion turn
+   * it claims the audit goal with no receipt, exactly as the proposer arm does,
+   * so both arms give the gate the same thing to refuse.
+   */
+  const buildActorPatch = (rendered: string): unknown[] => {
+    actorPatchCalls += 1;
+    if (actorPatchCalls === FALSE_COMPLETION_STEP) {
+      return [{ op: 'replace', path: '/goals/g_audit/status', value: 'done' }];
+    }
+    return buildEnvironmentPatch(rendered, rendered);
+  };
 
   const ai = new AxMockAIService({
     features: { functions: false, streaming: false },
@@ -246,7 +293,18 @@ function buildScenarioMock(plan: readonly Step[]): MockOutcome {
         };
       }
 
-      sentPromptChars.push(rendered.length);
+      sentPromptChars.push(
+        chatPrompt.reduce(
+          (total, message) =>
+            total +
+            (typeof message.content === 'string' ? message.content.length : 0),
+          0
+        )
+      );
+      // The scripted model decides whether to emit a state patch by reading its
+      // OUTPUT CONTRACT, never by asking which arm is running: the `statePatch`
+      // field only exists in the skillState signature.
+      const emitsPatch = systemPrompt.includes('State Patch');
       const step = plan[Math.min(executorStep, plan.length - 1)]!;
       let code: string;
 
@@ -288,11 +346,17 @@ function buildScenarioMock(plan: readonly Step[]): MockOutcome {
         }
       }
 
+      const patch = emitsPatch ? buildActorPatch(rendered) : undefined;
+      const content =
+        patch === undefined
+          ? `Javascript Code: ${code}`
+          : `Javascript Code: ${code}\nState Patch: ${JSON.stringify(patch)}`;
+
       return {
         results: [
           {
             index: 0,
-            content: `Javascript Code: ${code}`,
+            content,
             finishReason: 'stop' as const,
           },
         ],
@@ -345,7 +409,10 @@ export async function runWorkingStateScenario(
       runIdFactory: () => 'ws:bench:1',
       initial: { goals: seedGoals(orderCount), facts: { orders: {} } },
       proposer: 'on-change',
-      proposeWith: buildProposer(),
+      // In `skill-state` the actor emits the patch itself and the proposer is
+      // never consulted, so both arms record the SAME deltas from the same
+      // evidence and the comparison is about the substrate.
+      ...(arm === 'skill-state' ? {} : { proposeWith: buildProposer() }),
       receiptSources: ['inventory.pick'],
       maxRenderChars: 6_000,
       ...(options?.completionPolicy
@@ -366,7 +433,13 @@ export async function runWorkingStateScenario(
     maxTurns: horizon * 2 + 8,
     contextPolicy: { preset: 'adaptive', budget: 'compact' },
     onContextEvent: meter.onEvent,
-    ...(arm === 'working-state' ? { workingState } : {}),
+    ...(arm === 'baseline' ? {} : { workingState }),
+    ...(arm === 'skill-state'
+      ? {
+          actorMemoryMode: 'skillState' as const,
+          skillState: { skill: BENCH_SKILL },
+        }
+      : {}),
   });
 
   await built.forward(mock.ai, {
@@ -407,6 +480,7 @@ export async function runWorkingStateScenario(
       cumulativeTokens,
       peakPromptChars: meter.peak(),
       meanPromptCharsPerTurn: meter.mean(),
+      meanMutableCharsPerTurn: meter.meanMutable(),
       stateRecoverySteps: mock.stateRecoverySteps(),
       goalsCompleted: Object.values(goalStatuses).filter(
         (status) => status === 'done'
@@ -437,7 +511,7 @@ export async function runWorkingStateSweep(
 ): Promise<readonly AxWorkingStateScenarioResult[]> {
   const results: AxWorkingStateScenarioResult[] = [];
   for (const horizon of horizons) {
-    for (const arm of ['baseline', 'working-state'] as const) {
+    for (const arm of ['baseline', 'working-state', 'skill-state'] as const) {
       results.push(await runWorkingStateScenario(horizon, arm));
     }
   }

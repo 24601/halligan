@@ -14,6 +14,7 @@
 
 import { beforeAll, describe, expect, it } from 'vitest';
 import {
+  axWorkingStatePromptGrowth,
   axWorkingStatePromptOverhead,
   renderWorkingStateTable,
 } from './workingStateMetrics.js';
@@ -40,12 +41,25 @@ const PROMPT_OVERHEAD_CEILING = 0.6;
  */
 const MEASUREMENT_GAP_CEILING = 0.02;
 
+/**
+ * Declared ceiling for the `skill-state` arm's per-turn dynamic-tail growth
+ * between the two largest measured horizons. It is NOT 1.0: the scenario's
+ * goal ledger grows with the number of orders, which is a TASK-SIZE term the
+ * mode does not remove and does not claim to. The term the mode removes is the
+ * TRANSCRIPT, which is why the assertion below is relative to the two
+ * transcript arms as well.
+ */
+const SKILL_STATE_GROWTH_CEILING = 2.0;
+
 let sweep: readonly AxWorkingStateScenarioResult[];
 
 const rowsOf = (results: readonly AxWorkingStateScenarioResult[]) =>
   results.map((result) => result.row);
 
-const pick = (horizon: number, arm: 'baseline' | 'working-state') => {
+const pick = (
+  horizon: number,
+  arm: 'baseline' | 'working-state' | 'skill-state'
+) => {
   const found = sweep.find(
     (result) => result.row.horizon === horizon && result.row.arm === arm
   );
@@ -133,6 +147,72 @@ describe('working-state benchmark', () => {
     expect(first.traceDigests.length).toBeGreaterThan(0);
     expect(first.traceDigests).toEqual(second.traceDigests);
   }, 120_000);
+
+  it('A9: the skillState substrate grows more slowly than either transcript arm', () => {
+    // Measured on the MUTABLE tail: `meanPromptCharsPerTurn` folds in a large
+    // constant system prompt that dilutes every slope.
+    const growth = (arm: 'baseline' | 'working-state' | 'skill-state') =>
+      axWorkingStatePromptGrowth(rowsOf(sweep), arm, 25, MAX_HORIZON)!;
+
+    const baseline = growth('baseline');
+    const workingState = growth('working-state');
+    const skillState = growth('skill-state');
+
+    // The comparison is not vacuous: both transcript arms genuinely grow.
+    expect(baseline).toBeGreaterThan(1.5);
+    expect(workingState).toBeGreaterThan(1.5);
+    // The mode removes the transcript growth term while carrying the SAME
+    // state document as the `working-state` arm.
+    expect(skillState).toBeLessThan(baseline);
+    expect(skillState).toBeLessThan(workingState);
+    expect(skillState).toBeLessThan(SKILL_STATE_GROWTH_CEILING);
+  });
+
+  it('A10: skillState sends a smaller dynamic tail and makes fewer model calls', () => {
+    const skillState = pick(MAX_HORIZON, 'skill-state').row;
+    const workingState = pick(MAX_HORIZON, 'working-state').row;
+    const baseline = pick(MAX_HORIZON, 'baseline').row;
+
+    // Same document, no transcript: roughly half the dynamic tail.
+    expect(skillState.meanMutableCharsPerTurn).toBeLessThan(
+      workingState.meanMutableCharsPerTurn
+    );
+    expect(skillState.peakPromptChars).toBeLessThan(baseline.peakPromptChars);
+    // Fewer model calls than EITHER transcript arm: no checkpoint
+    // summarization runs, and no turn is spent re-deriving known state.
+    expect(skillState.modelCalls).toBeLessThan(workingState.modelCalls);
+    expect(skillState.modelCalls).toBeLessThan(baseline.modelCalls);
+  });
+
+  it('A11: skillState keeps the gate and the accuracy of the transcript arms', () => {
+    for (const horizon of AX_WORKING_STATE_BENCH_HORIZONS) {
+      const skillState = pick(horizon, 'skill-state');
+      const workingState = pick(horizon, 'working-state');
+      // The receipt gate is a property of the kernel, not of the substrate.
+      expect([horizon, skillState.row.falseCompletionsParked >= 1]).toEqual([
+        horizon,
+        true,
+      ]);
+      expect([horizon, skillState.goalStatuses.g_audit]).toEqual([
+        horizon,
+        'pending',
+      ]);
+      // Same goals closed, no recovery turns, accuracy not worse — with the
+      // transcript discarded.
+      expect([horizon, skillState.row.goalsCompleted]).toEqual([
+        horizon,
+        workingState.row.goalsCompleted,
+      ]);
+      expect([horizon, skillState.row.stateRecoverySteps]).toEqual([
+        horizon,
+        0,
+      ]);
+      expect([
+        horizon,
+        skillState.row.accuracy >= pick(horizon, 'baseline').row.accuracy,
+      ]).toEqual([horizon, true]);
+    }
+  });
 
   it('A8: the new prompt regions are counted by the budget meter', () => {
     // `budget_check.mutablePromptChars` is the benchmark's headline metric, so
