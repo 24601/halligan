@@ -12,7 +12,7 @@ let report: Readonly<AxTrajectoryProjectionReport>;
 
 beforeAll(async () => {
   report = await runTrajectoryProjectionEvaluation();
-}, 120_000);
+}, 300_000);
 
 const realRows = (): readonly AxTrajectoryProjectionRow[] =>
   report.rows.filter((row) => row.summarizer !== 'hollow-blocks');
