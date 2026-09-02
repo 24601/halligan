@@ -6,7 +6,9 @@ import {
   AxInMemoryTrajectoryStore,
   type AxTrajectoryCursor,
   type AxTrajectoryFieldValue,
+  type AxTrajectoryProjectionSection,
   type AxTrajectoryReadQuery,
+  type AxTrajectoryRollupBlock,
   type AxTrajectoryStep,
   type AxTrajectoryStore,
   type AxTrajectoryTailQuery,
@@ -83,3 +85,29 @@ const partial: AxTrajectoryTypeDescriptor = {
   wakeable: false,
 };
 void partial;
+
+// A projection section narrows on `kind`: a caller can never read `block` off
+// a gap, which is what makes "the summary is missing" impossible to ignore.
+declare const section: AxTrajectoryProjectionSection;
+if (section.kind === 'summary') {
+  const block: AxTrajectoryRollupBlock = section.block;
+  const tier: number = block.tier;
+  void tier;
+  // @ts-expect-error a summary section has no gap reason
+  void section.reason;
+} else {
+  const reason: 'pre-enable' | 'missing' = section.reason;
+  void reason;
+  // @ts-expect-error a gap section has no block
+  void section.block;
+}
+
+// A sealed block is immutable: it is a cache entry with provenance, and a
+// caller that could edit `summary` could rewrite the agent's own memory.
+declare const sealed: AxTrajectoryRollupBlock;
+// @ts-expect-error summary is readonly
+sealed.summary = 'rewritten';
+// @ts-expect-error the cited id list is readonly
+sealed.stepIds.push('x');
+// @ts-expect-error provenance is readonly
+sealed.summarizerId = 'someone-else';

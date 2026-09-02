@@ -27,12 +27,48 @@ export {
   AxInMemoryTrajectoryBlobStore,
   AxInMemoryTrajectoryStore,
 } from './memoryStore.js';
+export type {
+  AxTrajectoryProjection,
+  AxTrajectoryProjectionOptions,
+  AxTrajectoryProjectionSection,
+} from './projection.js';
+export {
+  axProjectTrajectory,
+  axRenderTrajectoryProjection,
+  axResolveTrajectoryCitations,
+  axTrajectoryContextBudget,
+  axTrajectoryDefaultBudgetTokens,
+  axTrajectoryDefaultFanout,
+  axTrajectoryMinRecentSteps,
+  axTrajectoryRecentSize,
+  axTrajectoryScanPageSteps,
+  axTrajectoryTokensPerStep,
+} from './projection.js';
 export type { AxTrajectoryTypeRegistryOptions } from './registry.js';
 export {
   axDefaultTrajectoryTypes,
   axTrajectoryTypeRegistry,
   axTrajectoryUnknownDescriptor,
 } from './registry.js';
+export type {
+  AxDeterministicTrajectorySummarizerOptions,
+  AxTrajectoryBuildRollupsOptions,
+  AxTrajectoryBuildRollupsResult,
+  AxTrajectoryProgramSummarizerOptions,
+  AxTrajectoryRollupBlock,
+  AxTrajectoryRollupMeta,
+  AxTrajectoryRollupStore,
+  AxTrajectorySummarizer,
+  AxTrajectorySummarizerRequest,
+  AxTrajectorySummarizerResult,
+} from './rollups.js';
+export {
+  AxInMemoryTrajectoryRollupStore,
+  axBuildTrajectoryRollups,
+  axDeterministicTrajectorySummarizer,
+  axTrajectoryProgramSummarizer,
+  axTrajectoryRollupSignature,
+} from './rollups.js';
 export type {
   AxTrajectoryResolveOptions,
   AxTrajectorySpillPolicy,
