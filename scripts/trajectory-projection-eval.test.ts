@@ -27,6 +27,8 @@ function mutate(
 
 describe('trajectory projection evaluation', () => {
   it('spends nothing and states what it is not', () => {
+    // `providerCalls` is an instrumented count of outbound fetches made while
+    // the rows were measured, not a literal checked against itself.
     expect(report.budget).toMatchObject({
       providerCalls: 0,
       tokens: 0,
@@ -57,6 +59,8 @@ describe('trajectory projection evaluation', () => {
         expect(row.lifeSections).toBeLessThanOrEqual(row.sectionBound);
         // Tiers are an optimization: deleting every block leaves the tail.
         expect(row.degradedRecentSteps).toBe(row.recentSteps);
+        // ...and leaves it for a BOUNDED number of store round-trips.
+        expect(row.degradedRollupReads).toBeLessThanOrEqual(row.descentBudget);
         expect(row.recentSteps).toBe(Math.min(size, row.recentSize));
         if (size > row.recentSize) {
           // Two-sided: a ceiling on sections is also met by emitting none.
@@ -202,6 +206,14 @@ describe('the shipped gate has teeth', () => {
         if (row) row.degradedRecentSteps = 0;
       },
       'changed the raw tail',
+    ],
+    [
+      'a degraded projection that swept the whole missing pyramid',
+      (rows: AxTrajectoryProjectionRow[]) => {
+        const row = rows.find((entry) => entry.narrativeSteps === 1_000_000);
+        if (row) row.degradedRollupReads = row.descentBudget + 1;
+      },
+      'descent budget',
     ],
     [
       'a generator that disagrees with the reference store',

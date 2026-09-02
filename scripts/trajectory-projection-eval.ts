@@ -22,6 +22,7 @@ import {
   axProjectTrajectory,
   axResolveTrajectoryCitations,
   axTrajectoryContextBudget,
+  axTrajectoryDescentBudget,
   axTrajectoryRecentSize,
 } from '../src/ax/index.js';
 
@@ -310,6 +311,13 @@ export interface AxTrajectoryProjectionRow {
   readonly compression: number;
   /** Recent steps still returned after every rollup block is deleted. */
   readonly degradedRecentSteps: number;
+  /**
+   * The counter-metric for "degrades cleanly": store round-trips the staircase
+   * spends looking for blocks that are gone. Cleanly is not free, and an
+   * unbounded descent pays O(N / F) of these on EVERY wake.
+   */
+  readonly degradedRollupReads: number;
+  readonly descentBudget: number;
   readonly buildMs: number;
   readonly projectMs: number;
 }
@@ -414,10 +422,20 @@ async function measure(
   }
 
   rollups.deleteBlocks();
+  let degradedRollupReads = 0;
+  const countingRollups: AxTrajectoryRollupStore = {
+    loadMeta: (id, signal) => rollups.loadMeta(id, signal),
+    saveMeta: (id, meta, signal) => rollups.saveMeta(id, meta, signal),
+    putBlock: (id, block, signal) => rollups.putBlock(id, block, signal),
+    getBlock: (id, tier, start, signal) => {
+      degradedRollupReads += 1;
+      return rollups.getBlock(id, tier, start, signal);
+    },
+  };
   const degraded = await axProjectTrajectory({
     trajectoryId: fixture.trajectoryId,
     store: fixture.store,
-    rollups,
+    rollups: countingRollups,
     fanout: FANOUT,
     budgetTokens: BUDGET_TOKENS,
   });
@@ -457,6 +475,11 @@ async function measure(
         ? 0
         : Math.ceil(rawChars / CHARS_PER_TOKEN) / projection.estimatedTokens,
     degradedRecentSteps: degraded.recent.length,
+    degradedRollupReads,
+    descentBudget: axTrajectoryDescentBudget(
+      Math.max(filtered - recentSize, 0),
+      FANOUT
+    ),
     buildMs: Math.round(buildMs),
     projectMs: Math.round(projectMs),
   };
@@ -518,6 +541,29 @@ export interface AxTrajectoryProjectionReport {
   readonly rows: readonly AxTrajectoryProjectionRow[];
 }
 
+/**
+ * `providerCalls: 0` was a literal checked against itself. This counts the
+ * only way a provider could be reached from here -- an outbound fetch -- so a
+ * summarizer that quietly acquired one would show up in the number the gate
+ * reads.
+ */
+async function withOutboundCallsCounted<T>(
+  run: () => Promise<T>
+): Promise<Readonly<{ value: T; calls: number }>> {
+  const original = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = ((...args: Parameters<typeof fetch>) => {
+    calls += 1;
+    return original(...args);
+  }) as typeof fetch;
+  try {
+    const value = await run();
+    return { value, calls };
+  } finally {
+    globalThis.fetch = original;
+  }
+}
+
 export async function runTrajectoryProjectionEvaluation(): Promise<
   Readonly<AxTrajectoryProjectionReport>
 > {
@@ -525,14 +571,16 @@ export async function runTrajectoryProjectionEvaluation(): Promise<
   const rows: AxTrajectoryProjectionRow[] = [];
   // The two small sizes run on BOTH the reference store and the generator, so
   // the generator is checked against the implementation it stands in for.
-  rows.push(await measure(await memoryFixture(10)));
-  rows.push(await measure(syntheticFixture(10)));
-  rows.push(await measure(await memoryFixture(1_000)));
-  rows.push(await measure(syntheticFixture(1_000)));
-  rows.push(await measure(syntheticFixture(100_000)));
-  rows.push(await measure(syntheticFixture(1_000_000)));
-  // The counter-metric's control.
-  rows.push(await measure(syntheticFixture(1_000), { hollow: true }));
+  const { calls } = await withOutboundCallsCounted(async () => {
+    rows.push(await measure(await memoryFixture(10)));
+    rows.push(await measure(syntheticFixture(10)));
+    rows.push(await measure(await memoryFixture(1_000)));
+    rows.push(await measure(syntheticFixture(1_000)));
+    rows.push(await measure(syntheticFixture(100_000)));
+    rows.push(await measure(syntheticFixture(1_000_000)));
+    // The counter-metric's control.
+    rows.push(await measure(syntheticFixture(1_000), { hollow: true }));
+  });
   return {
     honesty: AX_TRAJECTORY_PROJECTION_HONESTY,
     claim:
@@ -540,7 +588,7 @@ export async function runTrajectoryProjectionEvaluation(): Promise<
     baseline:
       'Full raw replay of the same log: every filtered step rendered verbatim, measured with the same formatter.',
     budget: {
-      providerCalls: 0,
+      providerCalls: calls,
       tokens: 0,
       usd: 0,
       wallClockMs: Math.round(performance.now() - started),
@@ -585,6 +633,14 @@ export function assertTrajectoryProjectionEvaluation(
     }
     if (row.chronologyInversions !== 0) {
       fail(`${at}: ${row.chronologyInversions} chronology inversions`);
+    }
+    // Degrading cleanly must also degrade CHEAPLY: an unbounded descent forks
+    // once per node through the missing pyramid, ~111,000 store round-trips
+    // per wake at a million steps.
+    if (row.degradedRollupReads > row.descentBudget) {
+      fail(
+        `${at}: the degraded projection spent ${row.degradedRollupReads} rollup reads, over the ${row.descentBudget} descent budget`
+      );
     }
     // Two-sided: coverage of 1.0 is also satisfiable by citing nothing at all.
     // A log shorter than R has no summaries to cite from -- it is all raw.
