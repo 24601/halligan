@@ -19,6 +19,8 @@ import type { AxGenOut } from '../types.js';
 import {
   type AxACEPlaybookRenderOptions,
   applyCuratorOperations,
+  axProjectActorPlaybook,
+  axRenderActorPlaybook,
   clonePlaybook,
   createEmptyPlaybook,
   createExecutablePlaybookView,
@@ -28,6 +30,7 @@ import {
   updateBulletFeedback,
 } from './acePlaybook.js';
 import type {
+  AxACEActorPlaybookView,
   AxACEApplicability,
   AxACEBullet,
   AxACECuratorOperation,
@@ -326,7 +329,9 @@ export class AxACEOptimizedProgram<
     const combinedInstruction = [
       originalDescription.trim(),
       '',
-      renderPlaybook(this.playbook, { includeInapplicable: true }),
+      axRenderActorPlaybook(
+        axProjectActorPlaybook(this.playbook, { includeInapplicable: true })
+      ),
     ]
       .filter((block) => block && block.trim().length > 0)
       .join('\n\n');
@@ -342,7 +347,10 @@ export class AxACEOptimizedProgram<
  */
 export class AxACE extends AxBaseOptimizer {
   private readonly aceConfig: Required<typeof DEFAULT_CONFIG> &
-    Pick<AxACEOptions, 'initialPlaybook' | 'sourceRunId'>;
+    Pick<
+      AxACEOptions,
+      'initialPlaybook' | 'sourceRunId' | 'defaultBulletVisibility'
+    >;
   private playbook: AxACEPlaybook;
   private baseInstruction?: string;
   private generatorHistory: AxACEFeedbackEvent[] = [];
@@ -605,6 +613,11 @@ export class AxACE extends AxBaseOptimizer {
                   source: 'compile',
                   ...(sourceRunId ? { sourceRunId } : {}),
                   feedbackIds: [feedbackId],
+                  ...(this.aceConfig.defaultBulletVisibility
+                    ? {
+                        visibility: this.aceConfig.defaultBulletVisibility,
+                      }
+                    : {}),
                 },
               }
             );
@@ -796,6 +809,9 @@ export class AxACE extends AxBaseOptimizer {
         enableAutoPrune: true,
         protectedBulletIds: protectedIds,
         hostEvidence: {
+          ...(this.aceConfig.defaultBulletVisibility
+            ? { visibility: this.aceConfig.defaultBulletVisibility }
+            : {}),
           ...args.evidence,
           source: args.evidence?.source ?? 'online',
           feedbackIds: [feedbackId, ...(args.evidence?.feedbackIds ?? [])],
@@ -880,6 +896,13 @@ export class AxACE extends AxBaseOptimizer {
     return result.updatedBulletIds;
   }
 
+  /** The projected, actor-safe view of the current playbook. */
+  public getActorPlaybookView(
+    options?: Readonly<AxACEPlaybookRenderOptions>
+  ): AxACEActorPlaybookView {
+    return axProjectActorPlaybook(this.playbook, options);
+  }
+
   private composeInstruction(
     baseInstruction: string,
     playbook: AxACEPlaybook,
@@ -888,7 +911,9 @@ export class AxACE extends AxBaseOptimizer {
     const instructionParts = [
       baseInstruction.trim(),
       '',
-      renderPlaybook(playbook, renderOptions),
+      // The actor projection, not `renderPlaybook`: this is the path that
+      // builds the generator's own instruction on every compile step.
+      axRenderActorPlaybook(axProjectActorPlaybook(playbook, renderOptions)),
     ].filter((part) => part.trim().length > 0);
 
     return instructionParts.join('\n\n');

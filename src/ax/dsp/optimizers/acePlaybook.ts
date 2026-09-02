@@ -1,11 +1,14 @@
 import { getCrypto } from '../../util/crypto.js';
 import type {
+  AxACEActorPlaybookView,
   AxACEApplicability,
   AxACEBullet,
   AxACEBulletEvidence,
+  AxACEBulletVisibility,
   AxACECuratorOperation,
   AxACEHostEvidence,
   AxACEPlaybook,
+  AxACEPreconditionDecision,
   AxACEProvenance,
   AxACEVerificationResult,
 } from './aceTypes.js';
@@ -177,6 +180,11 @@ function applyCuratorOperationsInPlace(
         }
 
         const supersedes = normalizeSupersedes(op.supersedes);
+        const addedVisibility = resolveWrittenVisibility(
+          undefined,
+          op,
+          hostEvidence
+        );
         const bullet: AxACEBullet = {
           id,
           section: op.section,
@@ -189,6 +197,7 @@ function applyCuratorOperationsInPlace(
           revision: 1,
           lineage: supersedes.length ? { supersedes } : undefined,
           evidence: mergeBulletEvidence(undefined, op.evidence, hostEvidence),
+          ...(addedVisibility ? { visibility: addedVisibility } : {}),
         };
         section.push(bullet);
         updatedBullets.push(id);
@@ -226,6 +235,14 @@ function applyCuratorOperationsInPlace(
           op.evidence,
           hostEvidence
         );
+        const updatedVisibility = resolveWrittenVisibility(
+          bullet.visibility,
+          op,
+          hostEvidence
+        );
+        if (updatedVisibility) {
+          bullet.visibility = updatedVisibility;
+        }
         updatedBullets.push(bullet.id);
         applySupersession(playbook, supersedes, bullet.id, now, changes);
         changes.push({
@@ -324,6 +341,64 @@ export function renderPlaybook(
     .join('\n\n');
 
   return `${header}\n${sections}`.trim();
+}
+
+/**
+ * Module-private brand. A public `kind` string is a label any caller can write;
+ * membership here is the enforcement, and it cannot survive JSON.
+ */
+const actorViewRenderOptions = new WeakMap<
+  object,
+  Readonly<AxACEPlaybookRenderOptions>
+>();
+
+/**
+ * Project a playbook for the actor: drop optimizer-tier bullets, then apply the
+ * existing lifecycle, expiry, and applicability gates. `renderPlaybook` is left
+ * alone as the FULL renderer the reflector and curator keep using; filtering
+ * there would blind both stages and delete the tier's whole purpose.
+ */
+export function axProjectActorPlaybook(
+  playbook: Readonly<AxACEPlaybook>,
+  options?: Readonly<AxACEPlaybookRenderOptions>
+): AxACEActorPlaybookView {
+  // Resolve the clock once so the projection and the render that follows it
+  // cannot straddle an expiry boundary.
+  const now = options?.now ?? new Date().toISOString();
+  const resolved: AxACEPlaybookRenderOptions = { ...(options ?? {}), now };
+  const decisions: AxACEPreconditionDecision[] = [];
+  const projected = clonePlaybook(playbook);
+  for (const [section, bullets] of Object.entries(projected.sections)) {
+    projected.sections[section] = bullets.filter((bullet) => {
+      if (bullet.visibility === 'optimizer') {
+        return false;
+      }
+      return isBulletApplicable(bullet, resolved);
+    });
+  }
+  recomputePlaybookStats(projected);
+  const view: AxACEActorPlaybookView = Object.freeze({
+    kind: 'ax-ace-actor-playbook-view' as const,
+    playbook: projected,
+    decisions: Object.freeze(decisions),
+  });
+  actorViewRenderOptions.set(view, Object.freeze(resolved));
+  return view;
+}
+
+/**
+ * Render an already-projected view. The only actor-facing renderer.
+ */
+export function axRenderActorPlaybook(
+  view: Readonly<AxACEActorPlaybookView>
+): string {
+  const options = actorViewRenderOptions.get(view as object);
+  if (!options) {
+    throw new TypeError(
+      'AxACE: actor playbook view was not produced by axProjectActorPlaybook'
+    );
+  }
+  return renderPlaybook(view.playbook, options);
 }
 
 /** @internal Build the safe playbook view supplied to executable ACE stages. */
@@ -543,12 +618,45 @@ function assertPlaybookMutable(
         !isEvidenceStructurallyValid(bullet.evidence) ||
         (bullet.metadata !== undefined && !isRecord(bullet.metadata)) ||
         (bullet.tags !== undefined && conditionList(bullet.tags) === null) ||
-        !isLineageStructurallyValid(bullet.lineage)
+        !isLineageStructurallyValid(bullet.lineage) ||
+        !isVisibilityStructurallyValid(bullet.visibility)
       ) {
         throw new TypeError(`AxACE: bullet in section ${section} is malformed`);
       }
     }
   }
+}
+
+/**
+ * A tier that is present but not exactly `'actor'` or `'optimizer'` fails
+ * closed. Defaulting a malformed value to actor-visible would make a typo an
+ * exposure.
+ */
+function isVisibilityStructurallyValid(value: unknown): boolean {
+  return value === undefined || value === 'actor' || value === 'optimizer';
+}
+
+/**
+ * Resolve the tier a written bullet carries.
+ *
+ * Precedence, and the order matters: an explicit host tier wins, because the
+ * host owns promotion. Otherwise the curator may only downgrade, and an ADD or
+ * UPDATE that carries no `visibility` never clears an existing `'optimizer'` —
+ * `op.visibility ?? bullet.visibility` would let an absent field launder a
+ * bullet back into the actor prompt.
+ */
+function resolveWrittenVisibility(
+  current: AxACEBulletVisibility | undefined,
+  operation: Readonly<AxACECuratorOperation>,
+  hostEvidence: Readonly<AxACEHostEvidence> | undefined
+): AxACEBulletVisibility | undefined {
+  if (hostEvidence?.visibility !== undefined) {
+    return hostEvidence.visibility;
+  }
+  if (operation.visibility === 'optimizer') {
+    return 'optimizer';
+  }
+  return current;
 }
 
 function isLineageStructurallyValid(value: unknown): boolean {
@@ -577,7 +685,11 @@ function assertCuratorOperation(
       typeof operation.bulletId !== 'string') ||
     (operation.metadata !== undefined && !isRecord(operation.metadata)) ||
     !isEvidenceStructurallyValid(operation.evidence) ||
-    conditionList(operation.supersedes) === null
+    conditionList(operation.supersedes) === null ||
+    // Downgrade-only: promotion to `'actor'` is host-owned and is not
+    // expressible here, in TypeScript or at runtime. Curator JSON reaches this
+    // function through a cast, not a parse, so the runtime check is the gate.
+    (operation.visibility !== undefined && operation.visibility !== 'optimizer')
   ) {
     throw new TypeError('AxACE: curator operation is malformed');
   }
@@ -603,6 +715,7 @@ function assertHostEvidence(value: unknown): void {
     (value.confidence !== undefined &&
       (typeof value.confidence !== 'number' ||
         !Number.isFinite(value.confidence))) ||
+    !isVisibilityStructurallyValid(value.visibility) ||
     !isEvidenceStructurallyValid({ verification: value.verification })
   ) {
     throw new TypeError('AxACE: host evidence is malformed');

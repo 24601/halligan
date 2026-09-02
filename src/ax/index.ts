@@ -1074,15 +1074,19 @@ import {
   AxACEOptimizedProgram,
   type AxACEResult,
 } from './dsp/optimizers/ace.js';
-import type {
-  AxACEBulletChange,
-  AxACEPlaybookRenderOptions,
+import {
+  type AxACEBulletChange,
+  type AxACEPlaybookRenderOptions,
+  axProjectActorPlaybook,
+  axRenderActorPlaybook,
 } from './dsp/optimizers/acePlaybook.js';
 import type {
+  AxACEActorPlaybookView,
   AxACEApplicability,
   AxACEBullet,
   AxACEBulletEvidence,
   AxACEBulletLifecycle,
+  AxACEBulletVisibility,
   AxACECuratorOperation,
   AxACECuratorOperationType,
   AxACECuratorOutput,
@@ -1092,6 +1096,7 @@ import type {
   AxACEOptimizationArtifact,
   AxACEOptions,
   AxACEPlaybook,
+  AxACEPreconditionDecision,
   AxACEProvenance,
   AxACEReflectionOutput,
   AxACEVerificationResult,
@@ -2743,6 +2748,7 @@ export { axProcessContentForProvider };
 export { axProgramSourceDefaultNodeResourceLimits };
 export { axProgramSourceRuntimeProtocol };
 export { axProgramSourceVersion };
+export { axProjectActorPlaybook };
 export { axProjectTrajectory };
 export { axReactCanonicalJSON };
 export { axReactSerializeHistory };
@@ -2752,6 +2758,7 @@ export { axRecoverMindPacerState };
 export { axRejectedCandidateDigest };
 export { axRejectedCandidateLedgerEntry };
 export { axRejectedCandidatePrior };
+export { axRenderActorPlaybook };
 export { axRenderTrajectoryProjection };
 export { axRenewPreferenceEvidence };
 export { axReplaceOptimizedProgramSnapshot };
@@ -2869,11 +2876,13 @@ export { runAxTrajectoryStoreConformance };
 export { s };
 
 // Type exports
+export type { AxACEActorPlaybookView };
 export type { AxACEApplicability };
 export type { AxACEBullet };
 export type { AxACEBulletChange };
 export type { AxACEBulletEvidence };
 export type { AxACEBulletLifecycle };
+export type { AxACEBulletVisibility };
 export type { AxACECuratorOperation };
 export type { AxACECuratorOperationType };
 export type { AxACECuratorOutput };
@@ -2884,6 +2893,7 @@ export type { AxACEOptimizationArtifact };
 export type { AxACEOptions };
 export type { AxACEPlaybook };
 export type { AxACEPlaybookRenderOptions };
+export type { AxACEPreconditionDecision };
 export type { AxACEProvenance };
 export type { AxACEReflectionOutput };
 export type { AxACEResult };
