@@ -2010,6 +2010,25 @@
       "verification": null
     },
     {
+      "id": "axir-2026-09-02-call-time-skill-injection-with-a-speculation-adapter-interlock",
+      "status": "open",
+      "title": "Call-time skill injection with a speculation-adapter interlock",
+      "createdAt": "2026-09-02",
+      "sourcePR": 98,
+      "sourceCommit": "e0167695dc78690204b890be0c192f4c38842208",
+      "tsPaths": ["src/ax/agent/callTimeSkills.ts"],
+      "portableSurface": "axagent",
+      "impact": "Adds an opt-in per-callable binding to the actor loop: when the actor drafts a call to a bound qualified callable the harness returns a frozen not-executed marker BEFORE the authority boundary instead of dispatching, so the call requests no authorization, fires no onFunctionCall, produces no function-call record and mints no working-state tool receipt; the bound skill is then ingested through the existing loaded-skills channel and harness-authored guidance is appended to the trusted guidance log so the model re-drafts on the next turn. A bound callable is additionally excluded from the JS-runtime speculation adapter, so the speculation path cannot execute, authorize or mint behind the interception. Injections are budgeted per callable (default 1), an optional predicate over the committed working state gates them, and the trace records the intercepted turn as not executed. Default behaviour is unchanged when callTimeSkills is unset.",
+      "suggestedAxirWork": [
+        "Add or update the TS-derived conformance fixture.",
+        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
+        "Run npm run axir:conformance:check and npm run test:axir."
+      ],
+      "completedAt": null,
+      "completedByCommit": null,
+      "verification": null
+    },
+    {
       "id": "axir-2026-09-02-gepa-evidence-primitives-branded-digests-trajectory-admission-mu",
       "status": "open",
       "title": "GEPA evidence primitives: branded digests, trajectory admission, mutation taxonomy, harness recipes, discriminative sampling with IPW, candidate effect declarations, rejected-candidate ledger",
