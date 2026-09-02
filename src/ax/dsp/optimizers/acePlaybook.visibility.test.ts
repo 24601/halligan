@@ -12,6 +12,7 @@ import {
   axRenderActorPlaybook,
   createEmptyPlaybook,
   createExecutablePlaybookView,
+  dedupePlaybookByContent,
   isBulletApplicable,
   renderPlaybook,
 } from './acePlaybook.js';
@@ -332,6 +333,113 @@ describe('the actor never sees the optimizer tier', () => {
       // would pass the leak assertions above and fail this one.
       expect(surface).toContain('actor secret text 0');
     }
+  });
+});
+
+describe('visibility laundering is blocked', () => {
+  function optimizerSeed(): AxACEPlaybook {
+    const playbook = createEmptyPlaybook('Laundering fixture');
+    playbook.sections.Guidelines = [
+      bullet({ id: 'actor-keep', content: 'ordinary actor guidance' }),
+    ];
+    playbook.sections['Common Pitfalls'] = [
+      bullet({
+        id: 'optimizer-seed',
+        section: 'Common Pitfalls',
+        content: 'internal diagnostic never shown to the actor',
+        visibility: 'optimizer',
+      }),
+    ];
+    return playbook;
+  }
+
+  const LEAK = 'internal diagnostic never shown to the actor';
+
+  it('a curator ADD copying optimizer content verbatim inherits optimizer', () => {
+    const playbook = optimizerSeed();
+    applyCuratorOperations(playbook, [
+      { type: 'ADD', section: 'Guidelines', content: LEAK },
+    ]);
+    const added = playbook.sections.Guidelines?.find(
+      (entry) => entry.id !== 'actor-keep'
+    );
+    expect(added?.visibility).toBe('optimizer');
+    expect(
+      axRenderActorPlaybook(axProjectActorPlaybook(playbook, { now: NOW }))
+    ).not.toContain(LEAK);
+  });
+
+  it('case and whitespace variants of the same content still inherit', () => {
+    const playbook = optimizerSeed();
+    applyCuratorOperations(playbook, [
+      {
+        type: 'ADD',
+        section: 'Guidelines',
+        content: `  ${LEAK.toUpperCase()} `,
+      },
+    ]);
+    const added = playbook.sections.Guidelines?.find(
+      (entry) => entry.id !== 'actor-keep'
+    );
+    expect(added?.visibility).toBe('optimizer');
+  });
+
+  it('a curator UPDATE rewriting a bullet to optimizer content inherits optimizer', () => {
+    const playbook = optimizerSeed();
+    applyCuratorOperations(playbook, [
+      {
+        type: 'UPDATE',
+        section: 'Guidelines',
+        bulletId: 'actor-keep',
+        content: LEAK,
+      },
+    ]);
+    expect(playbook.sections.Guidelines?.[0]?.visibility).toBe('optimizer');
+  });
+
+  it('a curator ADD superseding an optimizer bullet inherits optimizer', () => {
+    const playbook = optimizerSeed();
+    applyCuratorOperations(playbook, [
+      {
+        type: 'ADD',
+        section: 'Common Pitfalls',
+        content: 'a rewrite that replaces the internal diagnostic',
+        supersedes: ['optimizer-seed'],
+      },
+    ]);
+    const replacement = playbook.sections['Common Pitfalls']?.find(
+      (entry) => entry.id !== 'optimizer-seed'
+    );
+    expect(replacement?.visibility).toBe('optimizer');
+  });
+
+  it('dedupePlaybookByContent takes the more restrictive visibility of a merged pair', () => {
+    const playbook = createEmptyPlaybook('Merge fixture');
+    playbook.sections.Guidelines = [
+      bullet({ id: 'plain', content: 'shared text' }),
+      bullet({ id: 'tiered', content: 'shared text', visibility: 'optimizer' }),
+    ];
+    dedupePlaybookByContent(playbook);
+    expect(playbook.sections.Guidelines).toHaveLength(1);
+    expect(playbook.sections.Guidelines?.[0]?.visibility).toBe('optimizer');
+    expect(
+      axRenderActorPlaybook(axProjectActorPlaybook(playbook, { now: NOW }))
+    ).not.toContain('shared text');
+  });
+
+  it('an ordinary ADD in a playbook with an optimizer tier stays actor-visible', () => {
+    // The inheritance rules must not quarantine unrelated new guidance.
+    const playbook = optimizerSeed();
+    applyCuratorOperations(playbook, [
+      { type: 'ADD', section: 'Guidelines', content: 'unrelated new guidance' },
+    ]);
+    const added = playbook.sections.Guidelines?.find(
+      (entry) => entry.content === 'unrelated new guidance'
+    );
+    expect(added).not.toHaveProperty('visibility');
+    expect(
+      axRenderActorPlaybook(axProjectActorPlaybook(playbook, { now: NOW }))
+    ).toContain('unrelated new guidance');
   });
 });
 

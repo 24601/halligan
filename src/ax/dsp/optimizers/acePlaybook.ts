@@ -180,11 +180,15 @@ function applyCuratorOperationsInPlace(
         }
 
         const supersedes = normalizeSupersedes(op.supersedes);
-        const addedVisibility = resolveWrittenVisibility(
-          undefined,
-          op,
-          hostEvidence
-        );
+        const addedVisibility = resolveWrittenVisibility({
+          current: undefined,
+          playbook,
+          bulletId: id,
+          content,
+          supersedes,
+          operation: op,
+          hostEvidence,
+        });
         const bullet: AxACEBullet = {
           id,
           section: op.section,
@@ -235,11 +239,15 @@ function applyCuratorOperationsInPlace(
           op.evidence,
           hostEvidence
         );
-        const updatedVisibility = resolveWrittenVisibility(
-          bullet.visibility,
-          op,
-          hostEvidence
-        );
+        const updatedVisibility = resolveWrittenVisibility({
+          current: bullet.visibility,
+          playbook,
+          bulletId: bullet.id,
+          content: bullet.content,
+          supersedes,
+          operation: op,
+          hostEvidence,
+        });
         if (updatedVisibility) {
           bullet.visibility = updatedVisibility;
         }
@@ -636,27 +644,116 @@ function isVisibilityStructurallyValid(value: unknown): boolean {
   return value === undefined || value === 'actor' || value === 'optimizer';
 }
 
+/** The dedupe key `dedupePlaybookByContent` uses, reused for laundering. */
+function contentKey(content: string): string {
+  return content.trim().toLowerCase();
+}
+
+/**
+ * True when some other bullet with the same normalized content already sits in
+ * the optimizer tier. The curator is shown optimizer-tier content by design and
+ * could otherwise re-emit it verbatim as a new, tier-absent — therefore
+ * actor-visible — bullet.
+ */
+function matchesOptimizerContent(
+  playbook: Readonly<AxACEPlaybook>,
+  content: string,
+  excludeBulletId: string | undefined
+): boolean {
+  const key = contentKey(content);
+  if (!key) {
+    return false;
+  }
+  for (const bullets of Object.values(playbook.sections)) {
+    for (const bullet of bullets) {
+      if (
+        bullet.visibility === 'optimizer' &&
+        bullet.id !== excludeBulletId &&
+        contentKey(bullet.content) === key
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * True when the write supersedes an optimizer-tier bullet. `dedupePlaybookByContent`
+ * installs the NEW bullet as the survivor of a replacement pair, so a supersede
+ * without this rule is a tier swap.
+ */
+function supersedesOptimizer(
+  playbook: Readonly<AxACEPlaybook>,
+  supersedes: readonly string[]
+): boolean {
+  if (supersedes.length === 0) {
+    return false;
+  }
+  const targets = new Set(supersedes);
+  for (const bullets of Object.values(playbook.sections)) {
+    for (const bullet of bullets) {
+      if (targets.has(bullet.id) && bullet.visibility === 'optimizer') {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 /**
  * Resolve the tier a written bullet carries.
  *
  * Precedence, and the order matters: an explicit host tier wins, because the
- * host owns promotion. Otherwise the curator may only downgrade, and an ADD or
- * UPDATE that carries no `visibility` never clears an existing `'optimizer'` —
- * `op.visibility ?? bullet.visibility` would let an absent field launder a
- * bullet back into the actor prompt.
+ * host owns promotion. Otherwise the curator may only downgrade; an ADD or
+ * UPDATE that carries no `visibility` never clears an existing `'optimizer'`
+ * (`op.visibility ?? bullet.visibility` would let an absent field launder a
+ * bullet back into the actor prompt); and a write that copies optimizer-tier
+ * content verbatim, or supersedes an optimizer-tier bullet, inherits the tier.
+ *
+ * These rules block copy, supersede-swap and merge-survivor promotion. They do
+ * NOT block paraphrase, and no exact-content rule can. The tier gates artifacts,
+ * not text.
  */
-function resolveWrittenVisibility(
-  current: AxACEBulletVisibility | undefined,
-  operation: Readonly<AxACECuratorOperation>,
-  hostEvidence: Readonly<AxACEHostEvidence> | undefined
-): AxACEBulletVisibility | undefined {
-  if (hostEvidence?.visibility !== undefined) {
-    return hostEvidence.visibility;
+function resolveWrittenVisibility(args: {
+  current: AxACEBulletVisibility | undefined;
+  playbook: Readonly<AxACEPlaybook>;
+  bulletId?: string;
+  content?: string;
+  supersedes: readonly string[];
+  operation: Readonly<AxACECuratorOperation>;
+  hostEvidence: Readonly<AxACEHostEvidence> | undefined;
+}): AxACEBulletVisibility | undefined {
+  if (args.hostEvidence?.visibility !== undefined) {
+    return args.hostEvidence.visibility;
   }
-  if (operation.visibility === 'optimizer') {
+  if (
+    args.operation.visibility === 'optimizer' ||
+    args.current === 'optimizer'
+  ) {
     return 'optimizer';
   }
-  return current;
+  if (
+    args.content !== undefined &&
+    matchesOptimizerContent(args.playbook, args.content, args.bulletId)
+  ) {
+    return 'optimizer';
+  }
+  if (supersedesOptimizer(args.playbook, args.supersedes)) {
+    return 'optimizer';
+  }
+  return args.current;
+}
+
+/** `optimizer` beats `actor` beats absent. Merging may only tighten. */
+function mostRestrictiveVisibility(
+  survivor: AxACEBulletVisibility | undefined,
+  duplicate: AxACEBulletVisibility | undefined
+): AxACEBulletVisibility | undefined {
+  if (survivor === 'optimizer' || duplicate === 'optimizer') {
+    return 'optimizer';
+  }
+  return survivor;
 }
 
 function isLineageStructurallyValid(value: unknown): boolean {
@@ -853,6 +950,15 @@ export function dedupePlaybookByContent(
       : undefined;
     survivor.helpfulCount += duplicate.helpfulCount;
     survivor.harmfulCount += duplicate.harmfulCount;
+    // Without this the survivor of a merge is whichever bullet happened to be
+    // seen first, so a duplicate pair could promote optimizer content.
+    const mergedVisibility = mostRestrictiveVisibility(
+      survivor.visibility,
+      duplicate.visibility
+    );
+    if (mergedVisibility) {
+      survivor.visibility = mergedVisibility;
+    }
     if (Date.parse(duplicate.updatedAt) > Date.parse(survivor.updatedAt)) {
       survivor.updatedAt = duplicate.updatedAt;
     }
