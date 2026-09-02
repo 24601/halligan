@@ -1,4 +1,10 @@
 import type { AxFunction } from '../ai/types.js';
+import {
+  axCollectGrantRequirements,
+  axEvaluateGuards,
+  axIsEvidenceRequirement,
+  evidenceRequirementKey,
+} from './evidence.js';
 import type {
   AxActor,
   AxAuthorityClaim,
@@ -10,12 +16,26 @@ import type {
   AxAuthorizationRequestContext,
   AxCapabilityGrant,
   AxDelegationClaims,
+  AxEvidenceObservation,
+  AxEvidenceRequirement,
   AxResourceScope,
 } from './types.js';
 
 let fallbackRequestId = 0;
 const authoritySnapshots = new WeakSet<object>();
 const DEFAULT_AUTHORIZE_TIMEOUT_MS = 30_000;
+/** Bounds the per-grant contingency list a host may declare. */
+const MAX_GRANT_REQUIREMENTS = 32;
+/**
+ * Bounds the observation set a host may attach to one authority — including the
+ * set a per-request `observeEvidence` supplier returns, which is cloned and
+ * frozen on every `axAuthorize` call and scanned once per requirement.
+ */
+const MAX_EVIDENCE_OBSERVATIONS = 64;
+/** Matches the advisory bound the rest of this subsystem's labels use. */
+const MAX_FAILED_PREDICATE_KIND = 240;
+const EMPTY_EVIDENCE: readonly Readonly<AxEvidenceObservation>[] =
+  Object.freeze([]);
 
 export class AxAuthorizationDeniedError extends Error {
   constructor(
@@ -24,7 +44,8 @@ export class AxAuthorizationDeniedError extends Error {
       | 'no_matching_grant'
       | 'invalid_receipt'
       | 'cancelled'
-      | 'timeout',
+      | 'timeout'
+      | 'guard_predicate_failed',
     message: string
   ) {
     super(message);
@@ -146,6 +167,79 @@ function captureActor(
   });
 }
 
+/**
+ * `captureGrant` reconstructs a grant from an explicit field list, so a field
+ * it does not name is silently dropped. Requirements are captured here — and
+ * validated here — so that a declared contingency survives
+ * `axSnapshotAuthority` and so a malformed one throws from
+ * `axValidateCapabilityGrant` rather than at guard-evaluation time.
+ */
+function captureRequirements(
+  value: unknown,
+  label: string
+): readonly Readonly<AxEvidenceRequirement>[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
+  if (value.length > MAX_GRANT_REQUIREMENTS) {
+    throw new Error(`${label} exceeds ${MAX_GRANT_REQUIREMENTS} entries`);
+  }
+  return Object.freeze(
+    Array.from(value, (entry, index) => {
+      if (!axIsEvidenceRequirement(entry)) {
+        throw new Error(`${label}[${index}] is malformed`);
+      }
+      return Object.freeze({
+        kind: entry.kind,
+        trustedSources: Object.freeze([...entry.trustedSources]),
+        ...(entry.maxAgeMs !== undefined ? { maxAgeMs: entry.maxAgeMs } : {}),
+        match: Object.freeze({ ...entry.match }),
+      }) as Readonly<AxEvidenceRequirement>;
+    })
+  );
+}
+
+/**
+ * Host-observed facts are host-owned data at an execution boundary, so they get
+ * the same clone-and-freeze treatment as principals, grants, and claims. A
+ * structurally invalid observation throws rather than being silently ignored.
+ */
+function captureObservations(
+  value: unknown,
+  label: string
+): readonly Readonly<AxEvidenceObservation>[] {
+  if (value === undefined) return EMPTY_EVIDENCE;
+  if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
+  if (value.length > MAX_EVIDENCE_OBSERVATIONS) {
+    throw new Error(`${label} exceeds ${MAX_EVIDENCE_OBSERVATIONS} entries`);
+  }
+  return Object.freeze(
+    Array.from(value, (entry, index) => {
+      const path = `${label}[${index}]`;
+      const version = entry?.version;
+      const kind = entry?.kind;
+      const sourceId = entry?.sourceId;
+      const observedAt = entry?.observedAt;
+      const leaseEpoch = entry?.leaseEpoch;
+      if (version !== 1) throw new Error(`${path}.version must be 1`);
+      nonEmpty(kind, `${path}.kind`);
+      nonEmpty(sourceId, `${path}.sourceId`);
+      finite(observedAt, `${path}.observedAt`);
+      finite(leaseEpoch, `${path}.leaseEpoch`);
+      if (!Number.isInteger(leaseEpoch) || leaseEpoch < 0) {
+        throw new Error(`${path}.leaseEpoch must be a non-negative integer`);
+      }
+      return Object.freeze({
+        version: 1,
+        kind,
+        sourceId,
+        observedAt,
+        value: captureValue(entry?.value, `${path}.value`, new Set()),
+        leaseEpoch,
+      }) as Readonly<AxEvidenceObservation>;
+    })
+  );
+}
+
 function captureGrant(
   grant: Readonly<AxCapabilityGrant>
 ): Readonly<AxCapabilityGrant> {
@@ -161,6 +255,7 @@ function captureGrant(
   const leaseEpoch = grant?.leaseEpoch;
   const parentGrantId = grant?.parentGrantId;
   const claims = grant?.claims;
+  const requirements = grant?.requirements;
   if (version !== 1) throw new Error('AxCapabilityGrant.version must be 1');
   nonEmpty(id, 'AxCapabilityGrant.id');
   nonEmpty(principalId, 'AxCapabilityGrant.principalId');
@@ -201,6 +296,10 @@ function captureGrant(
     ? captureActor(actor as Readonly<AxActor>, 'AxCapabilityGrant.actor')
     : undefined;
   const capturedClaims = captureClaims(claims, 'AxCapabilityGrant.claims');
+  const capturedRequirements = captureRequirements(
+    requirements,
+    'AxCapabilityGrant.requirements'
+  );
   return Object.freeze({
     version,
     id,
@@ -221,6 +320,7 @@ function captureGrant(
     leaseEpoch,
     ...(parentGrantId !== undefined ? { parentGrantId } : {}),
     ...(capturedClaims ? { claims: capturedClaims } : {}),
+    ...(capturedRequirements ? { requirements: capturedRequirements } : {}),
   });
 }
 
@@ -243,6 +343,8 @@ export function axSnapshotAuthority(
   const authorize = authority?.authorize;
   const configuredTimeout = authority?.authorizeTimeoutMs;
   const now = authority?.now;
+  const sourceEvidence = authority?.evidence;
+  const observeEvidence = authority?.observeEvidence;
   const onAudit = authority?.onAudit;
 
   const principalId = principal?.id;
@@ -299,6 +401,13 @@ export function axSnapshotAuthority(
   if (new Set(grants.map((grant) => grant.id)).size !== grants.length) {
     throw new Error('AxAuthorityContext grant IDs must be unique');
   }
+  if (observeEvidence !== undefined && typeof observeEvidence !== 'function') {
+    throw new Error('AxAuthorityContext.observeEvidence must be a function');
+  }
+  const evidence =
+    sourceEvidence === undefined
+      ? undefined
+      : captureObservations(sourceEvidence, 'AxAuthorityContext.evidence');
   const snapshot = Object.freeze({
     principal: capturedPrincipal,
     actor: capturedActor,
@@ -308,6 +417,8 @@ export function axSnapshotAuthority(
     authorize,
     authorizeTimeoutMs,
     ...(now ? { now } : {}),
+    ...(evidence ? { evidence } : {}),
+    ...(observeEvidence ? { observeEvidence } : {}),
     ...(onAudit ? { onAudit } : {}),
   });
   authoritySnapshots.add(snapshot);
@@ -584,6 +695,29 @@ function snapshotReceipt(
 }
 
 /**
+ * One evidence read per `axAuthorize`. A supplier is what makes `maxAgeMs`
+ * usable: the snapshot cache means a frozen `evidence` array only ever ages
+ * within a run, while `observeEvidence` re-reads the host's current facts.
+ * A supplier that throws or returns malformed data yields no evidence, so every
+ * declared requirement fails closed with `missing_observation`.
+ */
+function resolveEvidence(
+  snapshot: Readonly<AxAuthorityContext>
+): readonly Readonly<AxEvidenceObservation>[] {
+  if (snapshot.observeEvidence) {
+    try {
+      return captureObservations(
+        snapshot.observeEvidence(),
+        'AxAuthorityContext.observeEvidence()'
+      );
+    } catch {
+      return EMPTY_EVIDENCE;
+    }
+  }
+  return snapshot.evidence ?? EMPTY_EVIDENCE;
+}
+
+/**
  * Perform exact local scope checks, then require an exactly-bound host receipt.
  * Host verification remains authoritative; Ax does not authenticate grants.
  */
@@ -598,6 +732,10 @@ export async function axAuthorize(
   nonEmpty(operation, 'authorization operation');
   const scopedResource = captureResource(resource, 'authorization resource');
   const now = snapshot.now?.() ?? Date.now();
+  // Every other host-supplied number on this path is validated; the clock is
+  // load-bearing for grant expiry and for evidence freshness, so a non-finite
+  // one is a host misconfiguration and must not reach either check.
+  finite(now, 'authorization now');
   if (cancelled(signal)) {
     await audit(
       snapshot,
@@ -637,6 +775,53 @@ export async function axAuthorize(
       `No active capability grant matches ${operation}`
     );
   }
+  // Guards run after a grant matched and before the host authorizer is called,
+  // so a guard denial costs zero host calls and emits exactly one audit event.
+  // They are deliberately not re-evaluated after the receipt: the receipt is
+  // the authority and is already bound to the request context that carried
+  // this evidence.
+  const evidence = resolveEvidence(snapshot);
+  const requirements = axCollectGrantRequirements(grants);
+  if (requirements.length) {
+    const evaluation = axEvaluateGuards({
+      operation,
+      resource: scopedResource,
+      requirements,
+      evidence,
+      leaseEpoch: snapshot.leaseEpoch,
+      now,
+    });
+    if (!evaluation.allow) {
+      const first = evaluation.failures[0];
+      await audit(
+        snapshot,
+        {
+          operation,
+          resourceType: scopedResource.type,
+          actorKind: snapshot.actor.kind,
+          decision: 'deny',
+          grantCount: grants.length,
+          at: now,
+          code: 'guard_predicate_failed',
+          // The one bounded exception to redaction-by-construction: operator
+          // and fact kind, never an observation value or a source ID.
+          ...(first
+            ? {
+                failedPredicateKind: `${first.op}:${first.kind}`.slice(
+                  0,
+                  MAX_FAILED_PREDICATE_KIND
+                ),
+              }
+            : {}),
+        },
+        signal
+      );
+      throw new AxAuthorizationDeniedError(
+        'guard_predicate_failed',
+        `Evidence guard failed for ${operation}`
+      );
+    }
+  }
   const id = requestId();
   let receipt: Readonly<AxAuthorizationReceipt> | undefined;
   try {
@@ -653,6 +838,8 @@ export async function axAuthorize(
           grants,
           leaseEpoch: snapshot.leaseEpoch,
           now,
+          evidence,
+          requirements,
         },
         signal
       )
@@ -812,6 +999,105 @@ function containsResource(
   );
 }
 
+/**
+ * Contingency may only tighten: a child grant must carry every requirement its
+ * parent declared, and may add more. Dropping one would expand the parent's
+ * authority just as surely as adding an operation does.
+ */
+function retainsRequirements(
+  parent: Readonly<AxCapabilityGrant>,
+  child: Readonly<AxCapabilityGrant>
+): boolean {
+  const required = parent.requirements ?? [];
+  if (!required.length) return true;
+  const carried = new Set(
+    (child.requirements ?? []).map(evidenceRequirementKey)
+  );
+  return required.every((requirement) =>
+    carried.has(evidenceRequirementKey(requirement))
+  );
+}
+
+/** The `matchingGrants` predicate minus its time window. See below for why. */
+function grantAppliesTo(
+  grant: Readonly<AxCapabilityGrant>,
+  principalId: string,
+  actor: Readonly<AxActor>,
+  leaseEpoch: number,
+  operation: string,
+  resource: Readonly<AxResourceScope>
+): boolean {
+  return (
+    grant.principalId === principalId &&
+    grant.leaseEpoch === leaseEpoch &&
+    grant.operations.includes(operation) &&
+    containsResource(grant, resource) &&
+    (grant.actor === undefined ||
+      (grant.actor.id === actor.id && grant.actor.kind === actor.kind))
+  );
+}
+
+/**
+ * Requirements are enforced as the union across every grant that matches an
+ * operation and resource, so a requirement declared on one grant also
+ * constrains a sibling that declared none. The per-grant lineage rule above
+ * cannot see that: a child delegating only the unannotated sibling would
+ * inherit no contingency at all and would out-authorize its own delegator.
+ * This check mirrors the evaluation semantic instead — for every operation and
+ * resource a child grant names, the child's union must cover the parent's.
+ *
+ * The parent side deliberately ignores `issuedAt` / `expiresAt` / `revokedAt`:
+ * attenuation has no clock, and counting a grant that may be inactive can only
+ * demand more of the child, which is the fail-closed direction.
+ */
+function retainsUnionRequirements(
+  parentSnapshot: Readonly<AxAuthorityContext>,
+  childPrincipalId: string,
+  childActor: Readonly<AxActor>,
+  childGrants: readonly Readonly<AxCapabilityGrant>[]
+): boolean {
+  const leaseEpoch = parentSnapshot.leaseEpoch;
+  for (const grant of childGrants) {
+    for (const operation of grant.operations) {
+      for (const resource of grant.resources) {
+        const required = axCollectGrantRequirements(
+          parentSnapshot.grants.filter((candidate) =>
+            grantAppliesTo(
+              candidate,
+              parentSnapshot.principal.id,
+              parentSnapshot.actor,
+              leaseEpoch,
+              operation,
+              resource
+            )
+          )
+        );
+        if (!required.length) continue;
+        const carried = new Set(
+          axCollectGrantRequirements(
+            childGrants.filter((candidate) =>
+              grantAppliesTo(
+                candidate,
+                childPrincipalId,
+                childActor,
+                leaseEpoch,
+                operation,
+                resource
+              )
+            )
+          ).map(evidenceRequirementKey)
+        );
+        if (
+          required.some((entry) => !carried.has(evidenceRequirementKey(entry)))
+        ) {
+          return false;
+        }
+      }
+    }
+  }
+  return true;
+}
+
 /** Validate and construct a child authority that cannot expand parent grants. */
 export function axAttenuateAuthority(
   parent: Readonly<AxAuthorityContext>,
@@ -900,10 +1186,22 @@ export function axAttenuateAuthority(
         (grant.expiresAt === undefined ||
           grant.expiresAt > source.expiresAt)) ||
       (source.revokedAt !== undefined &&
-        (grant.revokedAt === undefined || grant.revokedAt > source.revokedAt))
+        (grant.revokedAt === undefined ||
+          grant.revokedAt > source.revokedAt)) ||
+      !retainsRequirements(source, grant)
     ) {
       throw new Error('Child capability grant expands parent authority');
     }
+  }
+  if (
+    !retainsUnionRequirements(
+      parentSnapshot,
+      childPrincipal.id,
+      childActor,
+      childGrants
+    )
+  ) {
+    throw new Error('Child capability grant expands parent authority');
   }
   return axSnapshotAuthority({
     principal: childPrincipal,
@@ -914,6 +1212,10 @@ export function axAttenuateAuthority(
     authorize: parentSnapshot.authorize,
     authorizeTimeoutMs: parentSnapshot.authorizeTimeoutMs,
     now: parentSnapshot.now,
+    // Without these two, guards and delegation would be mutually exclusive:
+    // every inherited requirement would fail with missing_observation.
+    evidence: parentSnapshot.evidence,
+    observeEvidence: parentSnapshot.observeEvidence,
     onAudit: parentSnapshot.onAudit,
   });
 }

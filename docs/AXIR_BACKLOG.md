@@ -193,6 +193,13 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
   - TS paths: `ir/conformance/axmind`
   - Impact: ir/conformance/axmind/*.json are consumed only by TypeScript today (src/ax/trajectory/fixtures.test.ts). conformanceSuitePaths in tools/axir/internal/axir/verify.go is a hardcoded directory list and the coverage manifest in tools/axir/internal/axir/codegen.go is a hardcoded suite table, so adding the suite requires a Go change plus a runner in each of python/java/cpp/go/rust.
   - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+- `axir-2026-09-02-typed-evidence-observations-guard-predicates-and-evidence-guards` [runtime] Typed evidence observations, guard predicates, and evidence guards at the host-authority boundary
+  - Status: open
+  - Source PR: #85
+  - Source commit: `d5d43395602fd7fa208f18f84fdd83c3b6aaad56`
+  - TS paths: `src/ax/authority/types.ts`, `src/ax/authority/evidence.ts`, `src/ax/authority/authority.ts`, `src/ax/authority/index.ts`
+  - Impact: Adds AxEvidenceObservation and AxEvidenceRequirement carried and validated through captureGrant, six closed guard operators (eq, ne, in, notIn, contains, fresh), a pure axEvaluateGuards evaluated after a grant matches and before the host authorizer, a per-request observeEvidence supplier, a guard_predicate_failed audit code with a non-redacted op:kind predicate label, and an attenuation rule that a child grant may only add requirements while inheriting the parent's evidence, enforced both per grant lineage and as the union over every parent grant matching the same operation and resource. Lease-epoch binding is unconditional, ambiguity denies, a non-finite clock denies every maxAgeMs requirement, requirements are capped at 32 per grant and observations at 64 per authority, and no behaviour changes when no grant declares requirements.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 
 ## Done
 

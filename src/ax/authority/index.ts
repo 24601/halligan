@@ -7,6 +7,12 @@ export {
   axSnapshotAuthority,
   axValidateCapabilityGrant,
 } from './authority.js';
+export {
+  axCollectGrantRequirements,
+  axEvaluateGuards,
+  axIsEvidenceRequirement,
+  axIsGuardPredicateFailure,
+} from './evidence.js';
 export type {
   AxActor,
   AxAuthorityClaim,
@@ -20,6 +26,14 @@ export type {
   AxAuthorizer,
   AxCapabilityGrant,
   AxDelegationClaims,
+  AxEvidenceMatch,
+  AxEvidenceObservation,
+  AxEvidenceRequirement,
+  AxGuardEvaluation,
+  AxGuardEvaluationContext,
+  AxGuardFailure,
+  AxGuardFailureCode,
+  AxGuardOp,
   AxPrincipal,
   AxResourceScope,
 } from './types.js';

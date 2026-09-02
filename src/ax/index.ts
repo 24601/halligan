@@ -803,6 +803,12 @@ import {
   axSnapshotAuthority,
   axValidateCapabilityGrant,
 } from './authority/authority.js';
+import {
+  axCollectGrantRequirements,
+  axEvaluateGuards,
+  axIsEvidenceRequirement,
+  axIsGuardPredicateFailure,
+} from './authority/evidence.js';
 import type {
   AxActor,
   AxAuthorityClaim,
@@ -816,6 +822,14 @@ import type {
   AxAuthorizer,
   AxCapabilityGrant,
   AxDelegationClaims,
+  AxEvidenceMatch,
+  AxEvidenceObservation,
+  AxEvidenceRequirement,
+  AxGuardEvaluation,
+  AxGuardEvaluationContext,
+  AxGuardFailure,
+  AxGuardFailureCode,
+  AxGuardOp,
   AxPrincipal,
   AxResourceScope,
 } from './authority/types.js';
@@ -1983,6 +1997,7 @@ export { axCheckMetricsHealth };
 export { axCloneCausalCandidateEvidenceManifest };
 export { axCodeRuntimeProtocol };
 export { axCodeRuntimeProtocolVersion };
+export { axCollectGrantRequirements };
 export { axConcatBase64 };
 export { axCreateCausalCandidateEvidenceManifest };
 export { axCreateDefaultColorLogger };
@@ -2007,6 +2022,7 @@ export { axDemandEventObserver };
 export { axDeserializeOptimizedProgram };
 export { axEmitUsageEvent };
 export { axErasePreferenceEvidence };
+export { axEvaluateGuards };
 export { axEventCanonicalDigest };
 export { axEventCanonicalJson };
 export { axEventComponentManager };
@@ -2042,8 +2058,10 @@ export { axGlobals };
 export { axGoogleGeminiLiveAudioDefaults };
 export { axIsAudioOutputEnabled };
 export { axIsEventOutputPersistenceError };
+export { axIsEvidenceRequirement };
 export { axIsGeminiLiveAudioModel };
 export { axIsGrokVoiceModel };
+export { axIsGuardPredicateFailure };
 export { axIsOpenAIChatAudioModel };
 export { axIsOpenAIRealtimeModel };
 export { axIsOpenAIRealtimeTranscriptionModel };
@@ -2728,6 +2746,9 @@ export type { AxEventVerifierResult };
 export type { AxEventVerifierTransitionRecord };
 export type { AxEventVerifierTransitionRequest };
 export type { AxEvidenceDescriptor };
+export type { AxEvidenceMatch };
+export type { AxEvidenceObservation };
+export type { AxEvidenceRequirement };
 export type { AxExample };
 export type { AxExamples };
 export type { AxExecutableSkillArtifact };
@@ -2827,6 +2848,11 @@ export type { AxGenStreamingOut };
 export type { AxGenerateErrorDetails };
 export type { AxGenerateResult };
 export type { AxGeneratedMediaInteractionEvent };
+export type { AxGuardEvaluation };
+export type { AxGuardEvaluationContext };
+export type { AxGuardFailure };
+export type { AxGuardFailureCode };
+export type { AxGuardOp };
 export type { AxIField };
 export type { AxIRRuntimeCapabilities };
 export type { AxIRRuntimeCapabilitiesInput };

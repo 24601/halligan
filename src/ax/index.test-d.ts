@@ -12,16 +12,22 @@ import {
   type AxAIOpenAIResponsesConfig,
   type AxAIOpenAIResponsesRequest,
   type AxAIService,
+  type AxCapabilityGrant,
   type AxCodeRuntime,
   AxDemandBoundary,
   type AxDemandDetector,
   type AxDemandStore,
   type AxEventComponentDefinition,
   type AxEventComponentInspection,
+  type AxEvidenceObservation,
+  type AxEvidenceRequirement,
   type AxExecutableSkillArtifact,
   type AxExecutableSkillSelection,
   type AxFunction,
   type AxFunctionHandler,
+  type AxGuardEvaluation,
+  type AxGuardFailureCode,
+  type AxGuardOp,
   AxInMemoryDemandStore,
   AxJSRuntime,
   type AxJSRuntimeSpeculationEvent,
@@ -32,9 +38,13 @@ import {
   type AxProgrammable,
   type AxProgramSource,
   ax,
+  axCollectGrantRequirements,
   axDemandEventObserver,
+  axEvaluateGuards,
   axEventComponentManager,
   axExecutableSkillRef,
+  axIsEvidenceRequirement,
+  axIsGuardPredicateFailure,
   axProgramSourceRuntimeProtocol,
   axSelectExecutableSkills,
   f,
@@ -812,3 +822,50 @@ void trajectorySeq;
 void trajectoryType;
 void trajectoryExhausted;
 void trajectoryAssertions;
+
+// === Host-owned evidence guards ===
+// RFC §8.8: the guard surface is reachable, and correctly shaped, from the
+// generated public barrel rather than only from the subsystem module.
+const guardObservation: AxEvidenceObservation = {
+  version: 1,
+  kind: 'session.mfa',
+  sourceId: 'idp-a',
+  observedAt: 10_000,
+  value: 'strong',
+  leaseEpoch: 3,
+};
+const guardRequirement: AxEvidenceRequirement = {
+  kind: 'session.mfa',
+  trustedSources: ['idp-a'],
+  maxAgeMs: 60_000,
+  match: { op: 'fresh' },
+};
+const guardedGrant: AxCapabilityGrant = {
+  version: 1,
+  id: 'grant-guarded',
+  principalId: 'subject-42',
+  operations: ['document.read'],
+  resources: [{ type: 'document', id: 'doc-1' }],
+  leaseEpoch: 3,
+  requirements: [guardRequirement],
+};
+const guardEvaluation: Readonly<AxGuardEvaluation> = axEvaluateGuards({
+  operation: 'document.read',
+  resource: { type: 'document', id: 'doc-1' },
+  requirements: axCollectGrantRequirements([guardedGrant]),
+  evidence: [guardObservation],
+  leaseEpoch: 3,
+  now: 10_000,
+});
+const guardFailureCode: AxGuardFailureCode | undefined =
+  guardEvaluation.failures[0]?.code;
+void guardFailureCode;
+void axIsEvidenceRequirement(guardRequirement);
+void axIsGuardPredicateFailure(new Error('denied'));
+
+// @ts-expect-error `sameAs` was cut from the algebra and must stay unusable.
+const cutOperator: AxGuardOp = 'sameAs';
+void cutOperator;
+
+// @ts-expect-error a guard failure has no value channel.
+void guardEvaluation.failures[0]?.value;

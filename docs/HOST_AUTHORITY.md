@@ -109,6 +109,155 @@ Direct calls to `AxMCPClient.callTool()` do not pass through program execution;
 keep using `authorizeToolCall` there. The shared authority boundary applies when
 MCP/UCP operations are attached to an Ax program or agent.
 
+## Evidence guards
+
+A grant may carry `requirements`: contingencies its authority depends on. Ax
+evaluates them against host-supplied `AxEvidenceObservation` facts **after** a
+grant has matched and **before** the host authorizer is called. A guard denial
+therefore costs zero host calls and produces exactly one audit event.
+
+**The operators are mechanism the
+host authors policy with. Ax does not compile, infer, or extend policy, and
+will not grow a policy language. Adding a seventh operator requires a named
+host requirement recorded in this document.** There are no wildcards, roles,
+implied operations, resource hierarchies, or composition — the same rule this
+document already states for scope matching.
+
+Guards never substitute for the host receipt. They gate *whether the host is
+asked*; only a matching `AxAuthorizationReceipt` is an allow.
+
+### The six operators
+
+| `match.op` | Passes when |
+| --- | --- |
+| `eq` | the observation value canonically equals `value` |
+| `ne` | the observation value canonically differs from `value` |
+| `in` | the observation value canonically equals some member of `values` |
+| `notIn` | the observation value equals no member of `values` |
+| `contains` | the value is a string containing `value`, or an array with a canonically equal element. No coercion: any other value type fails |
+| `fresh` | the single resolved observation is within `maxAgeMs`. Requires `maxAgeMs` |
+
+Canonical comparison sorts object keys, so key order is never a difference.
+
+### Resolution order
+
+Exactly one observation must survive, and the first narrowing that empties the
+candidate set names the failure:
+
+| Condition | `AxGuardFailure.code` |
+| --- | --- |
+| unknown `op`, `fresh` without `maxAgeMs`, or empty `trustedSources` | `malformed_requirement` |
+| no observation of the requirement's `kind` | `missing_observation` |
+| none of them from an exact member of `trustedSources` | `untrusted_source` |
+| none of those taken under the current lease epoch | `lease_epoch_mismatch` |
+| more than one survives | `ambiguous_observation` |
+| the survivor is older than `maxAgeMs`, or the clock is not finite | `stale` |
+| the operator predicate rejects it | `predicate_failed` |
+
+`maxAgeMs` is evaluated as a passing condition, not a negated failing one, so a
+missing, `NaN`, or infinite clock denies every requirement that reads it rather
+than silently disabling freshness. `axAuthorize` additionally rejects a
+non-finite `now()` outright, since the same clock decides grant expiry.
+
+Lease-epoch binding is unconditional and is not an operator: an observation
+taken under a prior epoch never satisfies any requirement. Ambiguity is a deny —
+Ax never picks the freshest, the first, or the "best" of several candidate
+observations. Absent evidence is never treated as satisfied.
+
+A malformed requirement normally cannot reach evaluation: `captureRequirements`
+runs inside `captureGrant`, so `axValidateCapabilityGrant` throws on an unknown
+operator, on `fresh` without `maxAgeMs`, on an empty `trustedSources`, and on
+more than 32 requirements per grant. The evaluator's `malformed_requirement`
+code exists for a host calling `axEvaluateGuards` directly.
+
+### The union-of-grants semantic
+
+`axCollectGrantRequirements` returns the deduped union of requirements across
+**all** matching grants, in grant order and then within-grant order. A
+requirement declared on one grant therefore also constrains a sibling grant that
+matched the same operation and resource and declared nothing. This is coherent
+with receipt binding, which already demands the receipt echo every eligible
+grant ID, and it is the fail-closed direction. Requirements are deduped by a
+canonical key over the kind, the trusted-source set, `maxAgeMs`, and the match,
+in which `in` / `notIn` members compare as a set rather than a sequence.
+
+### Denial and audit
+
+A guard denial throws `AxAuthorizationDeniedError` with code
+`guard_predicate_failed` and emits one audit event with the same code plus
+`failedPredicateKind`. That field is the one deliberate, bounded exception to
+redaction-by-construction: it is exactly `"<op>:<kind>"` of the first failed
+requirement — host-authored labels only. It never carries an observation value,
+a source ID, a claim, a resource ID, or a receipt reason.
+
+`AxGuardFailure.op` is one of the six operators or the literal `'unknown'`: a
+requirement naming an operator outside the six is normalized rather than echoed,
+so both the failure union and the audit label stay a closed vocabulary a
+consumer can switch on. The `kind` half is host-authored and is truncated so the
+whole label stays within 240 characters.
+
+Guards are **not** re-evaluated after the host returns its receipt. The receipt
+is the authority and is already bound to the request context that carried this
+evidence; re-evaluating would open a time-of-check window on the host's own
+decision without adding a guarantee.
+
+### Supplying evidence
+
+`AxAuthorityContext.evidence` is a host-owned array, deep-cloned and frozen by
+`axSnapshotAuthority` like every other host datum. It is never sourced from
+model output, prompt text, tool arguments, or an event payload. A structurally
+invalid observation throws at snapshot time rather than being silently ignored.
+
+Both dimensions of guard evaluation are bounded so a host cannot accidentally
+put unbounded work on the per-tool-call path: **32 requirements per grant** and
+**64 observations per authority**. Exceeding either throws from
+`axSnapshotAuthority` / `axValidateCapabilityGrant`; an `observeEvidence`
+supplier that returns more than 64 observations is treated like a supplier that
+threw, so its request denies fail-closed rather than paying the cost.
+
+`AxAuthorityContext.observeEvidence` is a synchronous, side-effect-free supplier
+called once per `axAuthorize` call, mirroring the existing `now?: () => number`
+idiom. When present its result replaces `evidence` for that request. This is
+what makes `maxAgeMs` usable in a long-lived context: the snapshot is cached, so
+a frozen `evidence` array only ever ages within a run, while a supplier
+re-reads the host's current facts. A supplier that throws — or returns a
+malformed observation — yields no evidence, so every declared requirement fails
+closed with `missing_observation`.
+
+Ax always passes `evidence` and `requirements` (possibly empty) into
+`AxAuthorizationRequestContext`, so the host authorizer sees exactly what Ax
+evaluated.
+
+### Attenuation
+
+`axAttenuateAuthority` forwards the parent's `evidence` and `observeEvidence` to
+the child; without that, guards and delegation would be mutually exclusive.
+
+Contingency may only tighten, and the rule is checked twice because the union
+semantic above means a grant's contingency is not only its own:
+
+1. **Per lineage.** A child grant must carry every requirement its parent grant
+   declared, compared by the same canonical key, and may add more. Dropping or
+   relaxing one is rejected as an expansion of parent authority.
+2. **Per operation and resource.** For every operation and resource a child
+   grant names, the union of the child's matching requirements must cover the
+   union the parent would have enforced for that same pair. Without this a
+   child delegating only an *unannotated sibling* of a guarded grant would
+   inherit no contingency at all and would out-authorize its own delegator.
+   The parent side of this comparison ignores `issuedAt` / `expiresAt` /
+   `revokedAt`, because attenuation has no clock and counting a possibly
+   inactive grant can only demand more of the child.
+
+Rule 2 is a union, not a blanket per-grant demand: an unannotated child grant is
+legal when a sibling child grant matching the same operation and resource
+carries the requirement, because that is exactly what `axAuthorize` evaluates.
+
+### No behaviour change without requirements
+
+When no grant declares `requirements`, no guard is evaluated, the audit
+sequence and deny codes are byte-identical to before, and the only difference in
+the host request context is two additional empty optional arrays.
+
 ## Events and sessions
 
 `AxEventRuntimeOptions.authority` accepts a context or a resolver called for
