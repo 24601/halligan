@@ -1899,9 +1899,12 @@
       "createdAt": "2026-09-02",
       "sourcePR": 91,
       "sourceCommit": "95ad4abec618e176b48fa02c7de375c958ac24bd",
-      "tsPaths": ["src/ax/trajectory/projection.ts"],
+      "tsPaths": [
+        "src/ax/trajectory/projection.ts",
+        "src/ax/trajectory/rollups.ts"
+      ],
       "portableSurface": "runtime",
-      "impact": "New portable TS behaviour: a context budget rule of min(fraction * host-supplied window, absolute cap) with a derived raw-tail size floored at 20; a narrative-only recent stream filtered through the registry's declared stepClass so machinery and unknown steps cannot enter a projection even when named explicitly; F-ary tiered rollup blocks keyed by absolute filtered-step index range, sealed immutable and stamped with (summarizerId, promptVersion); a staircase assembler that decomposes the pre-tail prefix positionally in base F and emits it in chronological order, prunes segments below a forward-only enablement marker snapped down to an F boundary before descending, descends into the F children of a missing coarse block that straddles the marker, and reports only a tier-1 miss as a visible gap; and drill-down by cited step id where a citation outside its own block's range is dropped at seal time. Not yet expressed in AxIR.",
+      "impact": "New portable TS behaviour: a context budget rule of min(fraction * host-supplied window, absolute cap) with a derived raw-tail size floored at 20; a narrative-only recent stream filtered through the registry's declared stepClass so machinery and unknown steps cannot enter a projection even when named explicitly; F-ary tiered rollup blocks keyed by absolute filtered-step index range, sealed immutable and stamped with (summarizerId, promptVersion); a staircase assembler that decomposes the pre-tail prefix positionally in base F and emits it in chronological order, prunes segments below a forward-only enablement marker snapped down to an F boundary before descending, descends into the F children of a missing coarse block that straddles the marker, and reports only a tier-1 miss as a visible gap; and drill-down by cited step id where a citation outside its own block's range is dropped at seal time. The bounds are part of the behaviour: maxBlocks bounds summarizer ATTEMPTS per build rather than successes, the staircase descent is bounded by F^2 * (ceil(log_F cut0) + 1) assembler nodes with the remainder reported as a missing gap, summaries and themes are clipped at seal time, every interpolated value in the render is one-lined so model output and step bodies cannot forge a section header or a verbatim frame, and a rollup checkpoint sealed past the end of the log it is loaded for is rejected as a meta conflict. Not yet expressed in AxIR.",
       "suggestedAxirWork": [
         "Add or update the TS-derived conformance fixture.",
         "Update AxIR/Core or descriptor data to match the portable TS behavior.",
