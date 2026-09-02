@@ -279,4 +279,232 @@ const minibatchMerge = await runScenario(() => {
   };
 });
 
-process.stdout.write(JSON.stringify({ legacy, minibatchMerge }));
+/**
+ * Scenarios 3 and 4 — the merge gate's COMPARISON, not just its code path.
+ *
+ * Scenario 2 makes the `system_merge` block live but only exercises its accept
+ * branch, with a merge candidate that beats both parents comfortably. The gate
+ * at `gepa.ts:950-957` is therefore blind to the expression itself: mutating
+ * `Math.max(id1Sum, id2Sum)` to `Math.min(...)`, or `>=` to `>`, changed
+ * nothing observable. That expression is exactly what a later commit rewrites,
+ * so it is pinned here.
+ *
+ * Both scenarios use two components (A = `instruction`, B = `description`) over
+ * nine examples whose rows rotate through three kinds:
+ *
+ *   - `a` rows, which A's improvement helps (+0.25);
+ *   - `b` rows, which B's improvement helps (+0.125 — deliberately SMALLER, so
+ *     the two parents' subsample sums differ and `max` is distinguishable from
+ *     `min`);
+ *   - `n` rows, which every improvement hurts slightly. Without them the
+ *     unimproved seed is dominated the moment anything improves, GEPA's Pareto
+ *     front collapses to a single lineage, and the two siblings with a common
+ *     ancestor that a merge requires never both exist. Scenario 2's `-0.05`
+ *     cross-slice penalty does the same job.
+ *
+ * `pickSome` (`gepa.ts:874-899`) takes two rows from `p1` (rows where parent i
+ * wins), two from `p2` (parent j wins) and one from `p3` (ties), and all rows
+ * of one kind carry the same score — so the subsample's COMPOSITION, 2 `a` +
+ * 2 `b` + 1 `n`, is fixed even though which rows are drawn is not. Every score
+ * is a binary-exact fraction, so these sums are exact:
+ *
+ *   parent {A} over the subsample: 2(0.75) + 2(0.5)   + 0.46875 = 2.96875
+ *   parent {B} over the subsample: 2(0.5)  + 2(0.625) + 0.46875 = 2.71875
+ *
+ * Scenario 3's merge scores 2(0.6875) + 2(0.5625) + 0.4375 = **2.9375**,
+ * strictly between the two, so the real `Math.max` gate REJECTS and a
+ * `Math.min` gate ACCEPTS.
+ *
+ * Scenario 4's merge scores exactly parent {A}'s rows, so newSum ==
+ * max(id1Sum, id2Sum) == **2.96875**: the real `>=` gate ACCEPTS and a `>`
+ * gate REJECTS. An exact tie is the only construction that can see that
+ * mutation, because `minImprovementThreshold` defaults to 0 (`gepa.ts:218`)
+ * and the two operators differ nowhere else.
+ *
+ * Verified by injecting both mutations into `gepa.ts` and re-running
+ * `npm run test:gepa-upstream-compatibility`: each exits 1 with these
+ * scenarios present and passed without them.
+ */
+type RowKind = 'a' | 'b' | 'n';
+type ImprovedKey = 'none' | 'A' | 'B' | 'AB';
+type ScoreTable = Readonly<
+  Record<RowKind, Readonly<Record<ImprovedKey, number>>>
+>;
+
+/** Merge scores strictly between the two parents' subsample sums. */
+const BETWEEN_TABLE: ScoreTable = {
+  a: { none: 0.5, A: 0.75, B: 0.5, AB: 0.6875 },
+  b: { none: 0.5, A: 0.5, B: 0.625, AB: 0.5625 },
+  n: { none: 0.5, A: 0.46875, B: 0.46875, AB: 0.4375 },
+};
+
+/** Merge scores exactly what the better parent scores: the `>=` boundary. */
+const TIED_TABLE: ScoreTable = {
+  a: { none: 0.5, A: 0.75, B: 0.5, AB: 0.75 },
+  b: { none: 0.5, A: 0.5, B: 0.625, AB: 0.5 },
+  n: { none: 0.5, A: 0.46875, B: 0.46875, AB: 0.46875 },
+};
+
+const buildMergeGateScenario = (table: ScoreTable) => () => {
+  const componentA = 'root::instruction';
+  const componentB = 'root::description';
+  const componentIds = [componentA, componentB] as const;
+  const values: Record<string, string> = {
+    [componentA]: 'base',
+    [componentB]: 'base',
+  };
+  const events: unknown[] = [];
+  const checkpoints: unknown[] = [];
+  const rowKind = (index: number): RowKind =>
+    (['a', 'b', 'n'] as const)[index % 3]!;
+  const improvedKey = (): ImprovedKey => {
+    const a = values[componentA] === `better-${componentA}`;
+    const b = values[componentB] === `better-${componentB}`;
+    if (a && b) return 'AB';
+    if (a) return 'A';
+    if (b) return 'B';
+    return 'none';
+  };
+  const scoreRow = (index: number): number =>
+    table[rowKind(index)][improvedKey()];
+  const program = {
+    getId: () => 'root',
+    setId: () => {},
+    getInstruction: () => values[componentA]!,
+    setInstruction: (value: string) => {
+      values[componentA] = value;
+    },
+    getSignature: () => ({
+      getDescription: () => values[componentB]!,
+      toString: () => '"base" question:string -> answer:string',
+    }),
+    namedProgramInstances: () => [],
+    getOptimizableComponents: () => [
+      { key: componentA, kind: 'instruction', current: values[componentA]! },
+      { key: componentB, kind: 'description', current: values[componentB]! },
+    ],
+    applyOptimizedComponents: (updates: Readonly<Record<string, string>>) => {
+      for (const id of componentIds) {
+        const next = updates[id];
+        if (typeof next === 'string') values[id] = next;
+      }
+    },
+    forward: async (_ai: unknown, example: Readonly<{ index: number }>) => ({
+      score: scoreRow(example.index),
+    }),
+    getTraces: () => [],
+    setDemos: () => {},
+    applyOptimization: () => {},
+    getUsage: () => [],
+    resetUsage: () => {},
+  };
+  return {
+    program,
+    optimizerArgs: {
+      studentAI: {},
+      teacherAI: {},
+      numTrials: 12,
+      // GEPA stops after `earlyStoppingTrials` (default 5) rounds without an
+      // archive improvement. These scenarios deliberately spend rounds on
+      // rejected children, so the default stops the run before the two
+      // siblings a merge needs both exist.
+      earlyStoppingTrials: 30,
+      minibatch: true,
+      minibatchSize: 2,
+      mergeMax: 5,
+      checkpointInterval: 1,
+      checkpointSave: async (checkpoint: unknown) => {
+        checkpoints.push(checkpoint);
+        return `checkpoint-${checkpoints.length}`;
+      },
+      debugOptimizer: true,
+      optimizerLogger: (event: unknown) => events.push(event),
+    },
+    examples: Array.from({ length: 9 }, (_, index) => ({
+      index,
+      question: `q${index}`,
+    })),
+    metric: async ({ prediction }: any) => prediction.score,
+    compileOptions: {
+      maxMetricCalls: 200,
+      skipPerfectScore: false,
+      candidateLineage: mode !== 'false',
+    },
+    reflect: async (componentId: string) => `better-${componentId}`,
+    events,
+    checkpoints,
+  };
+};
+
+const mergeRejected = await runScenario(buildMergeGateScenario(BETWEEN_TABLE));
+const mergeTied = await runScenario(buildMergeGateScenario(TIED_TABLE));
+
+/**
+ * In-fixture coverage self-check.
+ *
+ * The gate only compares this fixture's output across two revisions, so it
+ * cannot notice that the fixture stopped covering something — which is exactly
+ * how the original `mergeMax: 0` shape stayed blind for as long as it did.
+ * These assertions fail the fixture on BOTH revisions, so a lost merge branch
+ * surfaces as a fixture error rather than as a false incompatibility.
+ *
+ * The subsample sums are pinned too: `scalarScore * evaluatedExamples` is the
+ * `newSum` the gate compares, so a score-table edit that quietly moves the
+ * merge candidate off the "strictly between" or "exactly equal" boundary trips
+ * here instead of silently retiring the tripwire.
+ */
+const mergeRecords = (
+  result: ScenarioResult,
+  decision: string
+): readonly Record<string, unknown>[] => {
+  const lineage = (
+    result.selection as {
+      candidateLineage?: { records?: readonly Record<string, unknown>[] };
+    }
+  ).candidateLineage;
+  return (lineage?.records ?? []).filter(
+    (record) =>
+      record.strategy === 'system_merge' && record.decision === decision
+  );
+};
+
+const subsampleSum = (record: Record<string, unknown>): number => {
+  const evaluations = record.evaluations as readonly Record<string, unknown>[];
+  const merge = evaluations.find(
+    (evaluation) => evaluation.phase === 'merge_subsample'
+  );
+  if (!merge) throw new Error('merge record has no merge_subsample evaluation');
+  return (merge.scalarScore as number) * (merge.evaluatedExamples as number);
+};
+
+const requireMergeCoverage = (
+  label: string,
+  result: ScenarioResult,
+  decision: string,
+  expectedSum: number
+): void => {
+  const records = mergeRecords(result, decision);
+  if (records.length === 0) {
+    throw new Error(
+      `fixture coverage lost: ${label} emitted no ${decision} system_merge record; the merge gate's comparison is no longer pinned`
+    );
+  }
+  const sums = records.map(subsampleSum);
+  // Tolerance rather than `===` only because the sum makes a round trip
+  // through the recorded mean; every score in the tables is binary-exact, so
+  // any real drift is orders of magnitude larger than this.
+  if (!sums.some((sum) => Math.abs(sum - expectedSum) < 1e-9)) {
+    throw new Error(
+      `fixture coverage lost: ${label} expected a ${decision} merge whose subsample sum is ${expectedSum}, saw ${JSON.stringify(sums)}`
+    );
+  }
+};
+
+if (mode !== 'false') {
+  requireMergeCoverage('scenario 3', mergeRejected, 'rejected', 2.9375);
+  requireMergeCoverage('scenario 4', mergeTied, 'accepted', 2.96875);
+}
+
+process.stdout.write(
+  JSON.stringify({ legacy, minibatchMerge, mergeRejected, mergeTied })
+);
