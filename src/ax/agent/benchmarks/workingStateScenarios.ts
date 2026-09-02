@@ -52,7 +52,7 @@ export const AX_WORKING_STATE_HORIZONS: readonly number[] = [10, 25, 50, 100];
  * Horizons the in-suite vitest benchmark sweeps. Deliberately shorter than
  * the eval script's: this file runs inside `npm run test
  * --workspace=@ax-llm/ax` beside every other unit test, and a long sweep there
- * starves wall-clock-sensitive neighbours. The runnable evaluation
+ * starves wall-clock-sensitive neighbors. The runnable evaluation
  * (`npm run agent:workingstate:eval`, guarded by
  * `scripts/eval-working-state.test.ts` in the root chain) sweeps the full set
  * out to horizon 100 in its own process.
