@@ -51,6 +51,34 @@ function emptySnapshot(): AxPlaybookSnapshot {
   return { playbook, artifact: { playbook, feedback: [], history: [] } };
 }
 
+/** A prior snapshot holding bullets this module did not write. */
+function snapshotWithHostBullet(): AxPlaybookSnapshot {
+  const playbook = {
+    version: 3,
+    sections: {
+      General: [
+        {
+          id: 'host-bullet',
+          section: 'General',
+          content: 'HOST OWNED',
+          helpfulCount: 7,
+          harmfulCount: 0,
+          createdAt: NOW,
+          updatedAt: NOW,
+        },
+      ],
+    },
+    stats: {
+      bulletCount: 1,
+      helpfulCount: 7,
+      harmfulCount: 0,
+      tokenEstimate: 2,
+    },
+    updatedAt: NOW,
+  };
+  return { playbook, artifact: { playbook, feedback: [], history: [] } };
+}
+
 /**
  * A fake target that records every write, so `dispose()` can be checked
  * against the exact prior state rather than against a plausible one.
@@ -235,6 +263,22 @@ describe('axApplyHarnessTree', () => {
     expect(target.loads).toBe(0);
   });
 
+  it('refuses a continuous-learning playbook for a tree with no bullets too', async () => {
+    // The refusal follows the RESET, and the reset happens on every install.
+    // Gating it on the tree carrying a bullet let the exact case the guard
+    // exists for — a continuous learner losing its run-accumulated bullets —
+    // through without an acknowledgement.
+    const target = new FakeTarget();
+    target.continuous = true;
+    target.snapshot = snapshotWithHostBullet();
+    await expect(install(target, [instruction('i1')])).rejects.toThrow(
+      /acknowledgeContinuousPlaybookReset/
+    );
+    expect(target.loads).toBe(0);
+    expect(target.instructionSlots.size).toBe(0);
+    expect(axCurrentHarnessInstallation(target)).toBeUndefined();
+  });
+
   it('reports discardedBulletCount when the acknowledged reset drops run-accumulated bullets', async () => {
     const target = new FakeTarget();
     target.continuous = true;
@@ -285,12 +329,66 @@ describe('axApplyHarnessTree', () => {
     expect(target.snapshot.playbook.sections.Learned).toBeUndefined();
   });
 
-  it('reports zero discardedBulletCount when the tree carries no bullets', async () => {
+  it('replaces the playbook even when the tree carries NO bullets', async () => {
+    // The install is a function of the TARGET, not of the tree. A tree with no
+    // bullets is a tree that says "serve no bullets"; leaving the host's
+    // bullets in place would make the agent serve release X plus content that
+    // is in no release, and every record stamped with X would be a lie.
+    const target = new FakeTarget();
+    target.snapshot = snapshotWithHostBullet();
+    const installation = await install(target, [instruction('i1')]);
+
+    expect(target.loads).toBe(1);
+    expect(target.snapshot.playbook.sections).toEqual({});
+    expect(installation.discardedBulletCount).toBe(1);
+
+    // …and the host's bullet comes back exactly on dispose.
+    installation.dispose();
+    expect(target.snapshot.playbook.sections.General?.[0]?.content).toBe(
+      'HOST OWNED'
+    );
+  });
+
+  it('reports zero discardedBulletCount when the prior playbook was empty', async () => {
     const target = new FakeTarget();
     const installation = await install(target, [instruction('i1')]);
     expect(installation.discardedBulletCount).toBe(0);
-    // …and the playbook was never touched.
-    expect(target.loads).toBe(0);
+    // The load still happened — an empty rendering is a valid playbook, and
+    // the channel is written so the replacement contract holds for every tree.
+    expect(target.loads).toBe(1);
+  });
+
+  it('installs on a target with no playbook handle when the tree has no bullets', async () => {
+    const target = new FakeTarget({ withPlaybook: false });
+    const installation = await install(target, [instruction('i1')]);
+    expect(target.instructionSlots.get('learn:i1')).toBe('Answer briefly.');
+    expect(installation.discardedBulletCount).toBe(0);
+  });
+
+  it('clears a skills slot the tree does not fill, and restores it on dispose', async () => {
+    const target = new FakeTarget();
+    target.skillSlots.set('learn', [
+      {
+        id: 'host-skill',
+        name: 'Host owned',
+        content: 'host content',
+      } as AxAgentCatalogSkill,
+    ]);
+    const installation = await install(target, [instruction('i1')]);
+    expect(target.skillSlots.get('learn')).toEqual([]);
+    installation.dispose();
+    expect(target.skillSlots.get('learn')?.[0]?.id).toBe('host-skill');
+  });
+
+  it('leaves the skills channel untouched when nothing is in the slot', async () => {
+    // An agent constructed with a host `onSkillsSearch` refuses the setter
+    // outright; an instruction-only tree must not inherit that refusal.
+    const target = new FakeTarget();
+    target.skillsThrows =
+      'AxAgent.setSkillsCatalogSlot(): this agent was constructed with a host onSkillsSearch';
+    const installation = await install(target, [instruction('i1')]);
+    expect(installation.contentId.startsWith('sha256:')).toBe(true);
+    expect(target.skillSlots.size).toBe(0);
   });
 
   it('wraps a refusing skills slot as AxHarnessApplyError and unwinds the earlier channels', async () => {
@@ -321,6 +419,57 @@ describe('axApplyHarnessTree', () => {
     ]);
     expect(target.instructionSlots.size).toBe(0);
     expect(axCurrentHarnessInstallation(target)).toBe(installation);
+  });
+
+  it('raises an AggregateError when dispose cannot restore, and deregisters anyway', async () => {
+    // R6's promise. A restore that failed silently would leave an agent
+    // serving a trial tree while `axCurrentHarnessInstallation` claimed
+    // otherwise; a restore that stopped at the first failure would leave a
+    // mixture of two trees with no record of which.
+    const target = new FakeTarget();
+    const installation = await install(target, [
+      instruction('i1'),
+      skill('s1'),
+    ]);
+    target.skillsThrows = 'the catalog is gone';
+    let raised: unknown;
+    try {
+      installation.dispose();
+    } catch (error) {
+      raised = error;
+    }
+    expect(raised).toBeInstanceOf(AggregateError);
+    expect((raised as AggregateError).errors).toHaveLength(1);
+    // The instruction channel was still restored, and the target is no longer
+    // registered as serving anything.
+    expect(target.instructionSlots.size).toBe(0);
+    expect(axCurrentHarnessInstallation(target)).toBeUndefined();
+  });
+
+  it('refuses a `now` that does not parse, before writing anything', async () => {
+    // `installedAt: NaN` on a frozen installation is a silently wrong
+    // provenance timestamp; the render check only sees a non-empty string.
+    const target = new FakeTarget();
+    await expect(
+      install(target, [instruction('i1')], { now: 'yesterday' })
+    ).rejects.toThrow(/parseable ISO timestamp/);
+    expect(target.instructionSlots.size).toBe(0);
+    expect(axCurrentHarnessInstallation(target)).toBeUndefined();
+  });
+
+  it('honours the trailing abort signal before it writes', async () => {
+    const target = new FakeTarget();
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      axApplyHarnessTree(
+        [instruction('i1')],
+        target,
+        { releaseId: 'rel-1', now: NOW },
+        controller.signal
+      )
+    ).rejects.toThrow();
+    expect(target.instructionSlots.size).toBe(0);
   });
 
   it('honours a custom slot prefix', async () => {

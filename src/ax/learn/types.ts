@@ -290,8 +290,14 @@ export interface AxHarnessInstallation {
   readonly contentId: string;
   readonly installedAt: number;
   /**
-   * How many run-accumulated playbook bullets the install discarded. Non-zero
-   * only for an acknowledged continuous-playbook reset; never silent.
+   * How many playbook bullets the install replaced.
+   *
+   * A tree install replaces the playbook wholesale on any target that has a
+   * playbook handle, so this counts whatever the prior snapshot held — host
+   * bullets and run-accumulated ones alike. On a target that learns into its
+   * playbook after every run the replacement is refused outright unless
+   * `acknowledgeContinuousPlaybookReset` is set, so a continuous learner's
+   * bullets are never discarded silently.
    */
   readonly discardedBulletCount: number;
   /** Restores the exact pre-install state through the same channels. Idempotent. */

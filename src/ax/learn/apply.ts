@@ -20,6 +20,7 @@ import {
   AxHarnessApplyError,
   type AxHarnessInstallation,
   type AxHarnessInstallTarget,
+  AxHarnessRenderError,
   type AxHarnessTree,
 } from './types.js';
 
@@ -61,6 +62,12 @@ export const axCurrentHarnessInstallation = (
   target: AxHarnessInstallTarget
 ): Readonly<AxHarnessInstallation> | undefined => installations.get(target);
 
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw signal.reason ?? new DOMException('Aborted', 'AbortError');
+  }
+}
+
 function countBullets(snapshot: Readonly<AxPlaybookSnapshot>): number {
   return Object.values(snapshot.playbook.sections ?? {}).reduce(
     (total, bullets) => total + bullets.length,
@@ -79,9 +86,11 @@ function countBullets(snapshot: Readonly<AxPlaybookSnapshot>): number {
 export const axApplyHarnessTree = async (
   tree: AxHarnessTree,
   target: AxHarnessInstallTarget,
-  options: Readonly<AxHarnessApplyOptions>
+  options: Readonly<AxHarnessApplyOptions>,
+  signal?: AbortSignal
 ): Promise<Readonly<AxHarnessInstallation>> => {
   const slotPrefix = options.slot ?? 'learn';
+  throwIfAborted(signal);
 
   if (installations.has(target)) {
     throw new AxHarnessApplyError(
@@ -90,24 +99,46 @@ export const axApplyHarnessTree = async (
     );
   }
 
+  // `now` is parsed once, here, rather than at the end: `installedAt: NaN` on
+  // a frozen installation is a silently wrong provenance timestamp, and the
+  // render below only checks that the string is non-empty.
+  const installedAt = Date.parse(options.now);
+  if (!Number.isFinite(installedAt)) {
+    throw new AxHarnessRenderError(
+      'now',
+      'axApplyHarnessTree: `now` must be a parseable ISO timestamp string'
+    );
+  }
+
   // Admission and content identity run BEFORE any write: an un-admittable
   // tree must never reach a live agent, even partially.
   const contentId = await axHarnessContentId(tree);
   const rendering = axRenderHarnessTree(tree, { now: options.now });
+  throwIfAborted(signal);
 
-  const needsPlaybook = Object.keys(rendering.playbook.sections).length > 0;
-  const needsSkills = rendering.skills.length > 0;
+  // The playbook channel is a function of the TARGET, not of the tree.
+  //
+  // A tree install REPLACES the playbook — that is the documented contract,
+  // and it is what makes a record's `artifactRef` honest, because an agent
+  // serving release X plus run-accumulated bullets that are in no release is
+  // not serving X. Gating the replacement on "the tree happens to carry a
+  // bullet" left foreign bullets serving under a tree that has none, skipped
+  // the continuous-learning refusal entirely for such a tree, and made
+  // "remove the last harmful bullet" unmeasurable in an evolve step.
+  const playbook = target.getPlaybook();
+  if (
+    playbook === undefined &&
+    Object.keys(rendering.playbook.sections).length > 0
+  ) {
+    throw new AxHarnessApplyError(
+      'playbookBullet',
+      'axApplyHarnessTree: the tree carries playbook bullets but the target has no playbook handle.'
+    );
+  }
 
   let priorPlaybook: AxPlaybookSnapshot | undefined;
   let discardedBulletCount = 0;
-  if (needsPlaybook) {
-    const handle = target.getPlaybook();
-    if (!handle) {
-      throw new AxHarnessApplyError(
-        'playbookBullet',
-        'axApplyHarnessTree: the tree carries playbook bullets but the target has no playbook handle.'
-      );
-    }
+  if (playbook) {
     if (
       target.hasContinuousPlaybookLearning?.() === true &&
       options.acknowledgeContinuousPlaybookReset !== true
@@ -117,7 +148,7 @@ export const axApplyHarnessTree = async (
         'axApplyHarnessTree: this target learns into its playbook after every run, and installing a tree replaces it. Pass acknowledgeContinuousPlaybookReset: true to accept discarding run-accumulated bullets.'
       );
     }
-    priorPlaybook = handle.getState();
+    priorPlaybook = playbook.getState();
     discardedBulletCount = countBullets(priorPlaybook);
   }
 
@@ -128,19 +159,54 @@ export const axApplyHarnessTree = async (
   let priorSkills: readonly Readonly<AxAgentCatalogSkill>[] | undefined;
   let wrotePlaybook = false;
 
-  const restore = (): void => {
+  /**
+   * Undo every write this installation made, and REPORT what could not be
+   * undone rather than stopping at the first failure.
+   *
+   * A restore that gave up half way would leave a target serving a mixture of
+   * two trees with no record of which, so each channel is attempted
+   * independently and the failures are collected for the caller to raise.
+   */
+  const restore = (): readonly unknown[] => {
+    const failures: unknown[] = [];
     for (const written of writtenInstructionSlots) {
-      target.setActorInstructionSlot(written.slot, written.prior);
+      try {
+        target.setActorInstructionSlot(written.slot, written.prior);
+      } catch (error) {
+        failures.push(error);
+      }
     }
     writtenInstructionSlots.length = 0;
     if (wroteSkills) {
-      target.setSkillsCatalogSlot(slotPrefix, priorSkills);
       wroteSkills = false;
+      try {
+        target.setSkillsCatalogSlot(slotPrefix, priorSkills);
+      } catch (error) {
+        failures.push(error);
+      }
     }
     if (wrotePlaybook && priorPlaybook) {
-      target.getPlaybook()?.load(priorPlaybook);
       wrotePlaybook = false;
+      try {
+        target.getPlaybook()?.load(priorPlaybook);
+      } catch (error) {
+        failures.push(error);
+      }
     }
+    return failures;
+  };
+
+  /** Unwind, then raise the install failure — with any restore failure attached. */
+  const unwind = (error: unknown, applyError: AxHarnessApplyError): never => {
+    const failures = restore();
+    if (failures.length > 0) {
+      throw new AggregateError(
+        [applyError, ...failures],
+        'axApplyHarnessTree: the install failed AND the target could not be restored'
+      );
+    }
+    void error;
+    throw applyError;
   };
 
   try {
@@ -156,19 +222,21 @@ export const axApplyHarnessTree = async (
       );
     }
   } catch (error) {
-    restore();
-    throw new AxHarnessApplyError(
-      'instruction',
-      `axApplyHarnessTree: installing instruction slots failed: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-      { cause: error }
+    unwind(
+      error,
+      new AxHarnessApplyError(
+        'instruction',
+        `axApplyHarnessTree: installing instruction slots failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        { cause: error }
+      )
     );
   }
 
-  if (needsPlaybook && priorPlaybook) {
+  if (playbook) {
     try {
-      target.getPlaybook()?.load({
+      playbook.load({
         playbook: rendering.playbook,
         artifact: {
           playbook: rendering.playbook,
@@ -178,34 +246,42 @@ export const axApplyHarnessTree = async (
       });
       wrotePlaybook = true;
     } catch (error) {
-      restore();
-      throw new AxHarnessApplyError(
-        'playbookBullet',
-        `axApplyHarnessTree: installing playbook bullets failed: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-        { cause: error }
+      unwind(
+        error,
+        new AxHarnessApplyError(
+          'playbookBullet',
+          `axApplyHarnessTree: installing playbook bullets failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+          { cause: error }
+        )
       );
     }
   }
 
-  if (needsSkills) {
-    try {
-      priorSkills = target.getSkillsCatalogSlot?.(slotPrefix);
+  try {
+    priorSkills = target.getSkillsCatalogSlot?.(slotPrefix);
+    // The slot is replaced, not merged — but a channel this install never
+    // touched is left alone. Writing an empty slot unconditionally would make
+    // an agent constructed with a host `onSkillsSearch` refuse an
+    // instruction-only tree, which is a refusal the tree does not earn.
+    if (rendering.skills.length > 0 || (priorSkills?.length ?? 0) > 0) {
       target.setSkillsCatalogSlot(slotPrefix, rendering.skills);
       wroteSkills = true;
-    } catch (error) {
-      restore();
-      // The setter refuses a host `onSkillsSearch` and a non-catalog agent;
-      // both arrive here as the skill channel with the reason in the message.
-      throw new AxHarnessApplyError(
+    }
+  } catch (error) {
+    // The setter refuses a host `onSkillsSearch` and a non-catalog agent;
+    // both arrive here as the skill channel with the reason in the message.
+    unwind(
+      error,
+      new AxHarnessApplyError(
         'skill',
         `axApplyHarnessTree: installing catalog skills failed: ${
           error instanceof Error ? error.message : String(error)
         }`,
         { cause: error }
-      );
-    }
+      )
+    );
   }
 
   let disposed = false;
@@ -215,13 +291,27 @@ export const axApplyHarnessTree = async (
       ? {}
       : { parentReleaseId: options.parentReleaseId }),
     contentId,
-    installedAt: Date.parse(options.now),
+    installedAt,
     discardedBulletCount,
     dispose: (): void => {
       if (disposed) return;
+      // Marked disposed and deregistered FIRST, in a finally, so a throwing
+      // setter cannot leave the target registered as serving a release it is
+      // no longer serving — a record stamped from a half-restored target would
+      // be worse than no ref at all. The failure is raised, never swallowed.
       disposed = true;
-      installations.delete(target);
-      restore();
+      let failures: readonly unknown[] = [];
+      try {
+        failures = restore();
+      } finally {
+        installations.delete(target);
+      }
+      if (failures.length > 0) {
+        throw new AggregateError(
+          failures,
+          'axApplyHarnessTree: dispose() could not restore the target to its pre-install state'
+        );
+      }
     },
   });
   installations.set(target, installation);
