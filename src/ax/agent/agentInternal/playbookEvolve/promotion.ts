@@ -399,10 +399,20 @@ export function promotionRecordOf(args: {
       vetoes: args.vetoes,
     };
   }
-  // No authority was configured (or the chain never reached it). The default
-  // stays permissive; the absence of a receipt is on the record as a warning,
-  // never as a fabricated 'promoted'.
-  return args.authorityConfigured
-    ? { status: 'not_nominated', nomination }
-    : { status: 'not_required', nomination };
+  if (args.authorityConfigured) {
+    // A nominated candidate, an authority configured, and no answer from it.
+    // `not_nominated` would state a falsehood about a candidate the free gates
+    // DID nominate, and `promoted` would grant on silence. The gate chain always
+    // reaches gate 9 once the free gates pass, so this is an internal invariant
+    // — and a broken invariant is never quietly rewritten into a status a reader
+    // would trust.
+    throw new AxAgentPlaybookEvolveError(
+      'promotion_authority_invalid',
+      'authority',
+      'a nominated candidate reached the promotion record with promotionAuthority configured but no authority outcome: neither a denial nor a receipt was produced, and reporting either would misstate what a host decided.'
+    );
+  }
+  // No authority was configured. The default stays permissive; the absence of a
+  // receipt is on the record as a warning, never as a fabricated 'promoted'.
+  return { status: 'not_required', nomination };
 }

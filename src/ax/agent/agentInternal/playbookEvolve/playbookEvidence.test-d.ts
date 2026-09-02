@@ -20,6 +20,7 @@ import type {
   AxAgentPlaybookSealedTestReport,
   AxAgentPlaybookTransferReport,
   AxAgentPlaybookValidityPredicateId,
+  AxAgentPlaybookVetoResult,
   AxAgentTrajectoryClassifier,
   AxAgentTrajectoryTermination,
 } from './playbookEvidenceTypes.js';
@@ -251,9 +252,15 @@ switch (promotionUnion.status) {
 // `return` fails to compile before it discovers, at runtime, that Ax read its
 // silence as a veto.
 declare const veto: AxAgentPlaybookPromotionVeto;
-// @ts-expect-error - `undefined` is not an answer a veto may give.
-const declined: false = await veto(promotionUnion.nomination);
-void declined;
+const vetoAnswer: boolean | AxAgentPlaybookVetoResult = await veto(
+  promotionUnion.nomination
+);
+void vetoAnswer;
+// @ts-expect-error - a veto that forgets its `return` does not type-check. This
+// is the probe that actually pins `undefined` out of the union: an assignment
+// to `false` would keep erroring even if `undefined` were added to it.
+const forgetfulVeto: AxAgentPlaybookPromotionVeto = () => undefined;
+void forgetfulVeto;
 
 // A prune records the thresholds it was judged by, separately from the
 // retention policy's own. Reading one as the other is what the two fields

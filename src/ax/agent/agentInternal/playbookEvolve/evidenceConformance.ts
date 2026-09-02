@@ -19,6 +19,15 @@
  * are `receiptMatches`, already covered by `authority.test.ts`; what a host can
  * actually get wrong is the echo it is responsible for producing, so that is
  * the only part restated here.
+ *
+ * RUNNING THIS KIT HAS REAL HOST-SIDE EFFECTS. It invokes the supplied veto
+ * twice and performs ONE genuine `axAuthorize` against the caller's live
+ * `AxAuthorityContext` — which calls the host authorizer, and therefore whatever
+ * approval system, audit log or policy engine sits behind it. Point it at a
+ * staging authority, or at a principal whose grants are scoped to
+ * `axPlaybookEvidenceConformanceResource`, unless a real approval record per run
+ * is acceptable. The classifier and reach probe are pure by contract, so those
+ * calls are free.
  */
 
 import { axAuthorize } from '../../../authority/authority.js';
@@ -45,18 +54,41 @@ const require_ = (condition: boolean, message: string): void => {
   if (!condition) throw new AxConformanceFailure(message);
 };
 
-const TASK: Readonly<AxAgentEvalTask> = Object.freeze({
-  input: Object.freeze({ conformance: true }),
+/**
+ * DEEP, not `Object.freeze`. A shallow freeze leaves every nested object
+ * writable, so "the classifier is handed frozen args" would have been a claim
+ * about the top level only — and `args.task.input.seen = true` is exactly the
+ * bookkeeping write a host classifier makes.
+ */
+function deepFreeze<T>(value: T): T {
+  if (value === null || typeof value !== 'object') return value;
+  if (Object.isFrozen(value)) return value;
+  Object.freeze(value);
+  for (const key of Object.getOwnPropertyNames(value)) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor && 'value' in descriptor) deepFreeze(descriptor.value);
+  }
+  return value;
+}
+
+/** A runtime's way of saying "you tried to write to something frozen". */
+function isFrozenWriteError(error: unknown): boolean {
+  if (!(error instanceof TypeError)) return false;
+  return /read.?only|not extensible|frozen|immutable/i.test(error.message);
+}
+
+const TASK: Readonly<AxAgentEvalTask> = deepFreeze({
+  input: { conformance: true },
   criteria: 'conformance probe task',
   id: 'ax-conformance-1',
 }) as Readonly<AxAgentEvalTask>;
 
-const CLEAN_PREDICTION = Object.freeze({
+const CLEAN_PREDICTION = deepFreeze({
   completionType: 'final' as const,
-  output: Object.freeze({ answer: 'ok' }),
+  output: { answer: 'ok' },
   actionLog: '',
-  functionCalls: Object.freeze([]),
-  toolErrors: Object.freeze([]),
+  functionCalls: [],
+  toolErrors: [],
   turnCount: 1,
 });
 
@@ -75,25 +107,28 @@ export const axPlaybookEvidenceConformanceResource = Object.freeze({
 export const axPlaybookEvidenceConformanceOperation =
   'ax.agent.playbook.promote';
 
-const NOMINATION: Readonly<AxAgentPlaybookNomination> = Object.freeze({
+const NOMINATION: Readonly<AxAgentPlaybookNomination> = deepFreeze({
   candidateDigest: 'conformance-candidate',
-  splitDigests: Object.freeze({
+  splitDigests: {
     current: 'conformance-current',
-    slices: Object.freeze([]),
-  }),
+    slices: [],
+  },
   splitDigestBasis: 'task_ids' as const,
   promotionDigest: 'conformance-promotion',
   resourceId: axPlaybookEvidenceConformanceResource.id,
-  gatesPassed: Object.freeze([]),
-  gatesFailed: Object.freeze([]),
+  gatesPassed: [],
+  gatesFailed: [],
   nominated: true,
 }) as Readonly<AxAgentPlaybookNomination>;
+
+const MUTATION_FAILURE =
+  'the classifier mutated its input. A classifier that writes into the task it is handed makes the discard denominator depend on evaluation order, which no receipt can disclose and no reader can reproduce';
 
 async function assertClassifier(
   classifier: AxAgentTrajectoryClassifier,
   count: () => void
 ): Promise<void> {
-  const unknownArgs = Object.freeze({
+  const unknownArgs = deepFreeze({
     task: TASK,
     attempt: 0,
     redraw: 0,
@@ -105,6 +140,14 @@ async function assertClassifier(
   try {
     first = classifier(unknownArgs);
   } catch (error) {
+    // A write to a deep-frozen argument surfaces here as a TypeError. Reporting
+    // that as "the classifier threw on an unrecognized input" would send a host
+    // to fix a totality bug it does not have, so the two are separated.
+    if (isFrozenWriteError(error)) {
+      throw new AxConformanceFailure(
+        `${MUTATION_FAILURE} (${(error as Error).message})`
+      );
+    }
     throw new AxConformanceFailure(
       `the classifier threw on an unrecognized input (${error instanceof Error ? error.message : String(error)}); a classifier that cannot classify must RETURN UNDEFINED, because a throw aborts the whole run with classifier_invalid`
     );
@@ -123,14 +166,33 @@ async function assertClassifier(
     JSON.stringify(second ?? null) === JSON.stringify(first ?? null),
     'the classifier is not pure: the same frozen input produced two different verdicts'
   );
+
+  // The write itself, on a MUTABLE copy — and snapshotted BEFORE the call, not
+  // compared against the same live reference the classifier was handed, which
+  // is a comparison of an object with itself that no mutation can ever fail.
+  // The copy exists because the frozen args above turn an unconditional write
+  // into a throw; a host that stamps bookkeeping inside a `try/catch` writes
+  // successfully here and nowhere else, and that write is the whole point.
+  const mutableArgs = {
+    task: JSON.parse(JSON.stringify(TASK)) as AxAgentEvalTask,
+    attempt: 0,
+    redraw: 0,
+    split: 'current' as const,
+    error: new Error('an error shape this classifier has never seen'),
+    errorName: 'AxConformanceUnknownError',
+  };
+  const taskBefore = JSON.stringify(mutableArgs.task);
+  try {
+    classifier(mutableArgs);
+  } catch {
+    // Totality is already asserted above against the frozen args; a throw here
+    // adds nothing and must not mask the mutation reading.
+  }
   count();
-  require_(
-    JSON.stringify(unknownArgs.task) === JSON.stringify(TASK),
-    'the classifier mutated its input'
-  );
+  require_(JSON.stringify(mutableArgs.task) === taskBefore, MUTATION_FAILURE);
 
   const clean = classifier(
-    Object.freeze({
+    deepFreeze({
       task: TASK,
       prediction: CLEAN_PREDICTION as never,
       attempt: 0,
@@ -150,9 +212,9 @@ function assertReachProbe(
   count: () => void
 ): void {
   const empty = probe(
-    Object.freeze({
-      candidateBulletIds: Object.freeze([]),
-      renderedBulletIds: Object.freeze(['other-bullet']),
+    deepFreeze({
+      candidateBulletIds: [],
+      renderedBulletIds: ['other-bullet'],
       task: TASK,
       prediction: CLEAN_PREDICTION as never,
       split: 'current' as const,
@@ -165,9 +227,9 @@ function assertReachProbe(
   );
 
   const observed = probe(
-    Object.freeze({
-      candidateBulletIds: Object.freeze(['ax-conformance-bullet']),
-      renderedBulletIds: Object.freeze(['ax-conformance-bullet']),
+    deepFreeze({
+      candidateBulletIds: ['ax-conformance-bullet'],
+      renderedBulletIds: ['ax-conformance-bullet'],
       task: TASK,
       prediction: CLEAN_PREDICTION as never,
       split: 'current' as const,
@@ -184,12 +246,25 @@ function assertReachProbe(
 /** Bounded so an unresponsive host callback fails the contract, not the run. */
 const VETO_SETTLE_BUDGET_MS = 250;
 
+/**
+ * A settlement that keeps THREW and RESOLVED apart.
+ *
+ * Collapsing a rejection into `value: undefined` made a throwing veto — a
+ * supported, documented fail-closed answer this subsystem implements and tests
+ * — indistinguishable from a host that forgot its `return`, and the kit then
+ * told it to fix a bug it did not have.
+ */
+type AxConformanceSettlement<T> =
+  | Readonly<{ settled: true; threw: false; value: T }>
+  | Readonly<{ settled: true; threw: true; error: unknown }>
+  | Readonly<{ settled: false }>;
+
 async function settleWithin<T>(
   work: () => T | Promise<T>,
   budgetMs: number
-): Promise<{ settled: true; value: T } | { settled: false }> {
+): Promise<AxConformanceSettlement<T>> {
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const hung = new Promise<{ settled: false }>((resolve) => {
+  const hung = new Promise<AxConformanceSettlement<T>>((resolve) => {
     timer = setTimeout(() => resolve({ settled: false }), budgetMs);
   });
   try {
@@ -197,14 +272,63 @@ async function settleWithin<T>(
       Promise.resolve()
         .then(work)
         .then(
-          (value) => ({ settled: true as const, value }),
-          () => ({ settled: true as const, value: undefined as T })
+          (value): AxConformanceSettlement<T> => ({
+            settled: true,
+            threw: false,
+            value,
+          }),
+          (error): AxConformanceSettlement<T> => ({
+            settled: true,
+            threw: true,
+            error,
+          })
         ),
       hung,
     ]);
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }
+}
+
+/**
+ * An `AbortSignal` that counts the abort listeners attached to it and not
+ * removed. There is no portable `getEventListeners`, so the signal itself is
+ * instrumented — which is enough for item 8, because the leak that matters is a
+ * host callback attaching to the CALLER's long-lived run signal once per veto
+ * per candidate and never detaching.
+ *
+ * Only checked on a call that settles normally: a listener registered with
+ * `{ once: true }` is detached by the runtime after firing, without a
+ * `removeEventListener` this counter could observe, so asserting the balance
+ * around an abort would report a false leak.
+ */
+function countingAbortSignal(): Readonly<{
+  signal: AbortSignal;
+  outstanding: () => number;
+}> {
+  const controller = new AbortController();
+  const signal = controller.signal;
+  let outstanding = 0;
+  const add = signal.addEventListener.bind(signal);
+  const remove = signal.removeEventListener.bind(signal);
+  Object.defineProperty(signal, 'addEventListener', {
+    configurable: true,
+    value: (type: string, ...rest: readonly unknown[]) => {
+      if (type === 'abort') outstanding++;
+      return (add as (...args: readonly unknown[]) => unknown)(type, ...rest);
+    },
+  });
+  Object.defineProperty(signal, 'removeEventListener', {
+    configurable: true,
+    value: (type: string, ...rest: readonly unknown[]) => {
+      if (type === 'abort') outstanding--;
+      return (remove as (...args: readonly unknown[]) => unknown)(
+        type,
+        ...rest
+      );
+    },
+  });
+  return { signal, outstanding: () => outstanding };
 }
 
 async function assertVeto(
@@ -232,8 +356,9 @@ async function assertVeto(
   // a naive implementation. Ax reads it as a VETO — which means a host that
   // MEANT to allow and returned nothing blocks its own promotions with no way
   // to see why. This assertion is the only place that distinction surfaces.
+  const listeners = countingAbortSignal();
   const answered = await settleWithin(
-    () => veto(NOMINATION, new AbortController().signal),
+    () => veto(NOMINATION, listeners.signal),
     VETO_SETTLE_BUDGET_MS
   );
   count();
@@ -241,15 +366,30 @@ async function assertVeto(
     answered.settled,
     `the veto did not settle within ${VETO_SETTLE_BUDGET_MS}ms on an un-aborted call`
   );
-  const answer = answered.settled ? answered.value : undefined;
+  count();
+  // A veto that THROWS is a documented, conforming fail-closed answer: Ax reads
+  // it as a veto and names the error in the receipt. The kit asserts that Ax's
+  // interpretation matches the table (§4.9); it does not ask hosts to stop
+  // throwing. So only a RESOLVED value has to be readable.
+  if (answered.settled && !answered.threw) {
+    const answer = answered.value;
+    require_(
+      answer === true ||
+        answer === false ||
+        (typeof answer === 'object' &&
+          answer !== null &&
+          typeof (answer as { vetoed?: unknown }).vetoed === 'boolean'),
+      `the veto RESOLVED with ${answer === undefined ? 'undefined' : JSON.stringify(answer)}, which Ax's fail-closed table reads as a VETO. Only false or { vetoed: false } declines; a host that meant to allow must say so explicitly. (A veto that THROWS is fine — that is a deliberate fail-closed answer.)`
+    );
+  }
+
+  // Item 8. A veto that attaches to the caller's run signal and never detaches
+  // accumulates one listener per veto per candidate on a signal that outlives
+  // the whole run.
   count();
   require_(
-    answer === true ||
-      answer === false ||
-      (typeof answer === 'object' &&
-        answer !== null &&
-        typeof (answer as { vetoed?: unknown }).vetoed === 'boolean'),
-    `the veto returned ${answer === undefined ? 'undefined' : JSON.stringify(answer)}, which Ax's fail-closed table reads as a VETO. Only false or { vetoed: false } declines; a host that meant to allow must say so explicitly.`
+    listeners.outstanding() === 0,
+    `the veto left ${listeners.outstanding()} abort listener(s) attached to a signal that never aborted; a run evaluating many candidates accumulates one per veto per candidate on the caller's long-lived signal`
   );
 }
 
@@ -305,13 +445,19 @@ async function assertAuthorizer(
  * Returns the number of assertions actually executed and the capabilities they
  * covered, so a host cannot pass this by supplying nothing: a caller that
  * expects four capabilities and receives one has been told so.
+ *
+ * The RFC's signature carried a `now?: () => number`. Nothing here reads a
+ * clock — the settle budget is a real `setTimeout` a host callback must beat,
+ * and an injected clock cannot make a hung callback return — so accepting one
+ * would be an accepted-but-inert option, which is the exact silent absence this
+ * subsystem refuses everywhere else. Recorded as a deviation rather than
+ * shipped as decoration.
  */
 export async function runAxAgentPlaybookEvidenceConformance(args: {
   classifier?: AxAgentTrajectoryClassifier;
   reachProbe?: AxAgentPlaybookReachProbe;
   veto?: AxAgentPlaybookPromotionVeto;
   authority?: Readonly<AxAuthorityContext>;
-  now?: () => number;
 }): Promise<{ assertions: number; capability: readonly string[] }> {
   let assertions = 0;
   const count = () => {

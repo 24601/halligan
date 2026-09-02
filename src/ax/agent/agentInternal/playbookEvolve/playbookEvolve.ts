@@ -483,6 +483,22 @@ function validateEvidenceOptions(
       'gates.interval: require needs varianceBand; a required interval gate without a band silently degrades to "excludes zero".'
     );
   }
+  if (options?.prune && options.prune.enabled !== true) {
+    const configured = Object.keys(options.prune)
+      .filter((key) => key !== 'enabled')
+      .sort();
+    if (configured.length > 0) {
+      // The same rule `promotionVeto` gets: an option that is accepted, counted
+      // as an evidence option, and then does nothing is the silent absence this
+      // machinery exists to remove. `prune: { maxRenderedTokens: 400 }` reads
+      // like a configured ceiling and enforces nothing.
+      throw new AxAgentPlaybookEvolveError(
+        'evidence_incomplete',
+        'redundancy_ablation',
+        `prune was configured with ${configured.join(', ')} but prune.enabled is not true, so the sweep never runs and none of it takes effect. Set prune.enabled: true, or drop the prune option.`
+      );
+    }
+  }
   if (options?.prune?.enabled && !hasHeldOut) {
     // A leave-one-out verdict taken on the split the artifact was selected on
     // measures selection, not redundancy, so there is no fallback to `current`

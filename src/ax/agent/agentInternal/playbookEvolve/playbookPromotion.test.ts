@@ -477,6 +477,26 @@ describe('promotion record', () => {
     expect(record.status).toBe('not_required');
   });
 
+  it('refuses to fabricate a status when a configured authority never answered', () => {
+    // Unreachable through the gate chain — gate 9 always runs once the free
+    // gates pass — so this pins the invariant rather than a code path. The old
+    // fallback reported `not_nominated` for a candidate the free gates DID
+    // nominate, which is a falsehood a reader would have trusted.
+    let thrown: unknown;
+    try {
+      promotionRecordOf({
+        nomination: NOMINATION,
+        vetoes: [{ vetoId: 'v', vetoed: false }],
+        authorityConfigured: true,
+      });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(axIsAgentPlaybookEvolveError(thrown)).toBe(true);
+    expect((thrown as any).code).toBe('promotion_authority_invalid');
+    expect((thrown as Error).message).toContain('no authority outcome');
+  });
+
   it('promotes only on an un-vetoed nomination with an allow receipt', () => {
     const record = promotionRecordOf({
       nomination: NOMINATION,
@@ -559,6 +579,73 @@ describe('runAxAgentPlaybookEvidenceConformance', () => {
             : undefined,
       })
     ).rejects.toThrow(/must return undefined for an input it does not/);
+  });
+
+  it('rejects a classifier that writes into the frozen task it is handed', async () => {
+    await expect(
+      runAxAgentPlaybookEvidenceConformance({
+        classifier: (args) => {
+          // A deep-frozen argument turns this into a TypeError. Reporting it as
+          // "the classifier threw on an unrecognized input" would send a host to
+          // fix a totality bug it does not have.
+          (args.task as { id: string }).id = 'stamped';
+          return undefined;
+        },
+      })
+    ).rejects.toThrow(/mutated its input/);
+  });
+
+  it('rejects a classifier that mutates whenever the input is writable', async () => {
+    await expect(
+      runAxAgentPlaybookEvidenceConformance({
+        classifier: (args) => {
+          try {
+            (args.task as { id: string }).id = 'stamped';
+          } catch {
+            // A host that stamps bookkeeping defensively writes only where it
+            // can — which is precisely the case a same-reference comparison
+            // could never catch.
+          }
+          return undefined;
+        },
+      })
+    ).rejects.toThrow(/mutated its input/);
+  });
+
+  it('accepts a veto that throws, because a throw is a fail-closed answer', async () => {
+    // `promotion.ts` reads a throwing veto as a veto and names the error. A kit
+    // that reported it as "returned undefined" would tell a host whose policy
+    // engine throws to fix a non-bug.
+    const outcome = await runAxAgentPlaybookEvidenceConformance({
+      veto: () => {
+        throw new Error('PolicyDenied');
+      },
+    });
+    expect(outcome.capability).toEqual(['veto']);
+    expect(outcome.assertions).toBeGreaterThan(0);
+  });
+
+  it('rejects a veto that leaves an abort listener on the run signal', async () => {
+    await expect(
+      runAxAgentPlaybookEvidenceConformance({
+        veto: (_nomination, signal) => {
+          signal?.addEventListener('abort', () => {});
+          return false;
+        },
+      })
+    ).rejects.toThrow(/abort listener\(s\) attached to a signal that never/);
+  });
+
+  it('accepts a veto that removes the listener it attached', async () => {
+    const outcome = await runAxAgentPlaybookEvidenceConformance({
+      veto: (_nomination, signal) => {
+        const onAbort = () => {};
+        signal?.addEventListener('abort', onAbort);
+        signal?.removeEventListener('abort', onAbort);
+        return false;
+      },
+    });
+    expect(outcome.capability).toEqual(['veto']);
   });
 
   it('rejects a classifier that discards a completed run', async () => {

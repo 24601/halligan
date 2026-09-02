@@ -71,6 +71,15 @@ export const PRUNE_DEFAULT_MAX_CURRENT_LOSS = 0;
 export const PRUNE_DEFAULT_OPERATION: AxAgentPlaybookPruneOperation =
   'deprecate';
 
+/**
+ * A prune's history entry does not come from a compile epoch: there is no
+ * training loop, no epoch counter and no example index behind it. `-1` is the
+ * artifact history's "not from a compile pass" sentinel, named here so a future
+ * consumer does arithmetic on the number only after reading what it means.
+ */
+const PRUNE_HISTORY_EPOCH = -1;
+const PRUNE_HISTORY_EXAMPLE_INDEX = -1;
+
 const pruneFailure = (message: string, cause?: unknown): never => {
   throw new AxAgentPlaybookEvolveError(
     'prune_apply_failed',
@@ -184,7 +193,7 @@ export function transformPlaybookForPrune(args: {
       const bullet = bullets[index]!;
       if (!remaining.has(bullet.id)) continue;
       remaining.delete(bullet.id);
-      const before = JSON.parse(JSON.stringify(bullet)) as AxACEBullet;
+      const before = structuredClone(bullet);
       if (operation === 'remove') {
         bullets.splice(index, 1);
         changes.push({ bulletId: bullet.id, section, before });
@@ -203,7 +212,7 @@ export function transformPlaybookForPrune(args: {
         bulletId: bullet.id,
         section,
         before,
-        after: JSON.parse(JSON.stringify(bullet)) as AxACEBullet,
+        after: structuredClone(bullet),
       });
     }
   }
@@ -444,8 +453,8 @@ export function applyPrune(args: {
         ...(stamped.artifact?.history ?? []),
         {
           source: 'agent-evolve',
-          epoch: -1,
-          exampleIndex: -1,
+          epoch: PRUNE_HISTORY_EPOCH,
+          exampleIndex: PRUNE_HISTORY_EXAMPLE_INDEX,
           operations: pruneOperationsFor(proposal, transform.changes),
           updatedBulletIds: [...proposal.bulletIds],
           changes: transform.changes.map((change) => ({

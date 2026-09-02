@@ -833,6 +833,44 @@ function overflowFixture() {
   return { handle, self, metric };
 }
 
+/**
+ * An actor that reads the RENDERED playbook, not the handle's state. The
+ * default `deprecate` operation leaves the bullet in the snapshot, so a fixture
+ * that inspects state directly measures a zero-effect change; only a render can
+ * observe what a deprecation actually does to the prompt.
+ */
+function renderedFixture() {
+  const handle = pruneHandle(
+    playbookOf([
+      bulletOf('noise', { content: 'noisy guidance that misleads the actor' }),
+      bulletOf('keeper', { content: 'load bearing guidance the actor needs' }),
+    ])
+  );
+  const self = {
+    init: { ai: {} as any },
+    getPlaybook: () => handle,
+    _forwardForEvaluation: async () => ({
+      completionType: 'final' as const,
+      output: {
+        rendered: renderPlaybook(handle.current().playbook, { now: NOW_ISO }),
+      },
+      actionLog: '',
+      functionCalls: [],
+      toolErrors: [],
+      turnCount: 1,
+      usage: [],
+    }),
+  };
+  const metric = async ({ prediction }: any) => {
+    const rendered = String(prediction.output.rendered);
+    const raw =
+      (rendered.includes('[noise]') ? -0.5 : 0) +
+      (rendered.includes('[keeper]') ? 0.7 : 0);
+    return Math.max(0, Math.min(1, raw));
+  };
+  return { handle, self, metric };
+}
+
 const PRUNE_DATASET = {
   train: [
     { input: { q: 1 }, criteria: 'c', id: 't1' },
@@ -1103,6 +1141,59 @@ describe('the prune phase', () => {
     // One bounded RETRY, exactly as the control-arm restore gets: two attempts,
     // never one and never a loop.
     expect(restoreAttempts).toBe(2);
+  });
+
+  it('deprecates a bullet out of the render the actor actually sees', async () => {
+    const { handle, self, metric } = renderedFixture();
+    const result = await evolveAgentPlaybook(self as any, PRUNE_DATASET, {
+      metric,
+      scoreThreshold: 0,
+      // The DEFAULT operation. `deprecate` is reversible and auditable, and its
+      // whole claim is that the rendered-token reduction is identical to a
+      // delete — which only a rendering actor can falsify.
+      prune: { enabled: true },
+    });
+
+    const prune = result.outcomes.filter((outcome) => outcome.kind === 'prune');
+    expect(prune).toHaveLength(1);
+    expect(prune[0]?.prune?.operation).toBe('deprecate');
+    expect(prune[0]?.prune?.bulletIds).toEqual(['noise']);
+    expect(prune[0]?.accepted).toBe(true);
+
+    const live = handle.current().playbook;
+    const rendered = renderPlaybook(live, { now: NOW_ISO });
+    // Gone from the prompt ...
+    expect(rendered).not.toContain('[noise]');
+    // ... and still there, still audited, in the snapshot.
+    expect(rendered).toContain('[keeper]');
+    const noise = live.sections.failures_to_avoid.find(
+      (bullet: AxACEBullet) => bullet.id === 'noise'
+    );
+    expect(noise?.evidence?.lifecycle?.status).toBe('deprecated');
+    // A deprecation frees the same rendered tokens a delete would.
+    expect(prune[0]?.prune?.renderedTokensAfter).toBeLessThan(
+      prune[0]!.prune!.renderedTokensBefore
+    );
+  });
+
+  it('refuses a prune configuration that would never run', async () => {
+    const { self, metric } = pruneFixture();
+    await expect(
+      evolveAgentPlaybook(self as any, PRUNE_DATASET, {
+        metric,
+        scoreThreshold: 0,
+        // A ceiling that reads as configured and enforces nothing is the
+        // accepted-but-inert option this subsystem refuses everywhere else.
+        prune: { maxRenderedTokens: 1, onOverflow: 'propose' },
+      })
+    ).rejects.toThrow(/prune.enabled is not true/);
+    // ... and the empty object is still accepted: it configures nothing.
+    const result = await evolveAgentPlaybook(self as any, PRUNE_DATASET, {
+      metric,
+      scoreThreshold: 0,
+      prune: {},
+    });
+    expect(result.redundancy).toBeUndefined();
   });
 
   it('is inert when prune is not enabled', async () => {
