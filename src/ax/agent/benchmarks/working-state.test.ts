@@ -48,8 +48,30 @@ const MEASUREMENT_GAP_CEILING = 0.02;
  * mode does not remove and does not claim to. The term the mode removes is the
  * TRANSCRIPT, which is why the assertion below is relative to the two
  * transcript arms as well.
+ *
+ * Measured 1.73 against 2.40 (`working-state`) and 2.95 (`baseline`), so the
+ * ceiling leaves ~7% headroom rather than the 16% a `2.0` ceiling left — at
+ * 2.0 a `skill-state` arm that had regressed to 1.9 would still have passed
+ * while a baseline sat at 1.95.
  */
-const SKILL_STATE_GROWTH_CEILING = 2.0;
+const SKILL_STATE_GROWTH_CEILING = 1.85;
+
+/**
+ * Declared margin by which the `skill-state` slope must beat the
+ * `working-state` slope. The two arms carry the SAME state document, so the
+ * only difference between them is the transcript: an arm that merely tied
+ * would mean the transcript term had come back.
+ */
+const SKILL_STATE_GROWTH_MARGIN = 0.85;
+
+/**
+ * Declared ceiling on the `skill-state` arm's model calls ABOVE its executor
+ * turn count. Measured 2 at every horizon (12/10, 27/25, 62/60): the run's
+ * non-executor-turn calls do not scale with the horizon, because no checkpoint
+ * summarizer runs and no turn is spent re-deriving known state. A regression
+ * that let the summarizer back in reads 90 calls for 60 turns.
+ */
+const SKILL_STATE_MODEL_CALL_SLACK = 3;
 
 let sweep: readonly AxWorkingStateScenarioResult[];
 
@@ -164,7 +186,7 @@ describe('working-state benchmark', () => {
     // The mode removes the transcript growth term while carrying the SAME
     // state document as the `working-state` arm.
     expect(skillState).toBeLessThan(baseline);
-    expect(skillState).toBeLessThan(workingState);
+    expect(skillState).toBeLessThan(workingState * SKILL_STATE_GROWTH_MARGIN);
     expect(skillState).toBeLessThan(SKILL_STATE_GROWTH_CEILING);
   });
 
@@ -182,6 +204,31 @@ describe('working-state benchmark', () => {
     // summarization runs, and no turn is spent re-deriving known state.
     expect(skillState.modelCalls).toBeLessThan(workingState.modelCalls);
     expect(skillState.modelCalls).toBeLessThan(baseline.modelCalls);
+  });
+
+  it('A10b: skillState model calls track its turn count at every horizon', () => {
+    // "Fewer than the other arms" is too loose to protect the headline number:
+    // with all three §7.4.1 cost guards removed the arm regresses 62 -> 90 at
+    // horizon 60 and still beats `working-state`'s 111. Tying model calls to
+    // TURNS instead catches that, because the extra calls a returning
+    // checkpoint summarizer makes scale with the horizon and the run's own
+    // non-turn calls do not.
+    for (const horizon of AX_WORKING_STATE_BENCH_HORIZONS) {
+      const row = pick(horizon, 'skill-state').row;
+      // Not vacuous: the arm really took a turn per scenario step, so the
+      // bound below is measured against real work rather than a short run.
+      expect([horizon, row.turns]).toEqual([horizon, horizon]);
+      expect([horizon, row.modelCalls]).toEqual([
+        horizon,
+        Math.min(row.modelCalls, row.turns + SKILL_STATE_MODEL_CALL_SLACK),
+      ]);
+    }
+    // ...and the bound is a real discriminator: the transcript arm at the
+    // largest horizon fails it.
+    const transcript = pick(MAX_HORIZON, 'working-state').row;
+    expect(
+      transcript.modelCalls > transcript.turns + SKILL_STATE_MODEL_CALL_SLACK
+    ).toBe(true);
   });
 
   it('A11: skillState keeps the gate and the accuracy of the transcript arms', () => {
