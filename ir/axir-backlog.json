@@ -2048,6 +2048,25 @@
       "verification": null
     },
     {
+      "id": "axir-2026-09-02-deferred-ast-level-mutation-annotation-for-program-source-candid",
+      "status": "open",
+      "title": "Deferred: AST-level mutation annotation for program-source candidates",
+      "createdAt": "2026-09-02",
+      "sourcePR": 100,
+      "sourceCommit": "382c3542be9ae312e69f9e5876ece7d1f5f5f5d6",
+      "tsPaths": ["src/ax/dsp/programSource.ts"],
+      "portableSurface": "axprogram",
+      "impact": "AxMutationAnnotator is invoked once per GEPA candidate, not once per program-source AST edit. programSource.ts has no annotation hook, so a candidate that rewrites an evolved AST is classified as a single program.source_replace patch regardless of how many distinct edits it made. Recorded so the gap is visible rather than implied by the taxonomy's presence.",
+      "suggestedAxirWork": [
+        "Add or update the TS-derived conformance fixture.",
+        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
+        "Run npm run axir:conformance:check and npm run test:axir."
+      ],
+      "completedAt": null,
+      "completedByCommit": null,
+      "verification": null
+    },
+    {
       "id": "axir-2026-09-02-gepa-evidence-primitives-branded-digests-trajectory-admission-mu",
       "status": "open",
       "title": "GEPA evidence primitives: branded digests, trajectory admission, mutation taxonomy, harness recipes, discriminative sampling with IPW, candidate effect declarations, rejected-candidate ledger",
@@ -2066,6 +2085,44 @@
       ],
       "portableSurface": "axoptimize",
       "impact": "Adds seven pure, currently UNWIRED modules under src/ax/dsp/optimizers/ and narrows fingerprintGEPAValue's return type. Nothing here is reachable from AxGEPA, so portable optimizer behaviour is byte-identical (proved by test:gepa-upstream-compatibility against the merge base). The portable semantics these modules will carry once wired: three digest strengths with a runtime strength assertion; host-classified trajectory termination with a non-reclassifiable override for config errors and program-source failures, admission accounting, a run-level discard ceiling, and an intersected paired-admitted index set; a mutation depth/patch taxonomy keyed on component kind that fails closed on an unmapped kind; harness recipes digesting bindings plus a bound model id; Beta(1,1)-smoothed Bernoulli-variance inclusion probabilities with a mandatory exploration floor, water-fill, Madow systematic pps sampling consuming exactly one RNG draw, and a Hajek/IPW paired-difference estimator; structural validation of candidate effect declarations bound to AxEventEffectIntent; and a rejected-candidate ledger port whose entries expire by construction with fail-open unknown context. Two ordering rules are load-bearing for any port: array members inside an identity digest (harness recipe bindings, ledger component deltas) are sorted by UTF-16 code unit, never by locale collation, so the digest is a function of its input alone; and the rejected-candidate prior block is a distinct type from the trusted optimization-reference channel and must never be renderable inside TRUSTED markers.",
+      "suggestedAxirWork": [
+        "Add or update the TS-derived conformance fixture.",
+        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
+        "Run npm run axir:conformance:check and npm run test:axir."
+      ],
+      "completedAt": null,
+      "completedByCommit": null,
+      "verification": null
+    },
+    {
+      "id": "axir-2026-09-02-gepa-lineage-version-2-mutation-taxonomy-reflection-outcomes-har",
+      "status": "open",
+      "title": "GEPA lineage version 2: mutation taxonomy, reflection outcomes, harness stamp, and the deployable best chain",
+      "createdAt": "2026-09-02",
+      "sourcePR": 100,
+      "sourceCommit": "382c3542be9ae312e69f9e5876ece7d1f5f5f5d6",
+      "tsPaths": ["src/ax/dsp/optimizers/gepaLineage.ts"],
+      "portableSurface": "axoptimize",
+      "impact": "AxGEPACandidateLineageManifest becomes version 1 | 2. Version 2 adds five optional record fields (mutation annotation, paired reflection outcomes, causal-evidence cross-link id, harness stamp, per-batch admission) and five optional manifest fields (mutation depth histogram, discrimination summary, harness stamp, deployable best chain, run-level admission). Two new compile options, harnessRecipe and mutationAnnotation, are read through the Proxy-safe own-data reader; a required annotation aborts a candidate before either promotion gate evaluates it. The manifest version is derived from content, so a record carrying a version-2 field can never ship inside a version-1 manifest. With every opt-in option absent the manifest stays version 1 and byte-identical, including the rand() draw sequence. The lineage objectives key order moves from localeCompare to code-unit order, so it no longer depends on the host locale.",
+      "suggestedAxirWork": [
+        "Add or update the TS-derived conformance fixture.",
+        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
+        "Run npm run axir:conformance:check and npm run test:axir."
+      ],
+      "completedAt": null,
+      "completedByCommit": null,
+      "verification": null
+    },
+    {
+      "id": "axir-2026-09-02-gepa-rejected-candidate-ledger-wiring-and-the-untrusted-proposer",
+      "status": "open",
+      "title": "GEPA rejected-candidate ledger wiring and the untrusted proposer prior",
+      "createdAt": "2026-09-02",
+      "sourcePR": 100,
+      "sourceCommit": "382c3542be9ae312e69f9e5876ece7d1f5f5f5d6",
+      "tsPaths": ["src/ax/dsp/optimizers/gepa.ts"],
+      "portableSurface": "axoptimize",
+      "impact": "Rejected candidates are recorded into a host-owned store at five sites (both merge aborts, the merge reject, the mutation abort and the mutation reject) with the gate reading, the estimator the gate actually used, the mutation annotation, the harness stamp and a bounded untrusted diagnosis. Each round reads the prior for the components it is about to propose, with expiry evaluated at query time against the caller's context and an injected clock; an expiresWhen with no after_ms clause is refused before the first metric call. AxGEPAProposalPolicyArgs gains rejectedPrior, rendered into its own delimited untrusted prompt field and never into the trusted optimization-reference channel; GEPA_PROPOSAL_CONTRACT gains two sentences only when a non-empty prior is present and is byte-identical otherwise. AxGEPAOptimizationReference gains an optional channel discriminant that makes the untrusted block structurally unassignable to it. AxOptimizedProgram gains rejectedCandidateLedgerRef, a pointer set the artifact cannot rewrite. A store that throws degrades to a lineage runtime failure and never aborts the run.",
       "suggestedAxirWork": [
         "Add or update the TS-derived conformance fixture.",
         "Update AxIR/Core or descriptor data to match the portable TS behavior.",
@@ -2279,6 +2336,25 @@
       "tsPaths": ["src/ax/agent/statePatch.ts", "src/ax/agent/workingState.ts"],
       "portableSurface": "axagent",
       "impact": "Adds an opt-in typed working state to the actor loop: an id-keyed goal ledger whose transitions commit only on host-checker support and harness-minted tool receipts cited by a model-visible ref, an RFC-6902-subset state patch applied all-or-nothing with test-as-guard, a closed delta classification table, a bounded park ledger, a per-turn structured trace, executor-only stage scoping with a per-forward run id, and an optional bounded completion interlock. Default behaviour is unchanged when the option is unset.",
+      "suggestedAxirWork": [
+        "Add or update the TS-derived conformance fixture.",
+        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
+        "Run npm run axir:conformance:check and npm run test:axir."
+      ],
+      "completedAt": null,
+      "completedByCommit": null,
+      "verification": null
+    },
+    {
+      "id": "axir-2026-09-02-version-4-causal-candidate-evidence-manifests-with-receipt-cover",
+      "status": "open",
+      "title": "Version-4 causal candidate evidence manifests with receipt-covered policy",
+      "createdAt": "2026-09-02",
+      "sourcePR": 100,
+      "sourceCommit": "382c3542be9ae312e69f9e5876ece7d1f5f5f5d6",
+      "tsPaths": ["src/ax/dsp/optimizers/causalCandidateEvidence.ts"],
+      "portableSurface": "axprogram",
+      "impact": "AxCausalCandidateEvidenceManifest becomes version 3 | 4, bumped by ANY version-4 feature rather than by a declared policy alone, so a version-3 manifest keeps identifying the exact legacy record schema. Records gain attribution, mutation, cost, harness, discrimination (with an estimator and gate discriminant), admission, effects and runtimeRequirements; ablation gains a leave-one-out matrix held to the same link invariants as the single ablation it generalizes. validateManifestRecords takes an explicit policy; canonicalizeReceipt appends a version-guarded policy key so the manifest-level gate is covered by the authority receipt; axCloneCausalCandidateEvidenceManifest accepts requirePolicyAtLeast and re-validates under the strictest of the artifact's policy and the caller's. Promotion of a program-source tool-capability patch is refused without an effect declaration; a promoted program.source_replace is refused without runtime capability requirements; an effect on a steering patch is refused. axReplaceOptimizedProgramSnapshot unions only the rejected-candidate ledger ref and leaves the divergent-causal-history refusal untouched. No version-4 manifest is readable by an older build.",
       "suggestedAxirWork": [
         "Add or update the TS-derived conformance fixture.",
         "Update AxIR/Core or descriptor data to match the portable TS behavior.",
