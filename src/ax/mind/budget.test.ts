@@ -102,7 +102,8 @@ import { describe, expect, it } from 'vitest';
  *   it. `index.ts` 175 likewise absorbs the two new exports.
  * - The DIRECTORY ceiling 5_650 -> 5_700. The previous raise measured 5_472,
  *   but that figure predates two commits that landed on main afterwards, so
- *   the shipped total was already 5_579 before this pass touched anything.
+ *   the shipped total on main was already 5_516 before this pass touched
+ *   anything.
  *
  * Measured at this raise: types 607, pacer 284, health 138, routes 314,
  * sources 594, chat 785, salience 163, skills 134, context 138, step 168,

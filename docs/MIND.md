@@ -406,7 +406,8 @@ ceiling; the shipped total is higher, and each raise has a reason:
 | `index.ts` | 175 | the barrel grew with the runtime |
 
 The DIRECTORY ceiling is **5,700** non-blank production lines against RFC 5.1's
-3,050. That is a real miss against RFC 11's definition of done, stated here
+3,050, measured at 5,650 (`main` was already at 5,516 before the Track A
+follow-up pass). That is a real miss against RFC 11's definition of done, stated here
 rather than left to be discovered: the estimate costed the declaration surface
 and the shipped files carry the implementation too, at 80 columns with a doc
 comment on each non-obvious policy. Raising either again needs the same
