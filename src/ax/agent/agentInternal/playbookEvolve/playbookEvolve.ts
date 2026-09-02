@@ -22,6 +22,7 @@ import type {
   AxAgentJudgeOptions,
 } from '../agentOptimizeTypes.js';
 import { createAgentOptimizeMetric } from '../optimizer.js';
+import { createAccountingLedger } from './accounting.js';
 import {
   atMostWithFloatingPointTolerance,
   canonicalDigest,
@@ -34,6 +35,13 @@ import type {
 } from './evalHarness.js';
 import { runAgentEvalBatch } from './evalHarness.js';
 import { clusterFailures } from './failureClusters.js';
+import type {
+  AxAgentPlaybookComputeAccounting,
+  AxAgentPlaybookComputePhaseName,
+  AxAgentPlaybookControlArmReport,
+  AxAgentPlaybookSplitName,
+} from './playbookEvidenceTypes.js';
+import { AxAgentPlaybookEvolveError } from './playbookEvidenceTypes.js';
 import type {
   AxAgentPlaybookEvolveOptions,
   AxAgentPlaybookEvolveOutcome,
@@ -202,6 +210,73 @@ function assertRequiredHeldOut<IN extends AxGenIn>(args: {
   }
 }
 
+/**
+ * Options whose presence turns on an evidence path. Every one of them is
+ * meaningless with `verify: false` — the trust-batch path accepts every
+ * proposal with no evaluation at all — so combining them fails closed rather
+ * than silently doing nothing.
+ */
+const EVIDENCE_OPTION_KEYS = [
+  'gates',
+  'varianceBand',
+  'intervalOptions',
+  'validity',
+  'reachProbe',
+  'conditionsForTask',
+  'classifyTermination',
+  'maxDiscardRedraws',
+] as const;
+
+function activeEvidenceOptions(
+  options?: Readonly<AxAgentPlaybookEvolveOptions<any>>
+): readonly string[] {
+  if (!options) return [];
+  const active: string[] = [];
+  for (const key of EVIDENCE_OPTION_KEYS) {
+    const value = (options as Record<string, unknown>)[key];
+    if (value === undefined) continue;
+    if (key === 'gates') {
+      const modes = Object.values(value as Record<string, unknown>).filter(
+        (mode) => mode === 'warn' || mode === 'require'
+      );
+      if (modes.length === 0) continue;
+    }
+    active.push(key);
+  }
+  return active;
+}
+
+function validateEvidenceOptions(
+  options: Readonly<AxAgentPlaybookEvolveOptions<any>> | undefined,
+  verify: boolean
+): void {
+  const active = activeEvidenceOptions(options);
+  if (!verify && active.length > 0) {
+    throw new AxAgentPlaybookEvolveError(
+      'evidence_requires_verify',
+      'baseline',
+      `${active.join(', ')} cannot be combined with verify: false; the trust-batch path accepts every proposal without evaluating it.`
+    );
+  }
+  const gates = options?.gates;
+  if (gates?.controlArm && gates.controlArm !== 'off') {
+    // A required (or warned) control-arm gate with no arm to compare against
+    // is a gate that can never read anything. Fail closed at validation.
+    throw new AxAgentPlaybookEvolveError(
+      'control_arm_failed',
+      'control_arm',
+      'gates.controlArm needs a controlArm configuration; a control-arm gate with no arm cannot be evaluated.'
+    );
+  }
+  if (gates?.transfer && gates.transfer !== 'off') {
+    throw new AxAgentPlaybookEvolveError(
+      'transfer_target_invalid',
+      'transfer',
+      'gates.transfer needs a transfer configuration with at least one target.'
+    );
+  }
+}
+
 export async function evolveAgentPlaybook<
   IN extends AxGenIn,
   OUT extends AxGenOut,
@@ -249,6 +324,13 @@ export async function evolveAgentPlaybook<
     options?.metric ?? createAgentOptimizeMetric(self, judgeAI, judgeOptions);
 
   const verify = options?.verify !== false;
+  validateEvidenceOptions(options, verify);
+  const evidenceEnabled = activeEvidenceOptions(options).length > 0;
+  const nowFn = options?.now ?? Date.now;
+  const ledger = createAccountingLedger(nowFn);
+  const usesBuiltInJudge = options?.metric === undefined;
+  const maxDiscardRedraws =
+    options?.maxDiscardRedraws ?? (options?.classifyTermination ? 1 : 0);
   const retentionPolicy = options?.retentionPolicy
     ? cloneAndFreeze(options.retentionPolicy, 'retentionPolicy')
     : undefined;
@@ -382,6 +464,47 @@ export async function evolveAgentPlaybook<
     runsPerTask,
     ...(retentionPolicy ? { isolateTaskInputs: true } : {}),
     ...(options?.abortSignal ? { abortSignal: options.abortSignal } : {}),
+    ...(options?.classifyTermination
+      ? { classifyTermination: options.classifyTermination }
+      : {}),
+    ...(maxDiscardRedraws > 0 ? { maxDiscardRedraws } : {}),
+    ...(evidenceEnabled ? { captureAttempts: true } : {}),
+    ...(options?.now ? { now: options.now } : {}),
+  };
+
+  /**
+   * Every evaluation goes through here so the honest run total (I6) is the sum
+   * over phases and no phase can spend budget without being counted. The
+   * judge phase counts INVOCATIONS only: the judge is reached as an opaque
+   * `AxMetricFn`, so its tokens are structurally unobservable.
+   */
+  const runPhaseBatch = async (
+    phase: AxAgentPlaybookComputePhaseName,
+    tasks: readonly AxAgentEvalTask<IN>[],
+    split: AxAgentPlaybookSplitName,
+    sliceName?: string
+  ): Promise<AxAgentEvalBatchResult<IN, OUT>> => {
+    const handle = ledger.phase(phase);
+    const before = budget.remaining;
+    try {
+      const result = await runAgentEvalBatch<IN, OUT>({
+        ...batchArgs,
+        tasks,
+        split,
+        ...(sliceName ? { sliceName } : {}),
+      });
+      handle.addUsage(result.usage);
+      return result;
+    } finally {
+      const spent = before - budget.remaining;
+      handle.addMetricCalls(spent);
+      handle.close();
+      if (usesBuiltInJudge && spent > 0) {
+        const judge = ledger.phase('judge');
+        judge.addModelCalls(spent);
+        judge.close();
+      }
+    }
   };
 
   // The playbook handle to curate into. The caller (agent.playbook().evolve)
@@ -401,10 +524,7 @@ export async function evolveAgentPlaybook<
 
   // ---- Baseline ----
   progress('baseline', `evaluating ${trainTasks.length} train tasks`);
-  const baselineTrain = await runAgentEvalBatch<IN, OUT>({
-    ...batchArgs,
-    tasks: trainTasks,
-  });
+  const baselineTrain = await runPhaseBatch('baseline', trainTasks, 'current');
   if (retentionPolicy && !baselineTrain.complete) {
     throw retentionEvidenceError(
       'retention current-task anchor',
@@ -442,10 +562,11 @@ export async function evolveAgentPlaybook<
       'baseline',
       `evaluating ${validationTasks.length} validation tasks`
     );
-    baselineHeldOutBatch = await runAgentEvalBatch<IN, OUT>({
-      ...batchArgs,
-      tasks: validationTasks,
-    });
+    baselineHeldOutBatch = await runPhaseBatch(
+      'baseline',
+      validationTasks,
+      'heldOut'
+    );
     if (retentionPolicy && !baselineHeldOutBatch.complete) {
       throw retentionEvidenceError(
         'retention held-out anchor',
@@ -478,10 +599,12 @@ export async function evolveAgentPlaybook<
         'baseline',
         `evaluating retention slice ${slice.name}@${slice.version} (${slice.tasks.length} tasks)`
       );
-      const result = await runAgentEvalBatch<IN, OUT>({
-        ...batchArgs,
-        tasks: slice.tasks,
-      });
+      const result = await runPhaseBatch(
+        'retention_eval',
+        slice.tasks,
+        'slice',
+        slice.name
+      );
       if (!result.complete) {
         throw retentionEvidenceError(
           `retention slice ${slice.name}@${slice.version}`,
@@ -520,11 +643,15 @@ export async function evolveAgentPlaybook<
   );
 
   const weaknesses: AxAgentPlaybookWeakness[] = [];
+  // `mineWeakness` builds its own AxGen and returns no usage, so this phase can
+  // count invocations and nothing else — hence tokensBasis 'unobservable'.
+  const miningPhase = ledger.phase('mining');
   for (const [index, cluster] of clusters.entries()) {
     if (options?.abortSignal?.aborted) {
       throw new Error('AxAgent.playbook().evolve(): aborted');
     }
     try {
+      miningPhase.addModelCalls(1);
       const weakness = await mineWeakness({
         ai: teacherAI,
         cluster,
@@ -547,6 +674,7 @@ export async function evolveAgentPlaybook<
       );
     }
   }
+  miningPhase.close();
 
   // ---- Sequential propose -> (verify) accept/reject ----
   const outcomes: AxAgentPlaybookEvolveOutcome[] = [];
@@ -578,6 +706,7 @@ export async function evolveAgentPlaybook<
       if (verify && budget.remaining < requiredCalls) {
         outcomes.push({
           proposal,
+          kind: 'curate',
           status: 'rejected',
           accepted: false,
           reason: 'metric_budget exhausted before validation',
@@ -602,6 +731,7 @@ export async function evolveAgentPlaybook<
         }
         outcomes.push({
           proposal,
+          kind: 'curate',
           status: 'rejected',
           accepted: false,
           reason: `apply failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -617,6 +747,7 @@ export async function evolveAgentPlaybook<
         inFlight = undefined;
         outcomes.push({
           proposal,
+          kind: 'curate',
           status: 'accepted',
           accepted: true,
           reason: 'applied without verification (verify: false)',
@@ -626,10 +757,11 @@ export async function evolveAgentPlaybook<
         continue;
       }
 
-      const revalTrain = await runAgentEvalBatch<IN, OUT>({
-        ...batchArgs,
-        tasks: trainTasks,
-      });
+      const revalTrain = await runPhaseBatch(
+        'candidate_eval',
+        trainTasks,
+        'current'
+      );
       const candidateCurrentSequence = retentionPolicy
         ? ++retentionSequence
         : undefined;
@@ -637,10 +769,11 @@ export async function evolveAgentPlaybook<
       let revalHeldOutBatch: AxAgentEvalBatchResult<IN, OUT> | undefined;
       let candidateHeldOutSequence: number | undefined;
       if (validationTasks?.length) {
-        revalHeldOutBatch = await runAgentEvalBatch<IN, OUT>({
-          ...batchArgs,
-          tasks: validationTasks,
-        });
+        revalHeldOutBatch = await runPhaseBatch(
+          'candidate_eval',
+          validationTasks,
+          'heldOut'
+        );
         revalHeldOut = revalHeldOutBatch.mean;
         if (retentionPolicy) {
           candidateHeldOutSequence = ++retentionSequence;
@@ -652,10 +785,12 @@ export async function evolveAgentPlaybook<
       }[] = [];
       if (retentionPolicy) {
         for (const slice of retentionPolicy.slices) {
-          const batch = await runAgentEvalBatch<IN, OUT>({
-            ...batchArgs,
-            tasks: slice.tasks,
-          });
+          const batch = await runPhaseBatch(
+            'retention_eval',
+            slice.tasks,
+            'slice',
+            slice.name
+          );
           candidateRetentionBatches.push({
             batch,
             sequence: ++retentionSequence,
@@ -783,6 +918,7 @@ export async function evolveAgentPlaybook<
 
       outcomes.push({
         proposal,
+        kind: 'curate',
         status: accept ? 'accepted' : 'rejected',
         accepted: accept,
         reason:
@@ -904,6 +1040,16 @@ export async function evolveAgentPlaybook<
     `${accepted.length}/${outcomes.length} proposals accepted; held-in ${baseline.heldIn.toFixed(3)} -> ${heldIn.toFixed(3)}`
   );
 
+  const accounting: AxAgentPlaybookComputeAccounting = ledger.assemble({
+    evolveOnlyMetricCalls: usedCalls(),
+    ...(options?.costFor ? { costFor: options.costFor } : {}),
+    ...(options?.usageTap ? { usageTapped: true } : {}),
+  });
+  const control: AxAgentPlaybookControlArmReport = {
+    status: 'not_run',
+    reason: 'controlArm option not supplied',
+  };
+
   return {
     baseline,
     final: { heldIn, ...(heldOut !== undefined ? { heldOut } : {}) },
@@ -916,5 +1062,8 @@ export async function evolveAgentPlaybook<
     ...(playbookSnapshot ? { playbookSnapshot } : {}),
     metricCallsUsed: usedCalls(),
     records: baselineTrain.records,
+    control,
+    accounting,
+    applied: options?.apply === false ? 'dry_run' : 'live',
   };
 }

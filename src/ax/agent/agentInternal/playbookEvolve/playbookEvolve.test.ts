@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { AxMockAIService } from '../../../ai/mock/api.js';
 import { agent } from '../../index.js';
+import { axIsAgentPlaybookEvolveError } from './playbookEvidenceTypes.js';
 import { evolveAgentPlaybook } from './playbookEvolve.js';
 
 const makeModelUsage = () => ({
@@ -1689,5 +1690,435 @@ describe('agent.playbook().evolve()', () => {
         ).rejects.toThrow(/positive safe integer/);
       }
     });
+  });
+});
+
+/**
+ * Legacy identity (invariant I1). The rest of this suite uses `toMatchObject`,
+ * which passes both for an additive field and for a silently CHANGED one, so
+ * it cannot catch a legacy regression on its own. These tests strip exactly the
+ * new keys and deep-equal the remainder — `records` included — against a
+ * checked-in golden object.
+ */
+describe('agent.playbook().evolve() legacy identity', () => {
+  /** Exactly the keys the evidence work adds. Everything else must be equal. */
+  const NEW_RESULT_KEYS = [
+    'control',
+    'accounting',
+    'applied',
+    'varianceBand',
+    'transfer',
+    'redundancy',
+    'overhead',
+    'sealedTest',
+    'rolledBackReason',
+    'warnings',
+  ] as const;
+  const NEW_OUTCOME_KEYS = [
+    'kind',
+    'prune',
+    'evictions',
+    'evidence',
+    'promotion',
+  ] as const;
+
+  const stripLegacy = (result: any) => {
+    const legacy = { ...result };
+    for (const key of NEW_RESULT_KEYS) delete legacy[key];
+    legacy.outcomes = result.outcomes.map((outcome: any) => {
+      const stripped = { ...outcome };
+      for (const key of NEW_OUTCOME_KEYS) delete stripped[key];
+      return stripped;
+    });
+    // `records` is returned verbatim and gains `attempts`; omitting it from the
+    // strip list would exclude the largest field from the identity claim.
+    legacy.records = result.records.map((record: any) => {
+      const stripped = { ...record };
+      delete stripped.attempts;
+      return stripped;
+    });
+    return legacy;
+  };
+
+  it('keeps every pre-existing result field and call count identical when no evidence option is set', async () => {
+    const { ag } = makeAgent();
+    let metricCalls = 0;
+    let agentRuns = 0;
+    const runForEvaluation = (ag as any)._forwardForEvaluation.bind(ag);
+    (ag as any)._forwardForEvaluation = async (...args: any[]) => {
+      agentRuns++;
+      return runForEvaluation(...args);
+    };
+    const result = await ag.playbook().evolve(
+      { train: TASKS, validation: VALIDATION_TASKS },
+      {
+        metric: async (args: any) => {
+          metricCalls++;
+          return scoreByAnswer(args);
+        },
+        maxProposals: 1,
+      }
+    );
+
+    // Exact integers, not "greater than": a changed number of agent runs is
+    // precisely what a silent legacy regression looks like.
+    expect(metricCalls).toBe(6);
+    expect(agentRuns).toBe(6);
+    expect(result.metricCallsUsed).toBe(6);
+
+    const legacy = stripLegacy(result);
+    expect(legacy).toEqual({
+      baseline: { heldIn: 0.2, heldOut: 0.2 },
+      final: { heldIn: 1, heldOut: 1 },
+      weaknesses: result.weaknesses,
+      outcomes: [
+        {
+          proposal: result.outcomes[0]!.proposal,
+          status: 'accepted',
+          accepted: true,
+          reason: 'held-in improved, held-out non-regressing',
+          heldIn: { before: 0.2, after: 1 },
+          heldOut: { before: 0.2, after: 1 },
+        },
+      ],
+      recommendations: result.recommendations,
+      playbookSnapshot: result.playbookSnapshot,
+      metricCallsUsed: 6,
+      records: [
+        {
+          task: TASKS[0],
+          prediction: result.records[0]!.prediction,
+          score: 0.2,
+          passed: false,
+        },
+        {
+          task: TASKS[1],
+          prediction: result.records[1]!.prediction,
+          score: 0.2,
+          passed: false,
+        },
+      ],
+    });
+
+    // The new fields take exactly the documented no-option values.
+    expect(result.control).toEqual({
+      status: 'not_run',
+      reason: 'controlArm option not supplied',
+    });
+    expect(result.applied).toBe('live');
+    expect(result.outcomes[0]!.kind).toBe('curate');
+    expect(result.outcomes[0]!.evidence).toBeUndefined();
+    expect(result.outcomes[0]!.promotion).toBeUndefined();
+    expect(result.varianceBand).toBeUndefined();
+    expect(result.transfer).toBeUndefined();
+    expect(result.warnings).toBeUndefined();
+    expect(result.records[0]).not.toHaveProperty('attempts');
+  });
+
+  it('keeps record.task reference-identical to the evaluated split', async () => {
+    // The paired bootstrap's pairing precondition is reference equality across
+    // passes. A future "hardening" that stores `structuredClone(task)` on the
+    // record silently turns every interval into `unmeasured` — a data-flow bug
+    // that would look like a statistics bug. Without a retention policy the
+    // evaluated split IS the caller's array; with one it is the frozen corpus
+    // clone, which is created ONCE and reused by every pass (see the harness
+    // test that pins the isolateTaskInputs half of this property).
+    const { ag } = makeAgent();
+    const result = await ag
+      .playbook()
+      .evolve(
+        { train: TASKS, validation: VALIDATION_TASKS },
+        { metric: scoreByAnswer, maxProposals: 1 }
+      );
+    expect(result.records).toHaveLength(TASKS.length);
+    for (const [index, record] of result.records.entries()) {
+      expect(record.task).toBe(TASKS[index]);
+    }
+
+    const { ag: frozen } = makeAgent();
+    const withRetention = await frozen.playbook().evolve(
+      { train: TASKS, validation: VALIDATION_TASKS },
+      {
+        metric: retentionMetric({}),
+        maxProposals: 1,
+        retentionPolicy: retentionPolicy(1),
+      }
+    );
+    // The frozen corpus is a clone of the caller's array, so it is NOT the same
+    // object — but it must be frozen and stable, which is what makes every
+    // pass in the run pair against the same task objects.
+    for (const record of withRetention.records) {
+      expect(Object.isFrozen(record.task)).toBe(true);
+      expect(record.task).not.toBe(TASKS[0]);
+    }
+  });
+
+  it('defaults control to a visible not_run rather than omitting it', async () => {
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(TASKS, {
+      metric: scoreByAnswer,
+      maxProposals: 1,
+    });
+    expect(result).toHaveProperty('control');
+    expect(result.control.status).toBe('not_run');
+    expect(result.control.reason).toBeTruthy();
+  });
+
+  it('pins the exact reason string for every rejection branch', async () => {
+    const exactReason = async (data: any, options: any): Promise<string> => {
+      const { ag } = makeAgent();
+      const result = await ag.playbook().evolve(data, options);
+      return result.outcomes[0]!.reason;
+    };
+
+    // accept, no held-out set
+    expect(
+      await exactReason(TASKS, { metric: scoreByAnswer, maxProposals: 1 })
+    ).toBe('held-in improved (no held-out set provided — consider one)');
+
+    // accept, held-out present
+    expect(
+      await exactReason(
+        { train: TASKS, validation: VALIDATION_TASKS },
+        { metric: scoreByAnswer, maxProposals: 1 }
+      )
+    ).toBe('held-in improved, held-out non-regressing');
+
+    // held-in gain below the threshold, no retention policy
+    expect(
+      await exactReason(TASKS, { metric: async () => 0.2, maxProposals: 1 })
+    ).toBe('held-in gain 0.000 below 0.05');
+
+    // held-out regression
+    expect(
+      await exactReason(
+        { train: TASKS, validation: [{ ...TASKS[0]!, id: 'holdout' }] },
+        {
+          requireHeldOut: true,
+          maxProposals: 1,
+          metric: async ({ example, prediction }: any) =>
+            example.id === 'holdout'
+              ? prediction?.output?.answer === 'ok-fixed'
+                ? 0
+                : 1
+              : prediction?.output?.answer === 'ok-fixed'
+                ? 1
+                : 0.2,
+        }
+      )
+    ).toBe('held-out regressed -1.000');
+
+    // budget exhausted before validation
+    expect(
+      await exactReason(TASKS, {
+        metric: scoreByAnswer,
+        maxProposals: 1,
+        maxMetricCalls: 2,
+      })
+    ).toBe('metric_budget exhausted before validation');
+
+    // retention: current-task gain below the policy threshold
+    expect(
+      await exactReason(TASKS, {
+        metric: async () => 0.2,
+        maxProposals: 1,
+        retentionPolicy: retentionPolicy(1),
+      })
+    ).toBe('current-task gain 0.000 below 0.5');
+
+    // retention: historical loss over the stability threshold
+    expect(
+      await exactReason(TASKS, {
+        metric: retentionMetric({
+          'history-refunds': 0,
+          'history-routing': 0,
+        }),
+        maxProposals: 1,
+        retentionPolicy: retentionPolicy(0),
+      })
+    ).toBe(
+      'historical loss exceeded retention threshold (worst 1.000, mean 1.000)'
+    );
+
+    // accept under a retention policy
+    expect(
+      await exactReason(TASKS, {
+        metric: retentionMetric({
+          'history-refunds': 1,
+          'history-routing': 1,
+        }),
+        maxProposals: 1,
+        retentionPolicy: retentionPolicy(1),
+      })
+    ).toBe('current task improved, historical retention thresholds satisfied');
+
+    // trust batch
+    expect(
+      await exactReason(TASKS, {
+        metric: scoreByAnswer,
+        maxProposals: 1,
+        verify: false,
+      })
+    ).toBe('applied without verification (verify: false)');
+  });
+});
+
+describe('agent.playbook().evolve() evidence option validation', () => {
+  it.each([
+    ['gates', { gates: { validity: 'require' } }],
+    ['varianceBand', { varianceBand: { extraRepeats: 1 } }],
+    ['intervalOptions', { intervalOptions: { resamples: 500 } }],
+    ['validity', { validity: { minFinalCompletionRate: 0.9 } }],
+    ['reachProbe', { reachProbe: () => undefined }],
+    ['conditionsForTask', { conditionsForTask: () => [] }],
+    ['classifyTermination', { classifyTermination: () => undefined }],
+    ['maxDiscardRedraws', { maxDiscardRedraws: 2 }],
+  ])('rejects %s combined with verify: false', async (_name, option) => {
+    const { ag } = makeAgent();
+    let metricCalls = 0;
+    const error = await ag
+      .playbook()
+      .evolve(TASKS, {
+        verify: false,
+        metric: async (args: any) => {
+          metricCalls++;
+          return scoreByAnswer(args);
+        },
+        ...(option as any),
+      })
+      .catch((err: unknown) => err);
+    expect(axIsAgentPlaybookEvolveError(error)).toBe(true);
+    expect((error as any).code).toBe('evidence_requires_verify');
+    expect((error as Error).message).toMatch(
+      /^AxAgent\.playbook\(\)\.evolve\(\): /
+    );
+    // Fails closed before any evaluation.
+    expect(metricCalls).toBe(0);
+    expect(ag.getPlaybook().getState().playbook.stats.bulletCount).toBe(0);
+  });
+
+  it('allows an all-off gates object with verify: false', async () => {
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(TASKS, {
+      verify: false,
+      metric: scoreByAnswer,
+      maxProposals: 1,
+      gates: { validity: 'off', reach: 'off' },
+    });
+    expect(result.outcomes[0]?.accepted).toBe(true);
+  });
+
+  it('fails closed when a control-arm or transfer gate has no arm to read', async () => {
+    for (const [gates, code] of [
+      [{ controlArm: 'require' }, 'control_arm_failed'],
+      [{ transfer: 'warn' }, 'transfer_target_invalid'],
+    ] as const) {
+      const { ag } = makeAgent();
+      let metricCalls = 0;
+      const error = await ag
+        .playbook()
+        .evolve(TASKS, {
+          metric: async (args: any) => {
+            metricCalls++;
+            return scoreByAnswer(args);
+          },
+          gates,
+        })
+        .catch((err: unknown) => err);
+      expect(axIsAgentPlaybookEvolveError(error)).toBe(true);
+      expect((error as any).code).toBe(code);
+      expect(metricCalls).toBe(0);
+    }
+  });
+});
+
+describe('agent.playbook().evolve() compute accounting', () => {
+  it('matches an independently counted metric tally and restates the legacy counter', async () => {
+    const { ag } = makeAgent();
+    // Counted OUTSIDE the accounting machinery: asserting the total against
+    // the sum over phases would be true by construction and prove nothing.
+    let metricCalls = 0;
+    const result = await ag.playbook().evolve(
+      { train: TASKS, validation: VALIDATION_TASKS },
+      {
+        metric: async (args: any) => {
+          metricCalls++;
+          return scoreByAnswer(args);
+        },
+        maxProposals: 1,
+      }
+    );
+    expect(result.accounting.metricCalls).toBe(metricCalls);
+    expect(result.accounting.evolveOnlyMetricCalls).toBe(
+      result.metricCallsUsed
+    );
+    // With no evidence phase running the two denominators coincide — a
+    // consequence of nothing else spending budget, not a definition.
+    expect(result.accounting.metricCalls).toBe(result.metricCallsUsed);
+    // Secondary consistency check.
+    expect(
+      result.accounting.phases.reduce(
+        (sum: number, phase: any) => sum + phase.metricCalls,
+        0
+      )
+    ).toBe(metricCalls);
+  });
+
+  it('counts mining invocations and has no proposal phase', async () => {
+    // `buildProposal` is pure — zero metric calls, zero model calls — so a
+    // phase for it would be permanent noise.
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(TASKS, {
+      metric: scoreByAnswer,
+      maxProposals: 2,
+    });
+    const phases = new Map(
+      result.accounting.phases.map((phase: any) => [phase.name, phase])
+    );
+    expect([...phases.keys()]).not.toContain('proposal');
+    expect(phases.get('mining')?.modelCalls).toBe(result.weaknesses.length);
+    expect(phases.get('mining')?.metricCalls).toBe(0);
+    expect(phases.get('mining')?.tokensBasis).toBe('unobservable');
+    // A caller-supplied deterministic metric means there is no built-in judge
+    // to account for, so the phase is absent rather than reported as zero.
+    expect(phases.get('judge')).toBeUndefined();
+    expect(phases.get('baseline')?.metricCalls).toBeGreaterThan(0);
+    expect(phases.get('candidate_eval')?.metricCalls).toBeGreaterThan(0);
+  });
+
+  it('reports cost as unknown without costFor and caller_supplied with it', async () => {
+    const { ag: bare } = makeAgent();
+    const withoutCost = await bare.playbook().evolve(TASKS, {
+      metric: scoreByAnswer,
+      maxProposals: 1,
+    });
+    expect(withoutCost.accounting.costUsd).toBeUndefined();
+    expect(withoutCost.accounting.costBasis).toBe('unknown');
+
+    const { ag } = makeAgent();
+    const costFor = vi.fn(() => 1.25);
+    const withCost = await ag.playbook().evolve(TASKS, {
+      metric: scoreByAnswer,
+      maxProposals: 1,
+      costFor,
+    });
+    expect(costFor).toHaveBeenCalledTimes(1);
+    expect(withCost.accounting.costUsd).toBe(1.25);
+    expect(withCost.accounting.costBasis).toBe('caller_supplied');
+  });
+
+  it('captures attempt records once an evidence option is set', async () => {
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(TASKS, {
+      metric: scoreByAnswer,
+      maxProposals: 1,
+      classifyTermination: () => undefined,
+    });
+    expect(result.records[0]?.attempts).toHaveLength(1);
+    // The baseline runs reach `completionType: 'final'` with a finite score,
+    // so the conservative default calls them completed.
+    expect(result.records[0]?.attempts?.[0]?.termination.kind).toBe(
+      'completed'
+    );
   });
 });

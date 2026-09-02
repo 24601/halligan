@@ -15,6 +15,29 @@ import type {
   AxAgentEvalTask,
   AxAgentJudgeOptions,
 } from '../agentOptimizeTypes.js';
+import type {
+  AxAgentPlaybookAttemptRecord,
+  AxAgentPlaybookComputeAccounting,
+  AxAgentPlaybookControlArmReport,
+  AxAgentPlaybookCostFn,
+  AxAgentPlaybookEviction,
+  AxAgentPlaybookEvidenceGates,
+  AxAgentPlaybookEvidenceReceipt,
+  AxAgentPlaybookEvidenceWarning,
+  AxAgentPlaybookIntervalOptions,
+  AxAgentPlaybookOverheadReport,
+  AxAgentPlaybookPromotionRecord,
+  AxAgentPlaybookPruneProposal,
+  AxAgentPlaybookReachProbe,
+  AxAgentPlaybookRedundancyReport,
+  AxAgentPlaybookSealedTestReport,
+  AxAgentPlaybookTransferReport,
+  AxAgentPlaybookUsageTap,
+  AxAgentPlaybookValidityOptions,
+  AxAgentPlaybookVarianceBandOptions,
+  AxAgentPlaybookVarianceBandReport,
+  AxAgentTrajectoryClassifier,
+} from './playbookEvidenceTypes.js';
 
 /** One executed (task, prediction, score) triple from the batch harness. */
 export type AxAgentPlaybookEvolveRunRecord<
@@ -29,6 +52,12 @@ export type AxAgentPlaybookEvolveRunRecord<
   passed: boolean;
   /** Message of a thrown (non-clarification) run error. */
   error?: string;
+  /**
+   * One entry per attempt, including re-draws and attempts discarded as
+   * environment failures. Equal weight regardless of calls or tokens. Present
+   * only when an evidence option asked the harness to capture them.
+   */
+  attempts?: readonly AxAgentPlaybookAttemptRecord[];
 };
 
 /** A verifier-grounded weakness mined from one failure cluster. */
@@ -187,10 +216,40 @@ export type AxAgentPlaybookEvolveOutcome = {
   heldOut?: { before: number; after: number };
   /** Present only when every configured retention slice was evaluated. */
   retention?: AxAgentPlaybookRetentionReceipt;
+  /**
+   * REQUIRED. `'curate'` for every legacy path; `'prune'` for a removal
+   * proposal. Breaking for construction sites (host test doubles, adapters),
+   * declared as such: an optional discriminant would reintroduce exactly the
+   * silent-absence problem the evidence work exists to remove.
+   */
+  kind: 'curate' | 'prune';
+  /** Present only when `kind === 'prune'`. */
+  prune?: AxAgentPlaybookPruneProposal;
+  /**
+   * Bullets the ACE curator evicted while applying THIS proposal, recovered
+   * from the artifact-history delta. Non-empty triggers `curate_eviction`.
+   */
+  evictions?: readonly AxAgentPlaybookEviction[];
+  /** Present when any evidence option is set. */
+  evidence?: AxAgentPlaybookEvidenceReceipt;
+  /** Mirrors `evidence.promotion`. Includes the rolled-back status. */
+  promotion?: AxAgentPlaybookPromotionRecord;
 };
 
 export type AxAgentPlaybookEvolveProgressEvent = {
-  phase: 'baseline' | 'mining' | 'proposal' | 'validation' | 'done';
+  phase:
+    | 'baseline'
+    | 'mining'
+    | 'proposal'
+    | 'validation'
+    | 'done'
+    | 'band'
+    | 'control'
+    | 'ablation'
+    | 'transfer'
+    | 'prune'
+    | 'promotion'
+    | 'sealed_test';
   message: string;
   metricCallsUsed: number;
 };
@@ -269,6 +328,46 @@ export type AxAgentPlaybookEvolveOptions<IN extends AxGenIn = AxGenIn> = {
   verbose?: boolean;
   onProgress?: (event: Readonly<AxAgentPlaybookEvolveProgressEvent>) => void;
   abortSignal?: AbortSignal;
+
+  // --- Evidence options. All optional; all default to today's behaviour. ---
+  // Options whose execution has not landed yet are deliberately absent rather
+  // than declared-and-ignored: an accepted-but-inert option is exactly the
+  // silent absence this machinery exists to remove. `gates.controlArm` and
+  // `gates.transfer` therefore fail closed at option validation until their
+  // arms ship.
+
+  /** Gate modes for the evidence conjuncts. Every gate defaults to 'off'. */
+  gates?: AxAgentPlaybookEvidenceGates;
+  varianceBand?: AxAgentPlaybookVarianceBandOptions;
+  intervalOptions?: AxAgentPlaybookIntervalOptions;
+  validity?: AxAgentPlaybookValidityOptions;
+  reachProbe?: AxAgentPlaybookReachProbe<IN>;
+  /** Soft cumulative budget for `reachProbe` across the whole run. Default 1_000. */
+  reachProbeBudgetMs?: number;
+  /**
+   * Per-task retrieval conditions for the `applicability_counterfactual` reach
+   * basis. COUNTERFACTUAL BY CONSTRUCTION — it cannot satisfy the reach gate.
+   */
+  conditionsForTask?: (
+    task: Readonly<AxAgentEvalTask<IN>>
+  ) => readonly string[];
+  classifyTermination?: AxAgentTrajectoryClassifier<IN>;
+  /** Warn above this environment-failure discard rate. Default 0.1. */
+  maxEnvironmentDiscardRate?: number;
+  /**
+   * Bounded re-draws per discarded attempt, within the SAME metric budget.
+   * Default 1 when `classifyTermination` is supplied, 0 otherwise: without it,
+   * one 429 at `runsPerTask: 1` rejects every candidate with a false reason.
+   */
+  maxDiscardRedraws?: number;
+  /** Caller cost hook. Without it `costUsd` is undefined and the basis unknown. */
+  costFor?: AxAgentPlaybookCostFn;
+  /** Usage tap for the 'mining' and 'judge' phases. Caller-owned. */
+  usageTap?: AxAgentPlaybookUsageTap;
+  /** Warn when the accepted artifact's relative overhead exceeds this. Default 0.25. */
+  overheadWarnRatio?: number;
+  /** Injected clock for durations and latency ceilings. Default `Date.now`. */
+  now?: () => number;
 };
 
 export type AxAgentPlaybookEvolveResult<OUT extends AxGenOut = AxGenOut> = {
@@ -280,9 +379,43 @@ export type AxAgentPlaybookEvolveResult<OUT extends AxGenOut = AxGenOut> = {
   outcomes: readonly AxAgentPlaybookEvolveOutcome[];
   /** Config suggestions collected from mined weaknesses; never auto-applied. */
   recommendations: readonly string[];
-  /** Playbook state after the accepted bullets. */
+  /**
+   * Playbook state after the accepted bullets. Present when `applied` is
+   * `'live'` or `'dry_run'` and at least one candidate was accepted, and
+   * `undefined` whenever `applied === 'rolled_back'` — the documented recovery
+   * idiom (`getPlaybook()?.load(...)`) must never hand a caller an artifact a
+   * run-level gate just rejected.
+   */
   playbookSnapshot?: AxPlaybookSnapshot;
   metricCallsUsed: number;
   /** The baseline corpus (post-run records with scores). */
   records: readonly AxAgentPlaybookEvolveRunRecord<any, OUT>[];
+  /**
+   * REQUIRED. `{ status: 'not_run', reason }` when no control arm was
+   * configured, so a run without a matched-budget comparison says so on the
+   * record instead of omitting the field.
+   */
+  control: AxAgentPlaybookControlArmReport;
+  /** REQUIRED. Every model call the run made, under one defined denominator. */
+  accounting: AxAgentPlaybookComputeAccounting;
+  /**
+   * REQUIRED. Three-state, because `false` conflated two opposite meanings:
+   *   'live'        the accepted set is applied. `playbookSnapshot` is live.
+   *   'dry_run'     `apply: false`; the accepted set was rolled back by
+   *                 request. `playbookSnapshot` is the INTENDED artifact and is
+   *                 safe to re-apply.
+   *   'rolled_back' a run-level gate rejected the whole set.
+   *                 `playbookSnapshot` is `undefined`: the artifact is poison.
+   */
+  applied: 'live' | 'dry_run' | 'rolled_back';
+  varianceBand?: AxAgentPlaybookVarianceBandReport;
+  transfer?: AxAgentPlaybookTransferReport;
+  redundancy?: AxAgentPlaybookRedundancyReport;
+  /** Anchor-vs-candidate turn / call / token cost of the final artifact. */
+  overhead?: AxAgentPlaybookOverheadReport;
+  /** Evaluated once at the end; forbidden from influencing any gate. */
+  sealedTest?: AxAgentPlaybookSealedTestReport;
+  /** Set only when `applied === 'rolled_back'`; names the gate. */
+  rolledBackReason?: string;
+  warnings?: readonly AxAgentPlaybookEvidenceWarning[];
 };
