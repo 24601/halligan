@@ -5,9 +5,9 @@ import type { AxProgramForwardOptions, AxProgrammable } from '../dsp/types.js';
 import type { AxEventContext, AxEventSink } from '../event/types.js';
 import type { AxTrajectoryProjection } from '../trajectory/projection.js';
 import type {
+  AxTrajectoryReader,
   AxTrajectoryStep,
   AxTrajectoryStepClass,
-  AxTrajectoryStore,
 } from '../trajectory/types.js';
 import type { AxMind } from './mind.js';
 
@@ -48,7 +48,12 @@ export interface AxMindContextRequest {
    * pretending some unrelated newest step was the trigger.
    */
   readonly trigger: Readonly<AxTrajectoryStep>;
-  readonly store: AxTrajectoryStore;
+  /**
+   * READ-ONLY by construction (RFC 6.5 item 1). A thinker reads the
+   * trajectory; the runtime is the only writer, so `append`, `fork` and
+   * `merge` are not on this type at all -- the rule cannot be forgotten.
+   */
+  readonly store: AxTrajectoryReader;
   readonly projection: Readonly<AxTrajectoryProjection>;
   readonly artifacts: Readonly<AxMindArtifacts>;
   /** Deterministic routing signals. Hints, never rules. */

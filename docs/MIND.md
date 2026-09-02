@@ -275,7 +275,10 @@ as data and clipped, and the `feedback` step recording the injection is
 **Host-owned — unreachable from any thinker program, by construction:**
 
 1. Trajectory contents. There is no update, delete, rewrite or compact method
-   on the store or on `AxMind`; `append` stamps the writer itself.
+   on the store or on `AxMind`; `append` stamps the writer itself. The handle a
+   thinker gets in `AxMindContextRequest.store` is an `AxTrajectoryReader` —
+   the read primitives and nothing else — so `append`, `create`, `fork`,
+   `merge` and `saveCursor` are not reachable at compile time either.
 2. The step-type registry, including `stepClass`, `wakeable`, `carriesSource`
    and `neverRetriggersSelf`.
 3. The route table and subscriptions. Routes are fixed at runtime

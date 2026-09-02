@@ -289,6 +289,14 @@ Four things account for the difference, none of them added scope:
   their regression tests. Each is a few lines of code and a paragraph saying
   what it defends against, which is the ratio this directory has had from the
   start: 3,785 → 3,927.
+- **`AxTrajectoryReader` (Track A follow-up)** raises `types.ts` from 480 to
+  490 and nothing else. It is the read-only view `AxMindContextRequest` hands a
+  thinker — `capabilities`, `clock`, `getTrajectory`, `read`, `tailBackward`,
+  `getStep`, `getSteps`, `stats` — so "a thinker reads the trajectory and never
+  writes it" holds by construction. `append`, `create`, `fork`, `merge`,
+  `saveCursor` and `blobs` (whose `put` is a write) are simply not on the type.
+  An `AxTrajectoryStore` is structurally assignable to it, so the runtime hands
+  its own store over with no wrapper. The DIRECTORY ceiling stays at 3,990.
 
 ## Store capability matrix
 

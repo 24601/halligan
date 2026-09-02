@@ -174,3 +174,30 @@ void request.mind;
 // The signal list is readonly: a hint is not a place to write policy back.
 // @ts-expect-error routing signals are readonly
 request.signals.push({ code: 'share_nudge', text: 'x' });
+
+// RFC 6.5 item 1 by CONSTRUCTION, not by convention: the trajectory handle a
+// thinker is given exposes the read primitives and nothing else, so there is
+// no write path to forget to forbid.
+void request.store.tailBackward;
+void request.store.getStep;
+void request.store.getSteps;
+void request.store.read;
+void request.store.stats;
+void request.store.getTrajectory;
+// @ts-expect-error a thinker never appends; the runtime is the only writer
+void request.store.append;
+// @ts-expect-error nor forks
+void request.store.fork;
+// @ts-expect-error nor merges
+void request.store.merge;
+// @ts-expect-error nor creates a trajectory
+void request.store.create;
+// @ts-expect-error nor moves another consumer's cursor
+void request.store.saveCursor;
+// @ts-expect-error and the blob store's put is a write, so blobs are absent
+void request.store.blobs;
+// The full store is still assignable INTO the reader, which is what lets the
+// runtime hand its own store over without a wrapper.
+declare const fullStore: AxTrajectoryStore;
+const reader: AxMindContextRequest['store'] = fullStore;
+void reader;

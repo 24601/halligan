@@ -2379,6 +2379,7 @@ import {
   type AxTrajectoryHeader,
   type AxTrajectoryMergeRequest,
   AxTrajectoryQueryError,
+  type AxTrajectoryReader,
   type AxTrajectoryReadQuery,
   AxTrajectoryRegistryError,
   AxTrajectoryRollupError,
@@ -4505,6 +4506,7 @@ export type { AxTrajectoryProjection };
 export type { AxTrajectoryProjectionOptions };
 export type { AxTrajectoryProjectionSection };
 export type { AxTrajectoryReadQuery };
+export type { AxTrajectoryReader };
 export type { AxTrajectoryResolveOptions };
 export type { AxTrajectoryRollupBlock };
 export type { AxTrajectoryRollupMeta };

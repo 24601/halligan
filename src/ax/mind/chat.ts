@@ -754,7 +754,7 @@ export async function axMindReconcileChatSends(
       text(effect.metadata?.content as AxTrajectoryFieldValue | undefined) ??
       '';
     if (!to) continue;
-    // Fails CLOSED on an unrecognised writer. The ledger is host storage, so
+    // Fails CLOSED on a writer this mind does not know. The ledger is host storage, so
     // the recorded sender is checked against the mind's own thinker table
     // before it becomes a `source` field; anything else falls back to the
     // caller's identity rather than minting a writer nobody declared.

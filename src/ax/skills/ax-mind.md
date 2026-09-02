@@ -109,6 +109,9 @@ const auxiliary: AxMindThinker = {
 };
 ```
 
+- `request.store` is an `AxTrajectoryReader`, not the full store: the read
+  primitives only. A thinker reads the trajectory; the runtime writes it, so
+  `append` / `fork` / `merge` / `saveCursor` do not compile from a thinker.
 - `subscription.types` absent means every wakeable NARRATIVE type. Machinery is
   opt-in, so a thinker is never woken by the mind's own bookkeeping by default.
 - `triggerSelf` is decided by the STEP'S `source` FIELD, not by process

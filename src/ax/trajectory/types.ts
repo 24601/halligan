@@ -496,6 +496,28 @@ export interface AxTrajectoryStore {
   close?(options?: Readonly<{ timeoutMs?: number }>): void | Promise<void>;
 }
 
+/**
+ * The read primitives, and only those. RFC 6.5 gives a thinker READ access to
+ * the trajectory and reserves every write for the runtime; handing it the
+ * whole `AxTrajectoryStore` made that a convention a thinker could ignore.
+ * `append`, `create`, `fork`, `merge` and `saveCursor` are simply not on this
+ * type, so the rule holds by construction. `blobs` is absent for the same
+ * reason: `AxTrajectoryBlobStore.put` is a write.
+ */
+export type AxTrajectoryReader = Readonly<
+  Pick<
+    AxTrajectoryStore,
+    | 'capabilities'
+    | 'clock'
+    | 'getTrajectory'
+    | 'read'
+    | 'tailBackward'
+    | 'getStep'
+    | 'getSteps'
+    | 'stats'
+  >
+>;
+
 export interface AxTrajectoryBlobPutRequest {
   readonly trajectoryId: string;
   readonly stepId: string;
