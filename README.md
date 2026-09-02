@@ -1,3 +1,12 @@
+> **Halligan** — Basit Mustafa's fork of Ax. *You get more leverage with the wedge on a halligan.*
+> Halligan adds bounded harness adaptation on top of Ax: an append-only trajectory and a persistent mind
+> (`docs/MIND.md`, `docs/TRAJECTORY.md`), a learning surface with receipts and a release chain
+> (`docs/LEARNING_SURFACE.md`), evidence-disciplined playbook evolution and GEPA manifests
+> (`docs/PLAYBOOK_EVIDENCE.md`, `docs/GEPA_EVIDENCE.md`), skill authority provenance
+> (`docs/SKILL_PROVENANCE.md`), and verifier-gated working state (`docs/AGENT_WORKING_STATE.md`).
+> It is evaluator-gated, retention-aware harness adaptation — not recursive self-improvement — and every
+> claim in this repo is backed by a deterministic, zero-cost evaluation you can run. The upstream README follows.
+
 # Ax — DSPy for TypeScript / Python / Java / C++ / Go / Rust and more
 
 One programming model for building with LLMs across TypeScript, Python, Java,
