@@ -1232,6 +1232,27 @@ void skillStateFacts;
 const skillStateRejection: AxSkillStateRejection = 'fence';
 void skillStateRejection;
 
+// --- Call-time skill injection ---------------------------------------------
+
+import {
+  type AxCallTimeSkillBinding,
+  type AxCallTimeSkillNotExecuted,
+  axIsCallTimeSkillNotExecuted,
+} from './index.js';
+
+const callTimeSkillBinding: AxCallTimeSkillBinding = {
+  qualifiedName: 'inventory.adjustStock',
+  skill: 'stock-adjustment',
+  maxInjections: 1,
+  when: (state) => state.facts !== undefined,
+};
+void callTimeSkillBinding;
+
+declare const callTimeMarker: AxCallTimeSkillNotExecuted;
+const callTimeSkillId: string = callTimeMarker.skillId;
+void callTimeSkillId;
+void axIsCallTimeSkillNotExecuted(callTimeMarker);
+
 // Benchmark scaffolding and harness plumbing must stay internal: these names
 // are listed in `internalExportNames`, so the generated barrel does not carry
 // them. A `keyof typeof import(...)` test cannot express this — a type-only
@@ -1263,6 +1284,19 @@ type ReceiptBindingIsNotPublic =
 const receiptBindingIsNotPublic: ReceiptBindingIsNotPublic | undefined =
   undefined;
 void receiptBindingIsNotPublic;
+
+type CallTimeRuntimeIsNotPublic =
+  // @ts-expect-error the package root must not export the per-run binding table
+  import('./index.js').AxCallTimeSkillRuntime;
+const callTimeRuntimeIsNotPublic: CallTimeRuntimeIsNotPublic | undefined =
+  undefined;
+void callTimeRuntimeIsNotPublic;
+
+type CallTimeHookIsNotPublic =
+  // @ts-expect-error the package root must not export the dispatch-site hook
+  import('./index.js').AxCallTimeSkillHook;
+const callTimeHookIsNotPublic: CallTimeHookIsNotPublic | undefined = undefined;
+void callTimeHookIsNotPublic;
 
 // === Track B4 skill provenance, visibility tiers, and skill cost ===
 // Same reason as Track B3 above: importing from './index.js' proves the

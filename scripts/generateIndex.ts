@@ -105,6 +105,18 @@ const internalExportNames = new Set([
   // The skillState config gate the agent constructor runs eagerly. Same
   // reason: hosts configure the mode through `AxSkillStateConfig`.
   'axValidateSkillStateConfig',
+  // Call-time skill injection plumbing. The PUBLIC surface is the binding, the
+  // frozen not-executed marker and its guard; the per-run table, the dispatch
+  // hook, the guidance builder and the config gate are harness internals the
+  // actor loop owns.
+  'AxCallTimeSkillRuntime',
+  'AxCallTimeSkillDeps',
+  'AxCallTimeSkillHook',
+  'AxCallTimeSkillInjection',
+  'axCallTimeSkillRuntime',
+  'axCallTimeSkillGuidance',
+  'axCallTimeSkillCatalogResolver',
+  'axValidateCallTimeSkillBindings',
   // Bare lowercase pointer parser shared by statePatch.ts and workingState.ts.
   // Listed deliberately: it is module plumbing, not public API.
   'parseStatePatchPointer',
