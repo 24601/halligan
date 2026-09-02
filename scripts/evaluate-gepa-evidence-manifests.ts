@@ -324,6 +324,50 @@ function measureRefusals(): Record<string, string> {
         options({ effectPolicy: 'required' })
       )
     ),
+    // §12/B1: the two routes that switched the whole effect gate off by
+    // editing the OPTIONAL `mutation` annotation the record's own author
+    // supplies. Both produced an accepted version-4 manifest before the gate
+    // moved onto `affectedComponents`.
+    effects_missing_unannotated: refusalCode(() =>
+      axCreateCausalCandidateEvidenceManifest(
+        [capabilityRecord({ mutation: undefined })],
+        options({ effectPolicy: 'required' })
+      )
+    ),
+    effects_missing_relabelled: refusalCode(() =>
+      axCreateCausalCandidateEvidenceManifest(
+        [
+          capabilityRecord({
+            mutation: {
+              depth: 'supervision',
+              patch: { class: 'steering', type: 'prompt.rule_modify' },
+              componentClasses: ['context'],
+            },
+          }),
+        ],
+        options({ effectPolicy: 'required' })
+      )
+    ),
+    // CONTROL: the same unannotated record that declares its effects passes,
+    // so the gate refuses the missing declaration and not the missing
+    // annotation.
+    effects_missing_unannotated_control: refusalCode(() =>
+      axCreateCausalCandidateEvidenceManifest(
+        [capabilityRecord({ mutation: undefined, effects: [validEffect] })],
+        options({ effectPolicy: 'required' })
+      )
+    ),
+    // §12/B1's reader-side half: written with the effect policy OFF, read back
+    // under a caller floor of `effects: 'required'`.
+    caller_policy_floor_effects: refusalCode(() => {
+      const manifest = axCreateCausalCandidateEvidenceManifest(
+        [capabilityRecord({ mutation: undefined })],
+        options()
+      );
+      return axCloneCausalCandidateEvidenceManifest(manifest, receipts.verify, {
+        requirePolicyAtLeast: { attribution: 'off', effects: 'required' },
+      });
+    }),
     effects_on_steering_surface: refusalCode(() =>
       axCreateCausalCandidateEvidenceManifest(
         [

@@ -1271,37 +1271,49 @@ function validateRecordPolicy(
 
   if (policy.effects !== 'required') return;
 
-  const capabilityPatch = record.mutation?.patch.class === 'capability';
+  // EVERY effect gate keys on the record's OWN COMPONENT LIST — the structured
+  // `componentKind` and `toolCapabilities` of what actually changed — never on
+  // the OPTIONAL `mutation` annotation (§12/B1). `mutation` is authored by the
+  // same host as the rest of the record, so a gate keyed on it is a gate the
+  // author switches off by omitting one field, or by relabelling a
+  // program-source patch as `steering`. That defeated the reader-side
+  // `requirePolicyAtLeast.effects` floor, whose whole purpose is that an
+  // artifact cannot lower a caller's bar by self-describing.
   const touchesTool = record.affectedComponents.some((component) =>
     axDeclaresToolCapability(component)
   );
-  if (capabilityPatch && touchesTool) {
-    if (!record.effects || record.effects.length === 0) {
-      throw new AxCandidateEffectManifestError({
-        code: 'effects_missing',
-        message: `record ${record.id} promotes a capability patch on a declared tool surface with no effect declaration`,
-      });
-    }
+  const touchesProgramSource = record.affectedComponents.some(
+    (component) => component.componentKind === 'program-source'
+  );
+  if (touchesTool && (!record.effects || record.effects.length === 0)) {
+    throw new AxCandidateEffectManifestError({
+      code: 'effects_missing',
+      message: `record ${record.id} promotes a patch on a component declaring a tool capability with no effect declaration`,
+    });
   }
   if (
     record.effects &&
     record.effects.length > 0 &&
-    record.mutation?.patch.class === 'steering'
+    (record.mutation?.patch.class === 'steering' || !touchesProgramSource)
   ) {
-    // Description text cannot carry an effect. A steering patch that declares
-    // one is either mislabelled or is claiming a reach it does not have.
+    // Description text cannot carry an effect. A record that declares one
+    // either mislabels the patch or names no executable surface it could
+    // possibly reach, and both are claims of a reach the record does not have.
     throw new AxCandidateEffectManifestError({
       code: 'effects_on_steering_surface',
-      message: `record ${record.id} attaches an effect declaration to a steering patch (${record.mutation.patch.type})`,
+      message: record.mutation
+        ? `record ${record.id} attaches an effect declaration to a steering patch (${record.mutation.patch.type})`
+        : `record ${record.id} attaches an effect declaration to a record whose affected components include no program-source surface`,
     });
   }
   if (
-    record.mutation?.patch.type === 'program.source_replace' &&
+    (touchesProgramSource ||
+      record.mutation?.patch.type === 'program.source_replace') &&
     record.runtimeRequirements === undefined
   ) {
     throw new AxCandidateEffectManifestError({
       code: 'runtime_requirements_missing',
-      message: `record ${record.id} promotes a program.source_replace candidate without declaring what the replacement runtime needs`,
+      message: `record ${record.id} promotes a program-source candidate without declaring what the replacement runtime needs`,
     });
   }
 }

@@ -1213,6 +1213,110 @@ describe('causal candidate evidence version 4', () => {
     ).not.toThrow();
   });
 
+  it('cannot be exempted from the effect gate by dropping or relabelling the mutation annotation', () => {
+    // §12/B1. `mutation` is OPTIONAL and is authored by the same host as the
+    // rest of the record, so a gate keyed on it is a gate its author switches
+    // off. Both routes below produced an ACCEPTED version-4 manifest before
+    // the gate moved onto `affectedComponents`.
+    expect(() =>
+      axCreateCausalCandidateEvidenceManifest(
+        [capabilityRecord({ mutation: undefined })],
+        {
+          ...hostReceipt('receipt-effects-no-mutation').options,
+          effectPolicy: 'required',
+        }
+      )
+    ).toThrow('effects_missing');
+    expect(() =>
+      axCreateCausalCandidateEvidenceManifest(
+        [
+          capabilityRecord({
+            mutation: {
+              depth: 'supervision',
+              patch: { class: 'steering', type: 'prompt.rule_modify' },
+              componentClasses: ['context'],
+            },
+          }),
+        ],
+        {
+          ...hostReceipt('receipt-effects-relabelled').options,
+          effectPolicy: 'required',
+        }
+      )
+    ).toThrow('effects_missing');
+    // Same two routes against the RUNTIME requirement, which keyed on
+    // `mutation.patch.type === 'program.source_replace'`.
+    expect(() =>
+      axCreateCausalCandidateEvidenceManifest(
+        [
+          capabilityRecord({
+            mutation: undefined,
+            runtimeRequirements: undefined,
+            effects: [
+              {
+                operation: 'payments.capture',
+                replaySafety: 'idempotent',
+                idempotencyKeySource: 'derived',
+                resolver: 'host_resolver',
+              },
+            ],
+          }),
+        ],
+        {
+          ...hostReceipt('receipt-runtime-no-mutation').options,
+          effectPolicy: 'required',
+        }
+      )
+    ).toThrow('runtime_requirements_missing');
+    // CONTROL: the identical unannotated record that DOES declare its effects
+    // and its runtime requirements is accepted, so the gate is not refusing
+    // every unannotated record.
+    expect(() =>
+      axCreateCausalCandidateEvidenceManifest(
+        [
+          capabilityRecord({
+            mutation: undefined,
+            effects: [
+              {
+                operation: 'payments.capture',
+                replaySafety: 'idempotent',
+                idempotencyKeySource: 'derived',
+                resolver: 'host_resolver',
+              },
+            ],
+          }),
+        ],
+        {
+          ...hostReceipt('receipt-effects-no-mutation-ok').options,
+          effectPolicy: 'required',
+        }
+      )
+    ).not.toThrow();
+  });
+
+  it("binds a reader's effects floor to an artifact that declares no policy", () => {
+    // §12/B1's reader-side half: the manifest is WRITTEN with the effect
+    // policy off (so it is accepted) and READ BACK under a caller floor of
+    // `effects: 'required'`. The floor must bind on the way in.
+    const receipt = hostReceipt('receipt-effects-floor');
+    const manifest = axCreateCausalCandidateEvidenceManifest(
+      [capabilityRecord({ mutation: undefined })],
+      receipt.options
+    );
+    expect(manifest.policy?.effects ?? 'off').toBe('off');
+    expect(() =>
+      axCloneCausalCandidateEvidenceManifest(manifest, receipt.verify, {
+        requirePolicyAtLeast: { attribution: 'off', effects: 'required' },
+      })
+    ).toThrow('effects_missing');
+    // CONTROL: the same manifest read back at its own declared floor clones.
+    expect(() =>
+      axCloneCausalCandidateEvidenceManifest(manifest, receipt.verify, {
+        requirePolicyAtLeast: { attribution: 'off', effects: 'off' },
+      })
+    ).not.toThrow();
+  });
+
   it('accepts a capability promotion that declares its effects', () => {
     const manifest = axCreateCausalCandidateEvidenceManifest(
       [

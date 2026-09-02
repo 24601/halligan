@@ -30,6 +30,10 @@ describe('GEPA evidence manifest evaluation', () => {
       leave_one_out_control: 'accepted',
       effects_missing: 'effects_missing',
       effects_missing_control: 'accepted',
+      effects_missing_unannotated: 'effects_missing',
+      effects_missing_relabelled: 'effects_missing',
+      effects_missing_unannotated_control: 'accepted',
+      caller_policy_floor_effects: 'effects_missing',
       effects_on_steering_surface: 'effects_on_steering_surface',
       runtime_requirements_missing: 'runtime_requirements_missing',
       unsafe_replay_without_resolver: 'unsafe_replay_without_resolver',
@@ -41,7 +45,7 @@ describe('GEPA evidence manifest evaluation', () => {
       ledger_expiry_requires_ttl: 'expiry_requires_ttl',
       ledger_empty_expiry: 'empty_expiry',
     });
-    // A gate that refuses everything is not a gate. Exactly the four control
+    // A gate that refuses everything is not a gate. Exactly the five control
     // cases are accepted, and every other row refuses with its own code.
     const accepted = Object.entries(result.refusals).filter(
       ([, code]) => code === 'accepted'
@@ -50,6 +54,7 @@ describe('GEPA evidence manifest evaluation', () => {
       'attribution_required_control',
       'leave_one_out_control',
       'effects_missing_control',
+      'effects_missing_unannotated_control',
       'effects_control',
     ]);
     expect(
