@@ -173,10 +173,11 @@ test.describe('D1 hero', () => {
 });
 
 test.describe('reduced motion', () => {
-  test.use({ reducedMotion: 'reduce' });
-
   test('the hero is fully legible with no motion', async ({ page }) => {
     const errors = collectConsoleErrors(page);
+    // Emulated before navigation so the very first render takes the
+    // reduced-motion path, not just the transitions after hydration.
+    await page.emulateMedia({ reducedMotion: 'reduce' });
     await page.goto(PINNED);
     await settle(page);
     await expect(page.locator('.ladder__now')).toContainText('rung');
