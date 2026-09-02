@@ -4,6 +4,7 @@ import { agent } from '../agent/index.js';
 import { AxMockAIService } from '../ai/mock/api.js';
 import type { AxMetricFn } from '../dsp/common_types.js';
 import { AxManualEventClock } from '../event/types.js';
+import { axEventCanonicalDigest } from '../event/util.js';
 import { axApplyHarnessTree, axCurrentHarnessInstallation } from './apply.js';
 import {
   type AxHarnessEvolveAgent,
@@ -366,26 +367,39 @@ describe('axHarnessEvolve — evaluation', { timeout: SLOW }, () => {
     expect(headAfter?.releaseId).toBe(headBefore?.releaseId);
   });
 
-  it('freezes taskSetDigest before propose is called', async () => {
+  it('computes taskSetDigest from the split alone, so a proposal cannot move it', async () => {
+    // R3's Goodhart argument is only true if the digest is a function of the
+    // frozen split and nothing else. Two checks make that concrete: the digest
+    // equals an independently computed one over the sorted task ids, and a
+    // DIFFERENT proposal on the same split produces the same digest.
+    const expected = await axEventCanonicalDigest(['t1']);
+    const expectedHeldOut = await axEventCanonicalDigest(['v1']);
+
     const h = await harness();
-    let digestAtProposeTime: string | undefined;
-    const result = await evolve(h, {
+    let proposerRan = false;
+    const first = await evolve(h, {
       propose: async () => {
-        // The proposer cannot see the digest, which is the point: it is
-        // computed from the split before this callback runs and cannot be
-        // influenced by what the proposal does.
-        digestAtProposeTime = 'proposer ran';
+        proposerRan = true;
         return [ADD_BULLET];
       },
     });
-    expect(digestAtProposeTime).toBe('proposer ran');
-    expect(result.decision?.metrics.taskSetDigest).toMatch(/^[0-9a-f]{64}$/);
-    // The digest is over the split's task ids, not over anything the proposal
-    // produced: a second run with the same split gives the same digest.
+    expect(proposerRan).toBe(true);
+    expect(first.decision?.metrics.taskSetDigest).toBe(expected);
+    expect(first.decision?.metrics.heldOutTaskSetDigest).toBe(expectedHeldOut);
+
     const second = await harness();
-    const again = await evolve(second);
-    expect(again.decision?.metrics.taskSetDigest).toBe(
-      result.decision?.metrics.taskSetDigest
+    const other = await evolve(second, {
+      propose: (): AxHarnessMutation[] => [
+        {
+          op: 'update',
+          id: 'tone',
+          options: { config: { text: 'A completely different rule.' } },
+        },
+      ],
+    });
+    expect(other.decision?.metrics.taskSetDigest).toBe(expected);
+    expect(other.candidate?.candidateContentId).not.toBe(
+      first.candidate?.candidateContentId
     );
   });
 
