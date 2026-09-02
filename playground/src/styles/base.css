@@ -1,0 +1,302 @@
+/* Pry base sheet. `.pry-component` is a reimplementation of modyl-live's
+ * `.modyl-component` reset (PR #255 styles/catalog.css): same rules, different
+ * namespace, because sharing a class name across repositories would be a false
+ * claim of shared code. */
+@import "@fontsource/geist/latin-400.css";
+@import "@fontsource/geist/latin-700.css";
+@import "@fontsource/geist-mono/latin-400.css";
+@import "./tokens.css";
+
+:root {
+  --font-sans:
+    "Geist", -apple-system, "SF Pro Text", "Inter", system-ui, sans-serif;
+  color-scheme: light;
+}
+
+:root[data-theme="dark"],
+:root.dark {
+  color-scheme: dark;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--ground);
+  color: var(--ink-full);
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: var(--text-body-size);
+  line-height: var(--text-body-line-height);
+  font-weight: 400;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
+}
+
+.pry-component,
+.pry-component *,
+.pry-component *::before,
+.pry-component *::after {
+  box-sizing: border-box;
+}
+
+.pry-component {
+  color: var(--ink-full);
+  font-family: var(--font-sans);
+  font-weight: 400;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.pry-component button,
+.pry-component input,
+.pry-component textarea,
+.pry-component select {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  margin: 0;
+}
+
+.pry-component button {
+  cursor: pointer;
+  transition:
+    background-color var(--dur-micro) var(--ease-snap),
+    color var(--dur-micro) var(--ease-snap),
+    border-color var(--dur-micro) var(--ease-snap),
+    transform var(--dur-micro) var(--ease-snap);
+}
+
+.pry-component :focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: var(--radius-control);
+}
+
+.pry-component button:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pry-component *,
+  .pry-component *::before,
+  .pry-component *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+
+  .pry-component button:active:not(:disabled) {
+    transform: none;
+  }
+}
+
+/* ---- type roles ------------------------------------------------------- */
+
+.t-display {
+  font-size: var(--text-display-size);
+  line-height: var(--text-display-line-height);
+  font-weight: var(--text-display-weight);
+  letter-spacing: var(--text-display-tracking);
+}
+
+.t-title {
+  font-size: var(--text-title-size);
+  line-height: var(--text-title-line-height);
+  font-weight: var(--text-title-weight);
+  letter-spacing: var(--text-title-tracking);
+}
+
+.t-bignum {
+  font-size: var(--text-bignum-size);
+  line-height: var(--text-bignum-line-height);
+  font-weight: var(--text-bignum-weight);
+  letter-spacing: var(--text-bignum-tracking);
+  font-variant-numeric: tabular-nums;
+}
+
+.t-h28 {
+  font-size: var(--text-heading-28-size);
+  line-height: var(--text-heading-28-line-height);
+  font-weight: var(--text-heading-28-weight);
+  letter-spacing: var(--text-heading-28-tracking);
+}
+
+.t-h24 {
+  font-size: var(--text-heading-24-size);
+  line-height: var(--text-heading-24-line-height);
+  font-weight: var(--text-heading-24-weight);
+  letter-spacing: var(--text-heading-24-tracking);
+}
+
+.t-h20 {
+  font-size: var(--text-heading-20-size);
+  line-height: var(--text-heading-20-line-height);
+  font-weight: var(--text-heading-20-weight);
+  letter-spacing: var(--text-heading-20-tracking);
+}
+
+.t-lede {
+  font-size: var(--text-lede-size);
+  line-height: var(--text-lede-line-height);
+  font-weight: var(--text-lede-weight);
+  letter-spacing: var(--text-lede-tracking);
+}
+
+.t-body {
+  font-size: var(--text-body-size);
+  line-height: var(--text-body-line-height);
+  font-weight: var(--text-body-weight);
+}
+
+.t-label {
+  font-size: var(--text-label-size);
+  line-height: var(--text-label-line-height);
+  font-weight: var(--text-label-weight);
+}
+
+.t-caption {
+  font-size: var(--text-caption-size);
+  line-height: var(--text-caption-line-height);
+  font-weight: var(--text-caption-weight);
+}
+
+.t-micro {
+  font-size: var(--text-micro-size);
+  line-height: var(--text-micro-line-height);
+  font-weight: var(--text-micro-weight);
+  letter-spacing: var(--text-micro-tracking);
+}
+
+.t-mono {
+  font-family: var(--font-mono);
+  font-size: var(--text-mono-size);
+  line-height: var(--text-mono-line-height);
+  font-weight: var(--text-mono-weight);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Italic has exactly one job in Pry: "this figure is not what you would
+ * assume it is". Never emphasis, never prose, never a heading. */
+.t-qualifier {
+  font-style: italic;
+  font-size: var(--text-caption-size);
+  line-height: var(--text-caption-line-height);
+  color: var(--ink-receded-plus);
+}
+
+.num {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- shared marks ----------------------------------------------------- */
+
+.hatch {
+  background-image: var(--hatch);
+}
+
+.eyebrow {
+  font-size: var(--text-label-size);
+  line-height: var(--text-label-line-height);
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-receded-plus);
+}
+
+.rule {
+  height: 1px;
+  background: var(--hairline);
+  border: 0;
+  margin: 0;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+.stage {
+  width: 100%;
+  max-width: var(--stage-max);
+  margin: 0 auto;
+  padding-inline: var(--gutter);
+}
+
+@media (max-width: 767px) {
+  .stage {
+    padding-inline: var(--space-16);
+  }
+
+  :root {
+    --gutter: 16px;
+  }
+}
+
+/* The architectural coordinate grid. Ambient by construction: class C ink,
+ * behind everything, never load-bearing. */
+.crosshair-grid {
+  background-image: var(--crosshair);
+  background-position: 0 0;
+}
+
+/* A control that reads as text-weight rather than a widget: the house bar
+ * idiom. Hairline, no fill, no shadow. */
+.ctl {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-8);
+  padding: 6px 12px;
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--radius-control);
+  background: var(--ground);
+  color: var(--ink-full);
+  font-size: var(--text-label-size);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.ctl:hover:not(:disabled) {
+  background: var(--surface-1);
+}
+
+.ctl[aria-pressed="true"],
+.ctl.is-on {
+  border-color: var(--ink-full);
+}
+
+.ctl:disabled {
+  cursor: not-allowed;
+  border-color: var(--hairline);
+  color: var(--ink-receded);
+}
+
+.ctl--primary {
+  border-color: var(--ink-full);
+  background: var(--ink-full);
+  color: var(--ground);
+  font-weight: 700;
+}
+
+.ctl--primary:hover:not(:disabled) {
+  background: var(--ink-full);
+  filter: none;
+  border-color: var(--accent);
+}
+
+input[type="range"] {
+  accent-color: var(--accent);
+  width: 100%;
+}
