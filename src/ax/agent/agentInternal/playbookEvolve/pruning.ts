@@ -26,7 +26,7 @@
  *  3. Without a variance band the only bullets this sweep will propose are ones
  *     whose removal *measurably helps*. An interval that contains zero is
  *     "unresolved", not "redundant": with no noise floor to compare against,
- *     calling an unresolved reading redundant would be the exact overclaim this
+ *     calling an unresolved reading redundant would be the exact over-claim this
  *     RFC exists to remove. Configure `varianceBand` to make `redundant`
  *     reachable.
  */

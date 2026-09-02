@@ -295,7 +295,7 @@ function denialCodeOf(error: unknown): AxAgentPlaybookPromotionDenialCode {
 /**
  * One `axAuthorize` call, bound to the nomination's `resourceId`.
  *
- * The post-return checks are defence in depth, not the guarantee: `axAuthorize`
+ * The post-return checks are defense in depth, not the guarantee: `axAuthorize`
  * already enforces exact receipt binding (`receiptMatches`) and throws on a
  * `deny` decision, so the only non-throw return is an allow receipt bound to
  * this exact request. They exist so a future refactor there cannot quietly

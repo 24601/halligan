@@ -486,9 +486,12 @@ function validateEvidenceOptions(
     // A leave-one-out verdict taken on the split the artifact was selected on
     // measures selection, not redundancy, so there is no fallback to `current`
     // here either.
+    // Not `prune_apply_failed`: nothing was applied. The evidence a prune gate
+    // needs cannot exist without a held-out split, which is what
+    // `evidence_incomplete` names.
     throw new AxAgentPlaybookEvolveError(
-      'prune_apply_failed',
-      'candidate_eval',
+      'evidence_incomplete',
+      'redundancy_ablation',
       'prune.enabled requires a non-empty validation set; a leave-one-out redundancy reading on the current split measures selection, not redundancy.'
     );
   }
