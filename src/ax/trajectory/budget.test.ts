@@ -13,23 +13,35 @@ import { describe, expect, it } from 'vitest';
  * formatting expands the RFC's own declared API surface -- the store files are
  * fifteen port methods each plus a reference blob store, and the conformance
  * kit is seventeen named cases. Nothing was added beyond the specified scope.
+ *
+ * `log.ts` is new relative to RFC 5.1 and the directory ceiling is raised for
+ * it. It holds the append-only index and every read primitive, shared verbatim
+ * by BOTH shipped stores; before it, ~230 lines were duplicated between
+ * memoryStore.ts and src/tools/trajectory/jsonl.ts and a fix to one silently
+ * missed the other. Sharing across the package boundary can only move those
+ * lines INTO this directory, so `jsonl.ts` fell 940 -> 800 and `memoryStore.ts`
+ * 720 -> 520 while the directory total rose. The A1+A2 total the RFC estimated
+ * at 2,900 is therefore 3,260 with projection.ts at 620; lane A2 must restate
+ * that number and record the reason in docs/TRAJECTORY.md per RFC 8.7, which
+ * this lane does not own.
  */
 const CAPS: readonly (readonly [string, number])[] = [
   ['src/ax/trajectory/types.ts', 480],
   ['src/ax/trajectory/util.ts', 150],
   ['src/ax/trajectory/registry.ts', 190],
   ['src/ax/trajectory/spill.ts', 170],
-  ['src/ax/trajectory/memoryStore.ts', 720], // raised from 620
+  ['src/ax/trajectory/log.ts', 500], // new: the shared index + read primitives
+  ['src/ax/trajectory/memoryStore.ts', 520], // lowered from 720
   ['src/ax/trajectory/conformance.ts', 620], // raised from 470
   ['src/ax/trajectory/index.ts', 110],
-  ['src/tools/trajectory/jsonl.ts', 940], // raised from 720
+  ['src/tools/trajectory/jsonl.ts', 800], // lowered from 940
 ];
 
 /**
  * Directory ceiling for the files lane A1 owns. Lane A2 adds projection.ts
  * (cap 620) and must restate this total in the same PR that adds its row.
  */
-const TRAJECTORY_DIRECTORY_CAP = 2_440;
+const TRAJECTORY_DIRECTORY_CAP = 2_640;
 
 // vitest runs this workspace with cwd = src/ax, so the repo root is derived
 // from this file rather than from the process.
@@ -76,6 +88,7 @@ describe('trajectory line budgets', () => {
       'src/ax/trajectory/util.ts',
       'src/ax/trajectory/registry.ts',
       'src/ax/trajectory/spill.ts',
+      'src/ax/trajectory/log.ts',
       'src/ax/trajectory/memoryStore.ts',
       'src/ax/trajectory/conformance.ts',
       'src/ax/trajectory/index.ts',

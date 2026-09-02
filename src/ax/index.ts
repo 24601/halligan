@@ -1614,6 +1614,17 @@ import {
   runAxTrajectoryStoreConformance,
 } from './trajectory/conformance.js';
 import {
+  AxTrajectoryLog,
+  type AxTrajectoryLogEntry,
+  type AxTrajectoryLogOptions,
+  type AxTrajectoryPreparedStep,
+  type AxTrajectorySpilledStep,
+  type AxTrajectorySpillStepOptions,
+  axFreezeTrajectoryStep,
+  axPrepareTrajectoryStep,
+  axSpillTrajectoryStep,
+} from './trajectory/log.js';
+import {
   AxInMemoryTrajectoryBlobStore,
   AxInMemoryTrajectoryStore,
   type AxInMemoryTrajectoryStoreOptions,
@@ -1912,6 +1923,7 @@ export { AxTrajectoryAppendError };
 export { AxTrajectoryBlobError };
 export { AxTrajectoryCursorError };
 export { AxTrajectoryForkError };
+export { AxTrajectoryLog };
 export { AxTrajectoryQueryError };
 export { AxTrajectoryRegistryError };
 export { AxTrajectoryRollupError };
@@ -2016,6 +2028,7 @@ export { axFetchJsonSpeech };
 export { axFetchMultipartTranscription };
 export { axFingerprintCausalEvidence };
 export { axFrameSampler };
+export { axFreezeTrajectoryStep };
 export { axFunctionAuthorityTarget };
 export { axGetAIProfile };
 export { axGetCompatibilityReport };
@@ -2083,6 +2096,7 @@ export { axOptimizableValidators };
 export { axPlaybookFailureSection };
 export { axPreferenceEvidenceLimits };
 export { axPreferenceEvidenceToMemories };
+export { axPrepareTrajectoryStep };
 export { axProcessContentForProvider };
 export { axProgramSourceDefaultNodeResourceLimits };
 export { axProgramSourceRuntimeProtocol };
@@ -2123,6 +2137,7 @@ export { axSnapshotAuthority };
 export { axSpanAttributes };
 export { axSpanEvents };
 export { axSpillTrajectoryFields };
+export { axSpillTrajectoryStep };
 export { axStartActiveSpanFailOpen };
 export { axStartSpanFailOpen };
 export { axTrajectoryCompactData };
@@ -3178,12 +3193,17 @@ export type { AxTrajectoryFieldValue };
 export type { AxTrajectoryForkRequest };
 export type { AxTrajectoryForkResult };
 export type { AxTrajectoryHeader };
+export type { AxTrajectoryLogEntry };
+export type { AxTrajectoryLogOptions };
 export type { AxTrajectoryMergeRequest };
+export type { AxTrajectoryPreparedStep };
 export type { AxTrajectoryReadQuery };
 export type { AxTrajectoryResolveOptions };
 export type { AxTrajectorySpillPolicy };
 export type { AxTrajectorySpillRequest };
 export type { AxTrajectorySpillResult };
+export type { AxTrajectorySpillStepOptions };
+export type { AxTrajectorySpilledStep };
 export type { AxTrajectoryStats };
 export type { AxTrajectoryStep };
 export type { AxTrajectoryStepClass };

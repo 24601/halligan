@@ -5,6 +5,23 @@ export type {
   AxTrajectoryStoreConformanceReport,
 } from './conformance.js';
 export { runAxTrajectoryStoreConformance } from './conformance.js';
+// Shared by BOTH shipped stores. `src/tools` consumes the package root, so
+// the log index and the write-boundary helpers have to be reachable from it:
+// the alternative is the ~230 duplicated lines this replaced, where a fix
+// applied to one store silently missed the other.
+export type {
+  AxTrajectoryLogEntry,
+  AxTrajectoryLogOptions,
+  AxTrajectoryPreparedStep,
+  AxTrajectorySpilledStep,
+  AxTrajectorySpillStepOptions,
+} from './log.js';
+export {
+  AxTrajectoryLog,
+  axFreezeTrajectoryStep,
+  axPrepareTrajectoryStep,
+  axSpillTrajectoryStep,
+} from './log.js';
 export type { AxInMemoryTrajectoryStoreOptions } from './memoryStore.js';
 export {
   AxInMemoryTrajectoryBlobStore,

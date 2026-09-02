@@ -7,8 +7,8 @@ import {
   openSync,
   readdirSync,
   readFileSync,
+  readSync,
   renameSync,
-  statSync,
   unlinkSync,
   writeSync,
 } from 'node:fs';
@@ -25,33 +25,27 @@ import {
   type AxTrajectoryBlobStore,
   type AxTrajectoryCreateRequest,
   type AxTrajectoryCursor,
-  AxTrajectoryCursorError,
   type AxTrajectoryDrainBudget,
-  type AxTrajectoryDrainResult,
   AxTrajectoryForkError,
   type AxTrajectoryForkRequest,
   type AxTrajectoryForkResult,
   type AxTrajectoryHeader,
+  AxTrajectoryLog,
+  type AxTrajectoryLogEntry,
   type AxTrajectoryMergeRequest,
   AxTrajectoryQueryError,
   type AxTrajectoryReadQuery,
   type AxTrajectorySpillPolicy,
-  type AxTrajectoryStats,
   type AxTrajectoryStep,
-  type AxTrajectoryStepClass,
   type AxTrajectoryStore,
   type AxTrajectoryStoreCapabilities,
   type AxTrajectoryTailQuery,
-  type AxTrajectoryTailResult,
   type AxTrajectoryTypeRegistry,
   axEventCanonicalDigest,
-  axNormalizeTrajectoryTimestamp,
-  axSpillTrajectoryFields,
-  axTrajectoryCompactData,
+  axFreezeTrajectoryStep,
+  axPrepareTrajectoryStep,
+  axSpillTrajectoryStep,
   axTrajectoryId,
-  axTrajectoryInvalidFieldPath,
-  axTrajectoryMaxStepIds,
-  axTrajectoryStepBytes,
   axTrajectoryStepFingerprint,
   axTrajectoryTypeRegistry,
   axTrajectoryUtf8ByteLength,
@@ -59,16 +53,15 @@ import {
 
 export const AX_JSONL_TRAJECTORY_SCHEMA_VERSION = 1;
 
-const DEFAULT_DRAIN_STEPS = 256;
-const DEFAULT_DRAIN_BYTES = 1024 * 1024;
 const STEPS_FILE = 'steps.jsonl';
 const HEADER_FILE = 'header.json';
 const BLOBS_DIR = 'blobs';
 const CURSORS_DIR = 'cursors';
+const READ_CHUNK = 64 * 1024;
+const NEWLINE = 0x0a;
 
 type AppendPhase = ConstructorParameters<typeof AxTrajectoryAppendError>[1];
 type AppendReason = ConstructorParameters<typeof AxTrajectoryAppendError>[2];
-type CursorReason = ConstructorParameters<typeof AxTrajectoryCursorError>[1];
 type QueryReason = ConstructorParameters<typeof AxTrajectoryQueryError>[1];
 type ForkReason = ConstructorParameters<typeof AxTrajectoryForkError>[1];
 
@@ -81,12 +74,12 @@ function failAppend(
   throw new AxTrajectoryAppendError(message, phase, reason, options);
 }
 
-function failCursor(message: string, reason: CursorReason): never {
-  throw new AxTrajectoryCursorError(message, reason);
-}
-
-function failQuery(message: string, reason: QueryReason): never {
-  throw new AxTrajectoryQueryError(message, reason);
+function failQuery(
+  message: string,
+  reason: QueryReason,
+  options?: ErrorOptions
+): never {
+  throw new AxTrajectoryQueryError(message, reason, options);
 }
 
 function failFork(message: string, reason: ForkReason): never {
@@ -101,14 +94,36 @@ function segment(id: string): string {
   return encodeURIComponent(id);
 }
 
+/**
+ * `writeSync` may write fewer bytes than it was given; a short write on the
+ * step file would truncate the frame the surrounding code calls atomic.
+ */
+function writeAll(fd: number, data: string): void {
+  const buffer = Buffer.from(data, 'utf8');
+  let written = 0;
+  while (written < buffer.length) {
+    written += writeSync(fd, buffer, written, buffer.length - written);
+  }
+}
+
+let temporaryCounter = 0;
+
+/**
+ * Creates `path` atomically: the bytes land in a sibling temp file, are
+ * flushed, and only then move into place. Opening the final path with `'w'`
+ * would truncate it first, so a crash mid-rewrite could leave a live reference
+ * pointing at half a file (I2's "a dangling ref is impossible").
+ */
 function writeDurable(path: string, data: string, fsync: boolean): void {
-  const fd = openSync(path, 'w');
+  const temporary = `${path}.${Date.now().toString(36)}${temporaryCounter++}.tmp`;
+  const fd = openSync(temporary, 'w');
   try {
-    writeSync(fd, data);
+    writeAll(fd, data);
     if (fsync) fsyncSync(fd);
   } finally {
     closeSync(fd);
   }
+  renameSync(temporary, path);
 }
 
 /**
@@ -147,12 +162,13 @@ export class AxJSONLTrajectoryBlobStore implements AxTrajectoryBlobStore {
         digest
       );
     }
-    writeDurable(this.path(ref), request.value, this.fsync);
-    return {
-      ref,
-      bytes: axTrajectoryUtf8ByteLength(request.value),
-      digest,
-    };
+    const path = this.path(ref);
+    const bytes = axTrajectoryUtf8ByteLength(request.value);
+    // Content-addressed, so an existing ref already holds exactly these bytes
+    // and a committed step may already point at it. Re-writing it buys
+    // nothing and risks truncating a live reference.
+    if (!existsSync(path)) writeDurable(path, request.value, this.fsync);
+    return { ref, bytes, digest };
   }
 
   async get(ref: string, digest: string, signal?: AbortSignal) {
@@ -205,19 +221,12 @@ interface StoredHeader extends AxTrajectoryHeader {
 }
 
 interface TrajectoryRecord {
-  readonly header: AxTrajectoryHeader;
-  readonly identity: string;
-  readonly steps: AxTrajectoryStep[];
-  readonly byId: Map<string, AxTrajectoryStep>;
-  readonly fingerprints: Map<string, string>;
-  readonly newestByClass: Map<
-    AxTrajectoryStepClass,
-    { seq: number; stepId: string; ts: number }
-  >;
-  /** Byte offset just past each step's line, for byte-offset cursor tokens. */
-  readonly offsets: number[];
+  readonly log: AxTrajectoryLog;
+  readonly path: string;
+  /** True byte length of steps.jsonl, including any unterminated tail. */
   bytes: number;
-  corrupt: number;
+  /** The tail is an unterminated frame, so the next append must close it. */
+  torn: boolean;
 }
 
 function isStepShaped(value: unknown): value is AxTrajectoryStep {
@@ -239,7 +248,15 @@ function isStepShaped(value: unknown): value is AxTrajectoryStep {
  * File-backed append-only trajectory store: one `steps.jsonl` per trajectory,
  * one line per step, blobs content-addressed in a shared directory, cursors in
  * their own files. Passes the same `runAxTrajectoryStoreConformance` kit as the
- * in-memory reference store, with the same assertion count.
+ * in-memory reference store, with the same assertion count, because every read
+ * primitive is the shared `AxTrajectoryLog`'s.
+ *
+ * **Memory.** Opening a trajectory indexes `steps.jsonl` a chunk at a time and
+ * keeps one `AxTrajectoryLogEntry` per frame -- id, type, class, ts, and the
+ * byte range -- never the parsed steps. A read seeks to the frames it is about
+ * to return and parses only those, so resident memory is O(steps), not
+ * O(bytes), and the 312 MB / 19k-step log the subsystem exists for does not
+ * have to fit in the heap.
  */
 export class AxJSONLTrajectoryStore implements AxTrajectoryStore {
   readonly capabilities: Readonly<AxTrajectoryStoreCapabilities> =
@@ -265,6 +282,7 @@ export class AxJSONLTrajectoryStore implements AxTrajectoryStore {
   private readonly records = new Map<string, TrajectoryRecord>();
   private queue: Promise<unknown> = Promise.resolve();
   private closed = false;
+  private resolved = 0;
 
   constructor(options: Readonly<AxJSONLTrajectoryStoreOptions>) {
     this.directory = options.directory;
@@ -278,6 +296,16 @@ export class AxJSONLTrajectoryStore implements AxTrajectoryStore {
       join(this.directory, BLOBS_DIR),
       this.fsync
     );
+  }
+
+  /**
+   * Frames this store has materialized to satisfy reads, since construction.
+   * The observable form of the memory claim above: a bounded read parses the
+   * frames it returns and no others, so this tracks result size rather than
+   * log size. Indexing does not count -- it parses each line and discards it.
+   */
+  get framesResolved(): number {
+    return this.resolved;
   }
 
   /** Fault seam: make the next blob write fail (conformance case C-ORDER). */
@@ -305,7 +333,7 @@ export class AxJSONLTrajectoryStore implements AxTrajectoryStore {
       signal?.throwIfAborted();
       const trajectoryId = request.trajectoryId ?? axTrajectoryId('traj');
       const existing = this.load(trajectoryId);
-      if (existing) return existing.header;
+      if (existing) return existing.log.header;
       const header: AxTrajectoryHeader = {
         trajectoryId,
         slug: request.slug,
@@ -322,7 +350,7 @@ export class AxJSONLTrajectoryStore implements AxTrajectoryStore {
 
   async getTrajectory(trajectoryId: string, signal?: AbortSignal) {
     signal?.throwIfAborted();
-    return this.load(trajectoryId)?.header;
+    return this.load(trajectoryId)?.log.header;
   }
 
   async append(
@@ -342,69 +370,20 @@ export class AxJSONLTrajectoryStore implements AxTrajectoryStore {
     signal?: AbortSignal
   ): Promise<readonly Readonly<AxTrajectoryStep>[]> {
     signal?.throwIfAborted();
-    const record = this.record(query.trajectoryId);
-    if (
-      query.limit === undefined &&
-      (query.fromSeq === undefined || query.toSeq === undefined)
-    ) {
-      failQuery(
-        'read requires a limit unless both fromSeq and toSeq are given',
-        'unbounded_read'
-      );
-    }
-    const from = Math.max(0, query.fromSeq ?? 0);
-    const to = Math.min(
-      record.steps.length,
-      query.toSeq ?? record.steps.length
-    );
-    if (to < from) {
-      failQuery(`read range ${from}..${to} is inverted`, 'invalid_range');
-    }
-    const matches = this.matcher(query.types, query.classes);
-    const out: AxTrajectoryStep[] = [];
-    for (let seq = from; seq < to; seq++) {
-      const step = record.steps[seq]!;
-      if (!matches(step)) continue;
-      out.push(step);
-      if (query.limit !== undefined && out.length >= query.limit) break;
-    }
-    return out;
+    return this.record(query.trajectoryId).log.read(query);
   }
 
   async tailBackward(
     query: Readonly<AxTrajectoryTailQuery>,
     signal?: AbortSignal
-  ): Promise<Readonly<AxTrajectoryTailResult>> {
+  ) {
     signal?.throwIfAborted();
-    const record = this.record(query.trajectoryId);
-    const matches = this.matcher(query.types, query.classes);
-    const maxScan = query.maxScan ?? Math.max(200, 20 * query.limit);
-    const chunkSize = Math.max(64, query.limit * 4);
-    let cursor = Math.min(
-      query.beforeSeq ?? record.steps.length,
-      record.steps.length
-    );
-    let scanned = 0;
-    const found: AxTrajectoryStep[] = [];
-    while (found.length < query.limit && scanned < maxScan && cursor > 0) {
-      const size = Math.min(chunkSize, cursor, maxScan - scanned);
-      if (size <= 0) break;
-      let examined = 0;
-      for (let offset = 1; offset <= size; offset++) {
-        const step = record.steps[cursor - offset]!;
-        scanned++;
-        examined++;
-        if (matches(step)) found.push(step);
-        if (found.length >= query.limit) break;
-      }
-      cursor -= examined;
-    }
-    return { steps: found.reverse(), scanned, exhausted: cursor === 0 };
+    return this.record(query.trajectoryId).log.tailBackward(query);
   }
 
   async getStep(trajectoryId: string, stepId: string, signal?: AbortSignal) {
     signal?.throwIfAborted();
-    return this.record(trajectoryId).byId.get(stepId);
+    return this.record(trajectoryId).log.getStep(stepId);
   }
 
   async getSteps(
@@ -413,19 +392,7 @@ export class AxJSONLTrajectoryStore implements AxTrajectoryStore {
     signal?: AbortSignal
   ): Promise<readonly Readonly<AxTrajectoryStep>[]> {
     signal?.throwIfAborted();
-    if (stepIds.length > axTrajectoryMaxStepIds) {
-      failQuery(
-        `getSteps accepts at most ${axTrajectoryMaxStepIds} ids, got ${stepIds.length}`,
-        'too_many_ids'
-      );
-    }
-    const record = this.record(trajectoryId);
-    const out: AxTrajectoryStep[] = [];
-    for (const stepId of stepIds) {
-      const step = record.byId.get(stepId);
-      if (step) out.push(step);
-    }
-    return out;
+    return this.record(trajectoryId).log.getSteps(stepIds);
   }
 
   async readFrom(
@@ -433,47 +400,14 @@ export class AxJSONLTrajectoryStore implements AxTrajectoryStore {
     trajectoryId: string,
     budget: Readonly<AxTrajectoryDrainBudget>,
     signal?: AbortSignal
-  ): Promise<Readonly<AxTrajectoryDrainResult>> {
+  ) {
     signal?.throwIfAborted();
-    const record = this.record(trajectoryId);
-    const maxSteps = budget.maxSteps ?? DEFAULT_DRAIN_STEPS;
-    const maxBytes = budget.maxBytes ?? DEFAULT_DRAIN_BYTES;
-    const steps: AxTrajectoryStep[] = [];
-    let seq = this.validateCursor(record, trajectoryId, cursor);
-    let bytes = 0;
-    while (seq < record.steps.length && steps.length < maxSteps) {
-      const step = record.steps[seq]!;
-      const size = axTrajectoryStepBytes(step);
-      if (steps.length > 0 && bytes + size > maxBytes) break;
-      steps.push(step);
-      bytes += size;
-      seq++;
-    }
-    const caughtUp = seq === record.steps.length;
-    return {
-      steps,
-      cursor: this.cursorAt(record, trajectoryId, seq),
-      caughtUp,
-      corrupt: caughtUp ? record.corrupt : 0,
-    };
+    return this.record(trajectoryId).log.readFrom(trajectoryId, cursor, budget);
   }
 
-  async stats(
-    trajectoryId: string,
-    signal?: AbortSignal
-  ): Promise<Readonly<AxTrajectoryStats> | undefined> {
+  async stats(trajectoryId: string, signal?: AbortSignal) {
     signal?.throwIfAborted();
-    const record = this.load(trajectoryId);
-    if (!record) return undefined;
-    const newest = record.steps[record.steps.length - 1];
-    return {
-      trajectoryId,
-      stepCount: record.steps.length,
-      newestSeq: newest ? newest.seq : -1,
-      newestTs: newest ? newest.ts : 0,
-      newestStepId: newest ? newest.stepId : '',
-      newestByClass: Object.fromEntries(record.newestByClass),
-    };
+    return this.load(trajectoryId)?.log.stats(trajectoryId);
   }
 
   async fork(
@@ -489,7 +423,7 @@ export class AxJSONLTrajectoryStore implements AxTrajectoryStore {
           'unknown_parent'
         );
       }
-      const depth = parent.header.depth + 1;
+      const depth = parent.log.header.depth + 1;
       if (request.maxDepth !== undefined && depth > request.maxDepth) {
         failFork(
           `fork depth ${depth} exceeds ${request.maxDepth}`,
@@ -497,9 +431,6 @@ export class AxJSONLTrajectoryStore implements AxTrajectoryStore {
         );
       }
       const childTrajectoryId = axTrajectoryId('traj');
-      if (childTrajectoryId === request.parentTrajectoryId) {
-        failFork('a trajectory cannot fork itself', 'cycle');
-      }
       const forkStepId = axTrajectoryId('step');
       this.materialize({
         trajectoryId: childTrajectoryId,
@@ -509,6 +440,8 @@ export class AxJSONLTrajectoryStore implements AxTrajectoryStore {
         parentStepId: forkStepId,
         depth,
       });
+      // Both directions are written before either is observable, so neither
+      // side ever has to search for the other (I9).
       await this.write(
         {
           trajectoryId: childTrajectoryId,
@@ -544,6 +477,7 @@ export class AxJSONLTrajectoryStore implements AxTrajectoryStore {
       this.record(request.parentTrajectoryId);
       this.record(request.childTrajectoryId);
       const parentStepId = axTrajectoryId('step');
+      // A sub-run always merges something back, success or failure (I10).
       const receipt = await this.write(
         {
           trajectoryId: request.parentTrajectoryId,
@@ -597,10 +531,11 @@ export class AxJSONLTrajectoryStore implements AxTrajectoryStore {
   ): Promise<void> {
     signal?.throwIfAborted();
     this.record(cursor.trajectoryId);
-    const path = this.cursorPath(consumerId, cursor.trajectoryId);
-    const temporary = `${path}.tmp`;
-    writeDurable(temporary, JSON.stringify(cursor), this.fsync);
-    renameSync(temporary, path);
+    writeDurable(
+      this.cursorPath(consumerId, cursor.trajectoryId),
+      JSON.stringify(cursor),
+      this.fsync
+    );
   }
 
   close(): void {
@@ -634,12 +569,40 @@ export class AxJSONLTrajectoryStore implements AxTrajectoryStore {
     return join(this.trajectoryDir(trajectoryId), STEPS_FILE);
   }
 
+  /**
+   * Length-prefixed on the encoded consumer id. `encodeURIComponent` leaves
+   * `_` alone, so a plain `a__b` join maps consumer `a__b`/trajectory `c` and
+   * consumer `a`/trajectory `b__c` onto the same cursor file.
+   */
   private cursorPath(consumerId: string, trajectoryId: string): string {
+    const consumer = segment(consumerId);
     return join(
       this.directory,
       CURSORS_DIR,
-      `${segment(consumerId)}__${segment(trajectoryId)}.json`
+      `${consumer.length}_${consumer}__${segment(trajectoryId)}.json`
     );
+  }
+
+  private newRecord(
+    header: AxTrajectoryHeader,
+    identity: string
+  ): TrajectoryRecord {
+    const path = this.stepsPath(header.trajectoryId);
+    const record: TrajectoryRecord = {
+      path,
+      bytes: 0,
+      torn: false,
+      log: new AxTrajectoryLog({
+        header,
+        identity,
+        resolve: (entry, seq) => {
+          this.resolved++;
+          return readFrame(path, entry, seq);
+        },
+      }),
+    };
+    this.records.set(header.trajectoryId, record);
+    return record;
   }
 
   private materialize(header: AxTrajectoryHeader): TrajectoryRecord {
@@ -652,19 +615,7 @@ export class AxJSONLTrajectoryStore implements AxTrajectoryStore {
     };
     writeDurable(join(dir, HEADER_FILE), JSON.stringify(stored), this.fsync);
     appendFileSync(join(dir, STEPS_FILE), '');
-    const record: TrajectoryRecord = {
-      header,
-      identity: stored.identity,
-      steps: [],
-      byId: new Map(),
-      fingerprints: new Map(),
-      newestByClass: new Map(),
-      offsets: [],
-      bytes: 0,
-      corrupt: 0,
-    };
-    this.records.set(header.trajectoryId, record);
-    return record;
+    return this.newRecord(header, stored.identity);
   }
 
   /** Loads (and tolerantly parses) a trajectory, or returns undefined. */
@@ -674,72 +625,95 @@ export class AxJSONLTrajectoryStore implements AxTrajectoryStore {
     const dir = this.trajectoryDir(trajectoryId);
     const headerPath = join(dir, HEADER_FILE);
     if (!existsSync(headerPath)) return undefined;
-    const stored = JSON.parse(readFileSync(headerPath, 'utf8')) as StoredHeader;
+    let stored: StoredHeader;
+    try {
+      stored = JSON.parse(readFileSync(headerPath, 'utf8')) as StoredHeader;
+    } catch (cause) {
+      // A half-written header cannot identify the trajectory, so the read
+      // fails closed with an Ax error rather than a raw SyntaxError. The
+      // step file is untouched and a host can restore the header.
+      failQuery(
+        `the header of trajectory ${trajectoryId} is unreadable`,
+        'unknown_trajectory',
+        { cause }
+      );
+    }
     const { identity, schemaVersion, ...header } = stored;
     void schemaVersion;
-    const record: TrajectoryRecord = {
-      header,
-      identity,
-      steps: [],
-      byId: new Map(),
-      fingerprints: new Map(),
-      newestByClass: new Map(),
-      offsets: [],
-      bytes: 0,
-      corrupt: 0,
-    };
-    const stepsPath = join(dir, STEPS_FILE);
-    if (existsSync(stepsPath)) {
-      const text = readFileSync(stepsPath, 'utf8');
-      const lines = text.split('\n');
-      // A trailing chunk with no newline is a torn write: dropped and counted,
-      // never glued onto the record before it (invariant I3).
-      const trailing = lines.pop();
-      if (trailing !== undefined && trailing !== '') record.corrupt++;
-      let offset = 0;
-      for (const line of lines) {
-        offset += axTrajectoryUtf8ByteLength(line) + 1;
-        if (line === '') continue;
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(line);
-        } catch {
-          record.corrupt++;
-          continue;
-        }
-        if (!isStepShaped(parsed)) {
-          record.corrupt++;
-          continue;
-        }
-        this.index(record, parsed, offset);
-      }
-    }
-    this.records.set(trajectoryId, record);
+    const record = this.newRecord(header, identity);
+    if (existsSync(record.path)) this.indexFile(record);
     return record;
   }
 
-  private index(
-    record: TrajectoryRecord,
-    step: AxTrajectoryStep,
-    offset: number
-  ): void {
-    const positioned: AxTrajectoryStep = { ...step, seq: record.steps.length };
-    record.steps.push(positioned);
-    record.byId.set(positioned.stepId, positioned);
-    record.fingerprints.set(
-      positioned.stepId,
-      axTrajectoryStepFingerprint(positioned)
-    );
-    record.offsets.push(offset);
-    record.bytes += axTrajectoryStepBytes(positioned);
-    record.newestByClass.set(
-      this.registry.describe(positioned.type).stepClass,
-      {
-        seq: positioned.seq,
-        stepId: positioned.stepId,
-        ts: positioned.ts,
+  /**
+   * Streams `steps.jsonl` in chunks and indexes one entry per complete frame.
+   * Nothing but the entries is retained: the parsed step is discarded, so a
+   * log far larger than memory can still be opened.
+   */
+  private indexFile(record: TrajectoryRecord): void {
+    const fd = openSync(record.path, 'r');
+    try {
+      const chunk = Buffer.allocUnsafe(READ_CHUNK);
+      let pending = Buffer.alloc(0);
+      let at = 0;
+      let read = readSync(fd, chunk, 0, READ_CHUNK, null);
+      while (read > 0) {
+        pending = Buffer.concat([pending, chunk.subarray(0, read)]);
+        let newline = pending.indexOf(NEWLINE);
+        while (newline !== -1) {
+          this.indexFrame(
+            record,
+            pending.subarray(0, newline),
+            at,
+            newline + 1
+          );
+          at += newline + 1;
+          pending = pending.subarray(newline + 1);
+          newline = pending.indexOf(NEWLINE);
+        }
+        read = readSync(fd, chunk, 0, READ_CHUNK, null);
       }
-    );
+      // A trailing chunk with no newline is a torn write: dropped and counted,
+      // never glued onto the record before it (invariant I3).
+      if (pending.length > 0) {
+        record.log.corrupt++;
+        record.torn = true;
+      }
+      record.bytes = at + pending.length;
+    } finally {
+      closeSync(fd);
+    }
+  }
+
+  private indexFrame(
+    record: TrajectoryRecord,
+    line: Buffer,
+    at: number,
+    span: number
+  ): void {
+    if (line.length === 0) return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line.toString('utf8'));
+    } catch {
+      record.log.corrupt++;
+      return;
+    }
+    if (!isStepShaped(parsed)) {
+      record.log.corrupt++;
+      return;
+    }
+    record.log.index({
+      stepId: parsed.stepId,
+      type: parsed.type,
+      stepClass: this.registry.describe(parsed.type).stepClass,
+      ts: parsed.ts,
+      // The frame's own bytes, minus the terminator: the on-the-wire size a
+      // drain budget is denominated in, with no re-serialization on load.
+      bytes: span - 1,
+      at,
+      span,
+    });
   }
 
   private record(trajectoryId: string): TrajectoryRecord {
@@ -748,66 +722,6 @@ export class AxJSONLTrajectoryStore implements AxTrajectoryStore {
       failQuery(`unknown trajectory ${trajectoryId}`, 'unknown_trajectory');
     }
     return record;
-  }
-
-  private cursorAt(
-    record: TrajectoryRecord,
-    trajectoryId: string,
-    seq: number
-  ): Readonly<AxTrajectoryCursor> {
-    const offset = seq === 0 ? 0 : (record.offsets[seq - 1] ?? 0);
-    return { trajectoryId, seq, token: `${record.identity}:${offset}` };
-  }
-
-  private matcher(
-    types: readonly string[] | undefined,
-    classes: readonly AxTrajectoryStepClass[] | undefined
-  ): (step: Readonly<AxTrajectoryStep>) => boolean {
-    const typeSet = types ? new Set(types) : undefined;
-    const classSet = classes ? new Set(classes) : undefined;
-    return (step) =>
-      (!typeSet || typeSet.has(step.type)) &&
-      (!classSet || classSet.has(this.registry.describe(step.type).stepClass));
-  }
-
-  private validateCursor(
-    record: TrajectoryRecord,
-    trajectoryId: string,
-    cursor: Readonly<AxTrajectoryCursor> | undefined
-  ): number {
-    if (!cursor) return 0;
-    if (cursor.trajectoryId !== trajectoryId) {
-      failCursor(
-        `cursor names ${cursor.trajectoryId}, not ${trajectoryId}`,
-        'identity_changed'
-      );
-    }
-    const token = cursor.token;
-    if (token !== undefined) {
-      const split = token.lastIndexOf(':');
-      const identity = token.slice(0, split);
-      if (identity !== record.identity) {
-        failCursor(
-          `cursor token is from another instance of ${trajectoryId}`,
-          'identity_changed'
-        );
-      }
-      const offset = Number(token.slice(split + 1));
-      const size = statSync(this.stepsPath(trajectoryId)).size;
-      if (Number.isFinite(offset) && offset > size) {
-        failCursor(`the log shrank below cursor offset ${offset}`, 'shrank');
-      }
-    }
-    if (!Number.isInteger(cursor.seq) || cursor.seq < 0) {
-      failCursor(
-        `cursor seq ${cursor.seq} is not a frame boundary`,
-        'not_a_frame_boundary'
-      );
-    }
-    if (cursor.seq > record.steps.length) {
-      failCursor(`cursor seq ${cursor.seq} is beyond the end`, 'beyond_end');
-    }
-    return cursor.seq;
   }
 
   /** Serializes every mutation, which is what makes `seq` dense (I4). */
@@ -833,103 +747,61 @@ export class AxJSONLTrajectoryStore implements AxTrajectoryStore {
         'unknown_trajectory'
       );
     }
-    const descriptor = this.registry.describe(request.type);
-    if (request.source !== undefined && !descriptor.carriesSource) {
-      failAppend(
-        `step type "${request.type}" may not carry a source`,
-        'validate',
-        'source_on_machinery_step'
-      );
-    }
-    const data = axTrajectoryCompactData(request.data);
-    const invalid = axTrajectoryInvalidFieldPath(data);
-    if (invalid) {
-      failAppend(
-        `step field ${invalid} is not persistable`,
-        'validate',
-        'invalid_field'
-      );
-    }
-    let ts = this.clock.now();
-    if (request.ts !== undefined) {
-      const normalized = axNormalizeTrajectoryTimestamp(request.ts);
-      if (normalized === undefined) {
-        failAppend(
-          `step ts ${request.ts} is not finite`,
-          'validate',
-          'invalid_field'
-        );
-      }
-      ts = normalized;
-    }
-    const stepId = request.stepId ?? axTrajectoryId('step');
-    const previous = record.byId.get(stepId);
+    const { log } = record;
+    const prepared = axPrepareTrajectoryStep(
+      request,
+      this.registry,
+      this.clock
+    );
+    const previousSeq = log.seqOf(prepared.stepId);
+    const seq = previousSeq ?? log.length;
+    // I2: every blob is durably on disk before the step line is appended.
+    const built = await axSpillTrajectoryStep({
+      request,
+      prepared,
+      seq,
+      blobs: this.blobs,
+      policy: this.spill,
+      signal,
+    });
 
-    let spilled: Awaited<ReturnType<typeof axSpillTrajectoryFields>>;
-    try {
-      // I2: every blob is durably on disk before the step line is appended.
-      spilled = await axSpillTrajectoryFields({
-        trajectoryId: request.trajectoryId,
-        stepId,
-        data,
-        blobs: this.blobs,
-        policy: this.spill,
-        spillFields: descriptor.spillFields,
-        signal,
-      });
-    } catch (cause) {
-      failAppend(
-        `blob spill failed for step ${stepId}`,
-        'blob',
-        'blob_write_failed',
-        { cause }
-      );
-    }
-
-    const step: AxTrajectoryStep = {
-      stepId,
-      trajectoryId: request.trajectoryId,
-      seq: record.steps.length,
-      type: request.type,
-      ts,
-      runId: request.runId,
-      triggerStep: request.triggerStep,
-      launchedBy: request.launchedBy,
-      source: request.source,
-      data: spilled.data,
-      blobs: spilled.blobs.length > 0 ? spilled.blobs : undefined,
-    };
-    // The fingerprint is taken over the PERSISTED step, so a replay compares
-    // equal without rehydrating a blob and load() recomputes it from bytes.
-    const fingerprint = axTrajectoryStepFingerprint(step);
-    if (previous) {
-      if (record.fingerprints.get(stepId) !== fingerprint) {
+    if (previousSeq !== undefined) {
+      // The fingerprint is taken over the PERSISTED step, so a replay compares
+      // equal without rehydrating a blob and it recomputes from the bytes.
+      const previous = log.step(previousSeq)!;
+      if (
+        axTrajectoryStepFingerprint(previous) !==
+        axTrajectoryStepFingerprint(built.step)
+      ) {
         failAppend(
-          `step id ${stepId} already exists with different content`,
+          `step id ${prepared.stepId} already exists with different content`,
           'validate',
           'duplicate_step_id'
         );
       }
       return {
-        stepId,
-        seq: previous.seq,
+        stepId: prepared.stepId,
+        seq: previousSeq,
         ts: previous.ts,
         durability: 'persistent',
         spilled: (previous.blobs ?? []).map((blob) => blob.field),
         duplicate: true,
       };
     }
+
     // One `\n`-terminated write per step: a reader either sees the whole line
-    // or, after a power loss, a trailing fragment the parser drops (I3).
-    const line = `${JSON.stringify(step)}\n`;
-    const path = this.stepsPath(request.trajectoryId);
-    const fd = openSync(path, 'a');
+    // or, after a power loss, a trailing fragment the parser drops (I3). A
+    // torn tail is closed with its own terminator first, so the new frame is
+    // never glued onto the fragment that a crash left behind.
+    const line = `${JSON.stringify(built.step)}\n`;
+    const prefix = record.torn ? '\n' : '';
+    const fd = openSync(record.path, 'a');
     try {
-      writeSync(fd, line);
+      writeAll(fd, `${prefix}${line}`);
       if (this.fsync) fsyncSync(fd);
     } catch (cause) {
       failAppend(
-        `step ${stepId} could not be appended`,
+        `step ${prepared.stepId} could not be appended`,
         'commit',
         'store_failure',
         { cause }
@@ -937,17 +809,47 @@ export class AxJSONLTrajectoryStore implements AxTrajectoryStore {
     } finally {
       closeSync(fd);
     }
-    const offset =
-      (record.offsets[record.offsets.length - 1] ?? 0) +
-      axTrajectoryUtf8ByteLength(line);
-    this.index(record, step, offset);
+    const at = record.bytes + prefix.length;
+    const span = axTrajectoryUtf8ByteLength(line);
+    record.bytes = at + span;
+    record.torn = false;
+    log.index({
+      stepId: prepared.stepId,
+      type: request.type,
+      stepClass: prepared.descriptor.stepClass,
+      ts: prepared.ts,
+      bytes: span - 1,
+      at,
+      span,
+    });
     return {
-      stepId,
-      seq: step.seq,
-      ts,
+      stepId: prepared.stepId,
+      seq,
+      ts: prepared.ts,
       durability: 'persistent',
-      spilled: spilled.spilled,
+      spilled: built.spilled,
       duplicate: false,
     };
+  }
+}
+
+/** Seeks to one indexed frame and parses only that frame. */
+function readFrame(
+  path: string,
+  entry: Readonly<AxTrajectoryLogEntry>,
+  seq: number
+): Readonly<AxTrajectoryStep> {
+  const fd = openSync(path, 'r');
+  try {
+    const buffer = Buffer.allocUnsafe(entry.span);
+    const read = readSync(fd, buffer, 0, entry.span, entry.at);
+    const parsed = JSON.parse(
+      buffer.subarray(0, read).toString('utf8')
+    ) as AxTrajectoryStep;
+    // `seq` is the store's, never the file's: a tolerant parse that dropped an
+    // interior frame renumbers everything after it (I4 keeps seq dense).
+    return axFreezeTrajectoryStep({ ...parsed, seq });
+  } finally {
+    closeSync(fd);
   }
 }

@@ -170,6 +170,11 @@ export class AxTrajectoryForkError extends Error {
   readonly code = 'trajectory_fork_invalid';
   constructor(
     message: string,
+    /**
+     * `cycle` is for a store that accepts a caller-supplied child id. Neither
+     * shipped store does -- both generate the child id -- so neither can
+     * raise it, and neither pretends to with an unreachable branch.
+     */
     readonly reason: 'unknown_parent' | 'cycle' | 'depth_exceeded',
     options?: ErrorOptions
   ) {

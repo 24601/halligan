@@ -5,6 +5,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -323,6 +324,78 @@ describe('AxJSONLTrajectoryStore on-disk contract', () => {
     ).rejects.toMatchObject({ reason: 'unknown_trajectory' });
     expect(await store.getTrajectory('ghost')).toBeUndefined();
     expect(await store.stats('ghost')).toBeUndefined();
+  });
+
+  it('materializes only the frames a bounded read returns', async () => {
+    const clock = new AxManualEventClock(5_000);
+    const directory = root();
+    const store = newStore(directory, clock);
+    const { trajectoryId } = await store.create({});
+    for (let index = 0; index < 200; index++) {
+      await store.append({
+        trajectoryId,
+        type: index % 50 === 0 ? 'message' : 'run',
+        ...(index % 50 === 0 ? { source: 'human' } : {}),
+        data: { index },
+      });
+    }
+    store.close();
+
+    const reopened = newStore(directory, clock);
+    // Opening indexes every line and keeps none of them.
+    expect(await reopened.stats(trajectoryId)).toMatchObject({
+      stepCount: 201,
+    });
+    expect(reopened.framesResolved).toBe(0);
+
+    const tail = await reopened.tailBackward({
+      trajectoryId,
+      limit: 2,
+      types: ['message'],
+      maxScan: 400,
+    });
+    expect(tail.steps).toHaveLength(2);
+    expect(tail.scanned).toBeGreaterThanOrEqual(100);
+    // Scanning 100 machinery frames materialized only the two returned:
+    // the filter runs on the index, not on parsed steps.
+    expect(reopened.framesResolved).toBe(2);
+
+    // Counter-metric: a full replay genuinely does materialize everything, so
+    // the bounded number above is not a counter that never moves.
+    const replay = await reopened.read({
+      trajectoryId,
+      fromSeq: 0,
+      toSeq: 201,
+    });
+    expect(replay).toHaveLength(201);
+    expect(reopened.framesResolved).toBe(203);
+  });
+
+  it('reads a step from disk rather than from a materialized log', async () => {
+    const clock = new AxManualEventClock(5_000);
+    const directory = root();
+    const store = newStore(directory, clock);
+    const { trajectoryId } = await store.create({});
+    const receipt = await store.append({
+      trajectoryId,
+      type: 'run',
+      data: { tag: 'aaaa' },
+    });
+    expect((await store.getStep(trajectoryId, receipt.stepId))?.data.tag).toBe(
+      'aaaa'
+    );
+
+    // Same byte length, so every frame offset is unchanged: a store holding
+    // the parsed log in memory would keep answering 'aaaa'.
+    const path = join(
+      directory,
+      encodeURIComponent(trajectoryId),
+      'steps.jsonl'
+    );
+    writeFileSync(path, readFileSync(path, 'utf8').replace('aaaa', 'bbbb'));
+    expect((await store.getStep(trajectoryId, receipt.stepId))?.data.tag).toBe(
+      'bbbb'
+    );
   });
 
   it('records fork and merge in both directions across reopen', async () => {
