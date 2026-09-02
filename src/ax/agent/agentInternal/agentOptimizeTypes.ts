@@ -227,6 +227,26 @@ export type AxAgentOptions<IN extends AxGenIn = AxGenIn> = Omit<
   workingState?: import('../workingState.js').AxWorkingStateConfig<any>;
 
   /**
+   * Prompt substrate for the actor loop. Named `actorMemoryMode`, NOT
+   * `memoryMode`, to avoid a silent collision with the existing
+   * `memoriesMode` behaviour.
+   *
+   * - `'transcript'` (default): today's action-log replay. Byte-identical.
+   * - `'skillState'`: the prompt becomes frozen skill spec + state contract +
+   *   working state + receipt roster + latest observation. The action log is
+   *   NOT replayed, and the actor additionally emits an optional typed
+   *   `statePatch` plus a `rationale` that is digested and discarded.
+   *   Requires BOTH `workingState` and `skillState`.
+   */
+  actorMemoryMode?: 'transcript' | 'skillState';
+
+  /**
+   * The frozen skill spec and observation window for
+   * `actorMemoryMode: 'skillState'`. Ignored in `'transcript'` mode.
+   */
+  skillState?: import('../skillState.js').AxSkillStateConfig<any>;
+
+  /**
    * Optional persistent context map for recurring long-context work.
    * When configured, Ax injects the map into the distiller prompt and updates
    * it once after each successful completed run. Use `onUpdate` to persist the

@@ -31,6 +31,7 @@ import {
   type AxEventClock,
   type AxEventVerificationUsage,
   type AxEventVerifierResult,
+  type AxProgramStateEnvelope,
   type AxProgramStateStore,
   AxSystemEventClock,
 } from '../event/types.js';
@@ -1212,6 +1213,7 @@ export class AxWorkingState<S = Record<string, unknown>> {
 
   private document: AxWorkingStateDocument<S>;
   private revision: number | undefined;
+  private lastEnvelope: AxProgramStateEnvelope;
   private readonly receiptList: AxWorkingStateReceipt[] = [];
   private readonly receiptByFingerprint = new Map<string, number>();
   private readonly parkCountByGoal = new Map<string, number>();
@@ -1231,6 +1233,7 @@ export class AxWorkingState<S = Record<string, unknown>> {
     document: AxWorkingStateDocument<S>;
     revision: number | undefined;
     receipts: readonly AxWorkingStateReceipt[];
+    envelope: AxProgramStateEnvelope;
   }) {
     this.config = args.config;
     this.runIdValue = args.runId;
@@ -1238,6 +1241,7 @@ export class AxWorkingState<S = Record<string, unknown>> {
     this.ai = args.ai;
     this.document = args.document;
     this.revision = args.revision;
+    this.lastEnvelope = args.envelope;
     for (const receipt of args.receipts) {
       this.receiptList.push(receipt);
       this.receiptByFingerprint.set(
@@ -1288,6 +1292,16 @@ export class AxWorkingState<S = Record<string, unknown>> {
       document,
       revision,
       receipts,
+      // The envelope is the STORED shape of the document. Before the first
+      // commit it is synthesized from the seed (or carried from the load), so
+      // `envelope()` never has to invent a revision.
+      envelope: {
+        schemaVersion: document.schemaVersion,
+        programVersion: deps.runId,
+        revision: revision ?? 0,
+        state: document,
+        updatedAt: loaded?.updatedAt ?? resolved.clock.now(),
+      },
     });
   }
 
@@ -1307,6 +1321,26 @@ export class AxWorkingState<S = Record<string, unknown>> {
 
   public currentRevision(): number {
     return this.revision ?? 0;
+  }
+
+  /**
+   * The STORED envelope: the last one this run committed, the last one it
+   * reloaded while rebasing off a competing writer, or the seed envelope
+   * before either happened. `envelope().revision` therefore always equals
+   * `currentRevision()`, which is what makes it usable as the expected
+   * revision for a host's own `compareAndSet`.
+   *
+   * It is NOT always `current()`. `current()` is the kernel's BELIEVED
+   * document, and a parks-only turn appends to the model-visible parked ledger
+   * without a store write, so after such a turn `current().parked` can carry
+   * entries `envelope().state.parked` does not. Stored is stored; believed is
+   * believed.
+   *
+   * A CLONE, for the same reason `current()` clones: a host that mutated it
+   * would silently corrupt the kernel's believed state.
+   */
+  public envelope(): AxProgramStateEnvelope {
+    return structuredClone(this.lastEnvelope) as AxProgramStateEnvelope;
   }
 
   /**
@@ -2029,6 +2063,7 @@ export class AxWorkingState<S = Record<string, unknown>> {
         );
         this.document = withParks;
         this.revision = envelope.revision;
+        this.lastEnvelope = envelope;
         return {
           committed: working.filter((entry) => entry.class !== 'guard'),
         };
@@ -2077,7 +2112,13 @@ export class AxWorkingState<S = Record<string, unknown>> {
             ),
           };
         }
+        // The rebase moves the run onto the STORED envelope, so all three
+        // views of it move together. Advancing `revision` without advancing
+        // `lastEnvelope` would leave `envelope().revision` one behind
+        // `currentRevision()`, and a host that used the stale value as its own
+        // expected revision would lose its write deterministically.
         this.revision = reloaded.revision;
+        this.lastEnvelope = reloaded;
         if (isRecord(reloaded.state)) {
           this.document = reloaded.state as AxWorkingStateDocument<S>;
         }

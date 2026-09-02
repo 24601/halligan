@@ -39,6 +39,10 @@ import {
   axUpdateSkillCostProfile,
 } from '../skillCost.js';
 import {
+  type AxSkillStateRuntime,
+  axSkillStateRuntime,
+} from '../skillState.js';
+import {
   buildRuntimeRestoreNotice,
   mergeRuntimeStateProvenance,
   runtimeStateProvenanceFromRecord,
@@ -162,6 +166,16 @@ export async function runActorLoop<IN extends AxGenIn>(
       ...(s.state?.workingState ? { restored: s.state.workingState } : {}),
     });
     s._workingStateRun = workingState;
+  }
+
+  // `skillState` is a substrate over the SAME working state: it never gets its
+  // own kernel, its own store or its own receipt ledger.
+  let skillState: AxSkillStateRuntime<any> | undefined;
+  if (workingState && s.options?.actorMemoryMode === 'skillState') {
+    // `initializeAgentInternal` already refused the mode without a skill
+    // config, so this is only reachable with one.
+    skillState = await axSkillStateRuntime(s.options.skillState, workingState);
+    s._skillStateRun = skillState;
   }
 
   // The receipt sink lives on the stage the way `_activeAuthority` does, so
@@ -615,6 +629,7 @@ export async function runActorLoop<IN extends AxGenIn>(
     contextThreshold,
     delegatedContextSummary,
     ...(workingState ? { workingState, workingStateObservations } : {}),
+    ...(skillState ? { skillState } : {}),
     mutableState,
     helpers,
   };

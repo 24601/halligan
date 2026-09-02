@@ -116,9 +116,9 @@
     {
       "name": "ax-agent-state",
       "type": "skill-md",
-      "description": "This skill helps an LLM generate correct verifier-gated working state code using @ax-llm/ax. Use when the user asks about AxWorkingState, goal ledgers, statePatch, state checkers, tool receipts, parked deltas, or long-horizon agent state.",
+      "description": "This skill helps an LLM generate correct verifier-gated working state and skillState memory-mode code using @ax-llm/ax. Use when the user asks about AxWorkingState, goal ledgers, actorMemoryMode, statePatch, state checkers, tool receipts, parked deltas, or long-horizon agent state.",
       "url": "ax-agent-state/SKILL.md",
-      "digest": "sha256:2364038dbe0e1cb5acc986b08e4f081c41957de1ed986dd7cf4398e69636bf90"
+      "digest": "sha256:61296f3994636c3b1d2aef5bf1f094c7ef4675509b34ef61d6796324afaeee26"
     },
     {
       "name": "ax-learn",

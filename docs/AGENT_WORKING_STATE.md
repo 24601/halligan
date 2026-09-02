@@ -193,6 +193,116 @@ compact form is itself truncated at the limit, so the guarantee is "text is
 sacrificed before goals are", not an absolute one — size `maxRenderChars` for
 the goal count you expect (roughly 24 chars per goal in the compact form).
 
+## The `skillState` memory mode
+
+`actorMemoryMode: 'skillState'` replaces action-log replay with *frozen skill
+spec + typed state + latest observation*. It is opt-in, requires BOTH
+`workingState` and `skillState`, and is refused at `agent(...)` construction
+otherwise (`skillstate_requires_working_state`, `skillstate_requires_skill`,
+`unresolvable_skill_spec`).
+
+| Prompt region | `transcript` (default) | `skillState` |
+|---|---|---|
+| Stable system prompt | role/stage rules, primitives, module list, callable signatures, output contract | unchanged, plus `skillSpec` and `stateContract` in the cached field set |
+| Cached working inputs | task inputs, `contextMetadata`, `contextMap`, `memories`, `executorRequest`, `distilledContextSummary`, `discoveredToolDocs`, `loadedSkills`, `summarizedActorLog` | the same **minus `summarizedActorLog`** |
+| Dynamic turn tail | `guidanceLog`, `actionLog`, `liveRuntimeState`, `contextPressure` | `guidanceLog`, `workingState`, `receiptRoster`, `latestObservation`, `liveRuntimeState`, `contextPressure`. **No `actionLog`.** |
+| Actor outputs | `javascriptCode` | `javascriptCode`, `statePatch` (`f.json().optional()`), `rationale` (`f.string().optional()`) |
+
+Both new outputs are **optional**, and that is load-bearing. The actor stage is
+a transport-shaped program; a required second output would turn a turn with
+nothing to record into a parse failure, therefore an error turn, therefore a
+possible executor-model escalation. An absent `statePatch` means the trace
+records `proposal: 'none'` and `outcome: 'unchanged'`.
+
+The action log is not merely omitted from the prompt: it is never rendered, and
+checkpoint summarization is skipped entirely, because the actor signature
+declares no `summarizedActorLog`. A checkpoint would otherwise be rendered,
+summarized **by a model call**, and then dropped. That is the difference
+between removing the transcript and hiding it.
+
+`rationale` is read, hashed with `axEventCanonicalDigest`, stored as
+`AxSkillStateTransition.rationaleDigest`, and dropped. It is never written to
+the action log, never rendered into a later prompt and never persisted, so two
+runs can be proved to have reasoned identically without retaining what they
+said. An ABSENT rationale produces no `rationaleDigest` at all: "declined to
+explain" and "explained with an empty string" are different events, and the
+audit record keeps them distinguishable.
+
+A refused turn is observed too. The code-policy branch (a non-final turn with
+no `console.log`, or multiple fenced code blocks) never executes the actor's
+code, and in this mode the observation window is the ONLY history, so the
+refusal itself is recorded as the latest observation rather than left visible
+only through the guidance entry.
+
+Only ACCEPTED transitions enter `transitions()`; every attempt is reported
+through `AxSkillStateConfig.onTransition` (fail-soft, like `onTrace`). The
+rejection vocabulary is:
+
+| `rejection` | Cause | Store touched |
+|---|---|---|
+| `schema` | the patch document is not a valid state patch | **no** |
+| `authority` | the patch addressed a harness-owned path; the whole patch is refused | no |
+| `fence` | the compare-and-set lost twice (once after the bounded rebase), or the delivery fence rejected the write | attempted |
+| `invariant` | the kernel or the host checker refused every delta | attempted |
+
+`committedRevision` is non-optional in every configuration, because the store
+is never absent: it defaults to `AxInMemoryProgramStateStore`. The rejection is
+decided by the error's typed `code` through `axIsWorkingStateError`, not by
+`instanceof`, so two copies of the package in one process cannot downgrade an
+`authority` or `fence` rejection to "nothing was refused".
+
+`AxSkillStateStep.state` is the STORED envelope, and its `revision` always
+equals the kernel's `currentRevision()` — including after the bounded rebase a
+losing compare-and-set performs — so a host can use it as the expected revision
+for its own `compareAndSet`. It is not the same view as the kernel's
+`current()`: a parks-only turn appends to the model-visible parked ledger
+without a store write, so `current().parked` can carry entries
+`step().state.state.parked` does not.
+
+### Measured equals sent
+
+The budget meter measures the SAME value record the turn sends. `buildActorPromptValues`
+builds it once, `measureActorPromptChars` takes it, and the turn sends it —
+rather than two call sites agreeing to re-derive the same thing. Two fields are
+structurally outside the measured window and are documented here rather than
+papered over:
+
+- `contextPressure` is DERIVED from the measurement, so counting it would move
+  the budget it reacts to;
+- the over-budget `inspectRuntime` hint is appended after the measurement for
+  the same reason.
+
+With `contextPolicy: { preset: 'full' }` neither is rendered, and
+`budget_check.mutablePromptChars + fixedPromptChars` equals the summed length
+of the message contents actually sent, EXACTLY, in both substrates. That
+equality is asserted in `agent.skillState.test.ts` and was verified falsifiable
+by dropping one region from the measured record.
+
+### What `skillState` does not fix
+
+The mode trades a long-context error for a state-projection error. Two things
+keep that honest: every transition passes the same verifier gate as the
+transcript path, and the store is never absent, so prior revisions are
+recoverable. With only the default in-memory store, though, the discard **is**
+irreversible once the process exits — supply a durable `store` if that matters.
+
+The dynamic tail is bounded by `maxRenderChars`, `maxRosterEntries` and
+`maxObservationChars`, so it does not grow with the TURN count. It does grow
+with the size of the goal ledger, which is a task-size term the mode neither
+removes nor claims to.
+
+The transcript leaves the PROMPT, not the process. `actionLogEntries` still
+grows for the whole run, `manageContext` still walks every entry each turn, and
+each entry's `output` and `chatLogMessages` stay resident — so the loop's
+per-turn context bookkeeping is still quadratic in the turn count even though
+the prompt is not. A host that enables `tombstoning` will additionally pay for
+MODEL-BACKED tombstones over text this mode never renders; leave it off under
+`skillState` unless a transcript consumer needs them.
+
+`onTransition` is awaited with no timeout and no abort signal, exactly like
+`onTrace` and `onFunctionCall`. A throwing sink is fail-soft; a sink that never
+settles stalls the turn, so a sink that can block should bound itself.
+
 ## What the gate does NOT gate
 
 `completionPolicy` defaults to `'observe'`: working state does **not** gate the
@@ -288,16 +398,39 @@ does not publish events, and never wakes anything.
 
 `scripts/eval-working-state.ts` (`npm run agent:workingstate:eval`) and
 `src/ax/agent/benchmarks/working-state.test.ts` run the same deterministic,
-zero-cost sweep over four horizons and two arms.
+zero-cost sweep over four horizons and three arms: `baseline` (transcript, no
+working state), `working-state` (transcript WITH the state document beside it)
+and `skill-state` (`actorMemoryMode: 'skillState'`).
+
+At horizon 100 (eval script, zero API calls):
+
+| arm | mean mutable prompt chars/turn | model calls | peak prompt chars | recovery turns |
+|---|---|---|---|---|
+| `baseline` | 11341 | 191 | 32562 | 19 |
+| `working-state` | 17650 | 198 | 37970 | 0 |
+| `skill-state` | 7589 | 102 | 18098 | 0 |
+
+Mutable-tail growth from horizon 50 to 100: `baseline` 2.50x,
+`working-state` 1.77x, `skill-state` 1.44x.
 
 This is **mechanism evidence, not model quality**. The AI is a deterministic
 mock; the scenario is a warehouse state machine, which is close to a best case
 for state-as-substrate; the proposer is a deterministic host callback, so the
 built-in model-backed proposer's cost is not measured. Accuracy is asserted
-only as NOT WORSE. And PR 1 **adds** prompt characters rather than removing
-them: the state document and the receipt roster ride beside the action log.
-Removing the action-log growth term is the `skillState` memory mode, which is
-a separate change.
+only as NOT WORSE.
+
+Two costs are reported rather than hidden. Working state **alone** adds prompt
+characters: the state document and the receipt roster ride beside the action
+log, and only `skillState` removes the action-log growth term. And the
+`skill-state` arm still grows (1.44x), because the scenario seeds one goal per
+order — the goal ledger is a task-size term the mode does not remove. With a
+fixed goal set the per-turn characters are flat, which is what the unit-scale
+assertion in `agent.skillState.test.ts` measures.
+
+`cumulativeTokens` counts only the actor and responder usage the mock reports;
+it does not count the checkpoint-summarizer calls the transcript arms make.
+`modelCalls` is therefore the honest cost proxy, and it is the column the
+`skill-state` arm is compared on.
 
 ## AxIR status
 
@@ -306,7 +439,9 @@ Working state is **not ported to AxIR**. It is recorded in the backlog as
 
 Its kernel is pinned by `scripts/fixtures/working-state-commit.json`, executed
 against the real kernel by `scripts/working-state-conformance.test.ts` in the
-root `npm test` chain.
+root `npm test` chain. The `skillState` transition semantics are pinned the
+same way by `scripts/fixtures/skill-state-transition.json` and
+`scripts/skill-state-conformance.test.ts`.
 
 That fixture deliberately does **not** live under `ir/conformance/`. Every
 directory there is enumerated by machinery that assumes the generated language

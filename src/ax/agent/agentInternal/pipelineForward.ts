@@ -510,6 +510,8 @@ export function beginPipelineSharedSession(
   // and `getWorkingState()` must say so rather than returning the last run's.
   distiller._workingStateRun = undefined;
   executor._workingStateRun = undefined;
+  distiller._skillStateRun = undefined;
+  executor._skillStateRun = undefined;
 
   distiller._sharedSession = controller;
   executor._sharedSession = controller;

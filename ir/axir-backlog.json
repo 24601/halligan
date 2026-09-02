@@ -2189,6 +2189,25 @@
       "verification": null
     },
     {
+      "id": "axir-2026-09-02-skillstate-actor-memory-mode-frozen-skill-spec-plus-typed-state-",
+      "status": "open",
+      "title": "skillState actor memory mode: frozen skill spec plus typed state as the actor prompt substrate",
+      "createdAt": "2026-09-02",
+      "sourcePR": 94,
+      "sourceCommit": "5e087d2298084e8d4028a571728f3ad6c060cd3d",
+      "tsPaths": ["src/ax/agent/skillState.ts"],
+      "portableSurface": "axagent",
+      "impact": "Adds an opt-in second prompt substrate to the actor loop. Under actorMemoryMode 'skillState' the prompt is a frozen skill spec, the declared state contract, the typed working-state document, the read-only receipt roster and the latest observation; the action log is neither replayed nor rendered nor checkpoint-summarized. The actor emits an optional typed RFC-6902 statePatch and a rationale that is digested and discarded; AxSkillStateRuntime validates the patch through the working-state kernel and host checker and commits it through AxProgramStateStore.compareAndSet under the configured fence, recording one transition per ACCEPTED transition with a non-optional committedRevision and a schema/authority/fence/invariant rejection vocabulary. The actor prompt measurement now reads the same value record the turn sends. Default behaviour is unchanged when actorMemoryMode is unset. Review-driven refinements ports must match: rationaleDigest is ABSENT when the actor emitted no rationale at all (an empty rationale still digests), so declining to explain is distinguishable from explaining with nothing; the rejection is decided by the working-state error CODE rather than by constructor identity; the kernel advances its stored envelope on the bounded rebase, so the envelope revision a host reads always equals the kernel current revision; and a code-policy-refused turn is recorded as the latest observation, which in this mode is the only history the actor sees.",
+      "suggestedAxirWork": [
+        "Add or update the TS-derived conformance fixture.",
+        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
+        "Run npm run axir:conformance:check and npm run test:axir."
+      ],
+      "completedAt": null,
+      "completedByCommit": null,
+      "verification": null
+    },
+    {
       "id": "axir-2026-09-02-typed-evidence-observations-guard-predicates-and-evidence-guards",
       "status": "open",
       "title": "Typed evidence observations, guard predicates, and evidence guards at the host-authority boundary",

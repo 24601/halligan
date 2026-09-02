@@ -261,6 +261,10 @@ export class ActorAgentRLM<
     | undefined;
   /** Per-`forward()` working-state run id, minted by the pipeline. */
   public _workingStateRunId: string | undefined;
+  /** Per-`forward()` skillState substrate, when the mode is configured. */
+  public _skillStateRun:
+    | import('./skillState.js').AxSkillStateRuntime<any>
+    | undefined;
   private runtimeBootstrapContext: unknown = undefined;
   private llmQueryBudgetState: AxLlmQueryBudgetState | undefined;
   private baseActorDefinition = '';

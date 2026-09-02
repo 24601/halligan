@@ -14,6 +14,7 @@
 
 import { beforeAll, describe, expect, it } from 'vitest';
 import {
+  axWorkingStatePromptGrowth,
   axWorkingStatePromptOverhead,
   renderWorkingStateTable,
 } from './workingStateMetrics.js';
@@ -40,12 +41,47 @@ const PROMPT_OVERHEAD_CEILING = 0.6;
  */
 const MEASUREMENT_GAP_CEILING = 0.02;
 
+/**
+ * Declared ceiling for the `skill-state` arm's per-turn dynamic-tail growth
+ * between the two largest measured horizons. It is NOT 1.0: the scenario's
+ * goal ledger grows with the number of orders, which is a TASK-SIZE term the
+ * mode does not remove and does not claim to. The term the mode removes is the
+ * TRANSCRIPT, which is why the assertion below is relative to the two
+ * transcript arms as well.
+ *
+ * Measured 1.73 against 2.40 (`working-state`) and 2.95 (`baseline`), so the
+ * ceiling leaves ~7% headroom rather than the 16% a `2.0` ceiling left — at
+ * 2.0 a `skill-state` arm that had regressed to 1.9 would still have passed
+ * while a baseline sat at 1.95.
+ */
+const SKILL_STATE_GROWTH_CEILING = 1.85;
+
+/**
+ * Declared margin by which the `skill-state` slope must beat the
+ * `working-state` slope. The two arms carry the SAME state document, so the
+ * only difference between them is the transcript: an arm that merely tied
+ * would mean the transcript term had come back.
+ */
+const SKILL_STATE_GROWTH_MARGIN = 0.85;
+
+/**
+ * Declared ceiling on the `skill-state` arm's model calls ABOVE its executor
+ * turn count. Measured 2 at every horizon (12/10, 27/25, 62/60): the run's
+ * non-executor-turn calls do not scale with the horizon, because no checkpoint
+ * summarizer runs and no turn is spent re-deriving known state. A regression
+ * that let the summarizer back in reads 90 calls for 60 turns.
+ */
+const SKILL_STATE_MODEL_CALL_SLACK = 3;
+
 let sweep: readonly AxWorkingStateScenarioResult[];
 
 const rowsOf = (results: readonly AxWorkingStateScenarioResult[]) =>
   results.map((result) => result.row);
 
-const pick = (horizon: number, arm: 'baseline' | 'working-state') => {
+const pick = (
+  horizon: number,
+  arm: 'baseline' | 'working-state' | 'skill-state'
+) => {
   const found = sweep.find(
     (result) => result.row.horizon === horizon && result.row.arm === arm
   );
@@ -133,6 +169,97 @@ describe('working-state benchmark', () => {
     expect(first.traceDigests.length).toBeGreaterThan(0);
     expect(first.traceDigests).toEqual(second.traceDigests);
   }, 120_000);
+
+  it('A9: the skillState substrate grows more slowly than either transcript arm', () => {
+    // Measured on the MUTABLE tail: `meanPromptCharsPerTurn` folds in a large
+    // constant system prompt that dilutes every slope.
+    const growth = (arm: 'baseline' | 'working-state' | 'skill-state') =>
+      axWorkingStatePromptGrowth(rowsOf(sweep), arm, 25, MAX_HORIZON)!;
+
+    const baseline = growth('baseline');
+    const workingState = growth('working-state');
+    const skillState = growth('skill-state');
+
+    // The comparison is not vacuous: both transcript arms genuinely grow.
+    expect(baseline).toBeGreaterThan(1.5);
+    expect(workingState).toBeGreaterThan(1.5);
+    // The mode removes the transcript growth term while carrying the SAME
+    // state document as the `working-state` arm.
+    expect(skillState).toBeLessThan(baseline);
+    expect(skillState).toBeLessThan(workingState * SKILL_STATE_GROWTH_MARGIN);
+    expect(skillState).toBeLessThan(SKILL_STATE_GROWTH_CEILING);
+  });
+
+  it('A10: skillState sends a smaller dynamic tail and makes fewer model calls', () => {
+    const skillState = pick(MAX_HORIZON, 'skill-state').row;
+    const workingState = pick(MAX_HORIZON, 'working-state').row;
+    const baseline = pick(MAX_HORIZON, 'baseline').row;
+
+    // Same document, no transcript: roughly half the dynamic tail.
+    expect(skillState.meanMutableCharsPerTurn).toBeLessThan(
+      workingState.meanMutableCharsPerTurn
+    );
+    expect(skillState.peakPromptChars).toBeLessThan(baseline.peakPromptChars);
+    // Fewer model calls than EITHER transcript arm: no checkpoint
+    // summarization runs, and no turn is spent re-deriving known state.
+    expect(skillState.modelCalls).toBeLessThan(workingState.modelCalls);
+    expect(skillState.modelCalls).toBeLessThan(baseline.modelCalls);
+  });
+
+  it('A10b: skillState model calls track its turn count at every horizon', () => {
+    // "Fewer than the other arms" is too loose to protect the headline number:
+    // with all three §7.4.1 cost guards removed the arm regresses 62 -> 90 at
+    // horizon 60 and still beats `working-state`'s 111. Tying model calls to
+    // TURNS instead catches that, because the extra calls a returning
+    // checkpoint summarizer makes scale with the horizon and the run's own
+    // non-turn calls do not.
+    for (const horizon of AX_WORKING_STATE_BENCH_HORIZONS) {
+      const row = pick(horizon, 'skill-state').row;
+      // Not vacuous: the arm really took a turn per scenario step, so the
+      // bound below is measured against real work rather than a short run.
+      expect([horizon, row.turns]).toEqual([horizon, horizon]);
+      expect([horizon, row.modelCalls]).toEqual([
+        horizon,
+        Math.min(row.modelCalls, row.turns + SKILL_STATE_MODEL_CALL_SLACK),
+      ]);
+    }
+    // ...and the bound is a real discriminator: the transcript arm at the
+    // largest horizon fails it.
+    const transcript = pick(MAX_HORIZON, 'working-state').row;
+    expect(
+      transcript.modelCalls > transcript.turns + SKILL_STATE_MODEL_CALL_SLACK
+    ).toBe(true);
+  });
+
+  it('A11: skillState keeps the gate and the accuracy of the transcript arms', () => {
+    for (const horizon of AX_WORKING_STATE_BENCH_HORIZONS) {
+      const skillState = pick(horizon, 'skill-state');
+      const workingState = pick(horizon, 'working-state');
+      // The receipt gate is a property of the kernel, not of the substrate.
+      expect([horizon, skillState.row.falseCompletionsParked >= 1]).toEqual([
+        horizon,
+        true,
+      ]);
+      expect([horizon, skillState.goalStatuses.g_audit]).toEqual([
+        horizon,
+        'pending',
+      ]);
+      // Same goals closed, no recovery turns, accuracy not worse — with the
+      // transcript discarded.
+      expect([horizon, skillState.row.goalsCompleted]).toEqual([
+        horizon,
+        workingState.row.goalsCompleted,
+      ]);
+      expect([horizon, skillState.row.stateRecoverySteps]).toEqual([
+        horizon,
+        0,
+      ]);
+      expect([
+        horizon,
+        skillState.row.accuracy >= pick(horizon, 'baseline').row.accuracy,
+      ]).toEqual([horizon, true]);
+    }
+  });
 
   it('A8: the new prompt regions are counted by the budget meter', () => {
     // `budget_check.mutablePromptChars` is the benchmark's headline metric, so

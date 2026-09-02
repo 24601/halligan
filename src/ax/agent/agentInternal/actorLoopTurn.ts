@@ -20,12 +20,14 @@ import {
   emitContextEvent,
   renderContextPressure,
 } from '../contextEvents.js';
+import type { ActionLogParts } from '../contextManager.js';
 import { manageContext } from '../contextManager.js';
 import { normalizeActorCode } from '../optimize.js';
 import {
   formatBubbledActorTurnOutput,
   validateActorTurnCodePolicy,
 } from '../runtime.js';
+import type { AxSkillStateRuntime } from '../skillState.js';
 import { axValidateStatePatch } from '../statePatch.js';
 import type {
   AxWorkingState,
@@ -149,6 +151,30 @@ async function runWorkingStateTurn(
 }
 
 /**
+ * Run one `skillState` turn. There is no proposer: the actor emitted the patch
+ * itself as a typed output field, so the turn goes straight to validation and
+ * the kernel. An ABSENT patch is not an error — it means the turn proved
+ * nothing, and the state is carried forward unchanged.
+ */
+async function runSkillStateTurn(
+  runtime: AxSkillStateRuntime<any>,
+  workingState: AxWorkingState<any>,
+  context: AxWorkingStateCommitContext,
+  output: Readonly<{ statePatch?: unknown; rationale?: unknown }>,
+  signal: AbortSignal | undefined
+): Promise<readonly AxWorkingStateGuidanceNote[]> {
+  const document = output.statePatch;
+  if (document === undefined || document === null) {
+    await workingState.recordNonCommit(context, 'none');
+    return [];
+  }
+  const rationale =
+    typeof output.rationale === 'string' ? output.rationale : undefined;
+  await runtime.applyPatch(document, rationale, context, signal);
+  return runtime.lastGuidance();
+}
+
+/**
  * Harness-authored interlock guidance: goal ids and statuses only, never
  * model-authored prose.
  */
@@ -247,6 +273,7 @@ export async function runActorTurn<_IN extends AxGenIn>(
     mutableState,
     workingState,
     workingStateObservations,
+    skillState,
     helpers,
   } = ctx;
 
@@ -286,17 +313,35 @@ export async function runActorTurn<_IN extends AxGenIn>(
       receiptRoster: workingState.renderReadOnly(),
     };
   }
+  if (skillState) {
+    // The two fields the substrate ADDS. `renderPrompt()` would re-run the
+    // three working-state renders the block above just did and throw them
+    // away, so the per-turn accessors are used instead.
+    s._skillStatePromptValues = {
+      skillSpec: skillState.skillSpec(),
+      latestObservation: skillState.renderObservations(),
+    };
+  }
 
-  let actionLogParts = renderActionLogParts();
+  // In `skillState` mode the action log is not rendered AT ALL: the cost the
+  // mode exists to remove is the rendering and compaction of a growing
+  // transcript, so skipping only the prompt field would keep paying it.
+  let actionLogParts: ActionLogParts = skillState
+    ? { summary: '', history: '', compactions: [] }
+    : renderActionLogParts();
   let summarizedActorLogText = actionLogParts.summary || undefined;
   let actionLogText = actionLogParts.history || '(no actions yet)';
   const guidanceLogText = renderGuidanceLog(guidanceState.entries);
-  let inspectMetrics = await measureActorPromptChars(
+  // Build the value record ONCE and measure that exact record, so the measured
+  // characters are the sent characters by construction. `contextPressure` is
+  // the one field that cannot be inside the measurement: it is derived from it.
+  let promptValues = buildActorPromptValues(
     actionLogText,
     guidanceLogText,
     mutableState.runtimeStateSummary,
     summarizedActorLogText
   );
+  let inspectMetrics = await measureActorPromptChars(promptValues);
   let inspectFixedOverhead =
     inspectMetrics.systemPromptCharacters +
     inspectMetrics.exampleChatContextCharacters;
@@ -315,6 +360,7 @@ export async function runActorTurn<_IN extends AxGenIn>(
   const defaultHygieneMode =
     runtimeContext.effectiveContextConfig.contextHygiene?.defaultMode ?? 'none';
   if (
+    !skillState &&
     pressure !== 'ok' &&
     pressureHygieneMode &&
     pressureHygieneMode !== defaultHygieneMode
@@ -328,12 +374,13 @@ export async function runActorTurn<_IN extends AxGenIn>(
     );
     const pressureActionLogText = pressureParts.history || '(no actions yet)';
     const pressureSummarizedActorLogText = pressureParts.summary || undefined;
-    const pressureMetrics = await measureActorPromptChars(
+    const pressureValues = buildActorPromptValues(
       pressureActionLogText,
       guidanceLogText,
       mutableState.runtimeStateSummary,
       pressureSummarizedActorLogText
     );
+    const pressureMetrics = await measureActorPromptChars(pressureValues);
     if (
       pressureMetrics.mutableChatContextCharacters <
       inspectMetrics.mutableChatContextCharacters
@@ -341,6 +388,7 @@ export async function runActorTurn<_IN extends AxGenIn>(
       actionLogParts = pressureParts;
       actionLogText = pressureActionLogText;
       summarizedActorLogText = pressureSummarizedActorLogText;
+      promptValues = pressureValues;
       inspectMetrics = pressureMetrics;
       inspectFixedOverhead =
         inspectMetrics.systemPromptCharacters +
@@ -391,6 +439,11 @@ export async function runActorTurn<_IN extends AxGenIn>(
   ) {
     actionLogText +=
       '\n\n[HINT: Actor prompt is large. Call `const state = await inspectRuntime()` for a compact snapshot of current variables instead of re-reading old outputs.]';
+    // Deliberately AFTER the measurement: the hint exists because the prompt is
+    // already over budget, so counting it would move the budget it reacts to.
+    if ('actionLog' in promptValues) {
+      promptValues = { ...promptValues, actionLog: actionLogText };
+    }
   }
 
   let actorCallOptions = actorMergedOptions;
@@ -424,13 +477,9 @@ export async function runActorTurn<_IN extends AxGenIn>(
 
   const executorResult = await s.actorProgram.forward(
     ai,
-    buildActorPromptValues(
-      actionLogText,
-      guidanceLogText,
-      mutableState.runtimeStateSummary,
-      summarizedActorLogText,
-      contextPressureText
-    ),
+    contextPressureText
+      ? { ...promptValues, contextPressure: contextPressureText }
+      : promptValues,
     actorCallOptions
   );
   if (!debugHideSystemPrompt) {
@@ -522,6 +571,11 @@ export async function runActorTurn<_IN extends AxGenIn>(
           return calls.length > 0 ? { _functionCalls: calls } : {};
         })(),
       });
+      // This branch returns before the normal `skillState?.observe(...)` at
+      // the end of the turn. In `skillState` mode the observation is the ONLY
+      // history the actor sees, so without this the refused turn would be
+      // invisible to it and the same code could be re-emitted forever.
+      skillState?.observe(policyViolation, entryTurn);
 
       if (actorTurnCallback) {
         await actorTurnCallback({
@@ -700,23 +754,38 @@ export async function runActorTurn<_IN extends AxGenIn>(
       return interlockDecision;
     };
 
-    const guidanceNotes = await runWorkingStateTurn(
-      workingState,
-      {
-        action: actionLogCode,
-        observation: output,
-        turn: entryTurn,
-        isError,
-        receiptRefs: mintedReceiptRefs,
-        calls: turnCalls,
-        selectedSkills: (mutableState.usedSkills ?? []).map(
-          (used: { id: string }) => used.id
-        ),
-        resolveCompletionInterlock,
-      },
-      { action: actionLogCode, observation: output },
-      _effectiveAbortSignal
-    );
+    const commitContext: AxWorkingStateCommitContext = {
+      action: actionLogCode,
+      observation: output,
+      turn: entryTurn,
+      isError,
+      receiptRefs: mintedReceiptRefs,
+      calls: turnCalls,
+      selectedSkills: (mutableState.usedSkills ?? []).map(
+        (used: { id: string }) => used.id
+      ),
+      resolveCompletionInterlock,
+    };
+    // The observation is recorded BEFORE the patch is applied so a rejected
+    // patch still leaves the model looking at what actually happened.
+    skillState?.observe(output, entryTurn);
+    const guidanceNotes = skillState
+      ? await runSkillStateTurn(
+          skillState,
+          workingState,
+          commitContext,
+          executorResult as Readonly<{
+            statePatch?: unknown;
+            rationale?: unknown;
+          }>,
+          _effectiveAbortSignal
+        )
+      : await runWorkingStateTurn(
+          workingState,
+          commitContext,
+          { action: actionLogCode, observation: output },
+          _effectiveAbortSignal
+        );
     const guidanceText = buildWorkingStateGuidance(guidanceNotes);
     if (guidanceText) {
       appendGuidanceEntry(guidanceState.entries, {

@@ -450,6 +450,15 @@ import {
   axUpdateSkillCostProfile,
 } from './agent/skillCost.js';
 import {
+  type AxSkillStateConfig,
+  type AxSkillStateEnvelope,
+  type AxSkillStateRejection,
+  AxSkillStateRuntime,
+  type AxSkillStateStep,
+  type AxSkillStateTransition,
+  axSkillStateRuntime,
+} from './agent/skillState.js';
+import {
   type AxStatePatch,
   type AxStatePatchApplyResult,
   type AxStatePatchInvalidCode,
@@ -2564,6 +2573,7 @@ export { AxRefineError };
 export { AxRejectedCandidateLedgerError };
 export { AxSignature };
 export { AxSignatureBuilder };
+export { AxSkillStateRuntime };
 export { AxStopFunctionCallException };
 export { AxStreamingAssertionError };
 export { AxStringUtil };
@@ -2967,6 +2977,7 @@ export { axSkillPreconditionExecutableDefaults };
 export { axSkillPreconditionGuidanceDefaults };
 export { axSkillProvenanceDigest };
 export { axSkillRetrievalGate };
+export { axSkillStateRuntime };
 export { axSkillValueScore };
 export { axSnapshotAuthority };
 export { axSpanAttributes };
@@ -4280,6 +4291,11 @@ export type { AxSkillProvenance };
 export type { AxSkillProvenanceAuthorization };
 export type { AxSkillProvenanceEffectRef };
 export type { AxSkillProvenanceSource };
+export type { AxSkillStateConfig };
+export type { AxSkillStateEnvelope };
+export type { AxSkillStateRejection };
+export type { AxSkillStateStep };
+export type { AxSkillStateTransition };
 export type { AxSkillVerifierDecision };
 export type { AxSkillVerifierVerdict };
 export type { AxSpeechConfig };

@@ -9,8 +9,14 @@
  * Internal benchmark helper — NOT exported from `src/ax/index.ts`.
  */
 
-/** The two arms PR 1 measures: the transcript loop with and without state. */
-export type AxWorkingStateArm = 'baseline' | 'working-state';
+/**
+ * The three measured arms:
+ * - `baseline` — the transcript loop with no working state (PR 1's baseline);
+ * - `working-state` — the transcript loop WITH working state beside it (PR 1);
+ * - `skill-state` — `actorMemoryMode: 'skillState'`, where the action log is
+ *   replaced by frozen skill spec + typed state + latest observation (PR 2).
+ */
+export type AxWorkingStateArm = 'baseline' | 'working-state' | 'skill-state';
 
 export type AxWorkingStateBenchRow = {
   horizon: number;
@@ -22,6 +28,12 @@ export type AxWorkingStateBenchRow = {
   cumulativeTokens: number;
   peakPromptChars: number;
   meanPromptCharsPerTurn: number;
+  /**
+   * Mean of the MUTABLE (per-turn) prompt characters. This is the dynamic tail
+   * the growth claim is about; `meanPromptCharsPerTurn` adds the constant
+   * system-prompt overhead, which dilutes any slope.
+   */
+  meanMutableCharsPerTurn: number;
   /**
    * Turns spent re-deriving a fact the run already knew, because the prompt
    * did not carry it. Counted from what the prompt actually contained, never
@@ -66,6 +78,13 @@ export class AxWorkingStatePromptMeter {
     return Math.round(sum / this.totalChars.length);
   }
 
+  /** Mean of the mutable (dynamic-tail) characters only. */
+  public meanMutable(): number {
+    if (this.mutableChars.length === 0) return 0;
+    const sum = this.mutableChars.reduce((total, value) => total + value, 0);
+    return Math.round(sum / this.mutableChars.length);
+  }
+
   public mutableAt(index: number): number | undefined {
     return this.mutableChars[index];
   }
@@ -73,6 +92,25 @@ export class AxWorkingStatePromptMeter {
   public totalAt(index: number): number | undefined {
     return this.totalChars[index];
   }
+}
+
+/**
+ * Growth factor of mean per-turn prompt characters between two horizons for
+ * one arm. This is the SLOPE the linearity claim is about: the totals depend
+ * on the mock's content sizes, the slope depends on the mechanism.
+ */
+export function axWorkingStatePromptGrowth(
+  rows: readonly AxWorkingStateBenchRow[],
+  arm: AxWorkingStateArm,
+  fromHorizon: number,
+  toHorizon: number
+): number | undefined {
+  const from = rows.find(
+    (row) => row.horizon === fromHorizon && row.arm === arm
+  );
+  const to = rows.find((row) => row.horizon === toHorizon && row.arm === arm);
+  if (!from || !to || from.meanMutableCharsPerTurn === 0) return undefined;
+  return to.meanMutableCharsPerTurn / from.meanMutableCharsPerTurn;
 }
 
 /** Mean prompt chars per turn, arm over arm, as a growth factor. */
@@ -100,6 +138,7 @@ const COLUMNS: readonly (keyof AxWorkingStateBenchRow)[] = [
   'cumulativeTokens',
   'peakPromptChars',
   'meanPromptCharsPerTurn',
+  'meanMutableCharsPerTurn',
   'stateRecoverySteps',
   'goalsCompleted',
   'falseCompletionsParked',

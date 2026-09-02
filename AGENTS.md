@@ -57,7 +57,7 @@ Use the skill files in `src/ax/skills/` as the primary subsystem documentation:
 - `src/ax/skills/ax-gen.md` - generators and structured output
 - `src/ax/skills/ax-agent.md` - agents, runtime, discovery, delegation, shared fields
 - `src/ax/skills/ax-agent-optimize.md` - `agent.optimize(...)`, evals, judges, artifacts
-- `src/ax/skills/ax-agent-state.md` - verifier-gated working state, goal ledger, tool receipts
+- `src/ax/skills/ax-agent-state.md` - verifier-gated working state, goal ledger, tool receipts, skillState memory mode
 - `src/ax/skills/ax-flow.md` - workflows and orchestration
 - `src/ax/skills/ax-mcp.md` - native MCP clients, transports, auth, catalogs, tasks, subscriptions, and Ax integration
 - `src/ax/skills/ax-event-runtime.md` - event ingestion, wake/resume, continuations, stores, and sinks

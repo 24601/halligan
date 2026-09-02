@@ -19,7 +19,11 @@ import {
   normalizeAgentFunctionCollection,
   toCamelCase,
 } from '../runtimeDiscovery.js';
-import { axValidateWorkingStateConfig } from '../workingState.js';
+import { axValidateSkillStateConfig } from '../skillState.js';
+import {
+  AxWorkingStateSchemaError,
+  axValidateWorkingStateConfig,
+} from '../workingState.js';
 import { createCatalogMemoriesSearch } from './memoriesHelpers.js';
 import {
   createCatalogSkillsSearch,
@@ -45,6 +49,18 @@ export function initializeAgentInternal(
   // happens once per `forward()`; this is only the config-time gate.
   if (options.workingState) {
     axValidateWorkingStateConfig(options.workingState);
+  }
+  if (options.actorMemoryMode === 'skillState') {
+    // The mode's prompt IS the state document plus the frozen spec. Without
+    // either one there is nothing to build a prompt from, and guessing a
+    // substitute would be worse than failing.
+    if (!options.workingState) {
+      throw new AxWorkingStateSchemaError('skillstate_requires_working_state');
+    }
+    if (!options.skillState) {
+      throw new AxWorkingStateSchemaError('skillstate_requires_skill');
+    }
+    axValidateSkillStateConfig(options.skillState);
   }
 
   const {

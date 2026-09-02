@@ -401,3 +401,5 @@ steptype
 untripped
 unwakeable
 wakeups
+skillstate
+skillspec

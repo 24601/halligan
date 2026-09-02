@@ -1218,6 +1218,20 @@ void axWorkingState<WorkingStateFacts>(
 );
 void axIsWorkingStateError(new Error('x'));
 
+// --- skillState memory mode -------------------------------------------------
+
+import type { AxSkillStateRejection, AxSkillStateTransition } from './index.js';
+
+declare const skillStateTransition: AxSkillStateTransition<WorkingStateFacts>;
+// `committedRevision` is NON-OPTIONAL: the store is never absent.
+const skillStateRevision: number = skillStateTransition.committedRevision;
+void skillStateRevision;
+const skillStateFacts: boolean | undefined =
+  skillStateTransition.state?.facts.shipped;
+void skillStateFacts;
+const skillStateRejection: AxSkillStateRejection = 'fence';
+void skillStateRejection;
+
 // Benchmark scaffolding and harness plumbing must stay internal: these names
 // are listed in `internalExportNames`, so the generated barrel does not carry
 // them. A `keyof typeof import(...)` test cannot express this — a type-only
@@ -1230,6 +1244,18 @@ type BenchRowIsNotPublic =
   import('./index.js').AxWorkingStateBenchRow;
 const benchRowIsNotPublic: BenchRowIsNotPublic | undefined = undefined;
 void benchRowIsNotPublic;
+
+type PromptGrowthIsNotPublic =
+  // @ts-expect-error the package root must not export the benchmark slope helper
+  typeof import('./index.js').axWorkingStatePromptGrowth;
+const promptGrowthIsNotPublic: PromptGrowthIsNotPublic | undefined = undefined;
+void promptGrowthIsNotPublic;
+
+type ScriptTurnIsNotPublic =
+  // @ts-expect-error the package root must not export the scripted-mock turn type
+  import('./index.js').AxWorkingStateScriptTurn;
+const scriptTurnIsNotPublic: ScriptTurnIsNotPublic | undefined = undefined;
+void scriptTurnIsNotPublic;
 
 type ReceiptBindingIsNotPublic =
   // @ts-expect-error the package root must not export the receipt sink contract

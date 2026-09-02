@@ -7,9 +7,9 @@ describe('working-state mechanism evaluation', () => {
 
     expect(report.kind).toBe('deterministic-mechanism-characterization');
     expect(report.independentModelHeldOut).toBe(false);
-    // Four horizons times two arms; a dropped cell must fail the suite rather
+    // Four horizons times three arms; a dropped cell must fail the suite rather
     // than silently shrink the evidence.
-    expect(report.rows).toHaveLength(report.horizons.length * 2);
+    expect(report.rows).toHaveLength(report.horizons.length * 3);
 
     for (const row of report.rows) {
       for (const column of [
@@ -18,6 +18,7 @@ describe('working-state mechanism evaluation', () => {
         'cumulativeTokens',
         'peakPromptChars',
         'meanPromptCharsPerTurn',
+        'meanMutableCharsPerTurn',
         'stateRecoverySteps',
         'goalsCompleted',
         'falseCompletionsParked',
@@ -59,6 +60,46 @@ describe('working-state mechanism evaluation', () => {
     )!;
     expect(baseline100.stateRecoverySteps).toBeGreaterThanOrEqual(1);
 
+    // The skillState arm keeps the gate and the accuracy while discarding the
+    // transcript, and its dynamic tail grows more slowly than either
+    // transcript arm.
+    for (const horizon of report.horizons) {
+      const skillState = report.rows.find(
+        (row) => row.horizon === horizon && row.arm === 'skill-state'
+      )!;
+      const withState = report.rows.find(
+        (row) => row.horizon === horizon && row.arm === 'working-state'
+      )!;
+      expect([horizon, skillState.falseCompletionsParked >= 1]).toEqual([
+        horizon,
+        true,
+      ]);
+      expect([horizon, skillState.stateRecoverySteps]).toEqual([horizon, 0]);
+      expect([horizon, skillState.goalsCompleted]).toEqual([
+        horizon,
+        withState.goalsCompleted,
+      ]);
+    }
+    const growth = report.mutableTailGrowth;
+    expect(typeof growth['skill-state']).toBe('number');
+    // Not vacuous: both transcript arms genuinely grow.
+    expect(growth.baseline!).toBeGreaterThan(1.5);
+    expect(growth['working-state']!).toBeGreaterThan(1.5);
+    expect(growth['skill-state']!).toBeLessThan(growth.baseline!);
+    expect(growth['skill-state']!).toBeLessThan(growth['working-state']!);
+
+    const skillState100 = report.rows.find(
+      (row) => row.horizon === 100 && row.arm === 'skill-state'
+    )!;
+    const workingState100 = report.rows.find(
+      (row) => row.horizon === 100 && row.arm === 'working-state'
+    )!;
+    expect(skillState100.meanMutableCharsPerTurn).toBeLessThan(
+      workingState100.meanMutableCharsPerTurn
+    );
+    expect(skillState100.modelCalls).toBeLessThan(workingState100.modelCalls);
+    expect(skillState100.modelCalls).toBeLessThan(baseline100.modelCalls);
+
     // The counter-metric is reported beside the metric, and is a cost.
     const overhead = report.promptOverheadByHorizon['100'];
     expect(typeof overhead).toBe('number');
@@ -70,7 +111,9 @@ describe('working-state mechanism evaluation', () => {
     expect(report.determinism.traceSteps).toBeGreaterThan(0);
 
     // The honesty clause travels with the numbers.
-    expect(report.negativeResults.length).toBeGreaterThanOrEqual(5);
+    expect(report.negativeResults.length).toBeGreaterThanOrEqual(7);
+    // The residual growth term is named rather than hidden.
+    expect(report.negativeResults.join(' ')).toContain('TASK-SIZE term');
     expect(report.negativeResults.join(' ')).toContain('mechanism evidence');
   }, 300_000);
 });

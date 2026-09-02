@@ -22,10 +22,32 @@ import {
 } from '../agentInternal/sharedSession.js';
 import type { AxCodeRuntime, AxCodeSession } from '../rlm.js';
 
+/**
+ * One scripted executor turn. A bare string is code only; the object form adds
+ * the optional `skillState` output fields so a test can drive the mode's real
+ * parse path rather than hand-feeding a patch to the kernel.
+ */
+export type AxWorkingStateScriptTurn =
+  | string
+  | Readonly<{ code: string; statePatch?: unknown; rationale?: string }>;
+
 export type AxWorkingStateScript = Readonly<{
   distiller: readonly string[];
-  executor: readonly string[];
+  executor: readonly AxWorkingStateScriptTurn[];
 }>;
+
+/** Render one scripted turn as the field-labelled content a provider returns. */
+function renderScriptedTurn(turn: AxWorkingStateScriptTurn): string {
+  if (typeof turn === 'string') return `Javascript Code: ${turn}`;
+  const parts = [`Javascript Code: ${turn.code}`];
+  if (turn.statePatch !== undefined) {
+    parts.push(`State Patch: ${JSON.stringify(turn.statePatch)}`);
+  }
+  if (turn.rationale !== undefined) {
+    parts.push(`Rationale: ${turn.rationale}`);
+  }
+  return parts.join('\n');
+}
 
 export const axWorkingStateHarnessUsage = () => ({
   ai: 'mock',
@@ -33,10 +55,21 @@ export const axWorkingStateHarnessUsage = () => ({
   tokens: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
 });
 
-/** An evaluating stub session: the actor's code really runs. */
-export function axCreateEvaluatingRuntime(): AxCodeRuntime {
+/**
+ * An evaluating stub session: the actor's code really runs.
+ *
+ * `usageInstructions` defaults to the empty string, which is what every
+ * existing caller gets. Passing text containing `console.log` is how a test
+ * turns ON the actor's incremental-console turn policy (the agent derives
+ * `enforceIncrementalConsoleTurns` from these instructions), so a scripted
+ * turn can be REFUSED by the policy rather than executed.
+ */
+export function axCreateEvaluatingRuntime(
+  options?: Readonly<{ usageInstructions?: string }>
+): AxCodeRuntime {
+  const usageInstructions = options?.usageInstructions ?? '';
   return {
-    getUsageInstructions: () => '',
+    getUsageInstructions: () => usageInstructions,
     createSession(globals): AxCodeSession {
       const scope: Record<string, unknown> = globals ?? {};
       return {
@@ -103,10 +136,17 @@ function systemPromptOf(
 export function axCreateScriptedMock(script: AxWorkingStateScript): {
   ai: AxMockAIService<unknown>;
   executorPrompts: string[];
+  /**
+   * Per-turn SUM of the executor message content lengths, with no join
+   * characters added. This is the number a measured-equals-sent assertion has
+   * to match exactly; `executorPrompts` is for content assertions only.
+   */
+  executorPromptChars: number[];
 } {
   let distillerIndex = 0;
   let executorIndex = 0;
   const executorPrompts: string[] = [];
+  const executorPromptChars: number[] = [];
   const ai = new AxMockAIService({
     features: { functions: false, streaming: false },
     chatResponse: async (req) => {
@@ -120,15 +160,15 @@ export function axCreateScriptedMock(script: AxWorkingStateScript): {
         const index = Math.min(distillerIndex++, script.distiller.length - 1);
         content = `Javascript Code: ${script.distiller[index]}`;
       } else if (systemPrompt.includes(EXECUTOR_MARKER)) {
-        executorPrompts.push(
-          chatPrompt
-            .map((message) =>
-              typeof message.content === 'string' ? message.content : ''
-            )
-            .join('\n')
+        const contents = chatPrompt.map((message) =>
+          typeof message.content === 'string' ? message.content : ''
+        );
+        executorPrompts.push(contents.join('\n'));
+        executorPromptChars.push(
+          contents.reduce((total, content) => total + content.length, 0)
         );
         const index = Math.min(executorIndex++, script.executor.length - 1);
-        content = `Javascript Code: ${script.executor[index]}`;
+        content = renderScriptedTurn(script.executor[index]!);
       } else {
         content = 'Answer: done';
       }
@@ -138,5 +178,5 @@ export function axCreateScriptedMock(script: AxWorkingStateScript): {
       };
     },
   });
-  return { ai, executorPrompts };
+  return { ai, executorPrompts, executorPromptChars };
 }
