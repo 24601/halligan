@@ -83,6 +83,12 @@ wakeable, never projected, still appendable and still readable, with
 `onUnknownStepType` firing once per distinct type so the open world is visible
 rather than silent.
 
+`siblingInert` is declared the same way: it marks a wakeable type that carries
+nothing a SIBLING writer's reader has to act on (`idle` alone, of the shipped
+rows), and `src/ax/mind` refuses that wake rather than inferring the class from
+`spillFields`, `visibleWork` or `conversational` — a storage, a pacing and a UI
+concern that would sweep a host's short-payload type in silently.
+
 Two edits are refused with `AxTrajectoryRegistryError`: setting
 `carriesSource` on a machinery type (`protected_flag`), and clearing
 `neverRetriggersSelf` on a type that ships with it.

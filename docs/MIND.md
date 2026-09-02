@@ -56,20 +56,37 @@ step's WRITER IDENTITY, exactly as it refuses the self-loop, and reports it as
 the `wake-suppressed-sibling` diagnostic (a suppressed wake creates no delivery
 and no step, so there is nowhere else to see it).
 
-The suppressed class is derived from the registry by
-`axMindSiblingWakeSuppressed`, never listed by hand:
+The suppressed class is read off DECLARED registry facts by
+`axMindSiblingWakeSuppressed`, never listed by hand and never inferred from
+`spillFields`, `visibleWork` or `conversational` — those are a storage, a
+pacing and a UI concern, and inferring from them would sweep a host's
+short-payload type (a `vote` carrying one enum) silently into the class:
 
 | registry fact | shipped types | why a sibling is not woken |
 |---|---|---|
 | `wakeSignal: true` | `mind-wake`, `mind-idle`, `manual-trigger` | a pure wake signal carries no payload to read |
-| wakeable with no content at all | `idle` | "I did nothing" is not news for anyone else |
+| `siblingInert: true` | `idle` | "I did nothing" is not news for anyone else, and the descriptor says so rather than leaving it to be guessed |
 | `neverRetriggersSelf: true` | `error` | the registry already forbids feeding it back to its writer; feeding it to the writer's sibling is the same loop with one more actor in it |
+
+A vocabulary note, because two RFC sections use one word on different axes:
+RFC §7.4's pending-policy table calls everything with `wakeSignal: false`
+"payload-carrying", which counts `idle` and `error` inside it. That is the
+QUEUE-VS-COALESCE axis. This table is the has-a-reader axis, and the two
+disagree on exactly those two rows by design.
 
 Payload-carrying types (`message`, `action`, `observation`, `merge`, `thought`)
 wake a sibling normally — that is the whole point of a second thinker. So does
 an EXTERNAL writer of any of the suppressed types: suppression is by writer
 identity, so a host or a person appending an `idle` still wakes everyone. A
 single-thinker mind has no siblings, so its dispatch is unchanged.
+
+The supervisor pattern keeps its escape hatch. Suppression happens in
+`authorize`, ABOVE the subscription, so a thinker that exists to watch a
+sibling fail could otherwise not be built at all. `subscription.siblingSignals`
+names the types it opts back in to (`['error']` for a supervisor). It re-opens
+the loop the rule closes, so a thinker that declares it owns bounding its own
+answer — a supervisor that replies to an `error` with an `error` is unbounded
+again.
 
 `mind.test.ts` asserts both halves against a step-ceiling store — the runaway
 starves the event loop synchronously, so vitest's own timeout never fires and
@@ -272,7 +289,11 @@ as data and clipped, and the `feedback` step recording the injection is
 
 ## Authority
 
-**Host-owned — unreachable from any thinker program, by construction:**
+**Host-owned — not reachable from a thinker program at COMPILE TIME.** The
+narrowing below is a TypeScript one: a thinker that casts its way back to the
+concrete store gets the write methods at runtime, exactly as any cast does. The
+guarantee is that a thinker cannot reach them by accident, and that a thinker
+that reaches them on purpose says so in a diff a reviewer can see:
 
 1. Trajectory contents. There is no update, delete, rewrite or compact method
    on the store or on `AxMind`; `append` stamps the writer itself. The handle a
@@ -390,10 +411,10 @@ ceiling; the shipped total is higher, and each raise has a reason:
 
 | file | cap | reason |
 |---|---|---|
-| `types.ts` | 615 | the context-request record, the whole artifact source with its change and receipt records, and the in-memory ownership store — RFC 4.9/4.10 declarations the pacing lane deferred for want of a consumer; then the `wake-suppressed-sibling` diagnostic code and the loop its absence hides |
+| `types.ts` | 630 | the context-request record, the whole artifact source with its change and receipt records, and the in-memory ownership store — RFC 4.9/4.10 declarations the pacing lane deferred for want of a consumer; then the `wake-suppressed-sibling` diagnostic code and the loop its absence hides; then the `closing` member of `AxMindLivenessError`'s closed union and the `siblingSignals` supervisor opt-in, both contract surface carrying the comment that says which failure they close |
 | `pacer.ts` | 300 | the fuse derived from the descent cost, plus `parkedUntil` |
 | `health.ts` | 150 | the derived stalled threshold |
-| `routes.ts` | 320 | the `wake-suppressed-self` diagnostic (a suppressed wake creates no delivery and no step, so nothing else can see the decision), then `axMindSiblingWakeSuppressed` and the sibling branch of the route predicate that close the unbounded two-thinker `idle` runaway |
+| `routes.ts` | 330 | the `wake-suppressed-self` diagnostic (a suppressed wake creates no delivery and no step, so nothing else can see the decision), then `axMindSiblingWakeSuppressed` and the sibling branch of the route predicate that close the unbounded two-thinker `idle` runaway, then the DECLARED sibling-inert class and the note reconciling its vocabulary with RFC §7.4's |
 | `sources.ts` | 610 | two `AxEventSource`s, the pure duty query, per-consumer cursor load/save, unit-commit planning, and a sleep that leaves no listener behind |
 | `chat.ts` | 800 | the ledgered send is declare → dispatch → transport → settle with a branch per non-`intent` status, plus `axMindReconcileChatSends` |
 | `salience.ts` | 180 | the fenced, byte-bounded quoting of third-party text |
@@ -402,7 +423,7 @@ ceiling; the shipped total is higher, and each raise has a reason:
 | `step.ts` | 180 | new: a thinker rendered as an `AxEventTarget`, the delegating `AxProgrammable` wrapper that brackets one run, and the trailing `mind-settle` sink |
 | `subruns.ts` | 150 | new: fork → run → merge with the depth and spend caps, plus the bound on an unsummarized merge content |
 | `thinkers.ts` | 560 | the monolith, the responder, `AxMindDeterministicProgram`, the function menu and the prompt assembly |
-| `mind.ts` | 1_490 | RFC 5.1 gives this file five deliverables at once and none of the surface they need: the options record is 90 lines, the start sequence is seven steps with five typed refusals, and the context assembly carries the dead-letter path M19 depends on. The review raise adds the idempotent delivery-keyed settle, the liveness-fallback arm (M7 layer (b)), the tick's reaper and the named sub-run owner; the follow-up adds the lifetime `AbortController` and the signal threaded through the whole settle path |
+| `mind.ts` | 1_490 | RFC 5.1 gives this file five deliverables at once and none of the surface they need: the options record is 90 lines, the start sequence is seven steps with five typed refusals, and the context assembly carries the dead-letter path M19 depends on. The review raise adds the idempotent delivery-keyed settle, the liveness-fallback arm (M7 layer (b)), the tick's reaper and the named sub-run owner; the follow-up adds the lifetime `AbortController` and the signal threaded through the whole settle path — the settle takes that signal and NOTHING else, because a delivery the runtime cancelled must still record its outcome |
 | `index.ts` | 175 | the barrel grew with the runtime |
 
 The DIRECTORY ceiling is **5,700** non-blank production lines against RFC 5.1's

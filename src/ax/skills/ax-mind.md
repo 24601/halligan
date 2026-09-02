@@ -126,13 +126,20 @@ const auxiliary: AxMindThinker = {
 - `createProgram` receives the mind itself, which is how a thinker's tools
   reach a runtime that did not exist when the thinker record was built.
 - A thinker never wakes on a SIBLING thinker's contentless step either. The
-  suppressed class is derived from the registry by `axMindSiblingWakeSuppressed`
-  — `wakeSignal` types (`mind-wake`, `mind-idle`, `manual-trigger`), a wakeable
-  type carrying no content (`idle`), and `neverRetriggersSelf` types (`error`).
-  Payload types (`message`, `action`, `observation`, `merge`, `thought`) wake a
-  sibling normally, and so does an EXTERNAL writer of a suppressed type.
-  Without this, two thinkers on the default subscription answer each other's
-  `idle` steps forever. The refusal is reported as `wake-suppressed-sibling`.
+  suppressed class is read off DECLARED registry facts by
+  `axMindSiblingWakeSuppressed` — `wakeSignal` types (`mind-wake`, `mind-idle`,
+  `manual-trigger`), `siblingInert` types (`idle`), and `neverRetriggersSelf`
+  types (`error`). Never inferred from `spillFields` / `visibleWork` /
+  `conversational`: those are storage, pacing and UI concerns, so declare
+  `siblingInert` on your own type instead of hoping it is guessed. Payload types
+  (`message`, `action`, `observation`, `merge`, `thought`) wake a sibling
+  normally, and so does an EXTERNAL writer of a suppressed type. Without this,
+  two thinkers on the default subscription answer each other's `idle` steps
+  forever. The refusal is reported as `wake-suppressed-sibling`.
+- A supervisor opts back in with `subscription.siblingSignals: ['error']`.
+  Suppression happens above the subscription, so without this a thinker that
+  watches a sibling fail cannot be built at all; declaring it re-opens the loop,
+  so the supervisor owns bounding its own answer.
 
 ## Pacing
 
