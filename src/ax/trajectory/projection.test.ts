@@ -1125,9 +1125,11 @@ describe('the render frames cannot be forged', () => {
     });
     await buildAll(log, rollups, { summarizer: verbose });
     const block = await rollups.getBlock(log.trajectoryId, 1, 0);
+    // The whole block, summary plus themes, is bounded: five themes together
+    // may not outweigh the summary they annotate.
     expect(block?.summary).toHaveLength(600);
     expect(block?.themes).toHaveLength(5);
-    for (const theme of block?.themes ?? []) expect(theme).toHaveLength(600);
+    for (const theme of block?.themes ?? []) expect(theme).toHaveLength(120);
   });
 });
 

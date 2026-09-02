@@ -17,8 +17,9 @@ import { axResolveTrajectorySteps } from './spill.js';
 import { AxTrajectoryRollupError } from './types.js';
 import { axTrajectoryTruncateUtf8, positiveOr } from './util.js';
 
-/** Derived: bytes kept from one block summary, and from one theme. */
+/** Derived: bytes kept from one block summary. */
 export const axTrajectoryMaxSummaryBytes = 600;
+/** Derived: themes kept per block. Together they may not outweigh the summary. */
 export const axTrajectoryMaxThemes = 5;
 
 export interface AxTrajectoryRollupBlock {
@@ -329,6 +330,10 @@ async function sealBlock(
     options.maxSummaryBytes ?? axTrajectoryMaxSummaryBytes,
     axTrajectoryMaxSummaryBytes
   );
+  const maxThemeBytes = Math.max(
+    16,
+    Math.floor(maxSummaryBytes / axTrajectoryMaxThemes)
+  );
   const result = await options.summarizer.summarize({
     tier,
     start,
@@ -351,7 +356,7 @@ async function sealBlock(
       summary: axTrajectoryTruncateUtf8(result.summary, maxSummaryBytes),
       themes: (result.themes ?? [])
         .slice(0, axTrajectoryMaxThemes)
-        .map((theme) => axTrajectoryTruncateUtf8(theme, maxSummaryBytes)),
+        .map((theme) => axTrajectoryTruncateUtf8(theme, maxThemeBytes)),
       stepIds: cited.length > 0 ? cited : [...allowedIds],
       summarizerId: options.summarizer.id,
       promptVersion: options.summarizer.promptVersion,

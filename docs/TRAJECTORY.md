@@ -268,7 +268,7 @@ coverage cannot be faked by a summarizer that read nothing.
 `src/ax/trajectory/budget.test.ts` caps every production file and the
 directory total, so raising a cap is a visible one-line diff. RFC §5.1
 estimated 2,190 lines for lane A1 and 620 for lane A2, a 2,900 total. The
-shipped directory is **3,922**, and the ceiling is restated to 3,990.
+shipped directory is **3,927**, and the ceiling is restated to 3,990.
 
 Four things account for the difference, none of them added scope:
 
@@ -288,7 +288,7 @@ Four things account for the difference, none of them added scope:
 - **A2's adversarial review** added six guards (deviations 5 and 6 above) and
   their regression tests. Each is a few lines of code and a paragraph saying
   what it defends against, which is the ratio this directory has had from the
-  start: 3,785 → 3,922.
+  start: 3,785 → 3,927.
 
 ## Store capability matrix
 

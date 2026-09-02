@@ -47,7 +47,7 @@ import { describe, expect, it } from 'vitest';
  *
  * Measured at this cap raise: types 465, util 151, registry 171, spill 158,
  * log 483, memoryStore 507, conformance 676, index 138, projection 577,
- * rollups 596 -- 3,922 in total. conformance.ts remains the biggest single
+ * rollups 601 -- 3,927 in total. conformance.ts remains the biggest single
  * overrun of the RFC's estimate (470): it is seventeen named cases, and the
  * A1 review's B1, Mn3, Mn4, Mn5 and Mn6 each added a normative assertion the
  * kit could not previously make.
@@ -62,14 +62,14 @@ const CAPS: readonly (readonly [string, number])[] = [
   ['src/ax/trajectory/conformance.ts', 700], // raised from 470
   ['src/ax/trajectory/index.ts', 150], // raised from 110 by the A2 exports
   ['src/ax/trajectory/projection.ts', 600], // raised from 520 by the A2 review fixes
-  ['src/ax/trajectory/rollups.ts', 600], // new: RFC 4.8 cache + sealing path
+  ['src/ax/trajectory/rollups.ts', 620], // raised from 600 by the A2 review fixes
   ['src/tools/trajectory/jsonl.ts', 830], // lowered from 940
 ];
 
 /**
  * Directory ceiling for src/ax/trajectory, restated by lane A2 and again by
  * its review pass. RFC 5.1's A1+A2 estimate was 2,900; the shipped lane
- * measures 3,922. The reason is in the header comment above and in
+ * measures 3,927. The reason is in the header comment above and in
  * docs/TRAJECTORY.md. Lane A3 owns src/ax/mind and must not raise this one.
  */
 const TRAJECTORY_DIRECTORY_CAP = 3_990;
