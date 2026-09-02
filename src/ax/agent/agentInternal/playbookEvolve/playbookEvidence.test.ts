@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { AxProgramUsage } from '../../../dsp/types.js';
-import { createAccountingLedger, emptyAccounting } from './accounting.js';
+import {
+  createAccountingLedger,
+  emptyAccounting,
+  overheadReportFrom,
+  overheadSplitFrom,
+} from './accounting.js';
 import type { AxAgentEvalBudget } from './evalHarness.js';
 import { runAgentEvalBatch } from './evalHarness.js';
 import type {
@@ -11,6 +16,15 @@ import {
   AxAgentPlaybookEvolveError,
   axIsAgentPlaybookEvolveError,
 } from './playbookEvidenceTypes.js';
+import {
+  clustersFromPairedRecords,
+  createSeededRandom,
+  pairedBootstrapInterval,
+  seedFromDigest,
+  validateIntervalOptions,
+  varianceBandFrom,
+  weightedMean,
+} from './statistics.js';
 import {
   axClassifyAxServiceTermination,
   extractErrorIdentity,
@@ -711,5 +725,338 @@ describe('compute accounting', () => {
     expect(accounting.phases).toEqual([]);
     expect(accounting.tokensBasis).toBe('none');
     expect(accounting.costBasis).toBe('unknown');
+  });
+});
+
+// --- statistics.ts ---------------------------------------------------------
+
+describe('paired task-clustered bootstrap', () => {
+  const cluster = (delta: number, weight = 1) => ({ weight, deltas: [delta] });
+
+  it('produces the same sequence for the same seed', () => {
+    const first = Array.from({ length: 8 }, createSeededRandom(42));
+    const second = Array.from({ length: 8 }, createSeededRandom(42));
+    const other = Array.from({ length: 8 }, createSeededRandom(43));
+    expect(first).toEqual(second);
+    expect(first).not.toEqual(other);
+    for (const value of first) {
+      expect(value).toBeGreaterThanOrEqual(0);
+      expect(value).toBeLessThan(1);
+    }
+  });
+
+  it('resamples tasks, not attempts', () => {
+    // 3 tasks x 20 attempts. Adding attempts without adding tasks must not
+    // narrow the interval: treating 60 episodes as 60 independent observations
+    // is exactly the error that makes a bootstrap look rigorous and not be.
+    const three = [0.1, 0.2, 0.3].map((delta) => ({
+      weight: 1,
+      deltas: [delta],
+    }));
+    const threeWithRepeats = [0.1, 0.2, 0.3].map((delta) => ({
+      weight: 1,
+      deltas: Array.from({ length: 20 }, () => delta),
+    }));
+    const sparse = pairedBootstrapInterval({
+      clusters: three,
+      seed: 7,
+      resamples: 2_000,
+    })!;
+    const dense = pairedBootstrapInterval({
+      clusters: threeWithRepeats,
+      seed: 7,
+      resamples: 2_000,
+    })!;
+    expect(sparse.unit).toBe('task');
+    expect(sparse.clusters).toBe(3);
+    expect(dense.clusters).toBe(3);
+    expect(dense.lower).toBeCloseTo(sparse.lower, 10);
+    expect(dense.upper).toBeCloseTo(sparse.upper, 10);
+  });
+
+  it('reports unresolved whenever the interval contains zero', () => {
+    const interval = pairedBootstrapInterval({
+      clusters: [cluster(-0.4), cluster(0.5), cluster(-0.3), cluster(0.4)],
+      seed: 11,
+      resamples: 2_000,
+    })!;
+    expect(interval.lower).toBeLessThan(0);
+    expect(interval.upper).toBeGreaterThan(0);
+    expect(interval.direction).toBe('unresolved');
+  });
+
+  it('reports positive only when the lower bound exceeds zero', () => {
+    const positive = pairedBootstrapInterval({
+      clusters: [0.4, 0.5, 0.45, 0.55, 0.5].map((d) => cluster(d)),
+      seed: 3,
+      resamples: 2_000,
+    })!;
+    expect(positive.lower).toBeGreaterThan(0);
+    expect(positive.direction).toBe('positive');
+
+    const negative = pairedBootstrapInterval({
+      clusters: [-0.4, -0.5, -0.45, -0.55, -0.5].map((d) => cluster(d)),
+      seed: 3,
+      resamples: 2_000,
+    })!;
+    expect(negative.upper).toBeLessThan(0);
+    expect(negative.direction).toBe('negative');
+  });
+
+  it('weights tasks by task.weight', () => {
+    // Hand-computed: (3*1.0 + 1*(-1.0)) / 4 = 0.5
+    expect(weightedMean([cluster(1, 3), cluster(-1, 1)])).toBeCloseTo(0.5, 12);
+    const interval = pairedBootstrapInterval({
+      clusters: [cluster(1, 3), cluster(-1, 1)],
+      seed: 5,
+      resamples: 500,
+    })!;
+    expect(interval.point).toBeCloseTo(0.5, 12);
+  });
+
+  it('is exactly reproducible from the recorded seed', () => {
+    const clusters = [0.2, -0.1, 0.4, 0.05].map((d) => cluster(d));
+    const first = pairedBootstrapInterval({
+      clusters,
+      seed: 99,
+      resamples: 1_000,
+    })!;
+    const second = pairedBootstrapInterval({
+      clusters,
+      seed: first.seed,
+      resamples: first.resamples,
+      level: first.level,
+    })!;
+    expect(second.lower).toBe(first.lower);
+    expect(second.upper).toBe(first.upper);
+    expect(second.point).toBe(first.point);
+  });
+
+  it('returns unmeasured when the pairing precondition fails', () => {
+    const taskA = { id: 'a' };
+    const taskB = { id: 'b' };
+    expect(
+      clustersFromPairedRecords(
+        [{ task: taskA, score: 1 }],
+        [{ task: taskB, score: 1 }]
+      )
+    ).toBeUndefined();
+    expect(
+      clustersFromPairedRecords(
+        [{ task: taskA, score: 1 }],
+        [
+          { task: taskA, score: 1 },
+          { task: taskB, score: 1 },
+        ]
+      )
+    ).toBeUndefined();
+    expect(clustersFromPairedRecords([], [])).toBeUndefined();
+    expect(
+      pairedBootstrapInterval({ clusters: [], seed: 1, resamples: 500 })
+    ).toBeUndefined();
+    expect(
+      pairedBootstrapInterval({
+        clusters: [{ weight: 1, deltas: [Number.NaN] }],
+        seed: 1,
+        resamples: 500,
+      })
+    ).toBeUndefined();
+  });
+
+  it('rejects out-of-range interval options before anything runs', () => {
+    for (const bad of [
+      { resamples: 199 },
+      { resamples: 100_001 },
+      { resamples: 1.5 },
+      { level: 0 },
+      { level: 1 },
+      { seed: 1.5 },
+    ]) {
+      const error = (() => {
+        try {
+          validateIntervalOptions(bad as any);
+          return undefined;
+        } catch (err) {
+          return err;
+        }
+      })();
+      expect(axIsAgentPlaybookEvolveError(error)).toBe(true);
+      expect((error as any).code).toBe('interval_options_invalid');
+    }
+    expect(validateIntervalOptions()).toEqual({
+      resamples: 10_000,
+      level: 0.95,
+    });
+  });
+
+  it('derives a stable seed from a task-set digest', () => {
+    expect(seedFromDigest('fnv1a64:0123456789abcdef')).toBe(
+      seedFromDigest('fnv1a64:0123456789abcdef')
+    );
+    expect(seedFromDigest('fnv1a64:0000000000000001')).not.toBe(
+      seedFromDigest('fnv1a64:0000000000000002')
+    );
+  });
+});
+
+describe('variance band', () => {
+  const recordsOf = (tasks: readonly object[], scores: readonly number[]) =>
+    tasks.map((task, index) => ({ task, score: scores[index]! }));
+
+  it('computes spread as max mean minus min mean', () => {
+    const tasks = [{ id: 'a' }, { id: 'b' }, { id: 'c' }];
+    const band = varianceBandFrom({
+      split: 'current',
+      repeats: [
+        recordsOf(tasks, [0.5, 0.5, 0.5]),
+        recordsOf(tasks, [0.6, 0.5, 0.5]),
+        recordsOf(tasks, [0.4, 0.5, 0.5]),
+      ],
+      means: [0.5, 0.533, 0.466],
+      seed: 21,
+      resamples: 500,
+    })!;
+    expect(band.repeats).toBe(3);
+    expect(band.spread).toBeCloseTo(0.533 - 0.466, 10);
+    expect(band.interval.unit).toBe('task');
+    expect(band.interval.clusters).toBe(3);
+  });
+
+  it('is unmeasured with fewer than two repeats or on a broken pairing', () => {
+    const tasks = [{ id: 'a' }];
+    expect(
+      varianceBandFrom({
+        split: 'current',
+        repeats: [recordsOf(tasks, [0.5])],
+        means: [0.5],
+        seed: 1,
+        resamples: 500,
+      })
+    ).toBeUndefined();
+    expect(
+      varianceBandFrom({
+        split: 'current',
+        repeats: [recordsOf(tasks, [0.5]), recordsOf([{ id: 'other' }], [0.5])],
+        means: [0.5, 0.5],
+        seed: 1,
+        resamples: 500,
+      })
+    ).toBeUndefined();
+  });
+});
+
+// --- overhead --------------------------------------------------------------
+
+describe('anchor-vs-candidate overhead', () => {
+  const attempt = (
+    over: Partial<AxAgentPlaybookAttemptRecord>
+  ): AxAgentPlaybookAttemptRecord => ({
+    attempt: 0,
+    redraw: 0,
+    score: 1,
+    termination: { kind: 'completed' },
+    callCount: 1,
+    turnCount: 1,
+    latencyMs: 1,
+    ...over,
+  });
+
+  it('reports turn and call overhead with intervals', () => {
+    const tasks = [{ id: 'a' }, { id: 'b' }];
+    const anchor = tasks.map((task) => ({
+      task,
+      attempts: [attempt({ turnCount: 10, callCount: 4 })],
+    }));
+    const candidate = tasks.map((task) => ({
+      task,
+      attempts: [attempt({ turnCount: 14, callCount: 5 })],
+    }));
+    const split = overheadSplitFrom({
+      split: 'heldOut',
+      anchor,
+      candidate,
+      seed: 4,
+      resamples: 500,
+    })!;
+    expect(split.turns.anchorMean).toBe(10);
+    expect(split.turns.candidateMean).toBe(14);
+    expect(split.turns.delta).toBe(4);
+    expect(split.turns.relativeDelta).toBeCloseTo(0.4, 12);
+    expect(split.calls.relativeDelta).toBeCloseTo(0.25, 12);
+    // No usage was reported on either side, so tokens are omitted, not zeroed.
+    expect(split.tokens).toBeUndefined();
+
+    const report = overheadReportFrom([split])!;
+    expect(report.worstRelativeDelta).toBeCloseTo(0.4, 12);
+  });
+
+  it('excludes discarded attempts from the per-task mean', () => {
+    const tasks = [{ id: 'a' }];
+    const anchor = tasks.map((task) => ({
+      task,
+      attempts: [attempt({ turnCount: 4 })],
+    }));
+    const candidate = tasks.map((task) => ({
+      task,
+      attempts: [
+        attempt({ turnCount: 4 }),
+        attempt({
+          turnCount: 1_000,
+          score: undefined,
+          termination: { kind: 'environment_failure', cause: 'network' },
+        }),
+      ],
+    }));
+    const split = overheadSplitFrom({
+      split: 'current',
+      anchor,
+      candidate,
+      seed: 1,
+      resamples: 500,
+    })!;
+    expect(split.turns.candidateMean).toBe(4);
+    expect(split.turns.delta).toBe(0);
+  });
+
+  it('omits relativeDelta rather than reporting infinity against a zero anchor', () => {
+    const tasks = [{ id: 'a' }];
+    const split = overheadSplitFrom({
+      split: 'current',
+      anchor: tasks.map((task) => ({
+        task,
+        attempts: [attempt({ turnCount: 0, callCount: 0 })],
+      })),
+      candidate: tasks.map((task) => ({
+        task,
+        attempts: [attempt({ turnCount: 3, callCount: 0 })],
+      })),
+      seed: 1,
+      resamples: 500,
+    })!;
+    expect(split.turns.relativeDelta).toBeUndefined();
+    expect(split.turns.delta).toBe(3);
+  });
+
+  it('is unmeasured when the pairing breaks or attempts are absent', () => {
+    expect(
+      overheadSplitFrom({
+        split: 'current',
+        anchor: [{ task: { id: 'a' }, attempts: [attempt({})] }],
+        candidate: [{ task: { id: 'b' }, attempts: [attempt({})] }],
+        seed: 1,
+        resamples: 500,
+      })
+    ).toBeUndefined();
+    const shared = { id: 'a' };
+    expect(
+      overheadSplitFrom({
+        split: 'current',
+        anchor: [{ task: shared }],
+        candidate: [{ task: shared }],
+        seed: 1,
+        resamples: 500,
+      })
+    ).toBeUndefined();
+    expect(overheadReportFrom([])).toBeUndefined();
   });
 });

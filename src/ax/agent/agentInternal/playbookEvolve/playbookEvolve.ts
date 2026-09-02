@@ -22,7 +22,7 @@ import type {
   AxAgentJudgeOptions,
 } from '../agentOptimizeTypes.js';
 import { createAgentOptimizeMetric } from '../optimizer.js';
-import { createAccountingLedger } from './accounting.js';
+import { accountingForPhases, createAccountingLedger } from './accounting.js';
 import {
   atMostWithFloatingPointTolerance,
   canonicalDigest,
@@ -40,11 +40,14 @@ import type {
   AxAgentPlaybookComputePhaseName,
   AxAgentPlaybookControlArmReport,
   AxAgentPlaybookSplitName,
+  AxAgentPlaybookVarianceBand,
+  AxAgentPlaybookVarianceBandReport,
 } from './playbookEvidenceTypes.js';
 import { AxAgentPlaybookEvolveError } from './playbookEvidenceTypes.js';
 import type {
   AxAgentPlaybookEvolveOptions,
   AxAgentPlaybookEvolveOutcome,
+  AxAgentPlaybookEvolveProgressEvent,
   AxAgentPlaybookEvolveResult,
   AxAgentPlaybookRetentionAnchor,
   AxAgentPlaybookRetentionReceipt,
@@ -56,6 +59,11 @@ import {
   buildProposal,
   currentPlaybookText,
 } from './proposals.js';
+import {
+  seedFromDigest,
+  validateIntervalOptions,
+  varianceBandFrom,
+} from './statistics.js';
 import { mineWeakness } from './weaknessMiner.js';
 
 const DEFAULT_MAX_PROPOSALS = 4;
@@ -67,6 +75,13 @@ const MAX_METRIC_CALLS = 1_000_000;
 const RESTORATION_FAILURE = Symbol.for(
   '@ax-llm/ax/agent-playbook-restoration-failure'
 );
+/** Phases the legacy `metricCallsUsed` counter has always counted. */
+const EVOLVE_ONLY_PHASES: ReadonlySet<AxAgentPlaybookComputePhaseName> =
+  new Set<AxAgentPlaybookComputePhaseName>([
+    'baseline',
+    'candidate_eval',
+    'retention_eval',
+  ]);
 
 function positiveSafeInteger(
   value: number,
@@ -275,6 +290,17 @@ function validateEvidenceOptions(
       'gates.transfer needs a transfer configuration with at least one target.'
     );
   }
+  if (gates?.interval === 'require' && !options?.varianceBand) {
+    // A required gate that silently becomes a weaker gate is exactly the
+    // failure shape this machinery exists to remove. Ax does not auto-enable
+    // the band either: that would spend candidate budget without asking.
+    throw new AxAgentPlaybookEvolveError(
+      'interval_options_invalid',
+      'variance_band',
+      'gates.interval: require needs varianceBand; a required interval gate without a band silently degrades to "excludes zero".'
+    );
+  }
+  validateIntervalOptions(options?.intervalOptions);
 }
 
 export async function evolveAgentPlaybook<
@@ -434,7 +460,16 @@ export async function evolveAgentPlaybook<
     );
   }
   const budget: AxAgentEvalBudget = { remaining: maxMetricCalls };
-  const usedCalls = () => maxMetricCalls - budget.remaining;
+  /**
+   * Metric calls spent by an evidence phase. They are real calls and land in
+   * `accounting.metricCalls` (the honest run total), but they must NOT move the
+   * legacy `metricCallsUsed` counter — invariant I6 says no new phase
+   * increments it, so a caller reading the legacy number sees exactly what it
+   * saw before this machinery existed.
+   */
+  let evidenceMetricCalls = 0;
+  const usedCalls = () =>
+    maxMetricCalls - budget.remaining - evidenceMetricCalls;
 
   const baselineRequiredCalls =
     (trainTasks.length + (validationTasks?.length ?? 0) + retentionTaskCount) *
@@ -446,7 +481,7 @@ export async function evolveAgentPlaybook<
   }
 
   const progress = (
-    phase: 'baseline' | 'mining' | 'proposal' | 'validation' | 'done',
+    phase: AxAgentPlaybookEvolveProgressEvent['phase'],
     message: string
   ) => {
     options?.onProgress?.({ phase, message, metricCallsUsed: usedCalls() });
@@ -499,6 +534,7 @@ export async function evolveAgentPlaybook<
       const spent = before - budget.remaining;
       handle.addMetricCalls(spent);
       handle.close();
+      if (!EVOLVE_ONLY_PHASES.has(phase)) evidenceMetricCalls += spent;
       if (usesBuiltInJudge && spent > 0) {
         const judge = ledger.phase('judge');
         judge.addModelCalls(spent);
@@ -628,6 +664,71 @@ export async function evolveAgentPlaybook<
           },
         })
       );
+    }
+  }
+
+  // ---- Variance band: re-runs of the UNCHANGED artifact ----
+  // Establishes the smallest delta distinguishable from run-to-run noise, so a
+  // candidate gain can be compared against the noise floor rather than against
+  // zero. Runs BEFORE any mutation, and fails closed on budget before it.
+  const intervalSettings = validateIntervalOptions(options?.intervalOptions);
+  const bandSplits: readonly ('current' | 'heldOut')[] =
+    options?.varianceBand?.splits ??
+    (validationTasks?.length ? ['current', 'heldOut'] : ['current']);
+  let varianceBands: AxAgentPlaybookVarianceBand[] | undefined;
+  if (options?.varianceBand) {
+    const extraRepeats = options.varianceBand.extraRepeats ?? 1;
+    if (!Number.isSafeInteger(extraRepeats) || extraRepeats < 0) {
+      throw new AxAgentPlaybookEvolveError(
+        'interval_options_invalid',
+        'variance_band',
+        'varianceBand.extraRepeats must be a non-negative safe integer.'
+      );
+    }
+    const bandTaskCount = bandSplits.reduce(
+      (sum, split) =>
+        sum +
+        (split === 'current'
+          ? trainTasks.length
+          : (validationTasks?.length ?? 0)),
+      0
+    );
+    const bandRequiredCalls = extraRepeats * bandTaskCount * runsPerTask;
+    if (budget.remaining < bandRequiredCalls) {
+      throw new AxAgentPlaybookEvolveError(
+        'budget_insufficient',
+        'variance_band',
+        `varianceBand needs ${bandRequiredCalls} metric calls; ${budget.remaining} remain.`
+      );
+    }
+    varianceBands = [];
+    for (const split of bandSplits) {
+      const tasks = split === 'current' ? trainTasks : validationTasks;
+      const anchorBatch =
+        split === 'current' ? baselineTrain : baselineHeldOutBatch;
+      if (!tasks?.length || !anchorBatch) continue;
+      const repeats = [anchorBatch.records];
+      const means = [anchorBatch.mean];
+      for (let repeat = 0; repeat < extraRepeats; repeat++) {
+        progress(
+          'band',
+          `${split}: unchanged-artifact repeat ${repeat + 1}/${extraRepeats}`
+        );
+        const batch = await runPhaseBatch('variance_band', tasks, split);
+        repeats.push(batch.records);
+        means.push(batch.mean);
+      }
+      const band = varianceBandFrom({
+        split,
+        repeats,
+        means,
+        seed:
+          intervalSettings.seed ??
+          seedFromDigest(canonicalDigest(tasks.map((task) => task.id ?? ''))),
+        resamples: intervalSettings.resamples,
+        level: intervalSettings.level,
+      });
+      if (band) varianceBands.push(band);
     }
   }
 
@@ -1049,6 +1150,20 @@ export async function evolveAgentPlaybook<
     status: 'not_run',
     reason: 'controlArm option not supplied',
   };
+  const varianceBand: AxAgentPlaybookVarianceBandReport | undefined =
+    options?.varianceBand
+      ? varianceBands && varianceBands.length > 0
+        ? {
+            status: 'completed',
+            bands: varianceBands,
+            accounting: accountingForPhases(accounting, ['variance_band']),
+          }
+        : {
+            status: 'not_run',
+            reason:
+              'varianceBand produced no comparable repeats; the band is reported absent rather than as a zero spread',
+          }
+      : undefined;
 
   return {
     baseline,
@@ -1065,5 +1180,6 @@ export async function evolveAgentPlaybook<
     control,
     accounting,
     applied: options?.apply === false ? 'dry_run' : 'live',
+    ...(varianceBand ? { varianceBand } : {}),
   };
 }

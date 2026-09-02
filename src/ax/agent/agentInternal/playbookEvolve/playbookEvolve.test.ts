@@ -2122,3 +2122,104 @@ describe('agent.playbook().evolve() compute accounting', () => {
     );
   });
 });
+
+describe('agent.playbook().evolve() variance band', () => {
+  it('re-runs the unchanged artifact and reports the band with its own cost', async () => {
+    const { ag } = makeAgent();
+    let metricCalls = 0;
+    const events: string[] = [];
+    const result = await ag.playbook().evolve(
+      { train: TASKS, validation: VALIDATION_TASKS },
+      {
+        metric: async (args: any) => {
+          metricCalls++;
+          return scoreByAnswer(args);
+        },
+        maxProposals: 1,
+        varianceBand: { extraRepeats: 1 },
+        onProgress: (e: any) => void events.push(e.phase),
+      }
+    );
+    expect(events).toContain('band');
+    expect(result.varianceBand?.status).toBe('completed');
+    const bands = (result.varianceBand as any).bands;
+    expect(bands.map((b: any) => b.split)).toEqual(['current', 'heldOut']);
+    for (const band of bands) {
+      expect(band.repeats).toBe(2);
+      expect(band.means).toHaveLength(2);
+      expect(band.spread).toBeGreaterThanOrEqual(0);
+      expect(band.interval.unit).toBe('task');
+    }
+    // The band's calls land in the honest run total but NEVER in the legacy
+    // evolve-only counter (invariant I6).
+    const bandCalls = TASKS.length + VALIDATION_TASKS.length;
+    expect(result.accounting.metricCalls).toBe(metricCalls);
+    expect(result.accounting.evolveOnlyMetricCalls).toBe(
+      result.metricCallsUsed
+    );
+    expect(result.accounting.metricCalls).toBeGreaterThan(
+      result.accounting.evolveOnlyMetricCalls
+    );
+    expect((result.varianceBand as any).accounting.metricCalls).toBe(bandCalls);
+  });
+
+  it('fails closed before any mutation when the budget cannot cover the band', async () => {
+    const { ag } = makeAgent();
+    const error = await ag
+      .playbook()
+      .evolve(TASKS, {
+        metric: scoreByAnswer,
+        maxProposals: 1,
+        maxMetricCalls: TASKS.length, // baseline only
+        varianceBand: { extraRepeats: 2 },
+      })
+      .catch((err: unknown) => err);
+    expect(axIsAgentPlaybookEvolveError(error)).toBe(true);
+    expect((error as any).code).toBe('budget_insufficient');
+    expect((error as any).phase).toBe('variance_band');
+    expect(ag.getPlaybook().getState().playbook.stats.bulletCount).toBe(0);
+  });
+
+  it('rejects a required interval gate with no band rather than silently weakening it', async () => {
+    const { ag } = makeAgent();
+    let metricCalls = 0;
+    const error = await ag
+      .playbook()
+      .evolve(TASKS, {
+        metric: async (args: any) => {
+          metricCalls++;
+          return scoreByAnswer(args);
+        },
+        gates: { interval: 'require' },
+      })
+      .catch((err: unknown) => err);
+    expect(axIsAgentPlaybookEvolveError(error)).toBe(true);
+    expect((error as any).code).toBe('interval_options_invalid');
+    expect((error as Error).message).toContain('silently degrades');
+    expect(metricCalls).toBe(0);
+  });
+
+  it('rejects out-of-range interval options before evaluating anything', async () => {
+    const { ag } = makeAgent();
+    let metricCalls = 0;
+    await expect(
+      ag.playbook().evolve(TASKS, {
+        metric: async (args: any) => {
+          metricCalls++;
+          return scoreByAnswer(args);
+        },
+        intervalOptions: { resamples: 10 },
+      })
+    ).rejects.toThrow(/intervalOptions\.resamples must be a safe integer/);
+    expect(metricCalls).toBe(0);
+  });
+
+  it('leaves varianceBand undefined when the option is absent', async () => {
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(TASKS, {
+      metric: scoreByAnswer,
+      maxProposals: 1,
+    });
+    expect(result.varianceBand).toBeUndefined();
+  });
+});
