@@ -126,7 +126,7 @@ function createRuntime(
   /**
    * Qualified names this harness actually drove down the speculation path.
    *
-   * The POSITIVE CONTROL for the [T4] behavioural test: every end-state
+   * The POSITIVE CONTROL for the [T4] behaviour test: every end-state
    * assertion there ("the tool did not run", "only the unbound callable
    * minted") holds identically if the harness silently stopped speculating —
    * a rename in `jsRuntimeHostFunction.ts` would do it, and an earlier version

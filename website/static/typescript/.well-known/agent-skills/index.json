@@ -118,7 +118,7 @@
       "type": "skill-md",
       "description": "This skill helps an LLM generate correct verifier-gated working state, skillState memory-mode and call-time skill injection code using @ax-llm/ax. Use when the user asks about AxWorkingState, goal ledgers, actorMemoryMode, statePatch, state checkers, tool receipts, parked deltas, callTimeSkills, or long-horizon agent state.",
       "url": "ax-agent-state/SKILL.md",
-      "digest": "sha256:d580e2ea200ca11feb5485752bd4161d63823d5d030e1dd387691501c12962c1"
+      "digest": "sha256:1b45af07c41d5260111006734f6d65f4fecc0045dccab412abe896745b0fbdb8"
     },
     {
       "name": "ax-learn",

@@ -431,16 +431,55 @@ a gate — so an unhelpful skill cannot trap the actor in a re-draft loop. A
 budget, so an early "not yet" does not disable the binding for the rest of the
 run.
 
-Refused at construction: a glob in `qualifiedName`, two bindings for one
-callable, `maxInjections` below 1 or non-integer, a skill id that does not
-resolve against the effective `skillsCatalog`, an inline skill with no body
-text, and a `when` predicate with no `workingState` to read.
+A `when` predicate that **throws** — or a working-state read that does — falls
+through to the normal call path and the callable behaves exactly as an unbound
+one. `intercept()` runs synchronously inside the actor's `await tool(...)`, so a
+propagated throw would become an `isError` turn and escalate the executor model;
+and since the budget is charged after the predicate, every re-draft would throw
+again with nothing bounding it. A predicate result that is not exactly `true`
+(an accidental `async when` returns an always-truthy Promise) does not
+intercept.
 
-Refused at **run start**, not at construction: a binding naming a callable this
-run does not register (`unknown_bound_callable`). MCP and UCP callables only
-exist once the run's execution context does, so a constructor-time check would
-reject every legitimate `mcp.*` binding. Every registration site — executing or
-stubbed — registers its name, so the check sees the full surface.
+Refused at construction: a glob in `qualifiedName`, two bindings for one
+callable, `maxInjections` below 1, non-integer or above 100, a skill id that
+does not resolve against the effective `skillsCatalog`, an inline skill with no
+body text, and a `when` predicate with no `workingState` to read.
+
+Refused at **run start**, not at construction:
+
+- a binding naming a callable this run does not register
+  (`unknown_bound_callable`). MCP and UCP callables only exist once the run's
+  execution context does, so a constructor-time check would reject every
+  legitimate `mcp.*` binding. Every registration site — executing or stubbed —
+  registers its name, so the check sees the full surface;
+- a binding naming a catalog skill the run's two catalog gates hid
+  (`ineligible_bound_skill`, `denied_bound_skill`). See below.
+
+Every call-time configuration failure is an `AxWorkingStateSchemaError` whose
+`subsystem` is `'Call-time skill'` and whose `detail` is the `<key>: <value>`
+pair above.
+
+### A binding does not bypass the catalog gates
+
+A binding is static host configuration; the two catalog gates are not.
+`requires` eligibility is resolved against the run's declared
+`skillPolicy.environment`, and the retrieval-time authority re-check
+(`axSkillRetrievalGate`) is time- and authority-varying — an expired grant or a
+revoked trajectory parks a skill mid-lifecycle, long after the binding was
+written.
+
+So a bound **catalog id** is re-asked at run start through the same admission
+verdict `discover({ skills })`, the `### Available Skills` index, the relevance
+hint and the kernel tier use, and the run is **refused** when either gate hid
+it. Refusing is deliberate over the two alternatives: silently dropping the
+skill while still intercepting would leave the actor blocked on a call it may
+not make with no procedure to read, and silently executing would make both
+gates advisory. "The host named it by id" is not an answer — that is exactly
+the argument the gates exist to overrule.
+
+An **inline** skill is not gated: it is host-supplied literal text with nothing
+to be eligible for and no provenance to re-check, the same posture as
+`presetSkills`.
 
 ### Delivery and the trace
 
@@ -451,9 +490,15 @@ harness-authored and names only the callable and the skill id, because
 untrusted one. Both take effect on the next turn's prompt, which is the
 re-draft point.
 
-Gamma records the intercepted turn with `action.executed: false`. `action.calls`
-still lists the callables that actually dispatched: forcing it empty would hide
-a real call made alongside an intercepted one.
+`onLoadedSkills` fires for an injected skill, fire-and-forget, exactly as it
+does on the ordinary load path: a host auditing which skill bodies reached the
+model must see call-time injections too.
+
+Gamma records the intercepted turn with `action.executed: false`. That flag
+reports the turn's **weakest** guarantee — at least one drafted call did not
+run — so a mixed turn is `{ executed: false, calls: ['inventory.pick'] }`.
+`action.calls` stays the exact record: forcing it empty would hide a real call
+made alongside an intercepted one.
 
 ## Build versus buy: the RFC-6902 subset
 
@@ -578,3 +623,9 @@ to pass it.
 - **Call-time injection is not an authorization or safety gate.** It is one
   budgeted nudge: past `maxInjections` the tool executes. Anything that must
   not run belongs in the authority layer, not here.
+- **Per-run harness state is held per agent INSTANCE, not per `forward()`.**
+  The working-state receipt sink and the call-time binding table are both
+  rebuilt at the start of each run and stored on the instance, so two
+  overlapping `forward()` calls on ONE agent share the injection ledger and the
+  observation buffer, or clobber them mid-flight. Concurrent runs need separate
+  agent instances.

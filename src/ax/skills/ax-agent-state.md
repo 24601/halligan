@@ -307,7 +307,17 @@ const shipper = agent('task:string -> answer:string', {
   dispatched even on turns that are not intercepted.
 - The guidance is harness-authored and names only the callable and the skill
   id. Model text never reaches the guidance log.
-- Gamma records the intercepted turn with `action.executed: false`.
+- **A bound catalog id still goes through both catalog gates.** At run start the
+  id is re-asked against `skillPolicy.environment` (`requires`) and the
+  retrieval-time authority re-check. If either hid the skill the RUN is refused
+  (`ineligible_bound_skill`, `denied_bound_skill`) — a binding never renders a
+  body `discover({ skills })` would not. An inline skill is not gated.
+- A `when` predicate that throws falls through to the normal call path; it never
+  becomes an error turn, and it never spends budget.
+- Gamma records the intercepted turn with `action.executed: false` — the turn's
+  weakest guarantee. A mixed turn is `{ executed: false, calls: [<the real
+  one>] }`; `action.calls` stays exact. `onLoadedSkills` fires for an injected
+  skill.
 - A binding naming a callable the run does not register throws
   `unknown_bound_callable` at run start; an unresolvable skill id, a glob, a
   duplicate binding, `maxInjections < 1` and a `when` without `workingState`
@@ -377,6 +387,8 @@ expect(outcome.parked[0]?.reason).toBe('no_supporting_receipt');
   receipt roster.
 - Do NOT treat call-time skill injection as an authorization or safety gate.
   It is one budgeted nudge; past the budget the tool runs.
+- Do NOT expect a binding to be a way around the skills catalog gates, and do
+  NOT set `maxInjections` above 100; both refuse.
 - Do NOT reach for `skillState` on a short run, or on a task whose progress no
   tool receipt witnesses: it removes the transcript, so anything not written
   into the state is gone.
