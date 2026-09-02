@@ -49,6 +49,7 @@ export {
   axMindEventSource,
   axMindEventTypes,
   axMindPendingClass,
+  axMindSiblingWakeSuppressed,
   axMindStepEventExtensions,
   axMindSubscribedStepTypes,
   axMindThinkerSubject,

@@ -47,14 +47,33 @@ menu (`act` / `think` / `share` / `learn` / `goals` / `idle`), and
 `axMindResponder` is a single generation with a chat-shaped context and an
 inner-life block, cheap enough to run on every inbound message.
 
-**Two thinkers need narrow subscriptions.** Self-suppression is per thinker, so
-it stops a thinker re-triggering on its OWN writing and nothing else. Two
-thinkers that both take the default subscription (every wakeable narrative type)
-wake each other on their own `idle` steps and never stop — an unbounded,
-token-spending ping-pong with no work in it. The shipped pair is safe because
-`axMindResponder` subscribes to `message` only; give any second thinker an
-explicit `subscription.types` for the same reason. `mind.test.ts` asserts the
-shipped pair's step count stays bounded.
+**A sibling thinker never wakes on another thinker's contentless step.**
+Self-suppression alone is per thinker: it stops a thinker re-triggering on its
+OWN writing and nothing else, so two thinkers on the default subscription used
+to answer each other's `idle` steps forever — an unbounded, token-spending
+ping-pong with no work in it. The route predicate now refuses that wake by the
+step's WRITER IDENTITY, exactly as it refuses the self-loop, and reports it as
+the `wake-suppressed-sibling` diagnostic (a suppressed wake creates no delivery
+and no step, so there is nowhere else to see it).
+
+The suppressed class is derived from the registry by
+`axMindSiblingWakeSuppressed`, never listed by hand:
+
+| registry fact | shipped types | why a sibling is not woken |
+|---|---|---|
+| `wakeSignal: true` | `mind-wake`, `mind-idle`, `manual-trigger` | a pure wake signal carries no payload to read |
+| wakeable with no content at all | `idle` | "I did nothing" is not news for anyone else |
+| `neverRetriggersSelf: true` | `error` | the registry already forbids feeding it back to its writer; feeding it to the writer's sibling is the same loop with one more actor in it |
+
+Payload-carrying types (`message`, `action`, `observation`, `merge`, `thought`)
+wake a sibling normally — that is the whole point of a second thinker. So does
+an EXTERNAL writer of any of the suppressed types: suppression is by writer
+identity, so a host or a person appending an `idle` still wakes everyone. A
+single-thinker mind has no siblings, so its dispatch is unchanged.
+
+`mind.test.ts` asserts both halves against a step-ceiling store — the runaway
+starves the event loop synchronously, so vitest's own timeout never fires and
+the bound has to live in the store the runaway writes to.
 
 Third-party text reaches a thinker QUOTED. `axMindQuote` one-lines, bounds and
 fences every remote-controlled value the responder interpolates (a sender name,
@@ -78,7 +97,12 @@ Evaluated in order, per drained step, per subscribed thinker. The first
 | 6 | `inFlight() >= maxInFlight` | **defer**: hold this consumer's cursor, diagnose, retry next pass |
 | 7 | consecutive wake signals of one type | publish only the newest with `data.coalesced = n` |
 | 8 | otherwise | publish -> `wake` route -> `instanceKey = thinker`, `ordering: 'strict'` |
+| 9 | the step is an inbound `message` and a subscribed thinker is mid-run | additionally `salience.offer(...)`, a `feedback` step and the `salience-injected` diagnostic |
 | 10 | `publish` throws `AxEventBackpressureError` | exactly row 6: cursor held, retried |
+
+Row 4 has a sibling half: `axMindSiblingWakeSuppressed(step.type)` and a
+`step.source`/`launchedBy` naming ANOTHER thinker of this mind also returns
+`authorize` false, with the `wake-suppressed-sibling` diagnostic.
 
 Nothing is ever dropped. The append-only log IS the backlog, so a deferral
 costs latency and never a wake.
@@ -363,10 +387,10 @@ ceiling; the shipped total is higher, and each raise has a reason:
 
 | file | cap | reason |
 |---|---|---|
-| `types.ts` | 600 | the context-request record, the whole artifact source with its change and receipt records, and the in-memory ownership store — RFC 4.9/4.10 declarations the pacing lane deferred for want of a consumer |
+| `types.ts` | 615 | the context-request record, the whole artifact source with its change and receipt records, and the in-memory ownership store — RFC 4.9/4.10 declarations the pacing lane deferred for want of a consumer; then the `wake-suppressed-sibling` diagnostic code and the loop its absence hides |
 | `pacer.ts` | 300 | the fuse derived from the descent cost, plus `parkedUntil` |
 | `health.ts` | 150 | the derived stalled threshold |
-| `routes.ts` | 270 | the `wake-suppressed-self` diagnostic: a suppressed wake creates no delivery and no step, so nothing else can see the decision |
+| `routes.ts` | 320 | the `wake-suppressed-self` diagnostic (a suppressed wake creates no delivery and no step, so nothing else can see the decision), then `axMindSiblingWakeSuppressed` and the sibling branch of the route predicate that close the unbounded two-thinker `idle` runaway |
 | `sources.ts` | 610 | two `AxEventSource`s, the pure duty query, per-consumer cursor load/save, unit-commit planning, and a sleep that leaves no listener behind |
 | `chat.ts` | 800 | the ledgered send is declare → dispatch → transport → settle with a branch per non-`intent` status, plus `axMindReconcileChatSends` |
 | `salience.ts` | 180 | the fenced, byte-bounded quoting of third-party text |

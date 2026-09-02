@@ -1690,6 +1690,132 @@ describe('AxMind self-suppression', () => {
   });
 });
 
+/**
+ * A trajectory store that refuses to grow past a ceiling. A mind whose
+ * thinkers wake each other on their own contentless steps starves the event
+ * loop SYNCHRONOUSLY -- vitest's own timeout never gets a turn -- so the bound
+ * cannot live in the test runner. It lives in the store the runaway writes to:
+ * the ceiling turns an unbounded hang into one fast, loud assertion.
+ */
+function cappedStore(
+  store: AxTrajectoryStore,
+  ceiling: number
+): Readonly<{ store: AxTrajectoryStore; exceeded: () => boolean }> {
+  let appends = 0;
+  let exceeded = false;
+  const append: AxTrajectoryStore['append'] = async (request, signal) => {
+    appends += 1;
+    if (appends > ceiling) {
+      exceeded = true;
+      throw new Error(`the trajectory passed its ${ceiling}-append ceiling`);
+    }
+    return store.append(request, signal);
+  };
+  const capped = new Proxy(store, {
+    get(target, property, _receiver) {
+      if (property === 'append') return append;
+      const value = Reflect.get(target, property, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  return Object.freeze({ store: capped, exceeded: () => exceeded });
+}
+
+describe('AxMind sibling suppression', () => {
+  it('never wakes a sibling on a contentless step, and still wakes both on an external one', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const capped = cappedStore(await seed(clock), 120);
+    const diagnostics: AxMindDiagnostic[] = [];
+    // Returns nothing durable, so every settle appends an `idle` step: the
+    // exact shape two default-subscribed thinkers answered forever.
+    const alpha = probeProgram(async () => ({}));
+    const beta = probeProgram(async () => ({}));
+    const instance = mind(
+      baseOptions(
+        capped.store,
+        [thinkerWith('alpha', alpha), thinkerWith('beta', beta)],
+        { onDiagnostic: (one) => diagnostics.push(one) }
+      )
+    );
+    await instance.start();
+    await pumpUntil(
+      clock,
+      () =>
+        capped.exceeded() || (alpha.calls.length > 0 && beta.calls.length > 0)
+    );
+    // THE ceiling assertion. Without the rule this is `true` and every other
+    // expectation below is meaningless, so it is asserted first.
+    expect(capped.exceeded()).toBe(false);
+    const bounced = diagnostics.filter(
+      (one) => one.code === 'wake-suppressed-sibling'
+    );
+    // The decision is visible: a suppressed wake creates no delivery and no
+    // step, so the diagnostic is the only place a host can read it.
+    expect(bounced.length).toBeGreaterThan(0);
+    expect(new Set(bounced.map((one) => one.thinker))).toEqual(
+      new Set(['alpha', 'beta'])
+    );
+    expect(
+      bounced.every((one) => /carries nothing for a sibling/.test(one.message))
+    ).toBe(true);
+    const settled = await typesIn(capped.store);
+    // Two bootstrap wakes, each an `idle` plus its `mind-wake` pace step.
+    expect(settled.length).toBeLessThanOrEqual(8);
+    expect(settled.filter((step) => step.type === 'idle')).toHaveLength(2);
+    const before = [alpha.calls.length, beta.calls.length];
+    // The negative that matters: boundedness bought by deafening the mind
+    // would pass every assertion above. An EXTERNAL writer of a payload type
+    // still wakes both thinkers.
+    await instance.append({
+      trajectoryId: '',
+      type: 'observation',
+      source: 'chat',
+      data: { content: 'a person said something out loud' },
+    });
+    await pumpUntil(
+      clock,
+      () =>
+        capped.exceeded() ||
+        (alpha.calls.length > before[0]! && beta.calls.length > before[1]!)
+    );
+    expect(capped.exceeded()).toBe(false);
+    expect(alpha.calls.length).toBeGreaterThan(before[0]!);
+    expect(beta.calls.length).toBeGreaterThan(before[1]!);
+    await instance.close({ drain: false, timeoutMs: 200 });
+  });
+
+  it('bounds the error ping-pong too: neverRetriggersSelf holds for a sibling', async () => {
+    const clock = new AxManualEventClock(1_000);
+    const capped = cappedStore(await seed(clock), 120);
+    // `error` never re-triggers its own writer (M3). A sibling answering it
+    // with an error of its own is the same loop with one more actor in it.
+    const boom = () =>
+      probeProgram(async () => {
+        throw new Error('this thinker always fails');
+      });
+    const alpha = boom();
+    const beta = boom();
+    const instance = mind(
+      baseOptions(capped.store, [
+        thinkerWith('alpha', alpha),
+        thinkerWith('beta', beta),
+      ])
+    );
+    await instance.start();
+    await pumpUntil(
+      clock,
+      async () =>
+        capped.exceeded() || (await errorSteps(capped.store)).length >= 2
+    );
+    expect(capped.exceeded()).toBe(false);
+    // One bootstrap wake each and nothing after it.
+    expect(alpha.calls).toHaveLength(1);
+    expect(beta.calls).toHaveLength(1);
+    expect(await errorSteps(capped.store)).toHaveLength(2);
+    await instance.close({ drain: false, timeoutMs: 200 });
+  });
+});
+
 describe('the shipped pair, in one mind', () => {
   it('runs a monolith beside a responder without waking each other forever', async () => {
     const clock = new AxManualEventClock(1_000);
@@ -1743,11 +1869,10 @@ describe('the shipped pair, in one mind', () => {
     const steps = await typesIn(store);
     const monolithWakes = await wakesOf('monolith');
     const responderWakes = await wakesOf('responder');
-    // The shipped pair is safe because the responder listens for `message`
-    // ONLY. Two thinkers that both take the default (every narrative type)
-    // subscription wake each other on their own `idle` steps forever, which
-    // is a live token-burning runaway -- docs/MIND.md says so, and this is
-    // the assertion that would catch the shipped pair growing into it. The
+    // The shipped pair is doubly safe: the responder listens for `message`
+    // ONLY, and the sibling rule refuses a wake on the monolith's `idle` and
+    // `error` steps even for a thinker that did subscribe to them. This is
+    // still the assertion that catches the pair growing into a runaway. The
     // paced monolith advances; the responder wakes ONCE, for its bootstrap,
     // and the log grows with the pacer rather than with the pair.
     expect(monolithWakes).toBeGreaterThanOrEqual(3);

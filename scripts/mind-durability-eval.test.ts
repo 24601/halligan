@@ -25,6 +25,10 @@ function mutate(
     concurrency: AxMindDurabilityReport['concurrency'];
     naiveGuardBaseline: AxMindDurabilityReport['naiveGuardBaseline'];
     watchdogBaseline: AxMindDurabilityReport['watchdogBaseline'];
+    siblingSuppression: {
+      routeFixedPoint: AxMindDurabilityReport['siblingSuppression']['routeFixedPoint'];
+      endToEnd: AxMindDurabilityReport['siblingSuppression']['endToEnd'];
+    };
   }) => void
 ): Readonly<AxMindDurabilityReport> {
   const draft = {
@@ -32,6 +36,10 @@ function mutate(
     concurrency: { ...report.concurrency },
     naiveGuardBaseline: { ...report.naiveGuardBaseline },
     watchdogBaseline: { ...report.watchdogBaseline },
+    siblingSuppression: {
+      routeFixedPoint: { ...report.siblingSuppression.routeFixedPoint },
+      endToEnd: { ...report.siblingSuppression.endToEnd },
+    },
   };
   change(draft);
   return { ...report, ...draft };
@@ -47,6 +55,25 @@ describe('mind durability evaluation', () => {
     expect(report.honesty).toBe(AX_MIND_DURABILITY_HONESTY);
     expect(report.honesty).toContain('not a held-out model comparison');
     expect(report.baseline).toBe(AX_MIND_DURABILITY_BASELINES);
+  });
+
+  it('bounds a two-thinker mind and still wakes both from outside', () => {
+    const sibling = report.siblingSuppression;
+    // The metric: the shipped predicate reaches a fixed point at zero
+    // admitted wakes, while the same predicate with no siblings named runs
+    // straight into its ceiling.
+    expect(sibling.routeFixedPoint.withRuleQuiesced).toBe(true);
+    expect(sibling.routeFixedPoint.withRuleAdmittedWakes).toBe(0);
+    expect(sibling.routeFixedPoint.withoutRuleQuiesced).toBe(false);
+    expect(sibling.routeFixedPoint.withoutRuleAdmittedWakes).toBe(
+      sibling.routeFixedPoint.ceiling
+    );
+    expect(sibling.endToEnd.ceilingHit).toBe(false);
+    expect(sibling.endToEnd.siblingWakesSuppressed).toBeGreaterThan(0);
+    // The counter-metric, reported beside the metric.
+    expect(sibling.endToEnd.thinkersWokenByExternalStep).toBe(
+      sibling.endToEnd.thinkers
+    );
   });
 
   it('covers every crash row from C4 to C14', () => {
@@ -224,6 +251,54 @@ describe('mind durability evaluation', () => {
         watchdogBaseline: AxMindDurabilityReport['watchdogBaseline'];
       }) => {
         Object.assign(draft.watchdogBaseline, { withoutWatchdogWakes: 3 });
+      },
+    ],
+    [
+      'a two-thinker mind that never quiesced',
+      (draft: {
+        siblingSuppression: { routeFixedPoint: Record<string, unknown> };
+      }) => {
+        Object.assign(draft.siblingSuppression.routeFixedPoint, {
+          withRuleQuiesced: false,
+        });
+      },
+    ],
+    [
+      'a sibling baseline that was never a runaway',
+      (draft: {
+        siblingSuppression: { routeFixedPoint: Record<string, unknown> };
+      }) => {
+        Object.assign(draft.siblingSuppression.routeFixedPoint, {
+          withoutRuleQuiesced: true,
+        });
+      },
+    ],
+    [
+      'a two-thinker mind that passed its append ceiling',
+      (draft: {
+        siblingSuppression: { endToEnd: Record<string, unknown> };
+      }) => {
+        Object.assign(draft.siblingSuppression.endToEnd, { ceilingHit: true });
+      },
+    ],
+    [
+      'a bound bought by deafness: the external step woke only one thinker',
+      (draft: {
+        siblingSuppression: { endToEnd: Record<string, unknown> };
+      }) => {
+        Object.assign(draft.siblingSuppression.endToEnd, {
+          thinkersWokenByExternalStep: 1,
+        });
+      },
+    ],
+    [
+      'a bound with no suppression behind it',
+      (draft: {
+        siblingSuppression: { endToEnd: Record<string, unknown> };
+      }) => {
+        Object.assign(draft.siblingSuppression.endToEnd, {
+          siblingWakesSuppressed: 0,
+        });
       },
     ],
   ])('the gate rejects %s', (_name, change) => {

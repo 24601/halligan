@@ -2168,6 +2168,7 @@ import {
   axMindEventSource,
   axMindEventTypes,
   axMindPendingClass,
+  axMindSiblingWakeSuppressed,
   axMindStepEventExtensions,
   axMindSubscribedStepTypes,
   axMindThinkerSubject,
@@ -2969,6 +2970,7 @@ export { axMindRoutingSignals };
 export { axMindSalienceBuffer };
 export { axMindSalienceGuidance };
 export { axMindSalienceTextBytes };
+export { axMindSiblingWakeSuppressed };
 export { axMindSkillTokens };
 export { axMindStalledThreshold };
 export { axMindStaticArtifacts };

@@ -612,6 +612,12 @@ export function axIsMindConfigurationError(
 
 export type AxMindDiagnosticCode =
   | 'wake-suppressed-self'
+  /**
+   * A SIBLING thinker of this mind wrote a step that carries nothing for a
+   * reader, so this thinker's wake was refused. Without it two thinkers on the
+   * default subscription answer each other's `idle` steps forever.
+   */
+  | 'wake-suppressed-sibling'
   | 'wake-coalesced'
   | 'wake-deferred-backpressure'
   | 'watchdog-fired'

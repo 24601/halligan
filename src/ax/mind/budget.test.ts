@@ -83,15 +83,26 @@ import { describe, expect, it } from 'vitest';
  * - `subruns.ts` 140 -> 150: the bound on an unsummarized merge content, and
  *   the poll ceiling reported in milliseconds like every other `wallClock`.
  *
- * Measured at this raise: types 596, pacer 284, health 138, routes 254,
+ * The Track A follow-up pass (the sibling-idle runaway) raises two more, and
+ * the reasons are in docs/MIND.md's "Line budgets" section:
+ *
+ * - `routes.ts` 270 -> 320: `axMindSiblingWakeSuppressed` (the derived
+ *   sibling-inert step class) and the sibling branch of the route predicate,
+ *   with the comment naming the unbounded token runaway they close. Two
+ *   thinkers on the default subscription answered each other's `idle` steps
+ *   forever; the fix is a dispatch rule, so it belongs on this page.
+ * - `types.ts` 600 -> 615: the `wake-suppressed-sibling` diagnostic code and
+ *   the doc comment that says which loop its absence hides.
+ *
+ * Measured at this raise: types 602, pacer 284, health 138, routes 314,
  * sources 594, chat 768, salience 163, skills 134, context 138, step 166,
- * subruns 140, thinkers 518, mind 1_415, index 164 -- 5_472 in total.
+ * subruns 140, thinkers 518, mind 1_415, index 165 -- 5_539 in total.
  */
 const CAPS: readonly (readonly [string, number])[] = [
-  ['src/ax/mind/types.ts', 600], // raised from 430, then 480
+  ['src/ax/mind/types.ts', 615], // raised from 430, 480, then 600
   ['src/ax/mind/pacer.ts', 300], // raised from 200, then 270
   ['src/ax/mind/health.ts', 150], // raised from 130
-  ['src/ax/mind/routes.ts', 270], // raised from 250
+  ['src/ax/mind/routes.ts', 320], // raised from 250, then 270
   ['src/ax/mind/sources.ts', 610], // raised from 330, then 560
   ['src/ax/mind/chat.ts', 800], // raised from 280, then 680
   ['src/ax/mind/salience.ts', 180], // raised from 130
