@@ -9,7 +9,10 @@
  * resulting goal statuses and the compare-and-set revision advance.
  *
  * Lives in `scripts/` because it reads the fixture from disk and `src/ax` may
- * not use node builtins.
+ * not use node builtins. The fixture itself lives in
+ * `ir/conformance/axagent-ts/` rather than `ir/conformance/axagent/` because
+ * working state is not ported to AxIR yet, and every generated language
+ * package executes the latter directory (see that directory's README).
  */
 
 import { readFileSync } from 'node:fs';
@@ -23,7 +26,7 @@ import {
 import { AxInMemoryProgramStateStore } from '../src/ax/event/memoryStore.js';
 import { AxManualEventClock } from '../src/ax/event/types.js';
 
-const FIXTURE_PATH = 'ir/conformance/axagent/working-state-commit.json';
+const FIXTURE_PATH = 'ir/conformance/axagent-ts/working-state-commit.json';
 
 type Fixture = {
   input: {

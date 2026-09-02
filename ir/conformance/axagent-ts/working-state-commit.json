@@ -1,8 +1,8 @@
 {
   "name": "working_state_commit",
-  "kind": "agent",
+  "kind": "agent_working_state",
   "operation": "working_state_commit",
-  "description": "Core-owned working-state commit kernel: receipt-set membership, expects matching, the closed classification table, test-as-guard semantics, and the compare-and-set revision advance. Host-supplied checker behaviour is deliberately NOT expected here; the checker declared below is a no-op.",
+  "description": "TypeScript-only (not yet ported to AxIR; see the backlog entry). Core-owned working-state commit kernel: receipt-set membership, expects matching, the closed classification table, test-as-guard semantics, and the compare-and-set revision advance. Host-supplied checker behaviour is deliberately NOT expected here; the checker declared below is a no-op.",
   "source": {
     "tsDerived": true,
     "extractor": "src/ax/agent/workingState.ts",

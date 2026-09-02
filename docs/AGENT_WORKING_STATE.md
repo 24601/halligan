@@ -253,6 +253,19 @@ them: the state document and the receipt roster ride beside the action log.
 Removing the action-log growth term is the `skillState` memory mode, which is
 a separate change.
 
+## AxIR status
+
+Working state is **not ported to AxIR**. It is recorded in the backlog as
+`axir-2026-09-02-verifier-gated-typed-working-state-for-the-actor-loop`.
+
+Its kernel is pinned by `ir/conformance/axagent-ts/working-state-commit.json`,
+executed against the real kernel by
+`scripts/working-state-conformance.test.ts` in the root `npm test` chain. That
+fixture deliberately lives outside `ir/conformance/axagent/`: every generated
+language package enumerates and executes that directory, so a fixture for an
+unported behaviour placed there would either fail every target or be reshaped
+until a target could "pass" it without implementing the behaviour.
+
 ## Known gaps
 
 - **Receipt laundering.** Nothing forbids two goals that both name the same
