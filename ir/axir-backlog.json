@@ -1839,6 +1839,25 @@
       "verification": null
     },
     {
+      "id": "axir-2026-09-02-agent-playbook-evolve-matched-budget-control-arm-neutral-artifac",
+      "status": "open",
+      "title": "Agent playbook evolve: matched-budget control arm, neutral-artifact harness-term ablation, and the baseline/evolved snapshot state machine",
+      "createdAt": "2026-09-02",
+      "sourcePR": 93,
+      "sourceCommit": "0b0e0110e746ff17ed3fb7c841d3b5a3e2bdd485",
+      "tsPaths": ["src/ax/agent/agentInternal/playbookEvolve/controlArm.ts"],
+      "portableSurface": "axagent",
+      "impact": "Adds a default-off matched-budget control arm to agent.playbook().evolve(). Portable TS behavior changes: (1) runAgentEvalBatch gains an optional metricTaskOf seam that maps the task handed to the agent onto the task handed to the metric (identity unless supplied, so the legacy path is unchanged); (2) evolve() gains run-level phases 0/7/9/10 — it captures the unevolved and evolved artifacts unconditionally, restores the unevolved one under canonical digest assertions to run best-of-N, self-refinement and a neutral-artifact ablation from a SEPARATE metric-call counter whose spend still lands in accounting.metricCalls but never in the legacy metricCallsUsed, and can then roll the WHOLE accepted set back when gates.controlArm is 'require'; (3) a run-level rollback cascades applied='rolled_back', playbookSnapshot=undefined, rolledBackReason, evidence.decision='superseded' with a re-digested receipt, and promotion.status='promoted_then_rolled_back'. Type-level widening (non-breaking): AxAgentPlaybookEvidenceWarningCode gains control_arm_not_beaten; AxAgentPlaybookControlArmResult gains optional neutralArtifactDigest/neutralArtifactTokens; AxAgentPlaybookEvolveError gains an optional playbookSnapshot; AxAgentPlaybookEvolveOptions gains controlArm. Generated packages keep the legacy gate; the control arm is TypeScript-first.",
+      "suggestedAxirWork": [
+        "Add or update the TS-derived conformance fixture.",
+        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
+        "Run npm run axir:conformance:check and npm run test:axir."
+      ],
+      "completedAt": null,
+      "completedByCommit": null,
+      "verification": null
+    },
+    {
       "id": "axir-2026-09-02-agent-playbook-evolve-termination-classification-per-attempt-evi",
       "status": "open",
       "title": "Agent playbook evolve: termination classification, per-attempt evidence, bootstrap intervals, variance band, validity conjuncts, reach instrumentation, gate chain and evidence receipt",
@@ -1908,7 +1927,7 @@
         "src/ax/mind/skills.ts"
       ],
       "portableSurface": "runtime",
-      "impact": "Portable-in-spirit state machines a non-TypeScript target would need to reproduce: the backoff ladder (delay(0)=0, delay(n)=min(base*factor^(n-1), cap), dwell, thought ceiling, immediate error descent, unchanged-on-noop, and the absolute wakes-per-hour fuse) plus its reconstruction from the log alone; the dispatch decision table (registry-derived wakeability, source- and launchedBy-based self-suppression, unconditional own-error suppression, admission-bound deferral that never drops, wake-signal coalescing with a visible count); lag-based health thresholds; the rate fuse derived as the steady-state tolerance PLUS the ladder descent cost, with a published drain time and an edge-triggered pace duty so a parked or unchanged wake cannot re-fire per tick; the disjunctive chat idempotency key and the priority-ordered reply-state resolution, in which outbound authorship is the host-stamped writer identity rather than the remote-controlled from field, a claim TTL fails open, and another thinker\u0027s decline cannot cancel the claim owner\u0027s reply; and the kernel/catalog skill selection with whole-entry demotion and host-facts-only requires gating.",
+      "impact": "Portable-in-spirit state machines a non-TypeScript target would need to reproduce: the backoff ladder (delay(0)=0, delay(n)=min(base*factor^(n-1), cap), dwell, thought ceiling, immediate error descent, unchanged-on-noop, and the absolute wakes-per-hour fuse) plus its reconstruction from the log alone; the dispatch decision table (registry-derived wakeability, source- and launchedBy-based self-suppression, unconditional own-error suppression, admission-bound deferral that never drops, wake-signal coalescing with a visible count); lag-based health thresholds; the rate fuse derived as the steady-state tolerance PLUS the ladder descent cost, with a published drain time and an edge-triggered pace duty so a parked or unchanged wake cannot re-fire per tick; the disjunctive chat idempotency key and the priority-ordered reply-state resolution, in which outbound authorship is the host-stamped writer identity rather than the remote-controlled from field, a claim TTL fails open, and another thinker's decline cannot cancel the claim owner's reply; and the kernel/catalog skill selection with whole-entry demotion and host-facts-only requires gating.",
       "suggestedAxirWork": [
         "Add or update the TS-derived conformance fixture.",
         "Update AxIR/Core or descriptor data to match the portable TS behavior.",
