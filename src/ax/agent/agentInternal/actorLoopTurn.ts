@@ -26,6 +26,12 @@ import {
   formatBubbledActorTurnOutput,
   validateActorTurnCodePolicy,
 } from '../runtime.js';
+import { axValidateStatePatch } from '../statePatch.js';
+import type {
+  AxWorkingState,
+  AxWorkingStateCommitContext,
+  AxWorkingStateGuidanceNote,
+} from '../workingState.js';
 import type { ActorLoopContext } from './actorLoopContext.js';
 import {
   appendDiscoveryTurnSummary,
@@ -59,6 +65,87 @@ function buildMultipleCodeBlocksPolicyGuidance(
     `Your previous ${runtimeCodeFieldTitle} value contained multiple fenced code blocks, so none of them were executed. ` +
     `On this turn, put every executable statement in one ${runtimeCodeFieldTitle} value with at most one fence.`
   );
+}
+
+/**
+ * Render harness-owned guidance for the trusted guidance channel. Only an enum
+ * code, the op KIND, a sanitized bounded pointer, the goal id and the expected
+ * callables ever appear — `guidanceLog` is the highest-authority prompt region
+ * and must never launder model-authored text into it.
+ */
+function buildWorkingStateGuidance(
+  notes: readonly AxWorkingStateGuidanceNote[]
+): string | undefined {
+  if (notes.length === 0) return undefined;
+  const lines = notes.map((note) => {
+    const goal = note.goalId ? ` for goal ${note.goalId}` : '';
+    const expects =
+      note.expects && note.expects.length > 0
+        ? ` (expected receipts from: ${note.expects.join(', ')})`
+        : '';
+    return `- ${note.code}: ${note.opKind} at ${note.path}${goal}${expects}`;
+  });
+  return [
+    'Working state did not apply part of your last proposal:',
+    ...lines,
+    'A goal becomes done only by citing a receipt ref from the read-only Receipt Roster in the same patch.',
+  ].join('\n');
+}
+
+/**
+ * Run one working-state turn: mint nothing (receipts are already drained),
+ * decide whether to propose, validate the untrusted patch document, commit
+ * through the kernel, and route harness guidance into the trusted channel.
+ */
+async function runWorkingStateTurn(
+  workingState: AxWorkingState<any>,
+  context: AxWorkingStateCommitContext,
+  proposerInput: Readonly<{ action: string; observation: string }>,
+  signal: AbortSignal | undefined
+): Promise<readonly AxWorkingStateGuidanceNote[]> {
+  const mode = workingState.proposerMode();
+  const changed =
+    (context.receiptRefs?.length ?? 0) > 0 || context.isError === true;
+  const shouldPropose =
+    mode === 'every-turn' || (mode === 'on-change' && changed);
+  if (!shouldPropose) {
+    // `on-change` makes the added model cost proportional to ENVIRONMENT
+    // change, not to turn count: a pure-inspection turn costs nothing extra.
+    await workingState.recordNonCommit(context, 'none');
+    return [];
+  }
+
+  let proposal: Awaited<ReturnType<typeof workingState.propose>>;
+  try {
+    proposal = await workingState.propose(
+      {
+        stateContract: workingState.stateContract(),
+        workingState: workingState.renderWritable(),
+        receiptRoster: workingState.renderReadOnly(),
+        action: proposerInput.action,
+        observation: proposerInput.observation,
+        isError: context.isError,
+        turn: context.turn,
+      },
+      signal
+    );
+  } catch {
+    // A flaky proposer must never corrupt state or fail the turn.
+    await workingState.recordNonCommit(context, 'proposer_error');
+    return [];
+  }
+
+  const validation = axValidateStatePatch(proposal.statePatch);
+  if (validation.status !== 'valid') {
+    const rejected = await workingState.recordNonCommit(
+      context,
+      'patch_invalid'
+    );
+    return rejected.guidance ?? [];
+  }
+
+  const outcome = await workingState.commit(validation.patch, context, signal);
+  return outcome.guidance ?? [];
 }
 
 function extractRawActorCode(
@@ -174,6 +261,16 @@ export async function runActorTurn<_IN extends AxGenIn>(
   }
   if (await refreshCheckpointSummary(actionLogEntries.length)) {
     resetActorModelErrorState();
+  }
+
+  // Refresh the working-state prompt regions BEFORE the prompt is measured or
+  // sent, so the measured characters are the sent characters by construction.
+  if (workingState) {
+    s._workingStatePromptValues = {
+      stateContract: workingState.stateContract(),
+      workingState: workingState.renderWritable(),
+      receiptRoster: workingState.renderReadOnly(),
+    };
   }
 
   let actionLogParts = renderActionLogParts();
@@ -559,6 +656,38 @@ export async function runActorTurn<_IN extends AxGenIn>(
       if (!mintedReceiptRefs.includes(receipt.ref)) {
         mintedReceiptRefs.push(receipt.ref);
       }
+    }
+
+    const turnCalls = [
+      ...new Set(
+        (functionCallRecords?.slice(functionCallStartIndex) ?? []).map(
+          (record) => record.qualifiedName
+        )
+      ),
+    ];
+    const guidanceNotes = await runWorkingStateTurn(
+      workingState,
+      {
+        action: actionLogCode,
+        observation: output,
+        turn: entryTurn,
+        isError,
+        receiptRefs: mintedReceiptRefs,
+        calls: turnCalls,
+        selectedSkills: (mutableState.usedSkills ?? []).map(
+          (used: { id: string }) => used.id
+        ),
+      },
+      { action: actionLogCode, observation: output },
+      _effectiveAbortSignal
+    );
+    const guidanceText = buildWorkingStateGuidance(guidanceNotes);
+    if (guidanceText) {
+      appendGuidanceEntry(guidanceState.entries, {
+        turn: entryTurn,
+        guidance: guidanceText,
+        triggeredBy: 'working state',
+      });
     }
   }
 

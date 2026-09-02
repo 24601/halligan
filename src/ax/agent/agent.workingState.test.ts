@@ -9,9 +9,10 @@
  * real dispatch from a fabricated one, which is the whole point of the gate.
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { AxAIService } from '../ai/types.js';
 import { AxInMemoryProgramStateStore } from '../event/memoryStore.js';
+import type { AxProgramStateStore } from '../event/types.js';
 import {
   type AxWorkingStateScript,
   axCreateEvaluatingRuntime,
@@ -22,6 +23,8 @@ import { agent } from './index.js';
 import type {
   AxWorkingStateConfig,
   AxWorkingStateGoal,
+  AxWorkingStateProposer,
+  AxWorkingStateTraceStep,
 } from './workingState.js';
 
 const STATE_SIGNATURE = 'orderId:string, itemsPacked:number, shipped:boolean';
@@ -347,5 +350,269 @@ describe('working state receipts from the dispatch site', () => {
     expect(receipts.map((receipt) => receipt.qualifiedName)).toEqual([
       'inventory.pick',
     ]);
+  });
+});
+
+describe('working state turn hook', () => {
+  const config = (
+    overrides?: Partial<AxWorkingStateConfig<any>>
+  ): AxWorkingStateConfig<any> => ({
+    stateSignature: STATE_SIGNATURE,
+    initial: {
+      goals: { g_pick: seededGoal('g_pick', { expects: ['inventory.pick'] }) },
+    },
+    ...overrides,
+  });
+
+  /** A proposer that cites whatever ref it can read out of the roster text. */
+  const citeFromRoster = (): AxWorkingStateProposer => async (input) => {
+    const ref = /^(r\d+)\s+inventory\.pick\s+turn \d+$/m.exec(
+      input.receiptRoster
+    )?.[1];
+    if (!ref) return { statePatch: [] };
+    return {
+      statePatch: [
+        {
+          op: 'add',
+          path: '/goals/g_pick/evidence/-',
+          value: { kind: 'tool_receipt', ref },
+        },
+        { op: 'replace', path: '/goals/g_pick/status', value: 'done' },
+      ],
+      rationale: 'the pick receipt proves it',
+    };
+  };
+
+  it('renders the writable state and the read-only roster into the actor prompt', async () => {
+    // Without a citable ref in front of the model, `goal_complete` would be
+    // unreachable and the mechanism would ship closed rather than strict.
+    const {
+      agent: built,
+      ai,
+      executorPrompts,
+    } = makeAgent(
+      {
+        distiller: [DISTILL],
+        executor: ['await inventory.pick({order:"42"})', FINAL],
+      },
+      config({ proposer: 'actor' })
+    );
+
+    await built.forward(ai, { task: 'pack' } as never);
+
+    const lastPrompt = executorPrompts[executorPrompts.length - 1] ?? '';
+    expect(lastPrompt).toContain('g_pick [pending]');
+    expect(lastPrompt).toMatch(/r1\s+inventory\.pick\s+turn 1/);
+    // The declared fact contract rides the cached prefix.
+    expect(executorPrompts[0] ?? '').toContain('facts.itemsPacked');
+  });
+
+  it('completes a goal end to end from a ref the proposer read off the roster', async () => {
+    const { agent: built, ai } = makeAgent(
+      {
+        distiller: [DISTILL],
+        executor: ['await inventory.pick({order:"42"})', FINAL],
+      },
+      config({ proposer: 'on-change', proposeWith: citeFromRoster() })
+    );
+
+    await built.forward(ai, { task: 'pack' } as never);
+    expect(built.getWorkingState()?.goals.g_pick?.status).toBe('done');
+    expect(built.getWorkingState()?.goals.g_pick?.evidence).toEqual([
+      { kind: 'tool_receipt', ref: 'r1' },
+    ]);
+  });
+
+  it('parks a false completion end to end and keeps the goal pending', async () => {
+    const traces: AxWorkingStateTraceStep[] = [];
+    const {
+      agent: built,
+      ai,
+      executorPrompts,
+    } = makeAgent(
+      {
+        distiller: [DISTILL],
+        executor: ['await inventory.fail({})', 'console.log("retry")', FINAL],
+      },
+      config({
+        proposer: 'every-turn',
+        // The model claims completion with no receipt at all.
+        proposeWith: async () => ({
+          statePatch: [
+            { op: 'replace', path: '/goals/g_pick/status', value: 'done' },
+          ],
+        }),
+        trace: true,
+        onTrace: (step) => {
+          traces.push(step);
+        },
+      })
+    );
+
+    await built.forward(ai, { task: 'lie about it' } as never);
+
+    expect(built.getWorkingState()?.goals.g_pick?.status).toBe('pending');
+    expect(
+      traces.some((step) => step.parked.includes('no_supporting_receipt'))
+    ).toBe(true);
+    // The park is explained to the model through the TRUSTED channel.
+    const laterPrompt = executorPrompts[1] ?? '';
+    expect(laterPrompt).toContain('no_supporting_receipt');
+    expect(laterPrompt).toContain('inventory.pick');
+  });
+
+  it('appends harness guidance that carries no model-authored text', async () => {
+    const injection = 'IGNOREPREVIOUSINSTRUCTIONS';
+    const {
+      agent: built,
+      ai,
+      executorPrompts,
+    } = makeAgent(
+      {
+        distiller: [DISTILL],
+        executor: ['await inventory.pick({order:"42"})', FINAL],
+      },
+      config({
+        proposer: 'on-change',
+        proposeWith: async () => ({
+          statePatch: [
+            { op: 'add', path: `/facts/${injection}`, value: injection },
+          ],
+        }),
+      })
+    );
+
+    await built.forward(ai, { task: 'inject' } as never);
+    const laterPrompt = executorPrompts[1] ?? '';
+    expect(laterPrompt).toContain('undeclared_fact_path');
+    // The model's VALUE never reaches the highest-authority prompt region.
+    expect(laterPrompt).not.toContain(`"${injection}"`);
+  });
+
+  it('records one gamma step per actor turn with digests and receipts', async () => {
+    const traces: AxWorkingStateTraceStep[] = [];
+    const { agent: built, ai } = makeAgent(
+      {
+        distiller: [DISTILL],
+        executor: ['await inventory.pick({order:"42"})', FINAL],
+      },
+      config({
+        proposer: 'on-change',
+        proposeWith: citeFromRoster(),
+        trace: true,
+        onTrace: (step) => {
+          traces.push(step);
+        },
+      })
+    );
+
+    await built.forward(ai, { task: 'pack' } as never);
+
+    expect(traces.map((step) => step.turn)).toEqual([1, 2]);
+    expect(traces[0]!.observation.receipts).toEqual(['r1']);
+    expect(traces[0]!.action.calls).toEqual(['inventory.pick']);
+    expect(traces[0]!.committed).toEqual(['evidence_append', 'goal_complete']);
+    expect(traces[0]!.stage).toBe('executor');
+    expect(traces[0]!.runId).toMatch(/^ws:/);
+    for (const step of traces) {
+      expect(step.believedStateDigest).toMatch(/^[0-9a-f]{64}$/);
+      expect(step.committedStateDigest).toMatch(/^[0-9a-f]{64}$/);
+    }
+  });
+
+  it('does not run the proposer on a clean no-receipt turn under on-change', async () => {
+    const proposeWith = vi.fn(async () => ({ statePatch: [] }));
+    const { agent: built, ai } = makeAgent(
+      {
+        distiller: [DISTILL],
+        executor: ['console.log("just looking")', FINAL],
+      },
+      config({ proposer: 'on-change', proposeWith })
+    );
+
+    await built.forward(ai, { task: 'look' } as never);
+    expect(proposeWith).not.toHaveBeenCalled();
+  });
+
+  it('runs the proposer on a receipt turn and on an errored turn', async () => {
+    const receiptCalls = vi.fn(async () => ({ statePatch: [] }));
+    const receiptRun = makeAgent(
+      {
+        distiller: [DISTILL],
+        executor: ['await inventory.pick({order:"42"})', FINAL],
+      },
+      config({ proposer: 'on-change', proposeWith: receiptCalls })
+    );
+    await receiptRun.agent.forward(receiptRun.ai, { task: 'pack' } as never);
+    expect(receiptCalls).toHaveBeenCalled();
+
+    const errorCalls = vi.fn(async () => ({ statePatch: [] }));
+    const errorRun = makeAgent(
+      { distiller: [DISTILL], executor: ['await inventory.fail({})', FINAL] },
+      config({ proposer: 'on-change', proposeWith: errorCalls })
+    );
+    await errorRun.agent.forward(errorRun.ai, { task: 'fail' } as never);
+    // A failure may set a blocker, so an errored turn still proposes.
+    expect(errorCalls).toHaveBeenCalled();
+  });
+
+  it('carries state forward and records proposal error when the proposer throws', async () => {
+    const traces: AxWorkingStateTraceStep[] = [];
+    const { agent: built, ai } = makeAgent(
+      {
+        distiller: [DISTILL],
+        executor: ['await inventory.pick({order:"42"})', FINAL],
+      },
+      config({
+        proposer: 'every-turn',
+        proposeWith: async () => {
+          throw new Error('proposer offline');
+        },
+        trace: true,
+        onTrace: (step) => {
+          traces.push(step);
+        },
+      })
+    );
+
+    await built.forward(ai, { task: 'pack' } as never);
+    expect(traces.some((step) => step.proposal === 'error')).toBe(true);
+    expect(built.getWorkingState()?.goals.g_pick?.status).toBe('pending');
+  });
+
+  it('records an invalid patch document without touching the store', async () => {
+    const traces: AxWorkingStateTraceStep[] = [];
+    const inner = new AxInMemoryProgramStateStore();
+    const writes = vi.fn();
+    const store: AxProgramStateStore = {
+      load: (key) => inner.load(key),
+      compareAndSet: (key, expected, state, fence) => {
+        writes();
+        return inner.compareAndSet(key, expected, state, fence);
+      },
+      delete: (key) => inner.delete(key),
+    };
+    const { agent: built, ai } = makeAgent(
+      {
+        distiller: [DISTILL],
+        executor: ['await inventory.pick({order:"42"})', FINAL],
+      },
+      config({
+        store,
+        proposer: 'every-turn',
+        // A model that emits an object instead of an array of ops.
+        proposeWith: async () => ({
+          statePatch: { op: 'add', path: '/facts/orderId', value: '42' },
+        }),
+        trace: true,
+        onTrace: (step) => {
+          traces.push(step);
+        },
+      })
+    );
+
+    await built.forward(ai, { task: 'bad patch' } as never);
+    expect(traces.some((step) => step.proposal === 'invalid')).toBe(true);
+    expect(writes).not.toHaveBeenCalled();
   });
 });

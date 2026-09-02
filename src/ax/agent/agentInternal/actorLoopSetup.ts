@@ -180,6 +180,21 @@ export function buildActorLoopSetup(
         values.relevanceHints = relevanceHints;
       }
     }
+    // Working-state prompt regions, refreshed once per turn by the turn hook
+    // before anything measures or sends the prompt, so measured chars are the
+    // sent chars by construction.
+    const workingStateValues = s._workingStatePromptValues as
+      | Readonly<{
+          stateContract: string;
+          workingState: string;
+          receiptRoster: string;
+        }>
+      | undefined;
+    if (workingStateValues) {
+      values.stateContract = workingStateValues.stateContract;
+      values.workingState = workingStateValues.workingState;
+      values.receiptRoster = workingStateValues.receiptRoster;
+    }
     const contextMetadata = inputState.getContextMetadata();
     if (contextMetadata) {
       values.contextMetadata = contextMetadata;
