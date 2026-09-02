@@ -3,7 +3,8 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
-
+import { AxSignature } from '../dsp/sig.js';
+import type { AxProgrammable } from '../dsp/types.js';
 import {
   AxEventBackpressureError,
   type AxEventIngress,
@@ -22,6 +23,7 @@ import {
 } from '../trajectory/rollups.js';
 import type { AxTrajectoryStep } from '../trajectory/types.js';
 import { axResolveMindReplyState } from './chat.js';
+import { mind } from './mind.js';
 import { axNextMindPace } from './pacer.js';
 import {
   type AxMindTrajectoryConsumer,
@@ -35,7 +37,7 @@ import type {
   AxMindWakeClass,
   AxMindWakeOutcome,
 } from './types.js';
-import { axDefaultMindSubscription } from './types.js';
+import { axDefaultMindSubscription, axMindStaticArtifacts } from './types.js';
 
 /**
  * The axmind fixtures are TypeScript-consumed in v1:
@@ -292,6 +294,12 @@ describe('ir/conformance/axmind/dispatch-decisions.json', () => {
       readonly subscription: Partial<AxMindSubscription>;
       readonly inFlight?: number;
       readonly backpressure?: number;
+      /**
+       * Row 9 is not a source decision at all: the offer happens in
+       * `AxMind.append`, so its case drives a REAL mind with a thinker whose
+       * program is still running. `mind` selects that branch.
+       */
+      readonly harness?: 'mind';
       readonly expected: {
         readonly action: 'drop' | 'defer' | 'publish';
         readonly authorized?: boolean;
@@ -299,6 +307,8 @@ describe('ir/conformance/axmind/dispatch-decisions.json', () => {
         readonly coalesced?: number;
         readonly diagnostic?: string;
         readonly deliveredOnNextPass?: boolean;
+        readonly salienceOffers?: number;
+        readonly feedbackSteps?: number;
       };
     }[];
   }
@@ -308,15 +318,138 @@ describe('ir/conformance/axmind/dispatch-decisions.json', () => {
   );
   const registry = axTrajectoryTypeRegistry();
 
+  /**
+   * Row 9. The offer is made by `AxMind.append`, not by the source, so this
+   * branch drives a REAL mind: one thinker whose program parks on a deferred,
+   * an inbound message appended WHILE it is parked, and the salience step plus
+   * its diagnostic asserted before the run is released.
+   */
+  async function runBusySubscriberRow(
+    fixtureFile: DispatchFixture,
+    one: DispatchFixture['cases'][number]
+  ): Promise<void> {
+    const clock = new AxManualEventClock(1_000);
+    const store = new AxInMemoryTrajectoryStore({ clock });
+    await store.create({ trajectoryId: fixtureFile.trajectoryId });
+    const diagnostics: AxMindDiagnostic[] = [];
+    let release: (() => void) | undefined;
+    const parked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered = 0;
+    const signature = new AxSignature('context:string -> reply?:string');
+    const program = {
+      getId: () => 'busy',
+      setId: () => undefined,
+      getSignature: () => signature,
+      getTraces: () => [],
+      setDemos: () => undefined,
+      applyOptimization: () => undefined,
+      getOptimizableComponents: () => [],
+      applyOptimizedComponents: () => undefined,
+      getUsage: () => [],
+      getChatLog: () => [],
+      resetUsage: () => undefined,
+      forward: async () => {
+        entered += 1;
+        await parked;
+        return { reply: 'ok' };
+      },
+      streamingForward: async function* () {},
+    } as unknown as AxProgrammable<any, any>;
+    const instance = mind({
+      id: 'dispatch-row-9',
+      trajectoryId: fixtureFile.trajectoryId,
+      store,
+      clock,
+      registry,
+      artifacts: axMindStaticArtifacts({
+        revision: 'row-9',
+        persona: 'a mind that is already busy',
+        thinkerPrompts: {},
+        goals: [],
+        skills: [],
+      }),
+      thinkers: [
+        {
+          name: fixtureFile.thinker,
+          kind: 'monolith',
+          subscription: {
+            ...axDefaultMindSubscription,
+            watchdogMs: 0,
+            ...one.subscription,
+          },
+          ai: {} as never,
+          program,
+          context: (request) => ({ context: request.projection.render }),
+        },
+      ],
+      budget: { contextWindowTokens: 8_000 },
+      allowVolatileTrajectory: true,
+      tickMs: 5,
+      sourcePollMs: 5,
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+    });
+    await instance.start();
+    const pump = async (rounds: number) => {
+      for (let round = 0; round < rounds; round++) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        clock.advanceBy(5);
+      }
+    };
+    // The bootstrap wake parks the only thinker. Without this the append
+    // below would find nobody running and row 9 would not apply at all.
+    await pump(40);
+    expect(entered).toBe(1);
+    expect(instance.health().thinkers[0]?.running).toBe(1);
+
+    await instance.append({
+      trajectoryId: '',
+      type: one.append!.type,
+      ...(one.append!.source ? { source: one.append!.source } : {}),
+      data: { from: 'ada', to: 'mind', content: 'while you are working' },
+    });
+    const injected = diagnostics.filter(
+      (diagnostic) => diagnostic.code === one.expected.diagnostic
+    );
+    expect(injected).toHaveLength(one.expected.salienceOffers ?? 1);
+    expect(injected[0]?.thinker).toBe(fixtureFile.thinker);
+    // The audit trail is a `feedback` step, which the registry declares
+    // wakeable:false -- so recording the injection can never re-dispatch it.
+    const tail = await store.tailBackward({
+      trajectoryId: fixtureFile.trajectoryId,
+      limit: 200,
+      maxScan: 2_000,
+    });
+    const feedback = tail.steps.filter((step) => step.type === 'feedback');
+    expect(feedback).toHaveLength(one.expected.feedbackSteps ?? 1);
+    expect(registry.describe('feedback').wakeable).toBe(false);
+    // Offered ONCE, globally: a second append of the same source step must
+    // not re-offer, and a fresh message must not be offered to a thinker that
+    // is no longer running.
+    expect(instance.salience.size).toBe(1);
+    const taken = instance.salience.take(fixtureFile.thinker);
+    expect(taken?.text).toContain('while you are working');
+    expect(instance.salience.take(fixtureFile.thinker)).toBeUndefined();
+    // Only now is the run released: the offer happened MID-RUN.
+    release?.();
+    await pump(40);
+    await instance.close({ drain: false, timeoutMs: 200 });
+  }
+
   it('covers every row of the decision table', () => {
     expect(new Set(loaded.cases.map((one) => one.row))).toEqual(
-      new Set([1, 2, 3, 4, 5, 6, 7, 8, 10])
+      new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
     );
   });
 
   it.each(
     loaded.cases.map((one) => [`row ${one.row}: ${one.name}`, one] as const)
   )('%s', async (_name, one) => {
+    if (one.harness === 'mind') {
+      await runBusySubscriberRow(loaded, one);
+      return;
+    }
     const clock = new AxManualEventClock(1_000);
     const store = new AxInMemoryTrajectoryStore({ clock });
     await store.create({ trajectoryId: loaded.trajectoryId });
