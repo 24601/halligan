@@ -104,7 +104,7 @@
       "type": "skill-md",
       "description": "This skill helps an LLM generate correct AxGEPA optimization code using @ax-llm/ax. Use when the user asks about AxGEPA, GEPA, Pareto optimization, multi-objective prompt tuning, reflective prompt evolution, validationExamples, maxMetricCalls, or optimizing a generator, flow, or agent tree.",
       "url": "ax-gepa/SKILL.md",
-      "digest": "sha256:39deee1ab458c25eb8868f3173153a106e43679cd6cd66e91fb85cda56c1bda3"
+      "digest": "sha256:920c5765bb81d6dd13de3e375a545bba8aa07f0f4048d39b7badcca8a04ebf85"
     },
     {
       "name": "ax-refine",

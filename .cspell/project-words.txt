@@ -38,6 +38,7 @@ backticked
 baprs
 behaviour
 behaviourally
+Bernoulli
 bootstrapper
 Buena
 camelcasefield
@@ -88,6 +89,7 @@ fewshot
 flac
 Flowable
 fmap
+fnv
 Forwardable
 fres
 frobnicate
@@ -118,6 +120,7 @@ Inspectable
 Instrs
 interp
 interop
+ipw
 Jiro
 jwtx
 kwargs
@@ -125,6 +128,7 @@ keyterm
 Kimi
 Kita
 Kore
+Laplace
 llmclient
 LLMQUERY
 lockdown
@@ -162,6 +166,7 @@ nanos
 Nemo
 nemo
 neumann
+newwriter
 Noll
 nonportable
 Northstar
@@ -192,6 +197,7 @@ Qwen
 rankable
 RARO
 Readye
+rebranded
 reclassifiable
 recognises
 reentrancy
@@ -211,6 +217,7 @@ Rpbw
 runbook
 région
 Sampford
+samplecount
 sandboxed
 scriptable
 scalarize
@@ -266,11 +273,14 @@ unawaited
 undeclarable
 unexpressible
 ungated
+unioned
+unkeyed
 unminified
 unprovenanced
 unranked
 unrequested
 unscored
+unsettleable
 unstub
 unvalidated
 unwired
