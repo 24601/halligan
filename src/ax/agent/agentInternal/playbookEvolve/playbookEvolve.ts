@@ -66,6 +66,7 @@ import type {
   AxAgentPlaybookEvolveOutcome,
   AxAgentPlaybookEvolveProgressEvent,
   AxAgentPlaybookEvolveResult,
+  AxAgentPlaybookEvolveRunRecord,
   AxAgentPlaybookRetentionAnchor,
   AxAgentPlaybookRetentionReceipt,
   AxAgentPlaybookWeakness,
@@ -305,6 +306,19 @@ function validateEvidenceOptions(
       'control_arm_failed',
       'control_arm',
       'gates.controlArm needs a controlArm configuration; a control-arm gate with no arm cannot be evaluated.'
+    );
+  }
+  if (
+    gates?.controlArmMargin !== undefined &&
+    (!gates.controlArm || gates.controlArm === 'off')
+  ) {
+    // A margin with no gate to apply it configures nothing. Accepting it
+    // silently is the same declared-and-inert failure the gates above fail
+    // closed on.
+    throw new AxAgentPlaybookEvolveError(
+      'control_arm_failed',
+      'control_arm',
+      'gates.controlArmMargin has no effect without gates.controlArm; a margin with no control-arm gate configures nothing.'
     );
   }
   if (gates?.transfer && gates.transfer !== 'off') {
@@ -700,6 +714,15 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
     ...(heldOut !== undefined ? { heldOut } : {}),
   };
   const retentionAnchors: AxAgentPlaybookRetentionAnchor[] = [];
+  /**
+   * The anchor pass's per-slice records, kept so a slice can carry its own
+   * paired interval on the receipt. Retention anchors are fixed pre-proposal,
+   * so these never re-anchor the way the current/held-out records do.
+   */
+  const sliceAnchorRecords: (readonly AxAgentPlaybookEvolveRunRecord<
+    IN,
+    OUT
+  >[])[] = [];
   if (retentionPolicy) {
     for (const [index, slice] of retentionPolicy.slices.entries()) {
       progress(
@@ -718,6 +741,7 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
           result
         );
       }
+      sliceAnchorRecords.push(result.records);
       retentionAnchors.push(
         deepFreeze({
           name: slice.name,
@@ -741,7 +765,9 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
   // ---- Variance band: re-runs of the UNCHANGED artifact ----
   // Establishes the smallest delta distinguishable from run-to-run noise, so a
   // candidate gain can be compared against the noise floor rather than against
-  // zero. Runs BEFORE any mutation, and fails closed on budget before it.
+  // zero. Runs BEFORE any mutation and fails closed on budget before making
+  // one — the baseline batches above have already been spent by this point, so
+  // this is "before any mutation", not "before any spend".
   const intervalSettings = validateIntervalOptions(options?.intervalOptions);
   const bandSplits: readonly ('current' | 'heldOut')[] =
     options?.varianceBand?.splits ??
@@ -874,6 +900,9 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
     seedFromDigest(
       canonicalDigest((validationTasks ?? []).map((task) => task.id ?? ''))
     );
+  const sliceSeed = (tasks: readonly AxAgentEvalTask<IN>[]) =>
+    intervalSettings.seed ??
+    seedFromDigest(canonicalDigest(tasks.map((task) => task.id ?? '')));
   const intervalFor = (
     anchor: readonly { task: object; score: number }[] | undefined,
     candidate: readonly { task: object; score: number }[] | undefined,
@@ -1424,6 +1453,22 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
           };
         })();
 
+        // Per-slice paired intervals, so a retention slice reports its own
+        // uncertainty instead of leaving the receipt's `slices` array empty
+        // whenever a retentionPolicy is configured.
+        const sliceIntervals = (retentionPolicy?.slices ?? []).flatMap(
+          (slice, index) => {
+            const interval = intervalFor(
+              sliceAnchorRecords[index],
+              candidateRetentionBatches[index]?.batch.records,
+              sliceSeed(slice.tasks as readonly AxAgentEvalTask<IN>[])
+            );
+            return interval
+              ? [{ name: slice.name, version: slice.version, interval }]
+              : [];
+          }
+        );
+
         const chainAccepts = gateChainAccepts(gateReport);
         if (legacyAccept && chainAccepts && overhead) finalOverhead = overhead;
         evidence = buildEvidenceReceipt({
@@ -1444,6 +1489,7 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
                 direction: 'unresolved',
               } as AxAgentPlaybookInterval),
             ...(heldOutInterval ? { heldOut: heldOutInterval } : {}),
+            ...(sliceIntervals.length > 0 ? { slices: sliceIntervals } : {}),
           },
           reach: reach?.report ?? {
             basis: 'rendered_only',
@@ -1486,7 +1532,13 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
         legacyAccept && (gateReport ? gateChainAccepts(gateReport) : true);
       const gateRejection =
         legacyAccept && gateReport?.failedGate
-          ? `${gateReport.failedGate} gate failed: ${gateReport.failedPredicate ?? ''}`
+          ? `${gateReport.failedGate} gate failed: ${
+              gateReport.failedPredicate ??
+              gateReport.entries.find(
+                (entry) => entry.id === gateReport.failedGate
+              )?.detail ??
+              ''
+            }`
           : undefined;
 
       outcomes.push({

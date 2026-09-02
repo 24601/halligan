@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { AxProgramUsage } from '../../../dsp/types.js';
 import {
+  accountingForPhases,
   candidateAccounting,
   createAccountingLedger,
   emptyAccounting,
@@ -690,6 +691,40 @@ describe('compute accounting', () => {
     expect(accounting.totalTokens).toBe(120);
   });
 
+  it('scopes a phase report to the models that actually ran in it', () => {
+    const ledger = createAccountingLedger(tickingClock());
+    const baseline = ledger.phase('baseline');
+    baseline.addMetricCalls(1);
+    baseline.addUsage([
+      {
+        ai: 'mock',
+        model: 'student',
+        tokens: { promptTokens: 1, completionTokens: 1, totalTokens: 10 },
+      } as AxProgramUsage,
+    ]);
+    baseline.close();
+    const band = ledger.phase('variance_band');
+    band.addMetricCalls(1);
+    band.addUsage([
+      {
+        ai: 'mock',
+        model: 'band-only',
+        tokens: { promptTokens: 1, completionTokens: 1, totalTokens: 20 },
+      } as AxProgramUsage,
+    ]);
+    band.close();
+    const accounting = ledger.assemble({ evolveOnlyMetricCalls: 1 });
+    expect(accounting.models.map((entry) => entry.model).sort()).toEqual([
+      'band-only',
+      'student',
+    ]);
+    // A band-scoped report must NOT name the model that only ran in baseline.
+    const scoped = accountingForPhases(accounting, ['variance_band']);
+    expect(scoped.models).toEqual([{ ai: 'mock', model: 'band-only' }]);
+    expect(scoped.metricCalls).toBe(1);
+    expect(scoped.evolveOnlyMetricCalls).toBe(0);
+  });
+
   it('drops tapped usage that arrives with no phase open', () => {
     const ledger = createAccountingLedger(tickingClock());
     expect(ledger.tapUsage([usageOf(50)])).toBe(false);
@@ -1023,6 +1058,25 @@ describe('variance band', () => {
     expect(band.repeats).toBe(3);
     expect(band.spread).toBeCloseTo(0.533 - 0.466, 10);
     expect(band.interval.unit).toBe('task');
+    expect(band.interval.clusters).toBe(3);
+  });
+
+  it('keeps a repeated task object as its own cluster', () => {
+    // A split may legitimately hold the same task object twice. Clustering by
+    // task identity collapses them into one cluster and NARROWS the band, so
+    // the count is pinned to the number of positions, not distinct objects.
+    const repeated = { id: 'a' };
+    const tasks = [repeated, repeated, { id: 'b' }];
+    const band = varianceBandFrom({
+      split: 'current',
+      repeats: [
+        recordsOf(tasks, [0.5, 0.5, 0.5]),
+        recordsOf(tasks, [0.9, 0.1, 0.5]),
+      ],
+      means: [0.5, 0.5],
+      seed: 7,
+      resamples: 500,
+    })!;
     expect(band.interval.clusters).toBe(3);
   });
 
@@ -1673,6 +1727,29 @@ describe('reach instrumentation', () => {
     expect(report.gateEligible).toBe(false);
     expect(report.splits[0]?.reachRate).toBe(0);
     expect(warnings.map((w) => w.code)).toContain('reach_probe_failed');
+  });
+
+  it('does not let a throwing conditionsForTask abort the run', () => {
+    // Symmetric with the probe path: a faulty caller callback marks the split
+    // unmeasured, it does not take the whole evolve() run down.
+    const collector = collectorOf({
+      conditionsForTask: () => {
+        throw new Error('caller conditions blew up');
+      },
+      candidateBullets: [{ id: 'b1', content: 'x' }],
+    });
+    expect(() =>
+      collector.observe({ task: task('t1'), split: 'current' })
+    ).not.toThrow();
+    expect(() =>
+      collector.observe({ task: task('t2'), split: 'current' })
+    ).not.toThrow();
+    const { report, warnings } = collector.report({ delta: 0.2 });
+    expect(report.basis).toBe('applicability_counterfactual');
+    expect(report.gateEligible).toBe(false);
+    expect(report.splits[0]?.reachRate).toBe(0);
+    const fault = warnings.find((w) => w.code === 'reach_probe_failed');
+    expect(fault?.message).toMatch(/conditionsForTask threw/);
   });
 
   it('rejects a malformed observation rather than trusting it', () => {

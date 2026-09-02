@@ -2028,6 +2028,9 @@ describe('agent.playbook().evolve() evidence option validation', () => {
     for (const [gates, code] of [
       [{ controlArm: 'require' }, 'control_arm_failed'],
       [{ transfer: 'warn' }, 'transfer_target_invalid'],
+      // A margin with no gate to apply it is inert, which is the same failure
+      // shape as a gate with no arm.
+      [{ controlArmMargin: 0.1 }, 'control_arm_failed'],
     ] as const) {
       const { ag } = makeAgent();
       let metricCalls = 0;
@@ -2396,6 +2399,33 @@ describe('agent.playbook().evolve() evidence receipt and gates', () => {
         (w: any) => w.code === 'held_out_reused_for_selection'
       )
     ).toBe(true);
+  });
+
+  it('carries a paired interval per retention slice on the receipt', async () => {
+    const { ag } = makeAgent();
+    const result = await ag.playbook().evolve(
+      { train: TASKS, validation: VALIDATION_TASKS },
+      {
+        metric: retentionMetric({}),
+        maxProposals: 1,
+        retentionPolicy: retentionPolicy(1),
+        gates: { validity: 'warn' },
+      }
+    );
+    const receipt = result.outcomes[0]!.evidence!;
+    // One entry per configured slice, each with its own bootstrap interval —
+    // not the empty array a receipt carried before the slices were paired.
+    expect(receipt.intervals.slices.map((slice: any) => slice.name)).toEqual(
+      RETENTION_TASKS.map((slice) => slice.name)
+    );
+    for (const [index, slice] of receipt.intervals.slices.entries()) {
+      expect(slice.version).toBe(RETENTION_TASKS[index]!.version);
+      expect(slice.interval.unit).toBe('task');
+      expect(slice.interval.clusters).toBe(
+        RETENTION_TASKS[index]!.tasks.length
+      );
+      expect(Number.isFinite(slice.interval.point)).toBe(true);
+    }
   });
 
   it('rejects a candidate on a required validity predicate and names it in the reason', async () => {

@@ -106,6 +106,10 @@ import type {
   AxAgentEvalBudget,
 } from './agent/agentInternal/playbookEvolve/evalHarness.js';
 import type { AxAgentFailureCluster } from './agent/agentInternal/playbookEvolve/failureClusters.js';
+import type {
+  AxGateAuthorityOutcome,
+  AxGateVetoOutcome,
+} from './agent/agentInternal/playbookEvolve/gates.js';
 import {
   type AxAgentEnvironmentFailureCause,
   type AxAgentPlaybookAttemptRecord,
@@ -3160,6 +3164,8 @@ export type { AxGEPARejectedPriorBlock };
 export type { AxGEPAResolvedLineageOptions };
 export type { AxGEPATraceSummary };
 export type { AxGEPATraceSummaryCall };
+export type { AxGateAuthorityOutcome };
+export type { AxGateVetoOutcome };
 export type { AxGenDeltaOut };
 export type { AxGenIn };
 export type { AxGenInput };

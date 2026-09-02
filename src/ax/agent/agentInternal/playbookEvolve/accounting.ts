@@ -48,6 +48,8 @@ type PhaseState = {
   observedAnyUsage: boolean;
   wallClockMs: number;
   openedAt?: number;
+  /** Model identities observed in THIS phase, keyed `${ai} ${model}`. */
+  models: Map<string, AxAgentPlaybookModelIdentity>;
 };
 
 export type AxPhaseHandle = {
@@ -89,6 +91,13 @@ function tokensOf(usage: AxProgramUsage): number | undefined {
   return typeof total === 'number' && Number.isFinite(total)
     ? total
     : undefined;
+}
+
+function rememberModel(state: PhaseState, entry: AxProgramUsage): void {
+  if (typeof entry?.ai !== 'string' || typeof entry?.model !== 'string') return;
+  const key = `${entry.ai} ${entry.model}`;
+  if (state.models.has(key)) return;
+  state.models.set(key, { ai: entry.ai, model: entry.model });
 }
 
 function phaseBasis(
@@ -148,6 +157,7 @@ export function createAccountingLedger(
       totalTokens: 0,
       observedAnyUsage: false,
       wallClockMs: 0,
+      models: new Map(),
     };
     states.set(name, created);
     return created;
@@ -177,6 +187,7 @@ export function createAccountingLedger(
           for (const entry of usage) {
             if (!entry) continue;
             seenUsage.push(entry);
+            rememberModel(state, entry);
             const tokens = tokensOf(entry);
             if (tokens !== undefined) {
               state.totalTokens += tokens;
@@ -196,6 +207,7 @@ export function createAccountingLedger(
       for (const entry of usage) {
         if (!entry) continue;
         seenUsage.push(entry);
+        rememberModel(target, entry);
         const tokens = tokensOf(entry);
         if (tokens === undefined) continue;
         target.totalTokens += tokens;
@@ -220,6 +232,9 @@ export function createAccountingLedger(
               : {}),
             tokensBasis: basis,
             wallClockMs: state.wallClockMs,
+            ...(state.models.size > 0
+              ? { models: [...state.models.values()] }
+              : {}),
           };
         }
       );
@@ -459,7 +474,9 @@ export function accountingForPhases(
     : undefined;
   return {
     metricCalls: phases.reduce((sum, phase) => sum + phase.metricCalls, 0),
-    // A scoped report never restates the legacy evolve-only counter as its own.
+    // A phase-scoped report has no evolve-only counter of its own: the legacy
+    // number describes the whole run, so restating it here would double-count
+    // it wherever the scoped block is read beside the run's.
     evolveOnlyMetricCalls: 0,
     modelCalls: phases.reduce((sum, phase) => sum + phase.modelCalls, 0),
     ...(observed !== undefined ? { totalTokens: observed } : {}),
@@ -467,8 +484,24 @@ export function accountingForPhases(
     costBasis: 'unknown',
     wallClockMs: phases.reduce((sum, phase) => sum + phase.wallClockMs, 0),
     phases,
-    models: accounting.models,
+    // The models observed in THESE phases only. Copying the run's whole list
+    // would let a variance-band accounting name a model that never ran in it.
+    models: distinctModels(phases.flatMap((phase) => phase.models ?? [])),
   };
+}
+
+function distinctModels(
+  entries: readonly AxAgentPlaybookModelIdentity[]
+): readonly AxAgentPlaybookModelIdentity[] {
+  const seen = new Set<string>();
+  const models: AxAgentPlaybookModelIdentity[] = [];
+  for (const entry of entries) {
+    const key = `${entry.ai} ${entry.model}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    models.push(entry);
+  }
+  return models;
 }
 
 /**
@@ -488,11 +521,23 @@ export function candidateAccounting(args: {
     observed.length > 0
       ? observed.reduce((sum, entry) => sum + (tokensOf(entry) ?? 0), 0)
       : undefined;
+  const models: AxAgentPlaybookModelIdentity[] = [];
+  const seen = new Set<string>();
+  for (const entry of args.usage) {
+    if (typeof entry?.ai !== 'string' || typeof entry?.model !== 'string') {
+      continue;
+    }
+    const key = `${entry.ai} ${entry.model}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    models.push({ ai: entry.ai, model: entry.model });
+  }
   const phases: AxAgentPlaybookComputePhase[] = [
     {
       name: 'candidate_eval',
       metricCalls: args.metricCalls,
       modelCalls: 0,
+      ...(models.length > 0 ? { models } : {}),
       ...(totalTokens !== undefined ? { totalTokens } : {}),
       // `candidate_eval` reads usage straight off the predictions, so it is
       // observable by construction: nothing reported means 'unreported'.
@@ -516,20 +561,11 @@ export function candidateAccounting(args: {
       wallClockMs: 0,
     });
   }
-  const models: AxAgentPlaybookModelIdentity[] = [];
-  const seen = new Set<string>();
-  for (const entry of args.usage) {
-    if (typeof entry?.ai !== 'string' || typeof entry?.model !== 'string') {
-      continue;
-    }
-    const key = `${entry.ai} ${entry.model}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    models.push({ ai: entry.ai, model: entry.model });
-  }
   return {
     metricCalls: args.metricCalls,
-    // A per-candidate block never restates the run's legacy counter as its own.
+    // A candidate block's own evolve-only counter IS its own metric calls: the
+    // legacy counter is evolve-only by definition and this block is scoped to
+    // one candidate's evaluation, so restating it here is the honest value.
     evolveOnlyMetricCalls: args.metricCalls,
     modelCalls: args.usesBuiltInJudge ? args.metricCalls : 0,
     ...(totalTokens !== undefined ? { totalTokens } : {}),

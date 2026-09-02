@@ -234,21 +234,25 @@ export function varianceBandFrom(args: {
 }): AxAgentPlaybookVarianceBand | undefined {
   if (args.repeats.length < 2 || args.means.length < 2) return undefined;
   const base = args.repeats[0]!;
-  const pooled = new Map<object, { weight: number; deltas: number[] }>();
+  // Clustered BY POSITION, not by task identity: a split may legitimately
+  // contain the same task object twice, and a map keyed by that object would
+  // silently collapse the two into one cluster and narrow the interval.
+  const pooled: { weight: number; deltas: number[] }[] = [];
   for (const [index, baseRecord] of base.entries()) {
-    pooled.set(baseRecord.task, {
+    const cluster = {
       weight: (baseRecord.task as { weight?: number }).weight ?? 1,
-      deltas: [],
-    });
+      deltas: [] as number[],
+    };
+    pooled.push(cluster);
     for (const repeat of args.repeats.slice(1)) {
       const other = repeat[index];
       // Pairing is reference equality, exactly as for a candidate comparison.
       if (!other || other.task !== baseRecord.task) return undefined;
-      pooled.get(baseRecord.task)!.deltas.push(other.score - baseRecord.score);
+      cluster.deltas.push(other.score - baseRecord.score);
     }
   }
   const interval = pairedBootstrapInterval({
-    clusters: [...pooled.values()],
+    clusters: pooled,
     seed: args.seed,
     ...(args.resamples !== undefined ? { resamples: args.resamples } : {}),
     ...(args.level !== undefined ? { level: args.level } : {}),

@@ -113,6 +113,12 @@ export type AxAgentPlaybookComputePhase = Readonly<{
    */
   tokensBasis: AxAgentPlaybookTokensBasis;
   wallClockMs: number;
+  /**
+   * Distinct model identities that produced usage IN THIS PHASE. Present only
+   * when at least one was observed, so a phase-scoped accounting cannot name a
+   * model that never ran in it.
+   */
+  models?: readonly AxAgentPlaybookModelIdentity[];
 }>;
 
 /**

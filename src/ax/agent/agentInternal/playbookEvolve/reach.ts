@@ -93,6 +93,8 @@ export function createReachCollector(args: {
   let probeSpentMs = 0;
   let probeDisabled = false;
   let probeFault: string | undefined;
+  let conditionsDisabled = false;
+  let conditionsFault: string | undefined;
 
   const stateOf = (
     split: AxAgentPlaybookSplitName,
@@ -171,17 +173,32 @@ export function createReachCollector(args: {
       }
 
       if (basis === 'applicability_counterfactual') {
-        const conditions = args.conditionsForTask!(observed.task);
-        const applicable = (args.candidateBullets ?? []).some((bullet) =>
-          isBulletApplicable(bullet, {
-            conditions,
-            // The ISO instant ACE evaluates lifecycle expiry against must come
-            // from the injected clock, or "reproducible from the receipt" is
-            // false.
-            now: args.nowIso,
-          })
-        );
-        if (applicable) state.reachedTasks.add(observed.task);
+        if (conditionsDisabled) {
+          state.unmeasured = true;
+          return;
+        }
+        // Symmetric with the probe path: reach is EVIDENCE, not scoring, so a
+        // throwing caller-supplied `conditionsForTask` (or an ACE bullet ACE
+        // itself cannot evaluate) marks the split unmeasured and the run
+        // continues. Letting it escape would abort a whole evolve() run over a
+        // reading no gate can pass on anyway.
+        try {
+          const conditions = args.conditionsForTask!(observed.task);
+          const applicable = (args.candidateBullets ?? []).some((bullet) =>
+            isBulletApplicable(bullet, {
+              conditions,
+              // The ISO instant ACE evaluates lifecycle expiry against must
+              // come from the injected clock, or "reproducible from the
+              // receipt" is false.
+              now: args.nowIso,
+            })
+          );
+          if (applicable) state.reachedTasks.add(observed.task);
+        } catch (err) {
+          conditionsDisabled = true;
+          conditionsFault = err instanceof Error ? err.message : String(err);
+          state.unmeasured = true;
+        }
         return;
       }
 
@@ -214,6 +231,12 @@ export function createReachCollector(args: {
         warnings.push({
           code: 'reach_probe_failed',
           message: `${probeFault}; the affected splits report reach as unmeasured and the reach gate fails closed`,
+        });
+      }
+      if (conditionsFault) {
+        warnings.push({
+          code: 'reach_probe_failed',
+          message: `conditionsForTask threw (${conditionsFault}); the affected splits report reach as unmeasured`,
         });
       }
       if (basis === 'applicability_counterfactual') {
