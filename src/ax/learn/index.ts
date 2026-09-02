@@ -51,6 +51,11 @@ export {
   axLearningRecordContent,
 } from './records.js';
 export type {
+  AxLearningPublishArgs,
+  AxLearningSurfaceOptions,
+} from './releases.js';
+export { AxLearningSurface, axLearningSurface } from './releases.js';
+export type {
   AxReportFieldSchema,
   AxReportFieldType,
   AxReportSchema,

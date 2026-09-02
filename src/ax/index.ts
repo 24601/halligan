@@ -1775,6 +1775,12 @@ import {
   axLearningRecordContent,
 } from './learn/records.js';
 import {
+  type AxLearningPublishArgs,
+  AxLearningSurface,
+  type AxLearningSurfaceOptions,
+  axLearningSurface,
+} from './learn/releases.js';
+import {
   type AxReportFieldSchema,
   type AxReportFieldType,
   type AxReportSchema,
@@ -2479,6 +2485,7 @@ export { AxLearningRecordConflictError };
 export { AxLearningRecordValidationError };
 export { AxLearningReleaseConflictError };
 export { AxLearningReportValidationError };
+export { AxLearningSurface };
 export { AxMCPAppBridge };
 export { AxMCPClient };
 export { AxMCPDPoPProofFactory };
@@ -2768,6 +2775,7 @@ export { axLearningEngineReady };
 export { axLearningFailureFrom };
 export { axLearningReceiptFrom };
 export { axLearningRecordContent };
+export { axLearningSurface };
 export { axMCPAPIKeyAuthentication };
 export { axMCPAppToolMeta };
 export { axMCPBasicAuthentication };
@@ -3807,6 +3815,7 @@ export type { AxLearningInteractionPayload };
 export type { AxLearningInteractionRecord };
 export type { AxLearningNeverReason };
 export type { AxLearningProcessor };
+export type { AxLearningPublishArgs };
 export type { AxLearningReceipt };
 export type { AxLearningRecord };
 export type { AxLearningRecordId };
@@ -3825,6 +3834,7 @@ export type { AxLearningStoreConformanceFactoryOptions };
 export type { AxLearningStoreConformanceReport };
 export type { AxLearningStorePage };
 export type { AxLearningStorePageEntry };
+export type { AxLearningSurfaceOptions };
 export type { AxLearningTrainingSample };
 export type { AxLearningTrainingUnit };
 export type { AxLearningTreeDelivery };
