@@ -362,6 +362,38 @@ describe('working state receipts from the dispatch site', () => {
     expect(built.getState()?.workingState?.receipts ?? []).toHaveLength(0);
   });
 
+  it('mints no receipt for an llmQuery', async () => {
+    // `llmQuery` is bound directly by the runtime, never through
+    // `wrapFunction`, so it has no receipt-eligible dispatch site at all. This
+    // is asserted rather than documented because a later refactor that routed
+    // it through `wrapFunction` would silently promote an LLM sub-query — model
+    // self-report — into environment evidence.
+    const { agent: built, ai } = makeAgent(
+      {
+        distiller: [DISTILL],
+        executor: [
+          'await llmQuery("is the order packed?"); await inventory.pick({order:"42"})',
+          FINAL,
+        ],
+      },
+      receiptConfig()
+    );
+
+    await built.forward(ai, { task: 'ask' } as never);
+    // The sub-query really resolved: without this the test would pass on a
+    // turn that threw before `llmQuery` ever dispatched.
+    const queryTurn = built
+      .getState()
+      ?.actionLogEntries?.find((entry) => entry.code.includes('llmQuery'));
+    expect(queryTurn?.tags ?? []).not.toContain('error');
+    const receipts = built.getState()?.workingState?.receipts ?? [];
+    // The real tool in the same turn still mints, so this is about the
+    // sub-query and not about receipts being off.
+    expect(receipts.map((receipt) => receipt.qualifiedName)).toEqual([
+      'inventory.pick',
+    ]);
+  });
+
   it('mints no receipt for an agent-derived callable', async () => {
     const { agent: built, ai } = makeAgent(
       {
