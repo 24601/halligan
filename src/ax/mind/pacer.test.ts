@@ -242,6 +242,10 @@ describe('axNextMindPace', () => {
     const tripped = step(state, 'spontaneous', 'empty', 2, config);
     expect(tripped.kind).toBe('unchanged');
     expect(tripped.state.parked).toBe('rate_fuse');
+    // The drain time is published, so one re-evaluation can be armed instead
+    // of none (parked forever) or one per tick (the fuse as an amplifier).
+    expect(tripped.state.parkedUntil).toBe(HOUR);
+    expect(tripped.state.wakeAt).toBe(state.wakeAt);
 
     // Reactive wakes keep being processed while parked: the pacer records the
     // wake, refuses only to ARM another spontaneous one, and never grows the
@@ -347,6 +351,9 @@ describe('axRecoverMindPacerState', () => {
     // The fifth process inherits the fuse from the autobiography, not a fresh
     // in-memory counter, so restarting is not a way to buy more wakes.
     expect(afterCrashLoop.parked).toBe('rate_fuse');
+    // Recovery rebuilds the drain time too: a restart does not lose the one
+    // fact that says when spontaneity may resume.
+    expect(afterCrashLoop.parkedUntil).toBe(2_000 + HOUR);
     const next = axNextMindPace(
       afterCrashLoop,
       { wakeClass: 'spontaneous', outcome: 'empty', now: 2_100 },

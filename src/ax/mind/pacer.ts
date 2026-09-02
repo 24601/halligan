@@ -87,9 +87,18 @@ export function axNextMindPace(
   // Reactive DELIVERIES keep running -- routes never consult the pacer -- but
   // nothing arms another spontaneous wake until the hour window drains.
   if (spontaneousWakes.length >= axMindPacerFuse(config)) {
+    // The oldest wake in the window leaves it one hour after it happened, and
+    // that is the first moment the fuse can read differently. Publishing it
+    // is what lets a caller arm one re-evaluation rather than re-firing the
+    // stale `wakeAt` this state deliberately keeps.
+    const parkedUntil = (spontaneousWakes[0] ?? event.now) + HOUR_MS;
     return {
       kind: 'unchanged',
-      state: Object.freeze({ ...hold(), parked: 'rate_fuse' as const }),
+      state: Object.freeze({
+        ...hold(),
+        parked: 'rate_fuse' as const,
+        parkedUntil,
+      }),
     };
   }
   if (event.outcome === 'noop' || event.wakeClass === 'noop') {
@@ -153,6 +162,9 @@ export function axMindPaceStepData(
       ? { wakeAt: decision.state.wakeAt }
       : {}),
     ...(decision.state.parked ? { parked: decision.state.parked } : {}),
+    ...(decision.state.parkedUntil !== undefined
+      ? { parkedUntil: decision.state.parkedUntil }
+      : {}),
   });
 }
 
@@ -211,7 +223,10 @@ export async function axRecoverMindPacerState(
       : {}),
     spontaneousWakes: Object.freeze(spontaneousWakes),
     ...(spontaneousWakes.length >= fuse
-      ? { parked: 'rate_fuse' as const }
+      ? {
+          parked: 'rate_fuse' as const,
+          parkedUntil: (spontaneousWakes[0] ?? newest.ts) + HOUR_MS,
+        }
       : {}),
   });
 }

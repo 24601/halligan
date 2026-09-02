@@ -403,6 +403,15 @@ export interface AxMindTickDutyState {
   readonly thinker: string;
   /** Armed by the pacer. Absent means no scheduled wake is pending. */
   readonly nextWakeAt?: number;
+  /**
+   * The `nextWakeAt` this thinker was already woken for. The pace duty is EDGE
+   * triggered on it: a `wakeAt` the pacer deliberately left alone -- every
+   * `unchanged` decision keeps the running timer -- is in the past forever, and
+   * a level-triggered duty would republish it every single grid slot.
+   */
+  readonly dispatchedWakeAt?: number;
+  /** Set by the rate fuse. A parked thinker has no pace duty at all. */
+  readonly parked?: 'rate_fuse';
   /** Newest dispatch, append or completion this thinker saw. */
   readonly lastActivityAt: number;
   readonly running: number;
@@ -430,7 +439,16 @@ export function axMindTickDue(
   const watchdog = options?.watchdog ?? true;
   const due: AxMindTickDuty[] = [];
   for (const state of states) {
-    if (pace && state.nextWakeAt !== undefined && now >= state.nextWakeAt) {
+    if (
+      pace &&
+      // The fuse means STOP SPENDING. Firing the stale wake it parked on would
+      // make the spend ceiling the highest spend rate the mind can reach; the
+      // watchdog below is what un-parks it once the hour window drains.
+      state.parked === undefined &&
+      state.nextWakeAt !== undefined &&
+      state.nextWakeAt !== state.dispatchedWakeAt &&
+      now >= state.nextWakeAt
+    ) {
       // A wake that fell behind by k grid slots stands for k, reported rather
       // than silently collapsed.
       const missed = Math.floor((now - state.nextWakeAt) / intervalMs);

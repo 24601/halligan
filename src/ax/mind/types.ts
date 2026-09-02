@@ -153,6 +153,12 @@ export interface AxMindPacerState {
   /** Rolling epoch-ms stamps used by the rate fuse. Oldest first. */
   readonly spontaneousWakes: readonly number[];
   readonly parked?: 'rate_fuse';
+  /**
+   * When the trailing-hour window drains below the fuse, so a parked mind can
+   * arm ONE re-evaluation instead of none (never un-parks without a watchdog)
+   * or one per tick (the fuse as a spend amplifier). Set only while parked.
+   */
+  readonly parkedUntil?: number;
 }
 export const axInitialMindPacerState: Readonly<AxMindPacerState> =
   Object.freeze({

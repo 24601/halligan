@@ -468,6 +468,46 @@ describe('axMindTickDue', () => {
     ]);
   });
 
+  it('a parked pacer has no pace duty, and its watchdog still runs', () => {
+    const parked = dutyState({
+      nextWakeAt: 1_000,
+      parked: 'rate_fuse',
+      lastActivityAt: 0,
+      watchdogMs: 500,
+    });
+    // The fuse trips ON a scheduled wake, so the parked state carries a
+    // `wakeAt` that is now in the past forever. Firing it would make the spend
+    // CEILING the highest spend rate the mind can reach.
+    expect(axMindTickDue([parked], 10_000)).toEqual([
+      { thinker: 'monolith', kind: 'idle' },
+    ]);
+    expect(axMindTickDue([parked], 10_000, { watchdog: false })).toEqual([]);
+    // Un-parked, the same state is due: nothing else about it changed.
+    expect(
+      axMindTickDue([{ ...parked, parked: undefined }], 10_000)
+    ).toHaveLength(1);
+  });
+
+  it('a stale armed wake fires once, not once per tick', () => {
+    const armed = dutyState({ nextWakeAt: 1_000, watchdogMs: 0 });
+    expect(axMindTickDue([armed], 2_000, { intervalMs: 1_000 })).toHaveLength(
+      1
+    );
+    // The host stamps the wake it dispatched. Every `unchanged` pace decision
+    // deliberately leaves the timer alone, so without an edge the same past
+    // `wakeAt` would republish on every grid slot for the rest of the hour.
+    const fired = { ...armed, dispatchedWakeAt: 1_000 };
+    for (let now = 2_000; now <= 12_000; now += 1_000) {
+      expect(axMindTickDue([fired], now, { intervalMs: 1_000 })).toEqual([]);
+    }
+    // A newly armed wake is a new edge and fires again.
+    expect(
+      axMindTickDue([{ ...fired, nextWakeAt: 12_000 }], 12_000, {
+        intervalMs: 1_000,
+      })
+    ).toHaveLength(1);
+  });
+
   it('disabling pace leaves the watchdog working and vice versa', () => {
     const both = dutyState({
       nextWakeAt: 1_000,
