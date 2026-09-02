@@ -221,6 +221,13 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
   - TS paths: `src/ax/agent/agentInternal/playbookEvolve/gate.ts`
   - Impact: Behaviour-preserving refactor: the evolve() acceptance decision (revalComplete/gainOk/heldOutOk/accept) and its human-readable reason move to the pure evaluateAgentPromotionGate; the retention computation, sequence counter, anchors and receipt assembly stay in playbookEvolve.ts. playbookEvolve.test.ts and playbookEvolveUnits.test.ts pass unmodified. The gate is internal (internalExportNames) and reached through evolve() and the coming axHarnessEvolve, so any AxIR migration of axagent promotion semantics now has one function to port instead of an inline expression.
   - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+- `axir-2026-09-02-axmind-declared-sibling-inert-step-class-supervisor-opt-in-and-s` [runtime] AxMind declared sibling-inert step class, supervisor opt-in, and settle-signal contract
+  - Status: open
+  - Source PR: #103
+  - Source commit: `d34286d8c8cdb125727d50558e2fcacc08ff1442`
+  - TS paths: `src/ax/mind/routes.ts`
+  - Impact: Dispatch: the sibling-inert class is a DECLARED registry fact (AxTrajectoryTypeDescriptor.siblingInert, shipped on idle) rather than an inference from spill/visibleWork/conversational flags, so a host type carrying a short payload is outside the class unless it says otherwise; a thinker may opt back in to named sibling wake signals with subscription.siblingSignals (the supervisor pattern), which re-opens the loop the rule closes and is the declaring thinker's own bound. Settlement: a wake always records its outcome step and its pace step; the settle is guarded by the mind's lifetime signal alone, never by the delivery's, so a run the runtime cancelled or whose claim lapsed still appends error/idle plus mind-wake, and a mind that is closing appends nothing. AxMindLivenessError.reason gains 'closing', distinct from the 'close_from_inside' authority refusal.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 - `axir-2026-09-02-axmind-monolith-and-responder-thinkers-the-model-free-determinis` [runtime] AxMind monolith and responder thinkers, the model-free deterministic program, and the host-mediated function menu
   - Status: open
   - Source PR: #101
