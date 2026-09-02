@@ -1,4 +1,12 @@
+import type { AxGEPARunAdmissionReport } from '../optimizerTypes.js';
 import { type AxSha256Digest64, axSha256Digest64Sync } from './digests.js';
+import type { AxHarnessStamp } from './harnessRecipe.js';
+import type {
+  AxMutationAnnotation,
+  AxMutationDepthHistogram,
+} from './mutationTaxonomy.js';
+import type { AxTaskDiscriminationSummary } from './taskDiscrimination.js';
+import type { AxTrajectoryAdmissionReport } from './trajectoryTermination.js';
 
 export type AxGEPACandidateStrategy =
   | 'seed'
@@ -29,6 +37,149 @@ export interface AxGEPACandidateLineageOptions {
   includeFailureMessages?: boolean;
   /** Opted-in message characters. Default: 200; finite values clamp to [1, 2000]. */
   maxFailureMessageChars?: number;
+  /**
+   * Emit the version-2 annotations Ax can compute with NO host input: paired
+   * reflection outcomes on every reflective-mutation record, the deployable
+   * best chain, and the causal-evidence cross-link id.
+   *
+   * Default `false`. That default is what keeps a plain `candidateLineage:
+   * true` run emitting a `version: 1` manifest with every new field absent
+   * (INV-L1) — the other version-2 fields each have their own compile option
+   * (`harnessRecipe`, `mutationAnnotation`, `trajectoryTermination`,
+   * `minibatchStrategy`) and these three do not.
+   *
+   * NAMING: the flag gates all THREE of those annotations, not only the
+   * reflection outcomes it is named for. Splitting it into three switches, or
+   * renaming it, would widen the public option surface for a distinction no
+   * caller has asked for — one switch for "the annotations Ax computes on its
+   * own" is the smaller contract. Documented here and in `ax-gepa.md` rather
+   * than left for a reader to discover from the implementation (§12/M4-minor).
+   */
+  includeReflectionOutcomes?: boolean;
+  /** Include bounded per-category example indices in reflection outcomes. Default: false. */
+  includeReflectionIndices?: boolean;
+  /** Maximum indices per reflection category. Default: 20; clamped to [1, 200]. */
+  maxReflectionIndices?: number;
+}
+
+export type AxGEPAReflectionCategory =
+  | 'fixed'
+  | 'regressed'
+  | 'still_failing'
+  | 'still_passing';
+
+/** Fixed emission order, so two reflection arrays diff positionally. */
+const REFLECTION_CATEGORIES: readonly AxGEPAReflectionCategory[] =
+  Object.freeze([
+    'fixed',
+    'regressed',
+    'still_failing',
+    'still_passing',
+  ] as const);
+
+export interface AxGEPAReflectionOutcome {
+  readonly category: AxGEPAReflectionCategory;
+  readonly count: number;
+  /** Bounded; present only with `includeReflectionIndices`. */
+  readonly exampleIndices?: readonly number[];
+}
+
+/**
+ * Deterministic paired classification of a parent/child evaluation pair.
+ *
+ * Module-internal-but-exported: the missing `ax` prefix is what keeps it out of
+ * the public barrel (`hasValidPrefix`, `scripts/generateIndex.ts`), matching the
+ * existing `buildGEPACandidateComponentDelta` precedent.
+ *
+ * Rows are paired by FEEDBACK-SET INDEX, and a row counts only when it was
+ * admitted on BOTH sides. Rows present on one side only, and rows either side
+ * discarded, are excluded from every category — so the four counts always sum
+ * to the paired admitted row count, which is the number a reader can check.
+ * (The RFC says unpaired rows are "ignored and counted"; the return type it
+ * fixes has nowhere to put a count, so they are excluded and the sum invariant
+ * is what makes the exclusion visible.)
+ */
+export function buildGEPAReflectionOutcomes(
+  parent: readonly Readonly<{
+    index: number;
+    scalar: number;
+    admitted: boolean;
+  }>[],
+  child: readonly Readonly<{
+    index: number;
+    scalar: number;
+    admitted: boolean;
+  }>[],
+  options: Readonly<{
+    successThreshold: number;
+    includeIndices: boolean;
+    maxIndices: number;
+  }>
+): readonly AxGEPAReflectionOutcome[] {
+  const childByIndex = new Map<number, { scalar: number; admitted: boolean }>();
+  for (const row of child) {
+    if (!childByIndex.has(row.index)) {
+      childByIndex.set(row.index, {
+        scalar: row.scalar,
+        admitted: row.admitted,
+      });
+    }
+  }
+  const counts = new Map<AxGEPAReflectionCategory, number>();
+  const indices = new Map<AxGEPAReflectionCategory, number[]>();
+  for (const category of REFLECTION_CATEGORIES) {
+    counts.set(category, 0);
+    indices.set(category, []);
+  }
+  const seen = new Set<number>();
+  for (const parentRow of parent) {
+    if (seen.has(parentRow.index)) continue;
+    seen.add(parentRow.index);
+    const childRow = childByIndex.get(parentRow.index);
+    if (!childRow || !parentRow.admitted || !childRow.admitted) continue;
+    const parentPass = parentRow.scalar >= options.successThreshold;
+    const childPass = childRow.scalar >= options.successThreshold;
+    const category: AxGEPAReflectionCategory = parentPass
+      ? childPass
+        ? 'still_passing'
+        : 'regressed'
+      : childPass
+        ? 'fixed'
+        : 'still_failing';
+    counts.set(category, counts.get(category)! + 1);
+    const bucket = indices.get(category)!;
+    if (options.includeIndices && bucket.length < options.maxIndices) {
+      bucket.push(parentRow.index);
+    }
+  }
+  // Zero-count entries are RETAINED so the array shape is stable and diffable.
+  return Object.freeze(
+    REFLECTION_CATEGORIES.map((category) =>
+      Object.freeze({
+        category,
+        count: counts.get(category)!,
+        ...(options.includeIndices
+          ? { exampleIndices: Object.freeze([...indices.get(category)!]) }
+          : {}),
+      })
+    )
+  );
+}
+
+/**
+ * The single deployable candidate and its ancestry.
+ *
+ * No `score`: it would duplicate `AxOptimizedProgram.bestScore`, which is
+ * already the maximum over INDIVIDUAL frontier candidates and already
+ * corresponds to the one deployable `componentMap`. No archive-best / per-task
+ * oracle composite is produced anywhere in this subsystem — computing one
+ * purely so it could be labelled non-deployable would add Goodhart surface for
+ * a number nothing consumes.
+ */
+export interface AxGEPADeployableBestChain {
+  readonly candidateId: string;
+  /** Root-first ancestry, ending at `candidateId`. Derived from existing parent links. */
+  readonly ancestry: readonly string[];
 }
 
 export interface AxGEPACandidateComponentDelta {
@@ -74,10 +225,43 @@ export interface AxGEPACandidateLineageRecord {
   readonly disposition: AxGEPACandidateDisposition;
   readonly dispositionReason?: string;
   readonly failures?: readonly AxGEPACandidateFailure[];
+  /**
+   * Host-annotated mutation depth, patch taxonomy, component classes, effort
+   * and cost. Present only under `AxCompileOptions.mutationAnnotation`, and
+   * only when the annotator returned an annotation Ax could validate against
+   * the component kinds the candidate actually touched.
+   */
+  readonly mutation?: AxMutationAnnotation;
+  /**
+   * Paired parent/child outcome categories for a reflective-mutation candidate.
+   * Present only under `includeReflectionOutcomes`.
+   */
+  readonly reflection?: readonly AxGEPAReflectionOutcome[];
+  /**
+   * The `AxCausalCandidateEvidenceRecord.id` a host should use when it attaches
+   * causal evidence for this candidate, so the join between the two manifests
+   * is one Ax published rather than one every host reinvents. Ax does not
+   * create causal evidence records; this is a cross-link, not a claim that one
+   * exists.
+   */
+  readonly causalEvidenceRecordId?: string;
+  /** Harness recipe digest and bound model id this candidate was produced under. */
+  readonly harness?: AxHarnessStamp;
+  /**
+   * PER-BATCH admission for the evaluation that decided this candidate — the
+   * child minibatch for a reflective mutation, the merge subsample for a merge.
+   * The run-level fold lives on the manifest.
+   */
+  readonly admission?: AxTrajectoryAdmissionReport;
 }
 
 export interface AxGEPACandidateLineageManifest {
-  readonly version: 1;
+  /**
+   * `2` whenever ANY version-2 field is present on the manifest or on any
+   * record; `1` otherwise. A `version: 1` manifest therefore still identifies
+   * the exact legacy record schema, byte for byte.
+   */
+  readonly version: 1 | 2;
   readonly records: readonly AxGEPACandidateLineageRecord[];
   readonly maxRecords: number;
   readonly maxArtifactBytes: number;
@@ -109,6 +293,24 @@ export interface AxGEPACandidateLineageManifest {
     readonly componentValues: 'fingerprints' | 'bounded_values';
     readonly failureMessages: 'fingerprints' | 'bounded_messages';
   };
+  /** Version 2 only. Depth counts over every proposed candidate, plus `unannotated`. */
+  readonly mutationDepthHistogram?: AxMutationDepthHistogram;
+  /** Version 2 only. Bounded run-level discriminative-sampler report. */
+  readonly discrimination?: AxTaskDiscriminationSummary;
+  /** Version 2 only. The run's harness stamp. */
+  readonly harness?: AxHarnessStamp;
+  /** Version 2 only. The deployable candidate and its ancestry. No archive-best. */
+  readonly bestChain?: AxGEPADeployableBestChain;
+  /**
+   * Version 2 only. WHOLE-RUN admission accounting.
+   *
+   * Typed `AxGEPARunAdmissionReport`, not the per-batch
+   * `AxTrajectoryAdmissionReport` the RFC names: `inconclusive` is a per-batch
+   * verdict whose run-level fold is an OR, so it travels here as
+   * `anyBatchInconclusive` rather than telling a reader the whole run was
+   * inconclusive because one batch was.
+   */
+  readonly admission?: AxGEPARunAdmissionReport;
 }
 
 function deepFreeze<T>(value: T): T {
@@ -184,6 +386,13 @@ export function resolveGEPALineageOptions(
       options?.maxFailureMessageChars,
       200,
       2000
+    ),
+    includeReflectionOutcomes: options?.includeReflectionOutcomes ?? false,
+    includeReflectionIndices: options?.includeReflectionIndices ?? false,
+    maxReflectionIndices: boundedInteger(
+      options?.maxReflectionIndices,
+      20,
+      200
     ),
   };
 }

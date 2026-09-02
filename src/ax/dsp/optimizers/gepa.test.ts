@@ -6,6 +6,12 @@ import {
 } from '../optimizer.js';
 import { ax } from '../template.js';
 import { AxGEPA } from './gepa.js';
+import { axHarnessRecipe } from './harnessRecipe.js';
+import {
+  AX_REJECTED_LEDGER_REF_MAX_DIGESTS,
+  AxInMemoryRejectedCandidateLedger,
+  axRejectedCandidatePrior,
+} from './rejectedCandidateLedger.js';
 import type { AxTrajectoryTerminationClassifier } from './trajectoryTermination.js';
 
 const createSingleRootProgram = (
@@ -661,7 +667,7 @@ describe('AxGEPA Optimizer', () => {
       });
     });
 
-    it('does not read candidate-lineage, abort, trajectory-termination or sampler accessors at the opt-in boundary', async () => {
+    it('does not read candidate-lineage, abort, trajectory-termination, sampler, harness, mutation or ledger accessors at the opt-in boundary', async () => {
       let reads = 0;
       const inheritedOptions = Object.create({
         get candidateLineage() {
@@ -683,6 +689,18 @@ describe('AxGEPA Optimizer', () => {
         get taskDiscrimination() {
           reads += 1;
           throw new Error('inherited taskDiscrimination was read');
+        },
+        get harnessRecipe() {
+          reads += 1;
+          throw new Error('inherited harnessRecipe was read');
+        },
+        get mutationAnnotation() {
+          reads += 1;
+          throw new Error('inherited mutationAnnotation was read');
+        },
+        get rejectedCandidateLedger() {
+          reads += 1;
+          throw new Error('inherited rejectedCandidateLedger was read');
         },
       });
       Object.defineProperty(inheritedOptions, 'maxMetricCalls', {
@@ -724,6 +742,27 @@ describe('AxGEPA Optimizer', () => {
           get() {
             reads += 1;
             throw new Error('taskDiscrimination accessor was read');
+          },
+        },
+        harnessRecipe: {
+          enumerable: true,
+          get() {
+            reads += 1;
+            throw new Error('harnessRecipe accessor was read');
+          },
+        },
+        mutationAnnotation: {
+          enumerable: true,
+          get() {
+            reads += 1;
+            throw new Error('mutationAnnotation accessor was read');
+          },
+        },
+        rejectedCandidateLedger: {
+          enumerable: true,
+          get() {
+            reads += 1;
+            throw new Error('rejectedCandidateLedger accessor was read');
           },
         },
         maxMetricCalls: { enumerable: true, value: 2 },
@@ -803,14 +842,15 @@ describe('AxGEPA Optimizer', () => {
       );
 
       // One own-descriptor read per opt-in option reached on the default path:
-      // candidateLineage, abortSignal, trajectoryTermination,
-      // minibatchStrategy and taskDiscrimination. The last is read even on the
-      // uniform path so that supplying it without the strategy that consumes it
-      // can be REPORTED rather than silently ignored; reading an own data
-      // property is not observable in any artifact, event or draw sequence.
-      // This count is the tripwire that a new option was added without being
-      // routed through `ownDataOption`.
-      expect(descriptorCalls).toBe(5);
+      // candidateLineage, abortSignal, trajectoryTermination, harnessRecipe,
+      // mutationAnnotation, rejectedCandidateLedger, minibatchStrategy and
+      // taskDiscrimination. The last
+      // is read even on the uniform path so that supplying it without the
+      // strategy that consumes it can be REPORTED rather than silently
+      // ignored; reading an own data property is not observable in any
+      // artifact, event or draw sequence. This count is the tripwire that a
+      // new option was added without being routed through `ownDataOption`.
+      expect(descriptorCalls).toBe(8);
       expect(result.optimizedProgram?.candidateLineage).toBeUndefined();
     });
 
@@ -2609,5 +2649,888 @@ describe('AxGEPA RNG stream discipline (INV-L5)', () => {
     });
     expect(discriminative).toBeLessThan(59);
     expect(discriminative).toBeGreaterThan(0);
+  });
+});
+
+describe('lineage version 2 annotations', () => {
+  const buildRecipe = async (boundModelId: string) =>
+    await axHarnessRecipe({
+      bindings: [
+        { port: 'model.primary', atomId: 'atom-a', version: '1' },
+        { port: 'retriever.default', atomId: 'atom-b', version: '2' },
+      ],
+      boundModelId,
+    });
+
+  /**
+   * One accepted mutation over a two-example set. `better` scores 1 on the
+   * first example and 0 on the second, `base` the reverse — so the paired
+   * reflection classes are one `fixed` and one `regressed`, which is the
+   * only shape that distinguishes a real classifier from one that returns a
+   * constant.
+   */
+  const runSplitFixture = async (
+    compileOptions: Record<string, unknown>,
+    optimizerOverrides: Record<string, unknown> = {}
+  ) => {
+    const optimizer = new AxGEPA({
+      studentAI: {} as AxAIService,
+      teacherAI: {} as AxAIService,
+      numTrials: 1,
+      minibatch: false,
+      mergeMax: 0,
+      minImprovementThreshold: -1,
+      ...optimizerOverrides,
+    });
+    const program = createSingleRootProgram(
+      'task',
+      async (instruction, example) => ({
+        score:
+          instruction === 'better'
+            ? example.question === 'q1'
+              ? 1
+              : 0
+            : example.question === 'q1'
+              ? 0
+              : 1,
+      })
+    );
+    (optimizer as any).reflectTargetInstruction = async () => 'better';
+    const result = await optimizer.compile(
+      program as any,
+      [{ question: 'q1' }, { question: 'q2' }],
+      async ({ prediction }) => prediction.score,
+      { maxMetricCalls: 40, skipPerfectScore: false, ...compileOptions }
+    );
+    return result;
+  };
+
+  it('emits lineage version 1 with no version-2 field when the new options are omitted', async () => {
+    const result = await runSplitFixture({ candidateLineage: true });
+    const manifest = result.optimizedProgram?.candidateLineage;
+    expect(manifest?.version).toBe(1);
+    // Every version-2 manifest field is ABSENT, not undefined: `undefined`
+    // would still change the serialized bytes if the key were present.
+    for (const key of [
+      'mutationDepthHistogram',
+      'discrimination',
+      'harness',
+      'bestChain',
+      'admission',
+    ]) {
+      expect(Object.hasOwn(manifest as object, key)).toBe(false);
+    }
+    for (const record of manifest?.records ?? []) {
+      for (const key of [
+        'mutation',
+        'reflection',
+        'causalEvidenceRecordId',
+        'harness',
+        'admission',
+      ]) {
+        expect(Object.hasOwn(record as object, key)).toBe(false);
+      }
+    }
+  });
+
+  it('stamps the harness digest and bound model id on every lineage record', async () => {
+    const recipe = await buildRecipe('model-a');
+    const result = await runSplitFixture({
+      candidateLineage: true,
+      harnessRecipe: { recipe },
+    });
+    const manifest = result.optimizedProgram?.candidateLineage;
+    expect(manifest?.version).toBe(2);
+    expect(manifest?.harness).toEqual({
+      recipeDigest: recipe.digest,
+      boundModelId: 'model-a',
+    });
+    const records = manifest?.records ?? [];
+    expect(records.length).toBeGreaterThan(1);
+    // EVERY record, not just the accepted one: a stamp that only some
+    // record sites carry is worse than none, because a reader cannot tell
+    // an unstamped record from a record produced under another harness.
+    for (const record of records) {
+      expect(record.harness).toEqual({
+        recipeDigest: recipe.digest,
+        boundModelId: 'model-a',
+      });
+      expect(record.harness?.stale).toBeUndefined();
+    }
+  });
+
+  it('marks a stamp stale only when currentModelId was supplied and differs', async () => {
+    const recipe = await buildRecipe('model-a');
+    const stampsFor = async (currentModelId?: string) => {
+      const result = await runSplitFixture({
+        candidateLineage: true,
+        harnessRecipe: {
+          recipe,
+          ...(currentModelId ? { currentModelId } : {}),
+        },
+      });
+      return (result.optimizedProgram?.candidateLineage?.records ?? []).map(
+        (record) => record.harness?.stale
+      );
+    };
+    // Absent means NOT EVALUATED, never "fresh".
+    expect(await stampsFor(undefined)).toEqual([undefined, undefined]);
+    expect(await stampsFor('model-a')).toEqual([undefined, undefined]);
+    expect(await stampsFor('model-b')).toEqual([true, true]);
+  });
+
+  it('classifies paired rows into the four reflection categories', async () => {
+    const result = await runSplitFixture({
+      candidateLineage: {
+        includeReflectionOutcomes: true,
+        includeReflectionIndices: true,
+      },
+    });
+    const records = result.optimizedProgram?.candidateLineage?.records ?? [];
+    const mutation = records.find(
+      (record) => record.strategy === 'reflective_mutation'
+    );
+    // Fixed emission order with zero-count entries retained.
+    expect(mutation?.reflection?.map((outcome) => outcome.category)).toEqual([
+      'fixed',
+      'regressed',
+      'still_failing',
+      'still_passing',
+    ]);
+    expect(
+      mutation?.reflection?.map((outcome) => [outcome.category, outcome.count])
+    ).toEqual([
+      ['fixed', 1],
+      ['regressed', 1],
+      ['still_failing', 0],
+      ['still_passing', 0],
+    ]);
+    // Indices identify WHICH example moved, not just how many.
+    expect(
+      mutation?.reflection?.find((outcome) => outcome.category === 'fixed')
+        ?.exampleIndices
+    ).toEqual([0]);
+    expect(
+      mutation?.reflection?.find((outcome) => outcome.category === 'regressed')
+        ?.exampleIndices
+    ).toEqual([1]);
+    // The seed is not a paired comparison, so it carries no reflection.
+    expect(
+      records.find((record) => record.strategy === 'seed')?.reflection
+    ).toBeUndefined();
+  });
+
+  it('omits reflection indices unless they were opted into', async () => {
+    const result = await runSplitFixture({
+      candidateLineage: { includeReflectionOutcomes: true },
+    });
+    const mutation = (
+      result.optimizedProgram?.candidateLineage?.records ?? []
+    ).find((record) => record.strategy === 'reflective_mutation');
+    expect(mutation?.reflection).toHaveLength(4);
+    for (const outcome of mutation?.reflection ?? []) {
+      expect(Object.hasOwn(outcome as object, 'exampleIndices')).toBe(false);
+    }
+  });
+
+  it('emits a mutation depth histogram summing to the proposed candidate count', async () => {
+    const result = await runSplitFixture({
+      candidateLineage: true,
+      mutationAnnotation: {},
+    });
+    const manifest = result.optimizedProgram?.candidateLineage;
+    const histogram = manifest?.mutationDepthHistogram;
+    expect(histogram).toBeDefined();
+    const total = Object.values(histogram ?? {}).reduce(
+      (sum, count) => sum + count,
+      0
+    );
+    const proposed = (manifest?.records ?? []).filter(
+      (record) => record.strategy !== 'seed'
+    ).length;
+    // The SEED is deliberately not annotated — it is not a patch — so the
+    // histogram counts proposed candidates only.
+    expect(proposed).toBeGreaterThan(0);
+    expect(total).toBe(proposed);
+    expect(histogram?.supervision).toBe(proposed);
+    expect(histogram?.unannotated).toBe(0);
+    const mutation = (manifest?.records ?? []).find(
+      (record) => record.strategy === 'reflective_mutation'
+    );
+    expect(mutation?.mutation).toEqual({
+      depth: 'supervision',
+      patch: { class: 'steering', type: 'prompt.rule_modify' },
+      componentClasses: ['context'],
+    });
+  });
+
+  it('emits a running mutation depth histogram on every round, not only at completion', async () => {
+    const events: any[] = [];
+    // The optimizer-level logger, not the compile-option one: GEPA
+    // deliberately does not forward `options` into
+    // `updateOptimizationProgress`, so a compile-option logger never sees
+    // RoundProgress.
+    await runSplitFixture(
+      { candidateLineage: true, mutationAnnotation: {} },
+      {
+        debugOptimizer: true,
+        optimizerLogger: (data: any) => events.push(data),
+      }
+    );
+    const rounds = events.filter((event) => event.name === 'RoundProgress');
+    expect(rounds.length).toBeGreaterThan(0);
+    for (const round of rounds) {
+      expect(round.value.mutationDepthHistogram).toBeDefined();
+    }
+    const complete = events.find(
+      (event) => event.name === 'OptimizationComplete'
+    );
+    expect(complete?.value.mutationDepthHistogram).toBeDefined();
+  });
+
+  it('aborts a candidate before evaluation when a required annotation is missing', async () => {
+    const calls: string[] = [];
+    const result = await runSplitFixture({
+      candidateLineage: true,
+      mutationAnnotation: {
+        policy: 'required',
+        annotator: (args: any) => {
+          calls.push(args.strategy);
+          return undefined;
+        },
+      },
+    });
+    const records = result.optimizedProgram?.candidateLineage?.records ?? [];
+    const aborted = records.find(
+      (record) => record.reason === 'mutation_annotation_required'
+    );
+    expect(aborted).toMatchObject({
+      decision: 'aborted',
+      disposition: 'aborted',
+    });
+    expect(aborted?.failures?.[0]?.kind).toBe('validator');
+    // The annotator ran for the proposed candidate and never for the seed.
+    expect(calls).toEqual(['reflective_mutation']);
+    // Refused BEFORE the child minibatch, so it never reached the gate: the
+    // candidate has no child_minibatch evaluation recorded.
+    expect(aborted?.evaluations).toEqual([]);
+    // ...and the aborted candidate is not the deployed one.
+    expect(result.optimizedProgram?.componentMap).toEqual({
+      'root::instruction': 'task',
+    });
+  });
+
+  it('records a validator failure but promotes anyway when the policy is off', async () => {
+    const result = await runSplitFixture({
+      candidateLineage: true,
+      mutationAnnotation: {
+        annotator: () =>
+          ({
+            depth: 'not-a-depth',
+            patch: { class: 'steering', type: 'prompt.rule_modify' },
+            componentClasses: ['context'],
+          }) as any,
+      },
+    });
+    const records = result.optimizedProgram?.candidateLineage?.records ?? [];
+    const mutation = records.find(
+      (record) => record.strategy === 'reflective_mutation'
+    );
+    expect(mutation?.decision).toBe('accepted');
+    expect(mutation?.mutation).toBeUndefined();
+    // Silence would make the option look like it validated something.
+    expect(
+      mutation?.failures?.some((failure) => failure.kind === 'validator')
+    ).toBe(true);
+    expect(
+      result.optimizedProgram?.candidateLineage?.mutationDepthHistogram
+        ?.unannotated
+    ).toBe(1);
+  });
+
+  it('reports a deployable best chain whose ancestry ends at the selected candidate', async () => {
+    const result = await runSplitFixture(
+      { candidateLineage: true, mutationAnnotation: {} },
+      { numTrials: 3 }
+    );
+    const manifest = result.optimizedProgram?.candidateLineage;
+    const chain = manifest?.bestChain;
+    expect(chain).toBeDefined();
+    expect(chain?.candidateId).toBe(manifest?.selectedCandidateId);
+    // Root-first, ending at the deployed candidate.
+    expect(chain?.ancestry.at(-1)).toBe(chain?.candidateId);
+    expect(chain?.ancestry[0]).toBe('c0');
+    expect(new Set(chain?.ancestry).size).toBe(chain?.ancestry.length);
+    // No archive-best / oracle composite is produced anywhere.
+    expect(Object.hasOwn(manifest as object, 'archiveBest')).toBe(false);
+  });
+
+  it('publishes a causal-evidence cross-link id on every version-2 record', async () => {
+    const result = await runSplitFixture({
+      candidateLineage: true,
+      mutationAnnotation: {},
+    });
+    const records = result.optimizedProgram?.candidateLineage?.records ?? [];
+    expect(records.length).toBeGreaterThan(1);
+    for (const record of records) {
+      expect(record.causalEvidenceRecordId).toBe(`gepa-candidate-${record.id}`);
+    }
+    // Unique per candidate, so it can be a manifest record id.
+    expect(
+      new Set(records.map((record) => record.causalEvidenceRecordId)).size
+    ).toBe(records.length);
+  });
+});
+
+describe('rejected-candidate ledger wiring', () => {
+  const makeClock = () => {
+    let now = 1_000;
+    return {
+      now: () => now,
+      advanceBy: (ms: number) => {
+        now += ms;
+      },
+    };
+  };
+
+  /**
+   * Two rounds where the proposal is always WORSE than the parent, so both are
+   * rejected at gate 1 and both must reach the ledger.
+   */
+  const runRejecting = async (
+    ledger: Record<string, unknown> | undefined,
+    overrides: Record<string, unknown> = {},
+    compileOverrides: Record<string, unknown> = {}
+  ) => {
+    const priorSeenPerRound: unknown[][] = [];
+    const optimizer = new AxGEPA({
+      studentAI: {} as AxAIService,
+      teacherAI: {} as AxAIService,
+      numTrials: 2,
+      minibatch: false,
+      mergeMax: 0,
+      earlyStoppingTrials: 10,
+      minImprovementThreshold: 0,
+      ...overrides,
+    });
+    const program = createSingleRootProgram('task', async (instruction) => ({
+      score: instruction === 'task' ? 1 : 0,
+    }));
+    (optimizer as any).reflectTargetInstruction = async (
+      ...args: unknown[]
+    ) => {
+      priorSeenPerRound.push((args[11] as unknown[]) ?? []);
+      return 'worse';
+    };
+    const result = await optimizer.compile(
+      program as any,
+      [{ question: 'q1' }, { question: 'q2' }],
+      async ({ prediction }) => prediction.score,
+      {
+        maxMetricCalls: 60,
+        skipPerfectScore: false,
+        candidateLineage: true,
+        ...(ledger ? { rejectedCandidateLedger: ledger } : {}),
+        ...compileOverrides,
+      }
+    );
+    return { result, priorSeenPerRound };
+  };
+
+  it('records a rejection and offers it back as an untrusted prior next round', async () => {
+    const clock = makeClock();
+    const store = new AxInMemoryRejectedCandidateLedger({ clock });
+    const { result, priorSeenPerRound } = await runRejecting({
+      store,
+      storeId: 'test-store',
+      clock,
+      expiresWhen: [{ kind: 'after_ms', ttlMs: 60_000 }],
+    });
+
+    // Round 1 saw nothing; round 2 saw round 1's rejection.
+    expect(priorSeenPerRound).toHaveLength(2);
+    expect(priorSeenPerRound[0]).toEqual([]);
+    expect(priorSeenPerRound[1]).toHaveLength(1);
+    const offered = priorSeenPerRound[1]![0] as any;
+    expect(offered.implicatedSurfaces).toEqual(['root::instruction']);
+    expect(offered.gateReading).toMatchObject({
+      gate: 'reflective_mutation',
+      estimator: 'sum',
+    });
+    // The diagnosis quotes the model's own proposed text back — which is
+    // exactly why it is untrusted and never enters the reference channel.
+    expect(offered.diagnosis).toContain('insufficient_minibatch_improvement');
+    expect(offered.diagnosis).toContain('root::instruction="worse"');
+
+    // The artifact carries POINTERS only.
+    const ref = (result.optimizedProgram as any)?.rejectedCandidateLedgerRef;
+    expect(ref?.storeId).toBe('test-store');
+    expect(ref?.entryDigests).toHaveLength(1);
+    expect(ref?.entryDigests[0]).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(ref?.omittedDigestCount).toBe(0);
+    // Both rounds proposed the same value, so both rejections supersede onto
+    // one entry rather than accumulating duplicates.
+    const stored = await store.list({ now: clock.now() });
+    expect(stored).toHaveLength(1);
+    expect(stored[0]?.candidateDigest).toBe(ref?.entryDigests[0]);
+  });
+
+  it('drops an entry from the prior once its ttl has elapsed', async () => {
+    const clock = makeClock();
+    const store = new AxInMemoryRejectedCandidateLedger({ clock });
+    await runRejecting({
+      store,
+      storeId: 'test-store',
+      clock,
+      expiresWhen: [{ kind: 'after_ms', ttlMs: 60_000 }],
+    });
+    expect(await store.list({ now: clock.now() })).toHaveLength(1);
+    clock.advanceBy(60_000);
+    // Fail-open: negative memory that outlives its stated conditions is a
+    // capability ceiling, so the entry leaves the query result.
+    expect(await store.list({ now: clock.now() })).toHaveLength(0);
+  });
+
+  it('continues the run and records a runtime failure when the store throws', async () => {
+    const clock = makeClock();
+    const throwing = {
+      capabilities: {
+        durability: 'volatile',
+        rollbackSurvival: 'unknown',
+      } as const,
+      record: async () => {
+        throw new Error('ledger offline');
+      },
+      list: async () => {
+        throw new Error('ledger offline');
+      },
+      purgeExpired: async () => 0,
+    };
+    const { result } = await runRejecting(
+      {
+        store: throwing,
+        storeId: 'broken',
+        clock,
+        expiresWhen: [{ kind: 'after_ms', ttlMs: 60_000 }],
+      },
+      {},
+      // Failure messages are fingerprint-only by default; this run reads them
+      // back, so it asks for them explicitly.
+      { candidateLineage: { includeFailureMessages: true } }
+    );
+
+    // The run completed and still selected an artifact.
+    expect(result.optimizedProgram?.componentMap).toEqual({
+      'root::instruction': 'task',
+    });
+    const records = result.optimizedProgram?.candidateLineage?.records ?? [];
+    const rejected = records.filter((record) => record.decision === 'rejected');
+    expect(rejected.length).toBeGreaterThan(0);
+    expect(
+      rejected.some((record) =>
+        record.failures?.some(
+          (failure) =>
+            failure.kind === 'runtime' &&
+            failure.messageFingerprint !== undefined
+        )
+      )
+    ).toBe(true);
+    // BOTH directions leave a trace. A failed READ used to record nothing, so
+    // a run whose every read failed looked exactly like a run against an empty
+    // ledger — and the prior is the half that changes what gets proposed.
+    const messages = records
+      .flatMap((record: any) => record.failures ?? [])
+      .map((failure: any) => failure.message)
+      .filter(
+        (message: unknown): message is string => typeof message === 'string'
+      );
+    expect(
+      messages.some((m) => m.startsWith('rejected_candidate_ledger_read'))
+    ).toBe(true);
+    expect(
+      messages.some((m) => m.startsWith('rejected_candidate_ledger_write'))
+    ).toBe(true);
+    // No ref: nothing was durably recorded, and claiming otherwise on the
+    // artifact would be a pointer into an empty store.
+    expect(
+      (result.optimizedProgram as any)?.rejectedCandidateLedgerRef
+    ).toBeUndefined();
+  });
+
+  it('refuses an expiry with no ttl before any metric call', async () => {
+    const clock = makeClock();
+    const store = new AxInMemoryRejectedCandidateLedger({ clock });
+    let forwardCalls = 0;
+    const optimizer = new AxGEPA({
+      studentAI: {} as AxAIService,
+      teacherAI: {} as AxAIService,
+      numTrials: 1,
+    });
+    await expect(
+      optimizer.compile(
+        createSingleRootProgram('task', async () => {
+          forwardCalls += 1;
+          return { score: 0 };
+        }) as any,
+        [{ question: 'q1' }, { question: 'q2' }],
+        async ({ prediction }) => prediction.score,
+        {
+          maxMetricCalls: 20,
+          rejectedCandidateLedger: {
+            store,
+            storeId: 'test-store',
+            clock,
+            expiresWhen: [{ kind: 'model_changed', boundModelId: 'model-a' }],
+          },
+        }
+      )
+    ).rejects.toThrow('expiry_requires_ttl');
+    // Refused BEFORE anything ran: permanent negative memory is a caller bug,
+    // not a degraded store, so it fails loudly and for free.
+    expect(forwardCalls).toBe(0);
+  });
+
+  /**
+   * One round whose CHILD rollouts all fail, so the batch is aborted for
+   * `insufficient_admitted_rows` before any comparison is computed.
+   */
+  const runAborting = async (ledger: Record<string, unknown>) => {
+    const optimizer = new AxGEPA({
+      studentAI: {} as AxAIService,
+      teacherAI: {} as AxAIService,
+      numTrials: 1,
+      minibatch: false,
+      mergeMax: 0,
+      minImprovementThreshold: 0,
+    } as any);
+    (optimizer as any).reflectTargetInstruction = async () => 'worse';
+    const program = createSingleRootProgram(
+      'task',
+      async (instruction: string) => {
+        if (instruction === 'worse') throw new Error('provider 429');
+        return { score: 0.5 };
+      }
+    );
+    const classifier: AxTrajectoryTerminationClassifier = (input) =>
+      input.error === undefined
+        ? { kind: 'completed' }
+        : { kind: 'environment_failure', cause: 'transport' };
+    return await optimizer.compile(
+      program as any,
+      [{ question: 'q1' }, { question: 'q2' }, { question: 'q3' }] as any,
+      async ({ prediction }: any) => prediction.score,
+      {
+        maxMetricCalls: 60,
+        skipPerfectScore: false,
+        candidateLineage: true,
+        trajectoryTermination: { classifier },
+        rejectedCandidateLedger: ledger,
+      } as any
+    );
+  };
+
+  it('records no score pair and no observed delta for a candidate aborted before the comparison', async () => {
+    const clock = makeClock();
+    const store = new AxInMemoryRejectedCandidateLedger({ clock });
+    const result = await runAborting({
+      store,
+      storeId: 'test-store',
+      clock,
+      expiresWhen: [{ kind: 'after_ms', ttlMs: 60_000 }],
+    });
+    const records = result.optimizedProgram?.candidateLineage?.records ?? [];
+    expect(
+      records.some(
+        (record: any) =>
+          record.decision === 'aborted' &&
+          record.reason === 'insufficient_admitted_rows'
+      )
+    ).toBe(true);
+
+    const [aborted] = await store.list({ now: clock.now() });
+    expect(aborted).toBeDefined();
+    // The abort produced NO comparable numbers. A `parentScore: 0,
+    // childScore: 0` pair would record a measured delta of zero for an
+    // evaluation that never ran, and a later reader could not tell that from a
+    // real tie (§12/M1).
+    expect(Object.hasOwn(aborted!.gateReading, 'parentScore')).toBe(false);
+    expect(Object.hasOwn(aborted!.gateReading, 'childScore')).toBe(false);
+    expect(aborted!.observedDeltas).toEqual([]);
+    expect(aborted!.gateReading.admittedRows).toBe(0);
+    // ...and the rendered prior says so rather than printing a hole.
+    const prior = axRejectedCandidatePrior([aborted!]);
+    expect(prior?.content).toContain('comparison: none');
+    expect(prior?.content).not.toContain('parent: undefined');
+
+    // CONTROL: a candidate that was actually COMPARED and lost carries both
+    // scores and one observed delta, so the absence above is a claim about
+    // this entry, not a field the writer never fills.
+    const rejectedClock = makeClock();
+    const rejectedStore = new AxInMemoryRejectedCandidateLedger({
+      clock: rejectedClock,
+    });
+    await runRejecting({
+      store: rejectedStore,
+      storeId: 'test-store',
+      clock: rejectedClock,
+      expiresWhen: [{ kind: 'after_ms', ttlMs: 60_000 }],
+    });
+    const [compared] = await rejectedStore.list({ now: rejectedClock.now() });
+    expect(typeof compared?.gateReading.parentScore).toBe('number');
+    expect(typeof compared?.gateReading.childScore).toBe('number');
+    expect(compared?.observedDeltas).toEqual([
+      { metric: 'scalar', split: 'held_in', delta: -2 },
+    ]);
+  });
+
+  it('keeps the most recent digests when the artifact ref hits its cap', async () => {
+    // The cap is a MEMORY bound, and `normalizeRef` keeps the tail. A clamp
+    // that dropped the newest digests would pin a run's first attempts and
+    // omit everything it learned afterwards (§12/M2).
+    const clock = makeClock();
+    const store = new AxInMemoryRejectedCandidateLedger({ clock });
+    const seen: string[] = [];
+    const recordingStore = {
+      capabilities: store.capabilities,
+      record: async (entry: any, signal?: AbortSignal) => {
+        seen.push(entry.candidateDigest);
+        return await store.record(entry, signal);
+      },
+      list: store.list.bind(store),
+      purgeExpired: store.purgeExpired.bind(store),
+    };
+    const rounds = AX_REJECTED_LEDGER_REF_MAX_DIGESTS + 3;
+    const optimizer = new AxGEPA({
+      studentAI: {} as AxAIService,
+      teacherAI: {} as AxAIService,
+      numTrials: rounds,
+      minibatch: false,
+      mergeMax: 0,
+      earlyStoppingTrials: rounds + 1,
+      minImprovementThreshold: 0,
+    } as any);
+    let proposal = 0;
+    (optimizer as any).reflectTargetInstruction = async () => {
+      proposal += 1;
+      return `worse-${proposal}`;
+    };
+    const program = createSingleRootProgram('task', async (instruction) => ({
+      score: instruction === 'task' ? 1 : 0,
+    }));
+    const result = await optimizer.compile(
+      program as any,
+      [{ question: 'q1' }, { question: 'q2' }] as any,
+      async ({ prediction }: any) => prediction.score,
+      {
+        maxMetricCalls: 4 * rounds + 8,
+        skipPerfectScore: false,
+        rejectedCandidateLedger: {
+          store: recordingStore,
+          storeId: 'test-store',
+          clock,
+          expiresWhen: [{ kind: 'after_ms', ttlMs: 600_000 }],
+        },
+      } as any
+    );
+    expect(seen.length).toBeGreaterThan(AX_REJECTED_LEDGER_REF_MAX_DIGESTS);
+    const ref = (result.optimizedProgram as any)?.rejectedCandidateLedgerRef;
+    expect(ref.entryDigests).toHaveLength(AX_REJECTED_LEDGER_REF_MAX_DIGESTS);
+    expect(ref.omittedDigestCount).toBe(
+      seen.length - AX_REJECTED_LEDGER_REF_MAX_DIGESTS
+    );
+    // The retained set is the TAIL of the write order, not its head.
+    expect([...ref.entryDigests]).toEqual(
+      seen.slice(seen.length - AX_REJECTED_LEDGER_REF_MAX_DIGESTS)
+    );
+    expect(ref.entryDigests).not.toContain(seen[0]);
+    expect(ref.entryDigests).toContain(seen[seen.length - 1]);
+  });
+
+  it('writes no ledger ref and offers no prior when the option is omitted', async () => {
+    const { result, priorSeenPerRound } = await runRejecting(undefined);
+    expect(priorSeenPerRound.every((prior) => prior.length === 0)).toBe(true);
+    expect(
+      (result.optimizedProgram as any)?.rejectedCandidateLedgerRef
+    ).toBeUndefined();
+    expect(
+      Object.hasOwn(
+        result.optimizedProgram as object,
+        'rejectedCandidateLedgerRef'
+      )
+    ).toBe(false);
+  });
+});
+
+describe('merge gate under a discriminative sampler', () => {
+  /**
+   * Three independently improvable components where improving ANY TWO is
+   * worse than improving one. Single mutations are accepted, so the archive
+   * grows enough to merge; every merge of two accepted candidates is then
+   * rejected at the merge gate. That is the only shape that reaches both gates
+   * in one run.
+   */
+  const runMerging = async (
+    store: AxInMemoryRejectedCandidateLedger,
+    clock: Readonly<{ now: () => number }>,
+    recipe: Awaited<ReturnType<typeof axHarnessRecipe>>
+  ) => {
+    const componentIds = [
+      'root::instruction',
+      'root::description',
+      'root::fn-desc:answer',
+    ];
+    const values: Record<string, string> = Object.fromEntries(
+      componentIds.map((id) => [id, 'base'])
+    );
+    const owner = (index: number) => componentIds[index % 3]!;
+    const program = {
+      getId: () => 'root',
+      setId: () => {},
+      getInstruction: () => values['root::instruction']!,
+      setInstruction: (value: string) => {
+        values['root::instruction'] = value;
+      },
+      getSignature: () => ({
+        getDescription: () => values['root::description']!,
+        toString: () => '"base" question:string -> answer:string',
+      }),
+      namedProgramInstances: () => [],
+      getOptimizableComponents: () =>
+        componentIds.map((key, position) => ({
+          key,
+          kind: ['instruction', 'description', 'fn-desc'][position]!,
+          current: values[key]!,
+        })),
+      applyOptimizedComponents: (updates: Readonly<Record<string, string>>) => {
+        for (const id of componentIds) {
+          const next = updates[id];
+          if (typeof next === 'string') values[id] = next;
+        }
+      },
+      forward: async (_ai: AxAIService, example: any) => {
+        const improved = componentIds.filter(
+          (id) => values[id] === `better-${id}`
+        );
+        if (improved.length >= 2) return { score: 0, index: example.index };
+        const own = improved.includes(owner(example.index))
+          ? 0.4
+          : improved.length > 0
+            ? -0.1
+            : 0;
+        return { score: 0.6 + own, index: example.index };
+      },
+      getTraces: () => [],
+      setDemos: () => {},
+      applyOptimization: () => {},
+      getUsage: () => [],
+      resetUsage: () => {},
+    };
+    const optimizer = new AxGEPA({
+      studentAI: {} as AxAIService,
+      teacherAI: {} as AxAIService,
+      numTrials: 6,
+      minibatch: true,
+      minibatchSize: 2,
+      mergeMax: 5,
+    } as any);
+    (optimizer as any).reflectTargetInstruction = async (componentId: string) =>
+      `better-${componentId}`;
+    return await optimizer.compile(
+      program as any,
+      Array.from({ length: 9 }, (_, index) => ({ index })) as any,
+      async ({ prediction }: any) => prediction.score,
+      {
+        maxMetricCalls: 200,
+        skipPerfectScore: false,
+        minibatchStrategy: 'discriminative',
+        candidateLineage: true,
+        harnessRecipe: { recipe },
+        rejectedCandidateLedger: {
+          store,
+          storeId: 'merge-store',
+          clock,
+          expiresWhen: [{ kind: 'after_ms', ttlMs: 600_000 }],
+        },
+      } as any
+    );
+  };
+
+  it('labels every merge-gate reading with the sum estimator while the mutation gate runs IPW', async () => {
+    const clock = { now: () => 1_000 };
+    const store = new AxInMemoryRejectedCandidateLedger({ clock });
+    const recipe = await axHarnessRecipe({
+      bindings: [{ port: 'model.primary', atomId: 'atom-a', version: '1' }],
+      boundModelId: 'model-a',
+    });
+    const result = await runMerging(store, clock, recipe);
+    const records = result.optimizedProgram?.candidateLineage?.records ?? [];
+
+    // The run REACHED the merge gate. Without this the estimator claim below
+    // is a statement about an empty set.
+    const merges = records.filter(
+      (record: any) => record.strategy === 'system_merge'
+    );
+    expect(merges.length).toBeGreaterThan(0);
+    expect(merges.every((record: any) => record.decision === 'rejected')).toBe(
+      true
+    );
+
+    const entries = await store.list({ now: clock.now() });
+    const mergeReadings = entries
+      .filter((entry) => entry.gateReading.gate === 'system_merge')
+      .map((entry) => entry.gateReading);
+    expect(mergeReadings.length).toBeGreaterThan(0);
+    for (const reading of mergeReadings) {
+      // The merge subsample is a score-disagreement stratified draw with no
+      // inclusion probabilities, so no IPW estimate of it exists — even under
+      // `minibatchStrategy: 'discriminative'` (RFC §8.7).
+      expect(reading.estimator).toBe('sum');
+      expect(reading.differenceEstimate).toBeUndefined();
+      expect(typeof reading.parentScore).toBe('number');
+      expect(typeof reading.childScore).toBe('number');
+    }
+
+    // THE CONTRAST: the same run's mutation gate really did run IPW, so the
+    // merge gate's `'sum'` is a distinction this fixture can see rather than
+    // the only value the run could have produced.
+    const mutationReadings = entries
+      .filter((entry) => entry.gateReading.gate === 'reflective_mutation')
+      .map((entry) => entry.gateReading);
+    expect(mutationReadings.length).toBeGreaterThan(0);
+    expect(
+      mutationReadings.every((reading) => reading.estimator === 'ipw_hajek')
+    ).toBe(true);
+    for (const reading of mutationReadings) {
+      // A paired difference, reported as one: no score pair is invented for it.
+      expect(typeof reading.differenceEstimate).toBe('number');
+      expect(reading.parentScore).toBeUndefined();
+      expect(reading.childScore).toBeUndefined();
+    }
+  });
+
+  it('stamps the harness on merge records too, not only on the two the split fixture reaches', async () => {
+    const clock = { now: () => 1_000 };
+    const store = new AxInMemoryRejectedCandidateLedger({ clock });
+    const recipe = await axHarnessRecipe({
+      bindings: [{ port: 'model.primary', atomId: 'atom-a', version: '1' }],
+      boundModelId: 'model-a',
+    });
+    const result = await runMerging(store, clock, recipe);
+    const records = result.optimizedProgram?.candidateLineage?.records ?? [];
+    // The structural argument is one central `lineageV2Fields` helper; this is
+    // the fixture that exercises it across every record STRATEGY rather than
+    // across two seed/mutation records.
+    expect(new Set(records.map((record: any) => record.strategy))).toEqual(
+      new Set(['seed', 'reflective_mutation', 'system_merge'])
+    );
+    expect(new Set(records.map((record: any) => record.decision))).toEqual(
+      new Set(['accepted', 'rejected'])
+    );
+    for (const record of records) {
+      expect(record.harness).toEqual({
+        recipeDigest: recipe.digest,
+        boundModelId: 'model-a',
+      });
+    }
   });
 });

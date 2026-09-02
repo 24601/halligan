@@ -87,28 +87,46 @@ entry.expiresWhen.push({ kind: 'after_ms', ttlMs: 1 });
  * a proposer gets its own text framed back to it as developer guidance.
  *
  * The assertion below is the firewall itself, not a description of one:
- * `AxGEPARejectedPriorBlock.description` is a required object where
- * `AxGEPAOptimizationReference.description` is `string | undefined`, which is
- * what makes this assignment fail. Deleting that member makes the
- * `@ts-expect-error` unused and this file stops compiling.
+ * `AxGEPARejectedPriorBlock.channel` is a required
+ * `'rejected-candidate-prior'` where `AxGEPAOptimizationReference.channel` is
+ * `'trusted-optimization-reference' | undefined`, which is what makes this
+ * assignment fail. Deleting that member makes the `@ts-expect-error` unused and
+ * this file stops compiling.
  */
 declare const prior: AxGEPARejectedPriorBlock;
 // @ts-expect-error the untrusted prior block is not a trusted optimization reference
 const _priorIsNotATrustedReference: AxGEPAOptimizationReference = prior;
 // ...and not by accident of a missing member: every member the trusted channel
-// reads is present, so `description` is doing the work.
+// reads is present — including a plain-string `description` — so `channel` is
+// doing the work.
 type _priorHasName = Expect<
   Equal<'name' extends keyof AxGEPARejectedPriorBlock ? true : false, true>
 >;
 type _priorHasContent = Expect<
   Equal<AxGEPARejectedPriorBlock['content'], string>
 >;
-type _priorDescriptionIsNotAString = Expect<
+// `description` is now an ORDINARY string on both sides: it carries no part of
+// the firewall any more, and asserting that proves `channel` alone closes the
+// channel.
+type _priorDescriptionIsAString = Expect<
+  Equal<AxGEPARejectedPriorBlock['description'], string>
+>;
+type _priorChannelIsPinned = Expect<
+  Equal<AxGEPARejectedPriorBlock['channel'], 'rejected-candidate-prior'>
+>;
+type _trustedChannelIsOptional = Expect<
   Equal<
-    AxGEPARejectedPriorBlock['description'] extends string ? true : false,
-    false
+    AxGEPAOptimizationReference['channel'],
+    'trusted-optimization-reference' | undefined
   >
 >;
+// A plain host literal still assigns to the trusted channel, so closing it
+// broke no existing caller.
+const _hostReference: AxGEPAOptimizationReference = {
+  name: 'style-guide',
+  content: 'prefer short sentences',
+  description: 'developer guidance',
+};
 type _priorNameIsPinned = Expect<
   Equal<AxGEPARejectedPriorBlock['name'], 'rejected-candidate-prior'>
 >;

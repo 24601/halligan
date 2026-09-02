@@ -36,6 +36,10 @@ import {
   cloneAndFreezeGEPACandidateLineageManifest,
 } from './optimizers/gepaLineage.js';
 import type { AxGEPAComponentBanditState } from './optimizers/gepaSelection.js';
+import {
+  type AxRejectedCandidateLedgerRef,
+  axMergeRejectedCandidateLedgerRefs,
+} from './optimizers/rejectedCandidateLedger.js';
 import type { AxOptimizerLoggerFunction } from './optimizerTypes.js';
 import type { AxGenOut, AxProgramDemos } from './types.js';
 
@@ -866,6 +870,12 @@ export interface AxOptimizedProgram<OUT = any> {
   /** Optional host-authored causal claim and evaluation receipts for candidates. */
   causalCandidateEvidence?: AxCausalCandidateEvidenceManifest;
   candidateLineage?: AxGEPACandidateLineageManifest;
+  /**
+   * POINTER ONLY. The rejected-candidate entries live in a host store the
+   * artifact cannot rewrite, which is what lets them survive a rollback of
+   * this snapshot.
+   */
+  rejectedCandidateLedgerRef?: AxRejectedCandidateLedgerRef;
   demos?: AxProgramDemos<any, OUT>[];
 
   // Model configuration
@@ -913,6 +923,12 @@ export class AxOptimizedProgramImpl<OUT = any>
   public readonly selectorState?: Record<string, AxGEPAComponentBanditState>;
   public readonly causalCandidateEvidence?: AxCausalCandidateEvidenceManifest;
   public declare readonly candidateLineage?: AxGEPACandidateLineageManifest;
+  /**
+   * `declare` + conditional assignment, matching `candidateLineage`: an
+   * unconditional `this.x = undefined` would put the key on every artifact,
+   * and `Object.keys` on a legacy artifact is part of INV-L1.
+   */
+  public declare readonly rejectedCandidateLedgerRef?: AxRejectedCandidateLedgerRef;
   public readonly demos?: AxProgramDemos<any, OUT>[];
   public readonly examples?: AxExample[];
   public readonly modelConfig?: {
@@ -943,6 +959,7 @@ export class AxOptimizedProgramImpl<OUT = any>
     causalEvidenceVerifier?: AxCausalEvidenceAuthorityVerifier;
     causalEvidenceAlreadyIssued?: symbol;
     candidateLineage?: AxGEPACandidateLineageManifest;
+    rejectedCandidateLedgerRef?: AxRejectedCandidateLedgerRef;
     demos?: AxProgramDemos<any, OUT>[];
     examples?: AxExample[];
     modelConfig?: AxOptimizedProgram<OUT>['modelConfig'];
@@ -962,6 +979,19 @@ export class AxOptimizedProgramImpl<OUT = any>
     if (config.candidateLineage) {
       this.candidateLineage = cloneAndFreezeGEPACandidateLineageManifest(
         config.candidateLineage
+      );
+    }
+    if (config.rejectedCandidateLedgerRef) {
+      // Through the SAME helper the union path uses, so a ref arriving from
+      // `axDeserializeOptimizedProgram` is held to the bounds a ref written by
+      // GEPA is: identity-strength members, deduplicated, clamped to
+      // `AX_REJECTED_LEDGER_REF_MAX_DIGESTS`, frozen. A plain assignment let a
+      // hand-edited artifact carry arbitrary strings, unbounded length and a
+      // mutable array into the one artifact field this constructor did not
+      // validate (§12/M3).
+      this.rejectedCandidateLedgerRef = axMergeRejectedCandidateLedgerRefs(
+        undefined,
+        config.rejectedCandidateLedgerRef
       );
     }
     if (config.causalCandidateEvidence && !config.causalEvidenceVerifier) {
@@ -1096,10 +1126,25 @@ export function axReplaceOptimizedProgramSnapshot<OUT = any>(
       'replacement snapshot has divergent causal evidence history'
     );
   }
+  // ASYMMETRIC, precisely. The causal evidence history keeps its REFUSAL above
+  // and is carried over from `current` unchanged: two chains cannot be unioned
+  // and still verify — records carry a strict sequence and a strict
+  // parent link, and receipts a strictly increasing count — and removing the
+  // refusal would delete the one control that stops a rollback substituting a
+  // fabricated history.
+  //
+  // The ledger ref is a POINTER SET into a store the artifact cannot rewrite,
+  // which is exactly why it can merge at all: rewinding the snapshot must not
+  // make the run forget which candidates it already tried and rejected.
+  const rejectedCandidateLedgerRef = axMergeRejectedCandidateLedgerRefs(
+    current.rejectedCandidateLedgerRef,
+    replacement.rejectedCandidateLedgerRef
+  );
   return new AxOptimizedProgramImpl<OUT>({
     ...axSerializeOptimizedProgram(replacement),
     causalCandidateEvidence: history,
     causalEvidenceVerifier,
+    ...(rejectedCandidateLedgerRef ? { rejectedCandidateLedgerRef } : {}),
   });
 }
 

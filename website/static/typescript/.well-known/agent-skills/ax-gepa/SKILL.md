@@ -574,6 +574,13 @@ program.applyOptimization(loaded);
 - Single-target runs usually populate both `optimizedProgram.instruction` and `optimizedProgram.componentMap`.
 - Tree-wide runs rely on `componentMap`, keyed by full component key.
 - Pareto points expose candidate configs under `point.configuration.componentMap`.
+- With any version-2 lineage mechanism enabled, `candidateLineage.bestChain`
+  names the DEPLOYABLE candidate and its root-first ancestry — the candidate
+  whose `cfg` actually became `componentMap`. **No archive-best or per-task
+  oracle composite is produced**: GEPA computes no oracle number, and inventing
+  one purely so it could be labelled non-deployable would add Goodhart surface
+  for a number nothing reads. `optimizedProgram.bestScore` remains the maximum
+  scalarized score over individual frontier candidates.
 
 ## Candidate Lineage and Decision Audit
 
@@ -697,6 +704,226 @@ npm run test:gepa-upstream-compatibility
 
 Set `GEPA_COMPAT_BASE=<commit-or-ref>` to compare another authoritative base.
 
+## Discriminative Minibatch Selection
+
+`minibatchStrategy` is default-`'uniform'`, which is byte-identical legacy
+behaviour including the `rand()` draw sequence. `'discriminative'` replaces the
+epoch-shuffled uniform minibatch with a Beta(1,1)-smoothed Bernoulli-variance
+πps draw that concentrates the budget on tasks that actually separate
+candidates, and promotes on a Hájek/IPW paired difference instead of a raw sum.
+
+```typescript
+const result = await optimize(program, train, metric, {
+  studentAI,
+  teacherAI,
+  maxMetricCalls: 200,
+  minibatchStrategy: 'discriminative',
+  taskDiscrimination: { explorationFloor: 0.05 },
+});
+```
+
+- **Every task keeps a mandatory exploration floor.** A task that has never been
+  solved is still drawn; the floor is not optional and is asserted per seed.
+- **Scale warning.** A raw sum and an IPW paired difference are on different
+  scales: the estimator compares a PER-EXAMPLE MEAN. With the default
+  `minImprovementThreshold` of 0 both mean "child beat parent", so the default
+  degrades gracefully; a caller who set a non-zero sum-scale threshold must
+  divide it by the batch size.
+- **This is a cost claim at parity, not a quality gain.** Nothing here makes the
+  resulting program better at anything, and the shipped evaluation does not
+  reproduce even the cost claim on its fixture — see
+  `npm run evaluate:gepa-search`, which reports the call ratio, the gate error
+  rate and the seeds where discriminative used MORE calls.
+- **The Madow standard error is reported, never gated on.** No promotion gate is
+  built on it; some joint inclusion probabilities under systematic πps are zero,
+  so the SE is an approximation.
+- **RNG consequence.** The sampler consumes a different number of `this.rand()`
+  draws, so a discriminative run is NOT seed-comparable to a uniform run
+  draw-for-draw. Compare strategies by outcome, never by draw sequence.
+
+Budget for the shipped evaluation: 0 provider calls, 0 tokens, $0.
+
+**Do not generate**: a discriminative run whose acceptance comparison is a raw
+sum. Cross-iteration scores are not comparable under non-uniform draws, so the
+sampler and the IPW estimator ship together and must be enabled together.
+
+## Trajectory Admission
+
+`trajectoryTermination` is default-off. Supplying it turns on host-owned
+classification of why a rollout ended, so a trajectory that died because a
+provider returned 429 stops counting as evidence against the candidate.
+
+```typescript
+trajectoryTermination: {
+  classifier: (row) =>
+    row.error?.includes('429')
+      ? { kind: 'environment_failure', cause: 'rate_limit' }
+      : { kind: 'completed' },
+  minAdmittedFraction: 0.5,
+  maxRunDiscardRate: 0.35,
+},
+```
+
+- **The classifier is HOST-owned and the default never returns an environment
+  failure.** Ax infers nothing. Classify conservatively: mislabelling a policy
+  failure launders a real defect out of the evidence.
+- **`avg`, `scalars` and `sum` keep their all-rows meaning.** Admission is
+  reported in separate fields; only the promotion comparison uses the paired
+  admitted denominator. That is what keeps `skipPerfectScore` honest.
+- **`configError` rows and every row of a program that declares a
+  `program-source` component are NOT reclassifiable.** For a program-source
+  candidate the evolved AST *is* the candidate: a worker timeout, a budget
+  error, a revoked epoch or a bad tool call are the candidate failing. A host
+  `environment_failure` there is overridden to `policy_failure` and counted in
+  `admission.overriddenRows`.
+- **Discarded rows still cost budget.** They were really run.
+- **Both promotion gates are covered.** The reflective-mutation gate and the
+  `system_merge` gate each compare an intersected admitted denominator. The
+  merge gate reports `estimator: 'sum'` on every record, even under
+  `minibatchStrategy: 'discriminative'`: its subsample is a score-disagreement
+  stratified draw with no inclusion probabilities, so no IPW estimate of it
+  exists.
+- **A high discard rate is a signal to inspect, not to celebrate.** The rate is
+  reported per batch and per run; above `maxRunDiscardRate` the run ends with
+  `stoppedReason: 'excessive_environment_failures'` and publishes NO best score.
+
+## Mutation Taxonomy, Effort, and Cost
+
+`mutationAnnotation` is default-off. It classifies each proposed candidate so a
+run's history can be graded instead of merely scored.
+
+```typescript
+mutationAnnotation: {
+  // Defaults to `axDefaultMutationAnnotator`.
+  annotator: ({ componentKinds, strategy, round }) => ({ /* ... */ }),
+  hostKinds: { 'my-kind': { componentClass: 'tools', allowedPatchTypes: ['tool.name_fix'] } },
+  policy: 'off',
+},
+```
+
+- **Seven depths**: `schedule`, `hyperparameter`, `capacity`, `objective`,
+  `supervision`, `updateRule`, `data`.
+- **Five patch types**, with their class DERIVED, never asserted:
+  `prompt.rule_add`, `prompt.rule_modify`, `tool.description_fix`,
+  `tool.name_fix` (all `steering`) and `program.source_replace` (`capability`).
+- **`tool.new`, `tool.argument_modify`, `tool.implementation_fix` and every
+  `middleware.*` value are deliberately absent.** GEPA replaces component
+  STRINGS; it cannot add or edit an implementation. Shipping unreachable enum
+  members would make the validator either always-throwing or vacuous.
+- **Five component classes**: `context`, `tools`, `runtime`, `evaluation`,
+  `orchestration`. The `'evaluation'` class is a label this taxonomy defines and
+  carries; **the denial policy it exists for is NOT implemented, so do not assume
+  the optimizer is prevented from editing its own evaluator.**
+- **Validation is keyed on component KIND, never on a free-text surface label.**
+  An unmapped kind throws `unknown_component_kind`; the validator is never a
+  no-op. Declared component classes must equal the classes actually touched.
+- **`costUsd: undefined` means unmeasured, never free.** Ax records `undefined`
+  rather than estimating, and the same goes for `effort`.
+- **A per-run depth histogram is emitted every round**, not only at completion,
+  so a run that aborts still leaves one behind. No winner is reported without
+  its cost.
+- `policy: 'required'` aborts a candidate whose annotation is missing or invalid
+  BEFORE either gate sees it, so it costs no metric calls.
+
+## Harness Recipe and Model-Bound Staleness
+
+`harnessRecipe` is default-off. It names the sockets a run was bound to and
+stamps every lineage record with a digest of them.
+
+```typescript
+const recipe = await axHarnessRecipe({
+  bindings: [{ port: 'model.primary', atomId: 'gpt-x', version: '1' }],
+  boundModelId: 'provider/model-id',
+});
+
+// `currentModelId` is what makes staleness LIVE.
+harnessRecipe: { recipe, currentModelId: 'provider/model-id' },
+```
+
+- **Port ids are opaque host strings**, validated for shape only. This RFC does
+  not enumerate, mutate, or search bindings.
+- **The digest is identity strength** (WebCrypto SHA-256 over canonical JSON of
+  the sorted bindings plus `boundModelId`), which is why `axHarnessRecipe` is
+  async. `boundModelId` is INSIDE the digest: the same bindings tuned against a
+  different model are a different configuration.
+- **`stale` absent means NOT EVALUATED, never "fresh."** Omit `currentModelId`
+  and no staleness claim is made. Supply it and a mismatch sets `stale: true` on
+  every record, with one log line saying so.
+- **Ax records staleness and never refuses on it.** `axAssertHarnessStampFresh`
+  is the host's fail-closed variant.
+- **Doctrinal boundary**: the port contract never constrains the program-source
+  AST. Free AST mutation inside, fixed named sockets around.
+
+## Attribution, Effects, and the Rejected-Candidate Ledger
+
+`attributionPolicy` and `effectPolicy` on `axCreateCausalCandidateEvidenceManifest`
+are default-`'off'`.
+
+- **`attributionPolicy: 'required'`** refuses a PROMOTED record whose candidate
+  touched more than one component unless it carries a leave-one-out matrix
+  covering exactly the affected component set, or an explicit
+  `attribution: { status: 'inconclusive', reason }`. A record may not do both.
+  Rejections and single-component promotions need nothing.
+- **The leave-one-out matrix meets the same standard as the single ablation it
+  generalizes**: every removed component must be one the candidate touched, ids
+  must be distinct, and each row's metric set must equal the candidate outcome's.
+  Its `metricCalls` is a **host self-report**: Ax ships no ablation runner, so it
+  validates the shape and cannot cross-check the number.
+- **`effectPolicy: 'required'`** keys on the record's own
+  `affectedComponents` — `componentKind: 'program-source'` plus a declared
+  `tool:*` capability — never on the free-text `surface` field and never on the
+  OPTIONAL `mutation` annotation. A promoted record whose affected components
+  declare a `tool:*` capability is refused without an effect declaration
+  (`effects_missing`); a promoted record touching a `program-source` component
+  is refused without `runtimeRequirements` (`runtime_requirements_missing`); an
+  effect attached to a steering patch, or to a record naming no program-source
+  surface at all, is refused outright (`effects_on_steering_surface`) because
+  description text cannot carry an effect. Keying any of these on `mutation`
+  would make the gate — and a reader's `requirePolicyAtLeast` floor — something
+  the record's own author switches off by omitting one field.
+- **The manifest-level `policy` is covered by the authority receipt**, and a
+  reader may demand a stricter floor regardless of what the artifact says about
+  itself:
+  `axCloneCausalCandidateEvidenceManifest(manifest, verify, { requirePolicyAtLeast: { attribution: 'required', effects: 'required' } })`.
+- **A `gateReading` never invents a comparison.** `parentScore` and `childScore`
+  are optional and travel together: a candidate aborted for
+  `insufficient_admitted_rows` carries neither and no `observedDeltas` row,
+  because nothing was compared. An `'ipw_hajek'` reading carries
+  `differenceEstimate` — a paired difference — instead of a score pair.
+- **Reflection categories split at `perfectScore ?? 1`.** `fixed` / `regressed`
+  / `still_failing` / `still_passing` reuse the threshold `skipPerfectScore`
+  already means rather than adding a second knob, so a metric that is not
+  normalised to `[0, 1]` puts every row in `still_passing` or `still_failing`.
+- **`includeReflectionOutcomes` gates all three no-host-input annotations** —
+  the reflection outcomes, the deployable `bestChain`, and
+  `causalEvidenceRecordId`. The other version-2 fields each have their own
+  compile option (`harnessRecipe`, `mutationAnnotation`,
+  `trajectoryTermination`, `minibatchStrategy`); these three do not, and
+  keeping them behind one switch is what lets a plain `candidateLineage: true`
+  run still emit a byte-identical version-1 manifest (INV-L1).
+- **`rejectedCandidateLedger`** records each rejection in a host store and feeds
+  it back as a PRIOR, never a prohibition. The rendered block says so in as many
+  words, and nothing downstream refuses a candidate for being in the ledger.
+- **`diagnosis` is UNTRUSTED.** In the GEPA path it quotes the model's own
+  proposed text back, so it is bounded, JSON-quoted, and rendered inside
+  `BEGIN UNTRUSTED REJECTED-CANDIDATE PRIOR` markers on its own prompt field —
+  never inside the trusted optimization-reference channel.
+- **Every entry must carry an `after_ms` clause.** Permanent negative memory is
+  refused by construction, before the first metric call. A `model_changed` or
+  `task_set_changed` clause whose context field the reader did not supply FIRES:
+  unknown resolves toward forgetting.
+- **Asymmetric rollback.** `axReplaceOptimizedProgramSnapshot` unions ONLY
+  `rejectedCandidateLedgerRef`, a pointer set into a store the artifact cannot
+  rewrite. The causal evidence history keeps its divergent-history refusal: two
+  chains carry strict sequences and strictly increasing receipt counts, so they
+  cannot be unioned and still verify.
+- **A ledger store that throws never aborts a run.** The rejection is still in
+  lineage and a `runtime` failure is recorded on the candidate.
+
+Run the shipped evaluation with `npm run evaluate:gepa-manifests`
+(0 provider calls, 0 tokens, $0). The normative contract is
+[`docs/GEPA_EVIDENCE.md`](../../../docs/GEPA_EVIDENCE.md).
+
 ## Useful Options
 
 ```typescript
@@ -721,6 +948,18 @@ const optimizer = new AxGEPA({
 - `earlyStoppingTrials`: stop after repeated non-improvement.
 - `minImprovementThreshold`: reject tiny gains below this threshold.
 - `seed`: stabilize sampling during demos and tests.
+
+Six compile options are opt-in and default-off. With all six omitted GEPA emits
+byte-identical artifacts, logger events and checkpoints, which
+`npm run test:gepa-upstream-compatibility` gates:
+
+- `minibatchStrategy`: `'uniform'` (default) or `'discriminative'`.
+- `taskDiscrimination`: sampler settings; ignored unless the strategy is
+  `'discriminative'`, and GEPA logs one line when it is supplied without it.
+- `trajectoryTermination`: host-owned rollout-termination classification.
+- `harnessRecipe`: `{ recipe, currentModelId? }`; stamps every lineage record.
+- `mutationAnnotation`: `{ annotator?, hostKinds?, policy? }`.
+- `rejectedCandidateLedger`: `{ store, storeId, clock, expiresWhen, expiryContext?, maxPriorEntries? }`.
 
 ## Budgeting and Validation
 

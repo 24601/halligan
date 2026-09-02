@@ -291,6 +291,15 @@ and protocol compatibility declarations but remain trusted adapters. See
 [`docs/PROGRAM_SOURCE.md`](./PROGRAM_SOURCE.md) for the grammar, security model,
 budgets, evaluation evidence, and unsupported cases.
 
+Optimization runs can also emit versioned evidence manifests: a candidate
+lineage record of what the search tried, a host-authored causal-claim manifest
+under an authority receipt, and a rejected-candidate ledger that artifact
+rollback cannot erase. See
+[`docs/GEPA_EVIDENCE.md`](./GEPA_EVIDENCE.md) for the record schemas, the
+fail-closed rules, the host-versus-Ax authority split, the two promotion gates
+and their estimators, the artifact byte budget, and the explicit
+non-guarantees. It is an artifact/audit contract, not a runtime surface.
+
 ## AxIR Generated Libraries
 
 AxIR makes Ax portable without freezing the TypeScript implementation into a
