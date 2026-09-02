@@ -6,6 +6,7 @@
  * ones.
  */
 
+import type { AxAgentEvalTask } from '../agentOptimizeTypes.js';
 import type {
   AxAgentPlaybookAttemptRecord,
   AxAgentPlaybookControlArmReport,
@@ -19,12 +20,16 @@ import type {
   AxAgentPlaybookReachReport,
   AxAgentPlaybookSealedTestReport,
   AxAgentPlaybookTransferReport,
+  AxAgentPlaybookTransferTarget,
   AxAgentPlaybookValidityPredicateId,
   AxAgentPlaybookVetoResult,
   AxAgentTrajectoryClassifier,
   AxAgentTrajectoryTermination,
 } from './playbookEvidenceTypes.js';
-import type { AxAgentPlaybookEvolveResult } from './playbookEvolveTypes.js';
+import type {
+  AxAgentPlaybookEvolveOptions,
+  AxAgentPlaybookEvolveResult,
+} from './playbookEvolveTypes.js';
 
 // The transfer report must never grow an average: an average is exactly what
 // hides a single catastrophic cell.
@@ -65,6 +70,22 @@ if (sealed.status === 'completed') {
   const influencedFalse: false = sealed.influencedNoDecision;
   void influenced;
   void influencedFalse;
+}
+
+// Transfer targets and the sealed split are caller-owned and READONLY: Ax never
+// derives a cell label from the service, and never mutates either collection.
+declare const evolveOptions: AxAgentPlaybookEvolveOptions;
+declare const transferTargets: readonly AxAgentPlaybookTransferTarget[];
+declare const sealedTasks: readonly AxAgentEvalTask[];
+const withTransfer: AxAgentPlaybookEvolveOptions = {
+  ...evolveOptions,
+  transfer: { targets: transferTargets, splits: ['heldOut'] },
+  sealedTest: sealedTasks,
+};
+void withTransfer;
+if (withTransfer.transfer) {
+  // @ts-expect-error - the target list is readonly; Ax never appends to it.
+  withTransfer.transfer.targets.push(transferTargets[0]!);
 }
 
 // Reach exposes gate eligibility structurally, so a caller cannot mistake a

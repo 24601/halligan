@@ -21,6 +21,8 @@
   - Where it helps / does not help:
   - Limitations and safety assumptions:
 
+  Any PR claiming that an agent, playbook, or optimizer change improves a model-facing outcome must report a matched-budget control arm (or state explicitly that none was run and why), the absolute baseline next to any relative gain, and the turn/token overhead alongside the gain.
+
   Do not hard-code outcomes, mutate evaluators or hidden tests, or make claims beyond the evidence. Paid provider calls are not required in CI: deterministic zero-cost mechanism evaluations are allowed, and bounded live evaluations are optional, with claims scoped to the evidence. Documentation-only, typo-only, or mechanical metadata changes may state why an outcome evaluation is not applicable rather than inventing one.
 
 - **AxIR portable behavior check**:

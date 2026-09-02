@@ -100,6 +100,11 @@ helps and does not help, and its limitations and safety assumptions. Do not
 hard-code outcomes, mutate an evaluator or hidden test, or make claims beyond
 the evidence.
 
+Any PR claiming that an agent, playbook, or optimizer change improves a
+model-facing outcome must report a matched-budget control arm (or state
+explicitly that none was run and why), the absolute baseline next to any
+relative gain, and the turn/token overhead alongside the gain.
+
 Paid provider calls are not required in CI. Deterministic, zero-cost mechanism
 evaluations are valid when they support the stated claim; bounded live
 evaluations may be run optionally. Keep the claim scoped honestly to the

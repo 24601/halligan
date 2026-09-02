@@ -159,6 +159,11 @@ evidence supports. Documentation-only, typo-only, and mechanical metadata
 changes may mark an outcome evaluation as not applicable, but must explain why
 instead of inventing one.
 
+Any PR claiming that an agent, playbook, or optimizer change improves a
+model-facing outcome must report a matched-budget control arm (or state
+explicitly that none was run and why), the absolute baseline next to any
+relative gain, and the turn/token overhead alongside the gain.
+
 See `.github/CONTRIBUTING.md` and the pull request template for the required
 evaluation type, evidence, exemptions, and zero-cost/live-evaluation rules.
 

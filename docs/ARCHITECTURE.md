@@ -242,6 +242,16 @@ compare-and-set `promote(...)` moves the head, and nothing inside Ax calls it.
 There is no canary, no staged rollout, no online monitoring, and no automatic
 demotion. See [`docs/LEARNING_SURFACE.md`](./LEARNING_SURFACE.md).
 
+`agent.playbook().evolve()` carries a default-off evidence surface on the same
+gate: compute accounting under one denominator, paired task-clustered bootstrap
+intervals with an unchanged-artifact band, a matched-budget control arm on the
+restored unevolved program, reach and validity conjuncts, host-owned trajectory
+termination, prune proposals, promotion authority, a per-cell transfer matrix
+with no average field, and a sealed test evaluated once after the run-level
+verdict. See [`docs/PLAYBOOK_EVIDENCE.md`](./PLAYBOOK_EVIDENCE.md) for the gate
+chain, the phase order, the statistical contract, and the explicit
+non-guarantees.
+
 TypeScript also exposes `AxEventComponentManager` at this boundary for trusted
 process-local listener and adapter lifecycle. It owns dependency ordering,
 serialized transitions, scoped disposers, activation rollback, and

@@ -9,7 +9,9 @@
  * Each contract is chosen so a stub cannot satisfy it:
  *  - a curate-threshold implementation rejects the zero-gain prune;
  *  - a `break`-based batch loop returns a shorter record list;
- *  - a budget-shaped rejection string fails the environment-incomplete case.
+ *  - a budget-shaped rejection string fails the environment-incomplete case;
+ *  - a transfer implementation that averages its cells passes the
+ *    regressing-cell case it must fail.
  *
  * Lives under `scripts/` rather than `src/ax/` because it reads a file, and
  * `src/ax` must stay free of node builtins.
@@ -25,7 +27,15 @@ import {
   GATE_ORDER,
   gateChainAccepts,
 } from '../src/ax/agent/agentInternal/playbookEvolve/gates.js';
-import type { AxAgentTrajectoryClassifier } from '../src/ax/agent/agentInternal/playbookEvolve/playbookEvidenceTypes.js';
+import type {
+  AxAgentPlaybookTransferCell,
+  AxAgentTrajectoryClassifier,
+} from '../src/ax/agent/agentInternal/playbookEvolve/playbookEvidenceTypes.js';
+import {
+  transferComparisonMade,
+  transferReportFrom,
+  transferVerdict,
+} from '../src/ax/agent/agentInternal/playbookEvolve/transfer.js';
 
 const repoRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -217,6 +227,58 @@ describe('ir/conformance/axagent/playbook-evidence-gate', () => {
       }
       if (expected.complete !== undefined) {
         expect(result.complete).toBe(expected.complete);
+      }
+    }
+  );
+
+  it.each(fixture.transfer_cells.map((entry: any) => [entry.name, entry]))(
+    'transfer contract: %s',
+    (_name: string, entry: any) => {
+      const cells: AxAgentPlaybookTransferCell[] = entry.cells.map(
+        (cell: any) => {
+          const delta = cell.candidate.mean - cell.anchor.mean;
+          return {
+            targetId: cell.targetId,
+            split: cell.split,
+            anchor: cell.anchor,
+            candidate: cell.candidate,
+            delta,
+            interval: {
+              point: delta,
+              lower: delta,
+              upper: delta,
+              level: 0.95,
+              resamples: cell.intervalClusters === 0 ? 0 : 1000,
+              unit: 'task',
+              clusters: cell.intervalClusters,
+              seed: 1,
+              direction: 'unresolved',
+            },
+            regressed: delta < -entry.floor,
+          };
+        }
+      );
+      const report = transferReportFrom({
+        floor: entry.floor,
+        cells,
+        accounting: {} as any,
+        expectedCells: entry.expectedCells,
+      });
+      const expected = entry.expected;
+      expect(report.status).toBe(expected.status);
+      if (report.status === 'not_run') throw new Error('expected a matrix');
+      expect([...report.regressedCells]).toEqual(expected.regressedCells);
+      expect(transferVerdict({ report }).passed).toBe(expected.passed);
+      expect(transferComparisonMade(report)).toBe(expected.comparisonMade);
+      if (expected.cellDeltaAverageIsPositive !== undefined) {
+        // The number the report refuses to compute. A stub that reported it
+        // would call this matrix a win; the contract says it is a rejection.
+        const average =
+          cells.reduce((sum, cell) => sum + cell.delta, 0) / cells.length;
+        expect(average > 0).toBe(expected.cellDeltaAverageIsPositive);
+      }
+      if (expected.reportKeys !== undefined) {
+        expect(Object.keys(report).sort()).toEqual(expected.reportKeys);
       }
     }
   );
