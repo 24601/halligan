@@ -44,7 +44,7 @@ function referenceFactory(clock: AxManualEventClock) {
  * pins the same number and additionally asserts the two stores report the
  * same count, so a store that quietly skips part of the kit is visible.
  */
-const CONFORMANCE_ASSERTIONS = 78;
+const CONFORMANCE_ASSERTIONS = 81;
 
 describe('runAxTrajectoryStoreConformance', () => {
   it('passes against the in-memory reference store', async () => {

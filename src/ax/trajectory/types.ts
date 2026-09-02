@@ -183,6 +183,11 @@ export class AxTrajectoryForkError extends Error {
   }
 }
 
+/**
+ * Declared here by RFC 4.3 and thrown by the projection lane, not this one:
+ * sealing is what raises it. Exported a lane early so the error surface is
+ * complete and stable rather than growing under a consumer.
+ */
 export class AxTrajectoryRollupError extends Error {
   readonly code = 'trajectory_rollup_invalid';
   constructor(

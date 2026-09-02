@@ -257,6 +257,15 @@ function isStepShaped(value: unknown): value is AxTrajectoryStep {
  * to return and parses only those, so resident memory is O(steps), not
  * O(bytes), and the 312 MB / 19k-step log the subsystem exists for does not
  * have to fit in the heap.
+ *
+ * **Durability limit, stated.** With `fsync` on, file contents are flushed
+ * before a step that references them becomes visible, but the containing
+ * DIRECTORY is not fsynced after a create or a rename. Against a real power
+ * cut a just-created blob or cursor file can therefore be absent even though
+ * its data was flushed. That degrades to C2 (an orphan blob) or to a cursor
+ * that reads as absent, both of which recover by replaying -- never to a
+ * dangling reference -- but the guarantee is weaker than a full O_DIRECTORY
+ * fsync and is not claimed to be otherwise.
  */
 export class AxJSONLTrajectoryStore implements AxTrajectoryStore {
   readonly capabilities: Readonly<AxTrajectoryStoreCapabilities> =

@@ -24,24 +24,30 @@ import { describe, expect, it } from 'vitest';
  * at 2,900 is therefore 3,260 with projection.ts at 620; lane A2 must restate
  * that number and record the reason in docs/TRAJECTORY.md per RFC 8.7, which
  * this lane does not own.
+ *
+ * Measured at the cap raise: types 461, util 141, registry 171, spill 158,
+ * log 483, memoryStore 507, conformance 676, index 98 -- 2,695 in total.
+ * conformance.ts is the biggest single overrun of the RFC's estimate (470):
+ * it is seventeen named cases, and the review's B1, Mn3, Mn4, Mn5 and Mn6
+ * each added a normative assertion the kit could not previously make.
  */
 const CAPS: readonly (readonly [string, number])[] = [
   ['src/ax/trajectory/types.ts', 480],
   ['src/ax/trajectory/util.ts', 150],
   ['src/ax/trajectory/registry.ts', 190],
-  ['src/ax/trajectory/spill.ts', 170],
+  ['src/ax/trajectory/spill.ts', 175], // raised from 170
   ['src/ax/trajectory/log.ts', 500], // new: the shared index + read primitives
   ['src/ax/trajectory/memoryStore.ts', 520], // lowered from 720
-  ['src/ax/trajectory/conformance.ts', 620], // raised from 470
+  ['src/ax/trajectory/conformance.ts', 700], // raised from 470
   ['src/ax/trajectory/index.ts', 110],
-  ['src/tools/trajectory/jsonl.ts', 800], // lowered from 940
+  ['src/tools/trajectory/jsonl.ts', 830], // lowered from 940
 ];
 
 /**
  * Directory ceiling for the files lane A1 owns. Lane A2 adds projection.ts
  * (cap 620) and must restate this total in the same PR that adds its row.
  */
-const TRAJECTORY_DIRECTORY_CAP = 2_640;
+const TRAJECTORY_DIRECTORY_CAP = 2_760;
 
 // vitest runs this workspace with cwd = src/ax, so the repo root is derived
 // from this file rather than from the process.

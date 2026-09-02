@@ -293,4 +293,28 @@ describe('axResolveTrajectorySteps', () => {
     for (const one of resolved) expect(one.data.content).toBe(BIG);
     expect(blobs.gets).toEqual([shared.blobs[0]!.ref]);
   });
+
+  it('checks the digest of every distinct ref, not only the first', async () => {
+    const blobs = new SpyBlobStore();
+    const spilled = await axSpillTrajectoryFields({
+      trajectoryId: 'traj-1',
+      stepId: 'step-1',
+      data: { content: BIG },
+      blobs,
+    });
+    const good = spilled.blobs[0]!;
+    const impostor = { ...good, digest: 'f'.repeat(64) };
+    const steps = [
+      step({ stepId: 'step-1', seq: 1, data: spilled.data, blobs: [good] }),
+      step({ stepId: 'step-2', seq: 2, data: spilled.data, blobs: [impostor] }),
+    ];
+
+    // Keying the pre-pass on the ref string alone collapses these into one
+    // fetch, so the second step's digest commitment is never verified and it
+    // rehydrates from bytes it never committed to.
+    await expect(axResolveTrajectorySteps(steps, blobs)).rejects.toMatchObject({
+      reason: 'digest_mismatch',
+    });
+    expect(blobs.gets).toHaveLength(2);
+  });
 });

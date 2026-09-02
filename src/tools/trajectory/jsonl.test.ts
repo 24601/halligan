@@ -26,7 +26,7 @@ import { AxJSONLTrajectoryStore } from './jsonl.js';
  * this number: a different count means one implementation quietly skipped part
  * of the contract, which is the whole point of shipping the kit.
  */
-const CONFORMANCE_ASSERTIONS = 78;
+const CONFORMANCE_ASSERTIONS = 81;
 
 const roots: string[] = [];
 
@@ -49,18 +49,12 @@ describe('AxJSONLTrajectoryStore conformance', () => {
   it('passes the shared kit with the same assertion count as the reference store', async () => {
     const clock = new AxManualEventClock(1_000);
     const base = root();
-    const stores = new Map<string, AxJSONLTrajectoryStore>();
-
     const fileReport = await runAxTrajectoryStoreConformance(
       ({ databaseKey }) => {
-        // Same databaseKey means the same directory, so the kit's reopen case
-        // exercises a genuinely second store instance over the same bytes.
-        let store = stores.get(databaseKey);
-        if (!store) {
-          store = newStore(join(base, databaseKey), clock);
-          stores.set(databaseKey, store);
-        }
-        const bound = store;
+        // Same databaseKey means the same directory and a NEW instance, so
+        // the kit's reopen cases -- a cursor token and a consumer cursor
+        // surviving -- exercise a genuinely second store over the same bytes.
+        const bound = newStore(join(base, databaseKey), clock);
         return {
           store: bound,
           failNextBlobWrite: () => bound.failNextBlobWrite(),
@@ -321,6 +315,53 @@ describe('AxJSONLTrajectoryStore on-disk contract', () => {
     expect(
       (await axResolveTrajectoryStep(again, reopened.blobs)).data.stdout
     ).toBe(big);
+  });
+
+  it('never rewrites a blob a committed step already references', async () => {
+    const clock = new AxManualEventClock(5_000);
+    const directory = root();
+    const store = newStore(directory, clock);
+    const { trajectoryId } = await store.create({});
+    const big = 'q'.repeat(20_000);
+    const first = await store.append({
+      trajectoryId,
+      type: 'runtime-output',
+      data: { stdout: big },
+    });
+    const firstStep = (await store.getStep(trajectoryId, first.stepId))!;
+
+    // Blobs are content-addressed, so a second step spilling identical bytes
+    // re-derives the same ref. Opening that path with 'w' truncates a file a
+    // committed step already points at, and a crash inside that window shows
+    // up as digest_mismatch -- the dangling reference I2 says is impossible.
+    const second = await store.append({
+      trajectoryId,
+      type: 'runtime-output',
+      data: { stdout: big },
+    });
+    const blobs = readdirSync(join(directory, 'blobs'));
+    expect(blobs).toHaveLength(1);
+    expect(blobs.every((file) => !file.endsWith('.tmp'))).toBe(true);
+    for (const step of [
+      firstStep,
+      (await store.getStep(trajectoryId, second.stepId))!,
+    ]) {
+      expect(
+        (await axResolveTrajectoryStep(step, store.blobs)).data.stdout
+      ).toBe(big);
+    }
+
+    // The bytes go out of band, then the same value is put again: a store
+    // that rewrites an existing ref would restore them.
+    const blobPath = join(directory, 'blobs', blobs[0]!);
+    writeFileSync(blobPath, 'SENTINEL');
+    await store.blobs.put({
+      trajectoryId,
+      stepId: 'probe',
+      field: 'stdout',
+      value: big,
+    });
+    expect(readFileSync(blobPath, 'utf8')).toBe('SENTINEL');
   });
 
   it('leaves no step behind when the blob write fails', async () => {

@@ -125,10 +125,15 @@ export async function axResolveTrajectorySteps(
   const selected = (ref: Readonly<AxTrajectoryBlobRef>): boolean =>
     !wanted || wanted.has(ref.field);
 
+  // Keyed on ref AND digest: two refs sharing a ref string with different
+  // digests are different content commitments, and collapsing them would run
+  // one fetch and one digest check where two are owed.
+  const key = (ref: Readonly<AxTrajectoryBlobRef>): string =>
+    `${ref.ref}\u0000${ref.digest}`;
   const pending = new Map<string, Readonly<AxTrajectoryBlobRef>>();
   for (const step of steps) {
     for (const ref of step.blobs ?? []) {
-      if (selected(ref) && !pending.has(ref.ref)) pending.set(ref.ref, ref);
+      if (selected(ref) && !pending.has(key(ref))) pending.set(key(ref), ref);
     }
   }
   if (pending.size === 0) return steps;
@@ -144,7 +149,7 @@ export async function axResolveTrajectorySteps(
 
   const values = new Map<string, string>();
   for (const ref of pending.values()) {
-    values.set(ref.ref, await blobs.get(ref.ref, ref.digest, options?.signal));
+    values.set(key(ref), await blobs.get(ref.ref, ref.digest, options?.signal));
   }
 
   return steps.map((step) => {
@@ -153,7 +158,7 @@ export async function axResolveTrajectorySteps(
     const data: Record<string, AxTrajectoryFieldValue> = { ...step.data };
     const keep: Readonly<AxTrajectoryBlobRef>[] = [];
     for (const ref of refs) {
-      const value = selected(ref) ? values.get(ref.ref) : undefined;
+      const value = selected(ref) ? values.get(key(ref)) : undefined;
       if (value === undefined) keep.push(ref);
       else data[ref.field] = value;
     }

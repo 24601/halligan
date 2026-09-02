@@ -53,22 +53,30 @@ async function expectReason(
   }
 }
 
-/** A structurally-typed signal that counts its own listener registrations. */
+/**
+ * A REAL AbortSignal that counts listener registrations. A hand-rolled object
+ * cast to AbortSignal cannot fail: `throwIfAborted` would be a no-op stub and
+ * a store that leaked a listener on a genuine signal would still pass.
+ */
 function countingSignal(): { signal: AbortSignal; listeners: () => number } {
+  const { signal } = new AbortController();
   let count = 0;
-  const signal = {
-    aborted: false,
-    reason: undefined,
-    onabort: null,
-    throwIfAborted(): void {},
-    addEventListener(): void {
+  const add = signal.addEventListener.bind(signal);
+  const remove = signal.removeEventListener.bind(signal);
+  Object.defineProperty(signal, 'addEventListener', {
+    configurable: true,
+    value: (...args: Parameters<AbortSignal['addEventListener']>) => {
       count++;
+      add(...args);
     },
-    removeEventListener(): void {
+  });
+  Object.defineProperty(signal, 'removeEventListener', {
+    configurable: true,
+    value: (...args: Parameters<AbortSignal['removeEventListener']>) => {
       count--;
+      remove(...args);
     },
-    dispatchEvent: (): boolean => true,
-  } as unknown as AbortSignal;
+  });
   return { signal, listeners: () => count };
 }
 
@@ -231,6 +239,31 @@ export async function runAxTrajectoryStoreConformance(
 
     // ---- C-ATOM ----------------------------------------------------------
     const atomicId = (await store.create({ slug: 'atomic' })).trajectoryId;
+    // Read WHILE the writers are running: "no partial line is ever visible to
+    // a concurrent reader" is not what a post-hoc read tests.
+    let torn = 0;
+    let polls = 0;
+    let polling = true;
+    const concurrentReader = (async () => {
+      while (polling && polls < 5_000) {
+        polls++;
+        const snapshot = await store.read({
+          trajectoryId: atomicId,
+          fromSeq: 0,
+          toSeq: 1_000,
+        });
+        for (const [position, step] of snapshot.entries()) {
+          if (
+            typeof step.stepId !== 'string' ||
+            typeof step.type !== 'string' ||
+            typeof step.ts !== 'number' ||
+            step.seq !== position
+          ) {
+            torn++;
+          }
+        }
+      }
+    })();
     const written = await Promise.all(
       Array.from({ length: 50 }, (_, index) =>
         store.append({
@@ -240,6 +273,12 @@ export async function runAxTrajectoryStoreConformance(
           data: { index },
         })
       )
+    );
+    polling = false;
+    await concurrentReader;
+    assert(
+      polls > 0 && torn === 0,
+      'C-ATOM: a reader running during the writes never sees a partial frame'
     );
     const atomicSteps = await store.read({
       trajectoryId: atomicId,
@@ -359,6 +398,18 @@ export async function runAxTrajectoryStoreConformance(
       secondDrain.steps[0]!.seq === 10,
       'C-CURSOR: resuming yields exactly the steps after the cursor'
     );
+    // `capabilities.cursorTokens` promises the token is resumable BEYOND
+    // `seq`. A store that ignores it passes every other cursor assertion, so
+    // this one pairs a valid token with a stale seq and requires the token.
+    const staleSeq = await store.readFrom(
+      { ...firstDrain.cursor, seq: 0 },
+      id,
+      { maxSteps: 1 }
+    );
+    assert(
+      staleSeq.steps[0]!.seq === 10,
+      'C-CURSOR: the token, not seq, decides where a resume starts'
+    );
     const peer = await createStore({ databaseKey: key });
     const reopened = await peer.store.readFrom(firstDrain.cursor, id, {
       maxSteps: 3,
@@ -398,6 +449,12 @@ export async function runAxTrajectoryStoreConformance(
     assert(
       (await store.loadCursor('consumer-b', id))?.seq === 2,
       'C-CONSUMER: advancing one consumer does not move another'
+    );
+    // `consumerCursors` means DURABLE per consumer. A store keeping them in
+    // process memory only would pass everything above.
+    assert(
+      (await peer.store.loadCursor('consumer-a', id))?.seq === 10,
+      'C-CONSUMER: a saved cursor survives a reopen of the store'
     );
 
     // ---- C-BLOB ----------------------------------------------------------
