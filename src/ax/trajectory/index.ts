@@ -1,3 +1,10 @@
+export type {
+  AxTrajectoryStoreConformanceFactory,
+  AxTrajectoryStoreConformanceFactoryOptions,
+  AxTrajectoryStoreConformanceInstance,
+  AxTrajectoryStoreConformanceReport,
+} from './conformance.js';
+export { runAxTrajectoryStoreConformance } from './conformance.js';
 export type { AxInMemoryTrajectoryStoreOptions } from './memoryStore.js';
 export {
   AxInMemoryTrajectoryBlobStore,
