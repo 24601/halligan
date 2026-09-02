@@ -2247,7 +2247,14 @@
       "createdAt": "2026-09-02",
       "sourcePR": 99,
       "sourceCommit": "47ba0f0f104419697a7c37de31b117d08575e57f",
-      "tsPaths": ["src/ax/agent/agentInternal/playbookEvolve/pruning.ts"],
+      "tsPaths": [
+        "src/ax/agent/agentInternal/playbookEvolve/evidenceConformance.ts",
+        "src/ax/agent/agentInternal/playbookEvolve/playbookEvolve.ts",
+        "src/ax/agent/agentInternal/playbookEvolve/promotion.ts",
+        "src/ax/agent/agentInternal/playbookEvolve/proposals.ts",
+        "src/ax/agent/agentInternal/playbookEvolve/pruning.ts",
+        "src/ax/dsp/optimizers/acePlaybook.ts"
+      ],
       "portableSurface": "axagent",
       "impact": "evolve() gains a prune phase whose REMOVE/DEPRECATE proposals run the full per-candidate gate chain in its loss-tolerance variant (gates 1/2 become maxCurrentLoss/maxHeldOutLoss, gate 7 prune_size requires a real rendered-token reduction), applied by a new snapshot-transform mutation primitive that replaces applyCuratorOperations' id/structural validation, stats recompute and artifact-history append explicitly so the derived bulletIds and the accept-path evidence stamp stay non-empty; a leave-one-out held-out redundancy sweep that never proposes a load_bearing or unresolved bullet; a rendered-size ceiling that triggers proposals and never truncates; curate-path section-overflow eviction instrumentation (outcome.evictions plus curate_eviction); and two host-callback gates where an AxAuthorizationReceipt bound to a caller-supplied host-grantable resourceId grants the capability while a conjunctive fail-closed promotionVeto decides the candidate, with promotion records distinguishing not_required/not_nominated/vetoed/denied/promoted. A port must reproduce the prune-variant thresholds, the never-truncate rule, the history-append-derived bulletIds, the fail-closed veto table (only false and { vetoed: false } decline) and the exact-resource-identity grant binding.",
       "suggestedAxirWork": [
