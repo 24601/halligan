@@ -486,6 +486,94 @@ describe('skills catalog — tiers, eligibility, and cost', () => {
     expect(decision.failures).toEqual([{ kind: 'grant_revoked', count: 1 }]);
   });
 
+  it('drops a revoked INDEXED skill from the index, discover, and the prompt', async () => {
+    // The kernel tier is not the only retrieval path. `discover({ skills })` is
+    // the primary one, and a `drop` policy that only reached the kernel would
+    // let a revoked skill be listed, searched, and rendered verbatim.
+    const capture: ExecutorCapture = { systems: [], users: [] };
+    const mockAI = makeSkillsMockAI(capture);
+    const loaded: string[] = [];
+    const a = agent('query:string -> answer:string', {
+      ai: mockAI,
+      runtime: makeSkillsDiscoverRuntime('revoked'),
+      skillsCatalog: [
+        {
+          id: 'revoked-skill',
+          name: 'Revoked skill',
+          description: 'Distilled from a trajectory whose grant is now revoked',
+          content: 'REVOKED SKILL BODY',
+          authorityProvenance: revokedProvenance(),
+        },
+        ...CATALOG,
+      ],
+      skillPolicy: {
+        authoritySnapshot: { grantIds: [], leaseEpoch: 1 },
+        precondition: { grant_revoked: 'drop' as const },
+        now: () => 0,
+      },
+      maxTurns: 4,
+      onLoadedSkills: (results: readonly { id?: string; name: string }[]) => {
+        loaded.push(...results.map((r) => r.id ?? r.name));
+      },
+    } as never);
+
+    await a.forward(mockAI, { query: 'revoked' });
+
+    expect(capture.systems[0]).not.toContain('`revoked-skill`');
+    expect(capture.systems[0]).toContain('`release-checklist`');
+    expect(loaded).not.toContain('revoked-skill');
+    for (const user of capture.users) {
+      expect(user).not.toContain('REVOKED SKILL BODY');
+    }
+  });
+
+  it('carries the advisory onto an INDEXED skill loaded through discover', async () => {
+    const capture: ExecutorCapture = { systems: [], users: [] };
+    const mockAI = makeSkillsMockAI(capture);
+    const loaded: { id?: string; advisory?: string }[] = [];
+    const a = agent('query:string -> answer:string', {
+      ai: mockAI,
+      runtime: makeSkillsDiscoverRuntime('stale'),
+      skillsCatalog: [
+        {
+          id: 'stale-skill',
+          name: 'Stale skill',
+          description: 'Distilled from a trajectory whose grant is now revoked',
+          content: 'STALE SKILL BODY',
+          authorityProvenance: revokedProvenance(),
+        },
+        ...CATALOG,
+      ],
+      // The default guidance policy downgrades rather than drops.
+      skillPolicy: {
+        authoritySnapshot: { grantIds: [], leaseEpoch: 1 },
+        now: () => 0,
+      },
+      maxTurns: 4,
+      onLoadedSkills: (
+        results: readonly { id?: string; advisory?: string }[]
+      ) => {
+        loaded.push(...results);
+      },
+    } as never);
+
+    await a.forward(mockAI, { query: 'stale' });
+
+    const rendered = capture.users.join('\n');
+    expect(rendered).toContain('STALE SKILL BODY');
+    expect(rendered).toContain('[advisory]');
+    expect(rendered).toContain('grant_revoked:1');
+    // The host callback sees it too, without it ever being serialized.
+    expect(
+      loaded.find((entry) => entry.id === 'stale-skill')?.advisory
+    ).toContain('grant_revoked:1');
+    const serialized = serializeSkillsPromptState(
+      (a as unknown as { executor: { currentSkillsPromptState: never } })
+        .executor.currentSkillsPromptState
+    );
+    expect(JSON.stringify(serialized ?? {})).not.toContain('advisory');
+  });
+
   it('does not inherit skillPolicy, verifierRails, or onSkillCost into a child agent', () => {
     const child = agent('taskBrief:string -> taskOutcome:string', {
       ai: new AxMockAIService({ features: { functions: false } }),
@@ -511,6 +599,29 @@ describe('skills catalog — tiers, eligibility, and cost', () => {
     expect(childOptions?.onSkillCost).toBeUndefined();
   });
 });
+
+/** Provenance whose recorded grant is absent from the current snapshot. */
+function revokedProvenance() {
+  return axExtractSkillProvenance({
+    receipts: [
+      {
+        version: 1,
+        receiptId: 'r-1',
+        requestId: 'q-1',
+        decision: 'allow',
+        operation: 'files.read',
+        resource: { type: 'file', id: 'f-1' },
+        principalId: 'p-1',
+        actor: { id: 'a-1', kind: 'agent' },
+        grantIds: ['grant:held'],
+        leaseEpoch: 1,
+        authorizedAt: 1,
+      },
+    ],
+    leaseEpoch: 1,
+    capturedAt: '2026-01-01T00:00:00.000Z',
+  });
+}
 
 /** Runtime whose first turn declares a skill used and second turn finishes. */
 function makeSkillsUsedRuntime(skillId: string): AxCodeRuntime {

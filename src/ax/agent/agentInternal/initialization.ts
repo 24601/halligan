@@ -106,7 +106,14 @@ export function initializeAgentInternal(
   s.onSkillsSearch =
     options.onSkillsSearch ??
     (skillsCatalog && skillsCatalog.length > 0
-      ? createCatalogSkillsSearch(skillsCatalog, skillEnvironment)
+      ? createCatalogSkillsSearch(
+          skillsCatalog,
+          skillEnvironment,
+          // Read per search, not captured: the run's authority re-check is
+          // computed in `actorLoop` and a skill it parked or dropped must not
+          // come back through `discover({ skills })`.
+          () => s._skillRetrievalGate
+        )
       : undefined);
   s.skillsHintEnabled =
     relevanceRankingChoice &&

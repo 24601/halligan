@@ -1,5 +1,8 @@
 import type { AxAgentContextStage } from '../contextEvents.js';
-import type { AxAgentSkillEnvironment } from '../skillCatalog.js';
+import type {
+  AxAgentSkillEnvironment,
+  AxAgentSkillRetrievalGate,
+} from '../skillCatalog.js';
 import { axEligibleCatalogSkills } from '../skillCatalog.js';
 import type {
   AxAgentSkillCostProfile,
@@ -126,10 +129,18 @@ const SKILLS_CATALOG_RANK_CONTENT_CHARS = 600;
  * the closest matches, unlike the strictly-guarded advisory hint. Results flow
  * through the existing id-sorted `ingestSkillResults` render, so the cached
  * `loadedSkills` prompt field stays byte-stable for identical skill sets.
+ *
+ * `resolveGate` is read per search, not captured at construction, because the
+ * authority re-check depends on the run's snapshot and clock. This is the
+ * PRIMARY skills path: a parked or dropped skill must not be reachable here
+ * either, and a downgraded one carries its advisory onto the result so
+ * `onLoadedSkills` hosts see it too. The render derives the advisory again
+ * regardless, which is what keeps it out of the serialized state.
  */
 export function createCatalogSkillsSearch(
   catalog: readonly AxAgentCatalogSkill[],
-  environment?: Readonly<AxAgentSkillEnvironment>
+  environment?: Readonly<AxAgentSkillEnvironment>,
+  resolveGate?: () => AxAgentSkillRetrievalGate | undefined
 ): AxAgentSkillsSearchFn {
   // An ineligible skill is hidden from `discover({ skills })` too, not only
   // from the kernel and the Available Skills index.
@@ -158,10 +169,15 @@ export function createCatalogSkillsSearch(
         }
       }
     }
+    const gate = resolveGate?.();
     return matchedIds
       .map((id) => byId.get(id))
       .filter((skill): skill is AxAgentCatalogSkill => skill !== undefined)
-      .map(({ id, name, content }) => ({ id, name, content }));
+      .filter((skill) => !gate?.denied.has(skill.id))
+      .map(({ id, name, content }) => {
+        const advisory = gate?.advisory(id);
+        return { id, name, content, ...(advisory ? { advisory } : {}) };
+      });
   };
 }
 
@@ -179,9 +195,14 @@ export function rankCatalogSkills(
     environment?: Readonly<AxAgentSkillEnvironment>;
     costProfiles?: readonly Readonly<AxAgentSkillCostProfile>[];
     weights?: Readonly<AxAgentSkillRankingWeights>;
+    /** The run's authority re-check. A denied skill is never hinted. */
+    gate?: Readonly<AxAgentSkillRetrievalGate>;
   }>
 ): { id: string; name: string; score: number }[] {
-  const eligible = axEligibleCatalogSkills(catalog, opts?.environment);
+  const gate = opts?.gate;
+  const eligible = axEligibleCatalogSkills(catalog, opts?.environment).filter(
+    (skill) => !gate?.denied.has(skill.id)
+  );
   const docs = eligible.map((skill) => ({
     id: skill.id,
     fields: [

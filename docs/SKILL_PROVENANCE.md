@@ -57,9 +57,13 @@ takes no `AxAIService` parameter and never will.
    `AxAuthorizationReceipt` carries `receiptId`, `operation`, `resource`,
    `grantIds` and `leaseEpoch` — and no guard result. Ax can derive *which grants
    paid for a trajectory*, never *which evidence requirements it satisfied*.
-4. **The re-check runs on the static catalog and the executable-artifact paths.**
-   A host that supplies `onSkillsSearch` owns retrieval and therefore owns its
-   own re-check; it may set `advisory` on its own results.
+4. **The re-check runs on every static-catalog retrieval path and on the
+   executable-artifact path.** On the catalog side that means all four: the
+   kernel tier, the `### Available Skills` index, `discover({ skills })` and the
+   advisory relevance hint — one `axSkillRetrievalGate` computed per run and
+   consulted by each, so they cannot disagree about whether a skill is
+   retrievable. A host that supplies `onSkillsSearch` owns retrieval and
+   therefore owns its own re-check; it may set `advisory` on its own results.
 
 ## Bounds and truncation
 

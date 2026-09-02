@@ -15,9 +15,14 @@ import {
   buildInternalSummaryRequestOptions,
   formatStructuredRuntimeState,
 } from '../runtime.js';
+import type {
+  AxAgentSkillRetrievalGate,
+  AxAgentSkillSelectionOptions,
+} from '../skillCatalog.js';
 import {
   AX_DEFAULT_KERNEL_TOKEN_BUDGET,
   axSelectCatalogSkills,
+  axSkillRetrievalGate,
 } from '../skillCatalog.js';
 import type {
   AxAgentSkillCostProfile,
@@ -236,11 +241,13 @@ export async function runActorLoop<IN extends AxGenIn>(
   // fixed authority snapshot, and recomputing it per turn would churn the
   // prompt for no new information.
   s._skillAdvisoryResolver = undefined;
+  s._skillRetrievalGate = undefined;
+  let skillRetrievalGate: AxAgentSkillRetrievalGate | undefined;
   if (Array.isArray(s.skillsCatalog) && s.skillsCatalog.length > 0) {
     const selectionNow = skillPolicy?.now
       ? new Date(skillPolicy.now()).toISOString()
       : undefined;
-    const selection = axSelectCatalogSkills(s.skillsCatalog, {
+    const selectionOptions: AxAgentSkillSelectionOptions = {
       ...(skillPolicy?.environment
         ? { environment: skillPolicy.environment }
         : {}),
@@ -258,7 +265,8 @@ export async function runActorLoop<IN extends AxGenIn>(
         ? { precondition: skillPolicy.precondition }
         : {}),
       ...(selectionNow ? { now: selectionNow } : {}),
-    });
+    };
+    const selection = axSelectCatalogSkills(s.skillsCatalog, selectionOptions);
     // Kernel skills are seeded into the skills prompt STATE, never straight
     // into the rendered values: `used(<kernelId>)` resolves through that map,
     // and a kernel skill injected past it could never be declared used, would
@@ -273,14 +281,24 @@ export async function runActorLoop<IN extends AxGenIn>(
         }))
       );
     }
-    // Derived at render, never stored (see `renderSkillsPromptMarkdown`).
-    const advisoryById = new Map(
-      selection.kernel
-        .filter((view) => view.advisory)
-        .map((view) => [view.id, view.advisory as string])
+    // Derived at render, never stored (see `renderSkillsPromptMarkdown`), and
+    // built over the WHOLE catalog rather than the kernel tier: an indexed
+    // skill loaded through `discover({ skills })` is the primary skills path
+    // and must carry the same advisory, while a parked or dropped one must not
+    // be retrievable there, in the index, or in the hint.
+    skillRetrievalGate = axSkillRetrievalGate(
+      s.skillsCatalog,
+      selectionOptions
     );
+    s._skillRetrievalGate =
+      skillRetrievalGate.denied.size > 0 ||
+      skillRetrievalGate.advisories.size > 0
+        ? skillRetrievalGate
+        : undefined;
     s._skillAdvisoryResolver =
-      advisoryById.size > 0 ? (id: string) => advisoryById.get(id) : undefined;
+      skillRetrievalGate.advisories.size > 0
+        ? skillRetrievalGate.advisory
+        : undefined;
     if (selection.hidden.length > 0 || selection.overflow.length > 0) {
       await emitContextEvent(s.onContextEvent, {
         kind: 'skill_eligibility',
@@ -371,6 +389,8 @@ export async function runActorLoop<IN extends AxGenIn>(
           ? { costProfiles: skillPolicy.costProfiles }
           : {}),
         ...(skillPolicy?.ranking ? { weights: skillPolicy.ranking } : {}),
+        // A parked or dropped skill is not hinted either.
+        ...(skillRetrievalGate ? { gate: skillRetrievalGate } : {}),
       });
       s._relevanceHintsForTurn.skills = rankedSkills;
       await emitContextEvent(s.onContextEvent, {

@@ -11,6 +11,7 @@ import {
   axEstimateSkillTokens,
   axPromoteSkill,
   axSelectCatalogSkills,
+  axSkillRetrievalGate,
 } from './skillCatalog.js';
 import type { AxAgentSkillCostProfile } from './skillCost.js';
 
@@ -316,5 +317,75 @@ describe('axEligibleCatalogSkills', () => {
         (entry) => entry.id
       )
     ).toEqual(['gated', 'open']);
+  });
+});
+
+describe('axSkillRetrievalGate', () => {
+  const catalog = [
+    skill({ id: 'revoked', authorityProvenance: provenance(['grant:gone']) }),
+    skill({ id: 'held', authorityProvenance: provenance([GRANT]) }),
+    skill({ id: 'plain' }),
+    skill({
+      id: 'ineligible',
+      requires: { env: ['TOKEN'] },
+      authorityProvenance: provenance(['grant:gone']),
+    }),
+  ];
+  const snapshot = { grantIds: [GRANT], leaseEpoch: 2 };
+
+  it('denies a parked or dropped skill and advises a downgraded one', () => {
+    const dropped = axSkillRetrievalGate(catalog, {
+      authority: snapshot,
+      precondition: { grant_revoked: 'drop' },
+      environment: { env: ['TOKEN'] },
+    });
+    expect([...dropped.denied]).toEqual(['revoked', 'ineligible']);
+    expect(dropped.advisory('revoked')).toBeUndefined();
+
+    const downgraded = axSkillRetrievalGate(catalog, {
+      authority: snapshot,
+      environment: { env: ['TOKEN'] },
+    });
+    expect([...downgraded.denied]).toEqual([]);
+    expect(downgraded.advisory('revoked')).toContain('grant_revoked:1');
+    expect(downgraded.advisory('held')).toBeUndefined();
+    expect(downgraded.advisory('plain')).toBeUndefined();
+  });
+
+  it('reports nothing for a skill the requires gate already hid', () => {
+    // The two gates are orthogonal and answer different questions: an
+    // ineligible skill is not "denied by authority", it was never eligible.
+    const gate = axSkillRetrievalGate(catalog, {
+      authority: snapshot,
+      precondition: { grant_revoked: 'drop' },
+      environment: { env: [] },
+    });
+    expect([...gate.denied]).toEqual(['revoked']);
+  });
+
+  it('is empty without an authority snapshot, so the default path is free', () => {
+    const gate = axSkillRetrievalGate(catalog);
+    expect(gate.denied.size).toBe(0);
+    expect(gate.advisories.size).toBe(0);
+  });
+
+  it('agrees with axSelectCatalogSkills about what is retrievable', () => {
+    // One re-check, one answer: a divergence here is exactly the bug where the
+    // kernel hid a skill the index and discover still advertised.
+    const options = {
+      authority: snapshot,
+      precondition: { grant_revoked: 'drop' as const },
+      environment: { env: ['TOKEN'] },
+    };
+    const selection = axSelectCatalogSkills(catalog, options);
+    const gate = axSkillRetrievalGate(catalog, options);
+    const visible = new Set([
+      ...selection.kernel.map((view) => view.id),
+      ...selection.index.map((entry) => entry.id),
+    ]);
+    for (const id of gate.denied) {
+      expect(visible.has(id)).toBe(false);
+    }
+    expect(visible).toEqual(new Set(['held', 'plain']));
   });
 });

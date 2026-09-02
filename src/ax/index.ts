@@ -406,6 +406,7 @@ import {
   type AxAgentSkillIndexEntry,
   type AxAgentSkillRequirementFailure,
   type AxAgentSkillRequirements,
+  type AxAgentSkillRetrievalGate,
   type AxAgentSkillSelection,
   type AxAgentSkillSelectionOptions,
   type AxAgentSkillTier,
@@ -416,6 +417,7 @@ import {
   axEstimateSkillTokens,
   axPromoteSkill,
   axSelectCatalogSkills,
+  axSkillRetrievalGate,
 } from './agent/skillCatalog.js';
 import {
   type AxAgentRailDiagnostic,
@@ -2869,6 +2871,7 @@ export { axSkillAdvisoryAnnotation };
 export { axSkillPreconditionExecutableDefaults };
 export { axSkillPreconditionGuidanceDefaults };
 export { axSkillProvenanceDigest };
+export { axSkillRetrievalGate };
 export { axSkillValueScore };
 export { axSnapshotAuthority };
 export { axSpanAttributes };
@@ -3358,6 +3361,7 @@ export type { AxAgentSkillRankingWeights };
 export type { AxAgentSkillRequirementFailure };
 export type { AxAgentSkillRequirements };
 export type { AxAgentSkillResult };
+export type { AxAgentSkillRetrievalGate };
 export type { AxAgentSkillSelection };
 export type { AxAgentSkillSelectionOptions };
 export type { AxAgentSkillTier };

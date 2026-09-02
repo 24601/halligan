@@ -862,8 +862,10 @@ Three non-guarantees:
 > `verifierDecisions` are caller-supplied, not derived — `AxAuthorizationReceipt`
 > carries no guard result.
 
-> The re-check runs on the static catalog and executable-artifact paths. A host
-> that supplies `onSkillsSearch` owns retrieval and owns the re-check.
+> The re-check runs on every static-catalog retrieval path — kernel tier,
+> `### Available Skills` index, `discover({ skills })` and the relevance hint —
+> and on the executable-artifact path. A host that supplies `onSkillsSearch` owns
+> retrieval and owns the re-check.
 
 Full contract: `docs/SKILL_PROVENANCE.md`.
 

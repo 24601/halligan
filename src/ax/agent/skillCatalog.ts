@@ -198,6 +198,10 @@ export function axEstimateSkillTokens(
  * The eligible subset, in catalog order. Consumed by the kernel, by the
  * `### Available Skills` signature index, and by `discover({ skills })`, so an
  * ineligible skill is hidden from all three rather than only from the kernel.
+ *
+ * `requires` gating only. The authority re-check is the orthogonal second gate
+ * and lives in `axSkillRetrievalGate`, because the two answer different
+ * questions and a caller must be able to see which one hid a skill.
  */
 export function axEligibleCatalogSkills(
   catalog: readonly Readonly<AxAgentCatalogSkill>[],
@@ -208,6 +212,91 @@ export function axEligibleCatalogSkills(
   );
 }
 
+const ADMITTED_CHECK: AxSkillPreconditionCheck = Object.freeze({
+  outcome: 'admit' as const,
+  failures: Object.freeze([]),
+});
+
+type AxCatalogAdmission = Readonly<{
+  skill: AxAgentCatalogSkill;
+  eligibility: AxAgentSkillEligibility;
+  check: AxSkillPreconditionCheck;
+}>;
+
+/**
+ * The ONE place the two catalog gates run. Every retrieval path routes through
+ * it, so `discover({ skills })`, the `### Available Skills` index, the
+ * relevance hint and the kernel can never disagree about whether a skill is
+ * retrievable.
+ */
+function admitCatalogSkills(
+  catalog: readonly Readonly<AxAgentCatalogSkill>[],
+  options: Readonly<AxAgentSkillSelectionOptions> | undefined
+): AxCatalogAdmission[] {
+  const policy = options?.precondition ?? axSkillPreconditionGuidanceDefaults;
+  return catalog.map((skill) => {
+    const eligibility = axCheckSkillRequirements(
+      skill.requires,
+      options?.environment
+    );
+    const check =
+      eligibility.eligible && options?.authority
+        ? axRecheckSkillProvenance(
+            skill.authorityProvenance,
+            options.authority,
+            policy,
+            options.now
+          )
+        : ADMITTED_CHECK;
+    return { skill, eligibility, check };
+  });
+}
+
+/**
+ * The retrieval-time authority re-check, in the shape every catalog path needs.
+ *
+ * `denied` is the fail-closed half: a skill the re-check parked or dropped is
+ * removed from `discover({ skills })`, from the `### Available Skills` index and
+ * from the relevance hint — not only from the kernel tier. `advisory` is the
+ * downgrade half: it is derived here on every call and never serialized, so it
+ * cannot arrive through `agent.setState()`.
+ */
+export type AxAgentSkillRetrievalGate = Readonly<{
+  /** Ids the re-check parked or dropped. Never retrievable on any path. */
+  denied: ReadonlySet<string>;
+  /** Advisory lines for downgraded skills, keyed by id. */
+  advisories: ReadonlyMap<string, string>;
+  advisory: (id: string) => string | undefined;
+}>;
+
+export function axSkillRetrievalGate(
+  catalog: readonly Readonly<AxAgentCatalogSkill>[],
+  options?: Readonly<AxAgentSkillSelectionOptions>
+): AxAgentSkillRetrievalGate {
+  const denied = new Set<string>();
+  const advisories = new Map<string, string>();
+  for (const { skill, eligibility, check } of admitCatalogSkills(
+    catalog,
+    options
+  )) {
+    // `requires` gating is a separate gate with its own diagnosis; this one
+    // reports only what the authority re-check decided.
+    if (!eligibility.eligible) {
+      continue;
+    }
+    if (check.outcome === 'park' || check.outcome === 'drop') {
+      denied.add(skill.id);
+    } else if (check.advisory) {
+      advisories.set(skill.id, check.advisory);
+    }
+  }
+  return Object.freeze({
+    denied: denied as ReadonlySet<string>,
+    advisories: advisories as ReadonlyMap<string, string>,
+    advisory: (id: string) => advisories.get(id),
+  });
+}
+
 function compareIds(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
@@ -216,7 +305,6 @@ export function axSelectCatalogSkills(
   catalog: readonly Readonly<AxAgentCatalogSkill>[],
   options?: Readonly<AxAgentSkillSelectionOptions>
 ): AxAgentSkillSelection {
-  const environment = options?.environment;
   const budget = Math.max(
     0,
     options?.kernelTokenBudget ?? AX_DEFAULT_KERNEL_TOKEN_BUDGET
@@ -224,8 +312,6 @@ export function axSelectCatalogSkills(
   const profiles = new Map(
     (options?.costProfiles ?? []).map((profile) => [profile.id, profile])
   );
-  const policy = options?.precondition ?? axSkillPreconditionGuidanceDefaults;
-
   const hidden: {
     id: string;
     unmet: readonly AxAgentSkillRequirementFailure[];
@@ -236,22 +322,14 @@ export function axSelectCatalogSkills(
     advisory?: string;
   }[] = [];
 
-  for (const skill of catalog) {
-    const eligibility = axCheckSkillRequirements(skill.requires, environment);
+  for (const { skill, eligibility, check } of admitCatalogSkills(
+    catalog,
+    options
+  )) {
     if (!eligibility.eligible) {
       hidden.push({ id: skill.id, unmet: eligibility.unmet });
       continue;
     }
-    if (!options?.authority) {
-      admitted.push({ skill });
-      continue;
-    }
-    const check = axRecheckSkillProvenance(
-      skill.authorityProvenance,
-      options.authority,
-      policy,
-      options.now
-    );
     if (check.outcome !== 'admit') {
       decisions.push({ id: skill.id, check });
     }
