@@ -169,6 +169,8 @@ function hasValidPrefix(name: string): boolean {
       name === 'ai' ||
       name === 'agent' ||
       name === 'flow' ||
+      // Top-level persistent-agency factory, like agent()/flow().
+      name === 'mind' ||
       name === 'eventRuntime' ||
       name === 'eventInput' ||
       name === 'eventPath' ||

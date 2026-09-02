@@ -860,13 +860,17 @@ void trajectoryExhausted;
 void trajectoryAssertions;
 
 // === Mind surface (src/ax/mind) ===
-// Proves the generated barrel really exports the pacing ladder, the wake
-// routing, both event sources, lag health, ledgered chat and the skill tier.
-// `AxMind` and `mind()` land with the runtime commit.
+// Proves the generated barrel really exports the runtime, the pacing ladder,
+// the wake routing, both event sources, lag health, ledgered chat and the
+// skill tier.
 import {
+  AxMind,
+  AxMindBudgetExceededError,
   AxMindChatError,
+  type AxMindContextRequest,
   type AxMindDiagnostic,
   type AxMindHealth,
+  type AxMindOptions,
   type AxMindPaceDecision,
   type AxMindReplyResolution,
   type AxMindSkillSelection,
@@ -878,11 +882,13 @@ import {
   axMindEventRoutes,
   axMindHealthState,
   axMindSalienceBuffer,
+  axMindStaticArtifacts,
   axNextMindPace,
   axRecoverMindPacerState,
   axResolveMindReplyState,
   axSelectMindSkills,
   axWithMindSalience,
+  mind,
 } from './index.js';
 
 void axNextMindPace;
@@ -897,6 +903,10 @@ void axMindSalienceBuffer;
 void AxMindChatError;
 void AxTrajectoryEventSource;
 void AxMindTickEventSource;
+void AxMind;
+void AxMindBudgetExceededError;
+void axMindStaticArtifacts;
+void mind;
 
 const mindCapMs: number = axDefaultMindPacerConfig.capMs;
 declare const mindThinker: AxMindThinker;
@@ -905,6 +915,12 @@ declare const mindHealth: AxMindHealth;
 declare const mindReply: AxMindReplyResolution;
 declare const mindSkills: AxMindSkillSelection;
 declare const mindDiagnostic: AxMindDiagnostic;
+declare const mindOptions: AxMindOptions;
+declare const mindContext: AxMindContextRequest;
+const mindTrajectoryId: string = mindOptions.trajectoryId;
+const mindContextBudget: number = mindContext.budgetTokens;
+void mindTrajectoryId;
+void mindContextBudget;
 const mindThinkerName: string = mindThinker.name;
 const mindDecisionKind: 'arm' | 'unchanged' = mindDecision.kind;
 const mindLagSteps: number = mindHealth.lagSteps;

@@ -2128,6 +2128,13 @@ import {
   axResolveMindReplyState,
 } from './mind/chat.js';
 import {
+  type AxMindRoutingSignalInput,
+  axMindCirclingThoughts,
+  axMindRoutingSignals,
+  axMindSyntheticTrigger,
+  axMindWakeClass,
+} from './mind/context.js';
+import {
   type AxMindHealthInput,
   axMindHealth,
   axMindHealthReporter,
@@ -2135,6 +2142,13 @@ import {
   axMindStalledThreshold,
   axMindStoreDurability,
 } from './mind/health.js';
+import {
+  AxMind,
+  type AxMindOptions,
+  axMindInboundSource,
+  axMindReservedNames,
+  mind,
+} from './mind/mind.js';
 import {
   axMindPaceDelay,
   axMindPacerFuse,
@@ -2185,6 +2199,17 @@ import {
   axMindTickDue,
 } from './mind/sources.js';
 import {
+  type AxMindSubRunOptions,
+  type AxMindSubRunRequest,
+  type AxMindSubRunResult,
+  axMindMaxSubRunPolls,
+  axMindSubRun,
+} from './mind/subruns.js';
+import {
+  AxInMemoryMindOwnershipStore,
+  type AxMindArtifactChange,
+  type AxMindArtifactReceipt,
+  type AxMindArtifactSource,
   type AxMindArtifacts,
   AxMindBudgetExceededError,
   type AxMindChat,
@@ -2192,6 +2217,8 @@ import {
   type AxMindChatMessage,
   type AxMindChatTransport,
   AxMindConfigurationError,
+  type AxMindContextAssembler,
+  type AxMindContextRequest,
   type AxMindDiagnostic,
   type AxMindDiagnosticCode,
   type AxMindEffectLedger,
@@ -2228,6 +2255,7 @@ import {
   axIsMindBudgetExceededError,
   axIsMindChatError,
   axIsMindConfigurationError,
+  axMindStaticArtifacts,
 } from './mind/types.js';
 import { axSpanAttributes, axSpanEvents } from './trace/trace.js';
 import {
@@ -2538,6 +2566,7 @@ export { AxInMemoryBalancerStatsStore };
 export { AxInMemoryDemandStore };
 export { AxInMemoryEventStore };
 export { AxInMemoryLearningStore };
+export { AxInMemoryMindOwnershipStore };
 export { AxInMemoryProgramStateStore };
 export { AxInMemoryRejectedCandidateLedger };
 export { AxInMemoryTrajectoryBlobStore };
@@ -2574,6 +2603,7 @@ export { AxMCPWebSocketTransport };
 export { AxManualEventClock };
 export { AxMediaNotSupportedError };
 export { AxMemory };
+export { AxMind };
 export { AxMindBudgetExceededError };
 export { AxMindChatError };
 export { AxMindConfigurationError };
@@ -2883,30 +2913,39 @@ export { axMergeUsageContexts };
 export { axMindChat };
 export { axMindChatIdempotencyKey };
 export { axMindChatOperation };
+export { axMindCirclingThoughts };
 export { axMindEventRoutes };
 export { axMindEventSource };
 export { axMindEventTypes };
 export { axMindHealth };
 export { axMindHealthReporter };
 export { axMindHealthState };
+export { axMindInboundSource };
 export { axMindInferReplyTo };
+export { axMindMaxSubRunPolls };
 export { axMindPaceDelay };
 export { axMindPaceStepData };
 export { axMindPaceStepType };
 export { axMindPacerFuse };
 export { axMindPendingClass };
 export { axMindReconcileChatSends };
+export { axMindReservedNames };
+export { axMindRoutingSignals };
 export { axMindSalienceBuffer };
 export { axMindSalienceGuidance };
 export { axMindSalienceTextBytes };
 export { axMindSkillTokens };
 export { axMindStalledThreshold };
+export { axMindStaticArtifacts };
 export { axMindStepEventExtensions };
 export { axMindStoreDurability };
+export { axMindSubRun };
 export { axMindSubscribedStepTypes };
+export { axMindSyntheticTrigger };
 export { axMindThinkerSubject };
 export { axMindTickDue };
 export { axMindVisibleStepTypes };
+export { axMindWakeClass };
 export { axMindWakeOutcomeOf };
 export { axMindWakeRoute };
 export { axMindWorkProbe };
@@ -3073,6 +3112,7 @@ export { eventTarget };
 export { f };
 export { flow };
 export { fn };
+export { mind };
 export { optimize };
 export { playbook };
 export { programSource };
@@ -4103,11 +4143,16 @@ export type { AxMetricFn };
 export type { AxMetricFnArgs };
 export type { AxMetricResult };
 export type { AxMetricsConfig };
+export type { AxMindArtifactChange };
+export type { AxMindArtifactReceipt };
+export type { AxMindArtifactSource };
 export type { AxMindArtifacts };
 export type { AxMindChat };
 export type { AxMindChatMessage };
 export type { AxMindChatOptions };
 export type { AxMindChatTransport };
+export type { AxMindContextAssembler };
+export type { AxMindContextRequest };
 export type { AxMindDiagnostic };
 export type { AxMindDiagnosticCode };
 export type { AxMindEffectLedger };
@@ -4117,6 +4162,7 @@ export type { AxMindHealth };
 export type { AxMindHealthInput };
 export type { AxMindHealthState };
 export type { AxMindHealthThresholds };
+export type { AxMindOptions };
 export type { AxMindOwnershipStore };
 export type { AxMindPaceDecision };
 export type { AxMindPacerConfig };
@@ -4126,6 +4172,7 @@ export type { AxMindReplyResolution };
 export type { AxMindReplyState };
 export type { AxMindReplyStateOptions };
 export type { AxMindRoutingSignal };
+export type { AxMindRoutingSignalInput };
 export type { AxMindSalienceBuffer };
 export type { AxMindSalienceBufferOptions };
 export type { AxMindSalienceItem };
@@ -4134,6 +4181,9 @@ export type { AxMindSkill };
 export type { AxMindSkillEnvironment };
 export type { AxMindSkillSelection };
 export type { AxMindStepResult };
+export type { AxMindSubRunOptions };
+export type { AxMindSubRunRequest };
+export type { AxMindSubRunResult };
 export type { AxMindSubscription };
 export type { AxMindThinker };
 export type { AxMindThinkerBudget };

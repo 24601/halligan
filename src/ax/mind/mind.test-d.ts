@@ -1,20 +1,28 @@
 // mind.test-d.ts — compile-time tests for the mind surface, enforced by
-// `npm run test:type-tests` (tsc -p tsconfig.typetests.json). `mind()` and
-// `AxMind` land with the runtime commit; everything the pacing, routing,
-// source, chat, salience and skill machinery exposes is covered here.
+// `npm run test:type-tests` (tsc -p tsconfig.typetests.json). Everything the
+// runtime, the pacing, routing, source, chat, salience and skill machinery
+// exposes is covered here, including what a thinker deliberately cannot see.
 
 import type { AxAIService } from '../ai/types.js';
 import type { AxProgrammable } from '../dsp/types.js';
 import { validateEventTarget } from '../event/mapping.js';
 import type { AxEventTarget } from '../event/types.js';
 import type {
+  AxMind,
+  AxMindContextRequest,
   AxMindPaceDecision,
   AxMindReplyResolution,
   AxMindSubscription,
   AxMindThinker,
   AxMindWakeOutcome,
+  AxTrajectoryStore,
 } from '../index.js';
-import { axDefaultMindSubscription, axNextMindPace } from '../index.js';
+import {
+  axDefaultMindSubscription,
+  axMindStaticArtifacts,
+  axNextMindPace,
+  mind,
+} from '../index.js';
 
 declare const ai: AxAIService;
 declare const program: AxProgrammable<{ prompt: string }, { answer: string }>;
@@ -27,6 +35,9 @@ const thinker: AxMindThinker<{ prompt: string }, { answer: string }> = {
   subscription: axDefaultMindSubscription,
   ai,
   program,
+  // The assembler's return type is the program's IN, so a thinker cannot hand
+  // its own program a shape the signature does not accept.
+  context: (request) => ({ prompt: request.projection.render }),
   classify: (result) => {
     const answer: string | undefined = result.output?.answer;
     void answer;
@@ -121,3 +132,45 @@ const widened: boolean = resolution.widened;
 void state;
 void failedOpen;
 void widened;
+
+// `mind()` infers AxMind, and the options record is the whole configuration
+// surface: a host supplies identity, budgets, authority and the registry, and
+// a thinker never sees any of it.
+declare const store: AxTrajectoryStore;
+const instance: AxMind = mind({
+  trajectoryId: 'traj',
+  store,
+  artifacts: axMindStaticArtifacts({
+    revision: 'rev-1',
+    persona: '',
+    thinkerPrompts: {},
+    goals: [],
+    skills: [],
+  }),
+  thinkers: [thinker],
+  budget: { contextWindowTokens: 8_000 },
+});
+void instance.health();
+void instance.routes();
+// @ts-expect-error a mind has no update path; the log is append-only
+void instance.updateStep;
+// @ts-expect-error nor a delete path
+void instance.deleteStep;
+// @ts-expect-error nor a way to rewrite history
+void instance.rewrite;
+
+// The context request is the entire surface a thinker program is handed.
+declare const request: AxMindContextRequest;
+const budgetTokens: number = request.budgetTokens;
+void budgetTokens;
+void request.projection.render;
+void request.artifacts.persona;
+// @ts-expect-error the transport's from-identity is host-owned (authority 5)
+void request.transport;
+// @ts-expect-error the route table is fixed at construction (authority 3)
+void request.routes;
+// @ts-expect-error a thinker cannot reach the mind's own close()
+void request.mind;
+// The signal list is readonly: a hint is not a place to write policy back.
+// @ts-expect-error routing signals are readonly
+request.signals.push({ code: 'share_nudge', text: 'x' });
