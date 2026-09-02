@@ -1612,6 +1612,29 @@ import {
   axInMemoryLearningStore,
 } from './learn/memoryStore.js';
 import {
+  type AxLearningBatch,
+  type AxLearningDecision,
+  type AxLearningEngineDecisionEntry,
+  type AxLearningEngineOptions,
+  type AxLearningEngineState,
+  type AxLearningEngineStep,
+  type AxLearningNeverReason,
+  type AxLearningProcessor,
+  type AxLearningReferenceResolution,
+  type AxLearningReportContext,
+  type AxLearningTrainingSample,
+  type AxLearningTrainingUnit,
+  type AxScoreWindowProcessorOptions,
+  axCreateLearningEngineState,
+  axLearningEligibility,
+  axLearningEngineAcknowledge,
+  axLearningEngineBuildBatch,
+  axLearningEngineIngest,
+  axLearningEngineNeverReasons,
+  axLearningEngineReady,
+  axScoreWindowProcessor,
+} from './learn/processor.js';
+import {
   type AxLearningInteractionInput,
   type AxLearningReportRecordInput,
   axCreateLearningInteractionRecord,
@@ -1620,6 +1643,12 @@ import {
   axLearningReceiptFrom,
   axLearningRecordContent,
 } from './learn/records.js';
+import {
+  type AxReportFieldSchema,
+  type AxReportFieldType,
+  type AxReportSchema,
+  axReportSchema,
+} from './learn/reportSchema.js';
 import {
   type AxHarnessBulletConfig,
   type AxHarnessEntry,
@@ -2278,6 +2307,7 @@ export { axCreateFlowTextLogger };
 export { axCreateGeminiLiveAudioApi };
 export { axCreateGrokRealtimeApi };
 export { axCreateJSRuntime };
+export { axCreateLearningEngineState };
 export { axCreateLearningInteractionRecord };
 export { axCreateLearningReportRecord };
 export { axCreateOpenAIRealtimeApi };
@@ -2372,6 +2402,12 @@ export { axIsTrajectoryBlobError };
 export { axIsTrajectoryCursorError };
 export { axIsTrajectoryQueryError };
 export { axKnownComponentKinds };
+export { axLearningEligibility };
+export { axLearningEngineAcknowledge };
+export { axLearningEngineBuildBatch };
+export { axLearningEngineIngest };
+export { axLearningEngineNeverReasons };
+export { axLearningEngineReady };
 export { axLearningFailureFrom };
 export { axLearningReceiptFrom };
 export { axLearningRecordContent };
@@ -2437,6 +2473,7 @@ export { axRejectedCandidatePrior };
 export { axRenewPreferenceEvidence };
 export { axReplaceOptimizedProgramSnapshot };
 export { axReportRuntimeCapabilityContradictions };
+export { axReportSchema };
 export { axResolveAIProfileFeatures };
 export { axResolveAIProfileId };
 export { axResolveGeminiLiveAudioConfig };
@@ -2459,6 +2496,7 @@ export { axRuntimePrimitives };
 export { axRuntimeProtocolFromToken };
 export { axSampleByInclusion };
 export { axScoreProvidersForRequest };
+export { axScoreWindowProcessor };
 export { axSelectCodeRuntime };
 export { axSelectExecutableSkills };
 export { axSelectOptimalProvider };
@@ -3288,13 +3326,23 @@ export type { AxJudgeForwardOptions };
 export type { AxJudgeOptions };
 export type { AxLearningAppendResult };
 export type { AxLearningArtifactRef };
+export type { AxLearningBatch };
+export type { AxLearningDecision };
+export type { AxLearningEngineDecisionEntry };
+export type { AxLearningEngineOptions };
+export type { AxLearningEngineState };
+export type { AxLearningEngineStep };
 export type { AxLearningInteractionInput };
 export type { AxLearningInteractionPayload };
 export type { AxLearningInteractionRecord };
+export type { AxLearningNeverReason };
+export type { AxLearningProcessor };
 export type { AxLearningReceipt };
 export type { AxLearningRecord };
 export type { AxLearningRecordId };
+export type { AxLearningReferenceResolution };
 export type { AxLearningRelease };
+export type { AxLearningReportContext };
 export type { AxLearningReportInput };
 export type { AxLearningReportPayload };
 export type { AxLearningReportRecord };
@@ -3307,6 +3355,8 @@ export type { AxLearningStoreConformanceFactoryOptions };
 export type { AxLearningStoreConformanceReport };
 export type { AxLearningStorePage };
 export type { AxLearningStorePageEntry };
+export type { AxLearningTrainingSample };
+export type { AxLearningTrainingUnit };
 export type { AxLearningTreeDelivery };
 export type { AxLearningValue };
 export type { AxLlmQueryBudgetState };
@@ -3577,6 +3627,9 @@ export type { AxRejectedCandidateLedgerRef };
 export type { AxRejectedCandidateLedgerStore };
 export type { AxRelevanceHints };
 export type { AxRenderedPrompt };
+export type { AxReportFieldSchema };
+export type { AxReportFieldType };
+export type { AxReportSchema };
 export type { AxResolvedAgentPlaybookConfig };
 export type { AxResolvedAgentPlaybookLearn };
 export type { AxResolvedAutoUpgrade };
@@ -3620,6 +3673,7 @@ export type { AxRuntimeProtocol };
 export type { AxRuntimeSelection };
 export type { AxRuntimeTimeoutEnforcement };
 export type { AxSamplePickerOptions };
+export type { AxScoreWindowProcessorOptions };
 export type { AxSelectExecutableSkillsOptions };
 export type { AxSelectedExecutableSkill };
 export type { AxSelectedPreferenceEvidence };
