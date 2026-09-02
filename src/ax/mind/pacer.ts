@@ -29,11 +29,30 @@ export function axMindPaceDelay(
   return Math.min(config.baseMs * config.factor ** (level - 1), config.capMs);
 }
 
-/** The absolute fuse, derived from the cost knob when not stated. */
+/**
+ * The absolute fuse, derived from the cost knob when not stated.
+ *
+ * `ceil(3_600_000/capMs x 1.5)` is the STEADY-STATE tolerance only. A descent
+ * from engagement additionally costs `hold` wakes at every level on the way
+ * down, and on the shipped defaults that descent (21) is larger than the
+ * steady-state figure (18): deriving the fuse from the steady state alone
+ * parked a default-configured mind under eight minutes into every quiet
+ * period, so the documented "12 wakes/hour at capMs = 300_000" was a state the
+ * shipped default could never occupy. The fuse is an absolute ceiling on a
+ * bounded ladder, not a rate limit; a host that wants a tighter one states
+ * `maxWakesPerHour` outright.
+ */
 export function axMindPacerFuse(
   config: Readonly<AxMindPacerConfig> = axDefaultMindPacerConfig
 ): number {
-  return config.maxWakesPerHour ?? Math.ceil((HOUR_MS / config.capMs) * 1.5);
+  if (config.maxWakesPerHour !== undefined) return config.maxWakesPerHour;
+  const levels =
+    config.factor > 1 && config.capMs > config.baseMs
+      ? Math.ceil(
+          Math.log(config.capMs / config.baseMs) / Math.log(config.factor)
+        ) + 1
+      : 1;
+  return Math.ceil((HOUR_MS / config.capMs) * 1.5) + config.hold * levels;
 }
 
 /** Wake classes that mean "a human or a host is engaged with this mind". */

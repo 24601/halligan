@@ -186,23 +186,53 @@ describe('axNextMindPace', () => {
   });
 
   it('steady-state spontaneous wakes per hour at cap 300s is 12', () => {
+    // Measured on the SHIPPED default, not on a config with the fuse turned
+    // off: a headline cost number the default cannot reach is a Goodhart
+    // number. `parked` is asserted at every step for the same reason.
+    const config = axDefaultMindPacerConfig;
     const atCap = { ...axInitialMindPacerState, level: 20, ticks: 0 };
     let state = atCap;
     let now = 0;
     let wakes = 0;
     while (now < HOUR) {
-      const decision = step(state, 'spontaneous', 'empty', now, LADDER);
+      const decision = step(state, 'spontaneous', 'empty', now, config);
       expect(decision.kind).toBe('arm');
       wakes++;
       state = decision.state;
+      expect(state.parked).toBeUndefined();
       now += decision.kind === 'arm' ? decision.delayMs : HOUR;
     }
     expect(wakes).toBe(12);
-    expect(axMindPaceDelay(state.level, LADDER)).toBe(LADDER.capMs);
+    expect(axMindPaceDelay(state.level, config)).toBe(config.capMs);
+  });
+
+  it('a whole idle hour from engagement never trips the default fuse', () => {
+    // Descent AND steady state together, from cold, on the shipped default.
+    // The counter-metric beside the 12/hr headline: the hour that costs most
+    // is the one that starts at full engagement, and it must stay under the
+    // ceiling or the advertised steady state is unreachable.
+    const config = axDefaultMindPacerConfig;
+    let state = axInitialMindPacerState;
+    let now = 0;
+    let wakes = 0;
+    while (now < HOUR) {
+      const decision = step(state, 'spontaneous', 'empty', now, config);
+      expect(decision.kind).toBe('arm');
+      wakes++;
+      state = decision.state;
+      expect(state.parked).toBeUndefined();
+      now += decision.kind === 'arm' ? decision.delayMs : HOUR;
+    }
+    expect(wakes).toBe(29);
+    expect(wakes).toBeLessThan(axMindPacerFuse(config));
+    expect(state.spontaneousWakes).toHaveLength(29);
   });
 
   it('raising the cap to 600s halves the wakes per hour', () => {
-    const slower: AxMindPacerConfig = { ...LADDER, capMs: 600_000 };
+    const slower: AxMindPacerConfig = {
+      ...axDefaultMindPacerConfig,
+      capMs: 600_000,
+    };
     let state = { ...axInitialMindPacerState, level: 20, ticks: 0 };
     let now = 0;
     let wakes = 0;
@@ -215,18 +245,28 @@ describe('axNextMindPace', () => {
     expect(wakes).toBe(6);
   });
 
-  it('derives the fuse from the cost knob and trips during a full descent', () => {
-    // The default fuse is 1.5x the steady-state rate, but a descent from
-    // engagement costs `hold` wakes per level, which is more. This is stated
-    // rather than hidden: the fuse is an absolute spend ceiling, not a
-    // steady-state tolerance, and a host that wants an untripped descent
-    // raises maxWakesPerHour above the descent cost measured here.
-    expect(axMindPacerFuse(axDefaultMindPacerConfig)).toBe(18);
+  it('the default fuse covers a full descent and still bounds spend', () => {
+    // 18 (steady-state tolerance) + 3 x 7 (hold wakes per ladder level). The
+    // steady-state half alone parked the shipped default 7.75 minutes into
+    // every quiet period, at level 5 -- nowhere near the 300s cap the cost
+    // model is written about.
+    expect(axMindPacerFuse(axDefaultMindPacerConfig)).toBe(39);
     const descent = descend('empty', axDefaultMindPacerConfig);
-    expect(descent.state.parked).toBe('rate_fuse');
-    expect(descent.wakes).toBe(axMindPacerFuse(axDefaultMindPacerConfig));
-    // It parks BEFORE reaching the steady-state cap it was descending towards.
-    expect(descent.delays.at(-1)).toBeLessThan(axDefaultMindPacerConfig.capMs);
+    expect(descent.state.parked).toBeUndefined();
+    // It reaches the cap it was descending towards, which is the state the
+    // documented 12/hr steady rate describes.
+    expect(descent.delays.at(-1)).toBe(axDefaultMindPacerConfig.capMs);
+    expect(descent.wakes).toBeLessThan(
+      axMindPacerFuse(axDefaultMindPacerConfig)
+    );
+    // An explicitly stated ceiling is still absolute, and still parks.
+    const tight = { ...axDefaultMindPacerConfig, maxWakesPerHour: 6 };
+    expect(axMindPacerFuse(tight)).toBe(6);
+    expect(descend('empty', tight).state.parked).toBe('rate_fuse');
+    // A degenerate ladder (no descent possible) collapses to one level.
+    expect(
+      axMindPacerFuse({ ...axDefaultMindPacerConfig, baseMs: 300_000 })
+    ).toBe(21);
   });
 
   it('the rate fuse parks spontaneity and leaves reactive wakes working', () => {
