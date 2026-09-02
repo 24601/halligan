@@ -8,6 +8,9 @@ on:
   workflow_dispatch:
 jobs:
   build:
+    # Halligan fork: publishing to upstream's npm/PyPI/crates/Maven packages is not ours to do.
+    # Set the repository variable HALLIGAN_PUBLISH=true to enable these jobs.
+    if: ${{ vars.HALLIGAN_PUBLISH == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
