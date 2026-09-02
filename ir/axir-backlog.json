@@ -1981,6 +1981,25 @@
       "completedAt": null,
       "completedByCommit": null,
       "verification": null
+    },
+    {
+      "id": "axir-2026-09-02-verifier-gated-typed-working-state-for-the-actor-loop",
+      "status": "open",
+      "title": "Verifier-gated typed working state for the actor loop",
+      "createdAt": "2026-09-02",
+      "sourcePR": 90,
+      "sourceCommit": "a69ec8ebcade22fc2a48a75d4f7f745b5e2b2350",
+      "tsPaths": ["src/ax/agent/workingState.ts"],
+      "portableSurface": "axagent",
+      "impact": "Adds an opt-in typed working state to the actor loop: an id-keyed goal ledger whose transitions commit only on host-checker support and harness-minted tool receipts cited by a model-visible ref, an RFC-6902-subset state patch applied all-or-nothing with test-as-guard, a closed delta classification table, a bounded park ledger, a per-turn structured trace, executor-only stage scoping with a per-forward run id, and an optional bounded completion interlock. Default behaviour is unchanged when the option is unset.",
+      "suggestedAxirWork": [
+        "Add or update the TS-derived conformance fixture.",
+        "Update AxIR/Core or descriptor data to match the portable TS behavior.",
+        "Run npm run axir:conformance:check and npm run test:axir."
+      ],
+      "completedAt": null,
+      "completedByCommit": null,
+      "verification": null
     }
   ],
   "nonPortableExemptions": [

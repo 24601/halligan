@@ -228,6 +228,13 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
   - TS paths: `src/ax/learn/types.ts`
   - Impact: New portable TS behaviour under a new src/ax/learn/ root: record and report schemas with fail-closed JSON-persistability validation, the train/wait/never eligibility reducer with named counted reasons and a stable-until-acknowledged batch, floor-not-ceiling report-schema validation, and a store port whose release chain moves by separate append-CAS and promote-CAS. Not yet expressible in AxIR; generated packages are unaffected until migrated. Harness tree, installer, release surface and axHarnessEvolve land in the follow-up PR.
   - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+- `axir-2026-09-02-verifier-gated-typed-working-state-for-the-actor-loop` [axagent] Verifier-gated typed working state for the actor loop
+  - Status: open
+  - Source PR: #90
+  - Source commit: `a69ec8ebcade22fc2a48a75d4f7f745b5e2b2350`
+  - TS paths: `src/ax/agent/workingState.ts`
+  - Impact: Adds an opt-in typed working state to the actor loop: an id-keyed goal ledger whose transitions commit only on host-checker support and harness-minted tool receipts cited by a model-visible ref, an RFC-6902-subset state patch applied all-or-nothing with test-as-guard, a closed delta classification table, a bounded park ledger, a per-turn structured trace, executor-only stage scoping with a per-forward run id, and an optional bounded completion interlock. Default behaviour is unchanged when the option is unset.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 
 ## Done
 
