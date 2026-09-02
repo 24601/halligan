@@ -248,6 +248,15 @@ export type AxAgentOptions<IN extends AxGenIn = AxGenIn> = Omit<
   playbook?: AxAgentPlaybookConfig;
 
   /**
+   * Opt-in learning surface: interaction records, receipts, late feedback, and
+   * a release chain to name what produced each exchange. Absent means no
+   * records, no receipts, and zero cost — nothing on the forward path reads
+   * it. Reach the handle with `agent.learn()` / `agent.getLearn()`; a bare
+   * `forward()` never records.
+   */
+  learning?: import('./agentLearning.js').AxLearningAgentConfig;
+
+  /**
    * Chain-of-evidence citations — opt-in (default off). When enabled, the
    * responder gains an optional string-array output field (default
    * `evidenceCitations`) that must list the evidence ids the answer actually

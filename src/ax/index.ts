@@ -28,6 +28,10 @@ import type {
   AxResolvedExecutorModelPolicyEntry,
   AxStageDefinitionBuildOptions,
 } from './agent/agentInternal/agentInternalTypes.js';
+import {
+  AxAgentLearning,
+  type AxLearningAgentConfig,
+} from './agent/agentInternal/agentLearning.js';
 import type {
   AxAgentDemos,
   AxAgentEvalDataset,
@@ -1833,6 +1837,7 @@ import {
   type AxLearningStoreCapabilities,
   type AxLearningStorePage,
   type AxLearningStorePageEntry,
+  AxLearningSuppressedError,
   type AxLearningTreeDelivery,
   type AxLearningValue,
   axIsHarnessAdmissionError,
@@ -2408,6 +2413,7 @@ export { AxAIWebLLMModel };
 export { AxAgent };
 export { AxAgentClarificationError };
 export { AxAgentContextMap };
+export { AxAgentLearning };
 export { AxAgentPlaybook };
 export { AxAgentPlaybookEvolveError };
 export { AxAgentProtocolCompletionSignal };
@@ -2485,6 +2491,7 @@ export { AxLearningRecordConflictError };
 export { AxLearningRecordValidationError };
 export { AxLearningReleaseConflictError };
 export { AxLearningReportValidationError };
+export { AxLearningSuppressedError };
 export { AxLearningSurface };
 export { AxMCPAppBridge };
 export { AxMCPClient };
@@ -3802,6 +3809,7 @@ export type { AxJSRuntimeSpeculationOptions };
 export type { AxJSRuntimeSpeculationPolicy };
 export type { AxJudgeForwardOptions };
 export type { AxJudgeOptions };
+export type { AxLearningAgentConfig };
 export type { AxLearningAppendResult };
 export type { AxLearningArtifactRef };
 export type { AxLearningBatch };

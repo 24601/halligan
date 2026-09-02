@@ -546,6 +546,24 @@ export class AxLearningReleaseConflictError extends Error {
   }
 }
 
+/**
+ * A recorded run was attempted while recording is suspended.
+ *
+ * Thrown BEFORE the forward is issued: a caller that asked for a receipt must
+ * never be handed a fake one, and a receipt without a durable record is
+ * forbidden. The suppression is counted, never silently dropped.
+ */
+export class AxLearningSuppressedError extends Error {
+  readonly code = 'learning_recording_suspended';
+
+  constructor(readonly scenario: string) {
+    super(
+      `AxAgentLearning: recording is suspended for scenario ${scenario}; no receipt can be issued`
+    );
+    this.name = 'AxLearningSuppressedError';
+  }
+}
+
 /** One entry failed admission. Carries the FIRST denial plus the full report. */
 export class AxHarnessAdmissionError extends Error {
   readonly code = 'harness_admission_denied';

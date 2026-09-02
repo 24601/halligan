@@ -39,6 +39,10 @@ import {
 } from '../playbookConfig.js';
 import { toCamelCase } from '../runtimeDiscovery.js';
 import { Synthesizer } from '../synthesizer.js';
+import {
+  AxAgentLearning,
+  type AxLearningAgentConfig,
+} from './agentLearning.js';
 import { AxAgentPlaybook } from './agentPlaybook.js';
 import type {
   AxAgentDemos,
@@ -244,6 +248,8 @@ export class AxAgent<IN extends AxGenIn, OUT extends AxGenOut>
   private readonly playbookConfigResolved?: AxResolvedAgentPlaybookConfig;
   private playbookHandle?: AxPlaybook<any, any>;
   private _agentPlaybook?: AxAgentPlaybook<any, any>;
+  private readonly learningConfig?: Readonly<AxLearningAgentConfig>;
+  private learningHandle?: AxAgentLearning<any, any>;
   private readonly citationsResolved: AxResolvedCitations;
   private func?: AxFunction;
 
@@ -266,6 +272,7 @@ export class AxAgent<IN extends AxGenIn, OUT extends AxGenOut>
     this.contextMapConfig = options.contextMap;
     this.contextMap = normalizeAgentContextMap(options.contextMap);
     this.playbookConfigResolved = resolveAgentPlaybookConfig(options.playbook);
+    this.learningConfig = options.learning;
     this.citationsResolved = resolveCitations(options.citations);
     this.fullSignature =
       typeof init.signature === 'string'
@@ -1150,6 +1157,39 @@ export class AxAgent<IN extends AxGenIn, OUT extends AxGenOut>
       );
     }
     return this._agentPlaybookWrapper();
+  }
+
+  /**
+   * The agent's learning handle: recorded runs, receipts and report ingress.
+   *
+   * Throws without a `learning` config, because a handle that silently records
+   * nothing is worse than an error. Memoized — one handle per agent.
+   */
+  public learn(): AxAgentLearning<IN, OUT> {
+    const handle = this.getLearn();
+    if (!handle) {
+      throw new Error(
+        'AxAgent.learn(): this agent was constructed without a `learning` config; pass one to record interactions.'
+      );
+    }
+    return handle;
+  }
+
+  /**
+   * The agent's learning handle, or `undefined` if none was configured.
+   *
+   * The pair exists so a caller that only wants to record when recording is
+   * configured never has to optional-chain over a throw.
+   */
+  public getLearn(): AxAgentLearning<IN, OUT> | undefined {
+    if (!this.learningConfig) return undefined;
+    if (!this.learningHandle) {
+      this.learningHandle = new AxAgentLearning<any, any>(
+        this as any,
+        this.learningConfig
+      );
+    }
+    return this.learningHandle as AxAgentLearning<IN, OUT>;
   }
 
   /** The agent's playbook handle, or `undefined` if none has been created. */
