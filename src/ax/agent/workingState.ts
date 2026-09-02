@@ -275,7 +275,11 @@ export type AxWorkingStateTraceStep = Readonly<{
   action: Readonly<{
     codeDigest: string;
     codeChars: number;
-    /** False when a call-time skill injection suppressed execution. */
+    /**
+     * False when a call-time skill injection suppressed AT LEAST ONE drafted
+     * call. A mixed turn is `false` with a non-empty `calls`: this reports the
+     * turn's weakest guarantee, and `calls` stays the exact record.
+     */
     executed: boolean;
     /** Qualified callables the turn actually invoked, sorted, deduped. */
     calls: readonly string[];

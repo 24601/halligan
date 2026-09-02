@@ -281,9 +281,17 @@ describe('call-time skill injection: configuration at the agent boundary', () =>
         ],
       }
     );
-    await expect(
-      built.forward(ai, { task: 'x' } as never)
-    ).rejects.toBeInstanceOf(AxWorkingStateSchemaError);
+    const error = await built
+      .forward(ai, { task: 'x' } as never)
+      .then(() => undefined)
+      .catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(AxWorkingStateSchemaError);
+    // Named exactly: any other construction failure would satisfy a bare
+    // `toBeInstanceOf`, including one that never reached the registration
+    // check this test exists to pin.
+    expect((error as AxWorkingStateSchemaError).detail).toBe(
+      'unknown_bound_callable: inventory.typo'
+    );
   });
 
   it('throws at construction on an unresolvable skill id', () => {
@@ -701,6 +709,52 @@ describe('call-time skill injection: the intercepted call', () => {
     expect(when).toHaveBeenCalled();
     expect(adjustCalls).toEqual([{ sku: 'a1' }]);
   });
+
+  it('a throwing when predicate executes the tool and does NOT make an error turn', async () => {
+    // `intercept()` runs synchronously inside the actor's `await tool(...)`, so
+    // a propagated host-predicate throw would be caught as an `isError` turn,
+    // tagged `'error'` on the action log and fed to the executor's escalation
+    // policy — and the budget, spent only after the predicate, would never be
+    // charged, so every re-draft would throw again with nothing bounding it.
+    const when = vi.fn((): boolean => {
+      throw new Error('host predicate exploded');
+    });
+    const {
+      agent: built,
+      ai,
+      adjustCalls,
+    } = makeAgent(
+      {
+        distiller: [DISTILL],
+        executor: ['await inventory.adjustStock({sku:"a1"})', FINAL],
+      },
+      {
+        workingState: workingStateConfig(),
+        callTimeSkills: [
+          {
+            qualifiedName: ADJUST,
+            skill: 'stock-adjustment',
+            when: when as never,
+          },
+        ],
+      }
+    );
+
+    await built.forward(ai, { task: 'adjust' } as never);
+
+    expect(when).toHaveBeenCalled();
+    // Behaves exactly as an unbound callable would.
+    expect(adjustCalls).toEqual([{ sku: 'a1' }]);
+    const log = built
+      .getState()
+      ?.actionLogEntries?.find((entry) => entry.code.includes('adjustStock'));
+    expect(log?.tags ?? []).not.toContain('error');
+    // No guidance either: nothing was intercepted, so nothing is claimed.
+    const guidance = built.getState()?.guidanceLogEntries ?? [];
+    expect(
+      guidance.filter((item) => item.triggeredBy === 'call-time skill')
+    ).toHaveLength(0);
+  });
 });
 
 describe('call-time skill injection at the dispatch site (wrapFunction)', () => {
@@ -965,6 +1019,67 @@ describe('call-time skill injection: delivery', () => {
     expect(steps[0]?.action.calls).toEqual([]);
     expect(steps[1]?.action.executed).toBe(true);
     expect(steps[1]?.action.calls).toEqual([PICK]);
+  });
+
+  it('reports a MIXED turn as not executed while keeping calls exact', async () => {
+    // One turn drafting an intercepted call AND a real one. `executed` reports
+    // the turn's weakest guarantee, so it is false; `calls` stays the exact
+    // record and still names the callable that did dispatch. Forcing `calls`
+    // empty would hide a real environment effect from Γ.
+    const steps: AxWorkingStateTraceStep[] = [];
+    const {
+      agent: built,
+      ai,
+      adjustCalls,
+      pickCalls,
+    } = makeAgent(
+      {
+        distiller: [DISTILL],
+        executor: [
+          'await inventory.adjustStock({sku:"a1"}); await inventory.pick({order:"42"})',
+          FINAL,
+        ],
+      },
+      {
+        workingState: workingStateConfig({
+          trace: true,
+          onTrace: (step: AxWorkingStateTraceStep) => {
+            steps.push(step);
+          },
+        }),
+        callTimeSkills: [{ qualifiedName: ADJUST, skill: 'stock-adjustment' }],
+      }
+    );
+
+    await built.forward(ai, { task: 'adjust' } as never);
+
+    expect(adjustCalls).toHaveLength(0);
+    expect(pickCalls).toHaveLength(1);
+    expect(steps[0]?.action.executed).toBe(false);
+    expect(steps[0]?.action.calls).toEqual([PICK]);
+    // The real call still minted; the intercepted one still did not.
+    expect(steps[0]?.observation.receipts).toHaveLength(1);
+  });
+
+  it('reports the injected skill to onLoadedSkills', async () => {
+    // A host auditing which skill BODIES reached the model must see call-time
+    // injections; the ordinary load path pairs ingestion with this callback.
+    const loaded: string[] = [];
+    const { agent: built, ai } = makeAgent(
+      {
+        distiller: [DISTILL],
+        executor: ['await inventory.adjustStock({sku:"a1"})', FINAL],
+      },
+      {
+        onLoadedSkills: (results: readonly { id?: string; name: string }[]) => {
+          loaded.push(...results.map((result) => result.id ?? result.name));
+        },
+        callTimeSkills: [{ qualifiedName: ADJUST, skill: 'stock-adjustment' }],
+      }
+    );
+
+    await built.forward(ai, { task: 'adjust' } as never);
+    expect(loaded).toContain('stock-adjustment');
   });
 });
 
