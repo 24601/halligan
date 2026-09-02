@@ -869,3 +869,80 @@ void cutOperator;
 
 // @ts-expect-error a guard failure has no value channel.
 void guardEvaluation.failures[0]?.value;
+// === Track B3 optimizer evidence modules ===
+// These import from './index.js' on purpose: the point is to prove the
+// GENERATED public barrel actually re-exports them, not merely that the modules
+// compile. A symbol that silently fails `hasValidPrefix` would break here.
+import {
+  type AxCandidateEffectDeclaration,
+  type AxHarnessRecipe,
+  AxInMemoryRejectedCandidateLedger,
+  AxManualEventClock,
+  type AxMutationAnnotation,
+  type AxRejectedCandidateLedgerEntry,
+  type AxSha256Digest,
+  type AxTaskInclusion,
+  type AxTrajectoryTermination,
+  axComputeInclusionProbabilities,
+  axHarnessRecipe,
+  axRunRejectedCandidateLedgerConformance,
+  axValidateCandidateEffectDeclaration,
+} from './index.js';
+
+declare const b3Digest: AxSha256Digest;
+
+const b3Recipe: Promise<AxHarnessRecipe> = axHarnessRecipe({
+  bindings: [
+    { port: 'exec.dispatch', atomId: 'worker-pool', version: '1.0.0' },
+  ],
+  boundModelId: 'gpt-5',
+});
+void b3Recipe;
+
+const b3Inclusions: readonly AxTaskInclusion[] =
+  axComputeInclusionProbabilities(
+    [{ index: 0, successes: 1, trials: 2, lastSeenIteration: 0 }],
+    1,
+    {
+      successThreshold: 0.5,
+      explorationFloor: 0.2,
+      maxReportedTasks: 200,
+      maxInclusionSnapshots: 20,
+    }
+  );
+void b3Inclusions;
+
+const b3Termination: AxTrajectoryTermination = {
+  kind: 'environment_failure',
+  cause: 'rate_limit',
+};
+void b3Termination;
+
+const b3Mutation: AxMutationAnnotation = {
+  depth: 'supervision',
+  patch: { class: 'steering', type: 'prompt.rule_modify' },
+  componentClasses: ['context'],
+};
+void b3Mutation;
+
+const b3Effect: AxCandidateEffectDeclaration =
+  axValidateCandidateEffectDeclaration(
+    {
+      operation: 'payments.capture',
+      replaySafety: 'idempotent',
+      idempotencyKeySource: 'derived',
+      resolver: 'host_resolver',
+    },
+    'effects[0]'
+  );
+void b3Effect;
+
+declare const b3Entry: AxRejectedCandidateLedgerEntry;
+void b3Entry.candidateDigest;
+void b3Digest;
+
+const b3Clock = new AxManualEventClock(0);
+void axRunRejectedCandidateLedgerConformance(
+  () => new AxInMemoryRejectedCandidateLedger({ clock: b3Clock }),
+  { clock: b3Clock }
+);
