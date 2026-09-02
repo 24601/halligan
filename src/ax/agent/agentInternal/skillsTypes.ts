@@ -1,4 +1,8 @@
 import type { AxAgentContextStage } from '../contextEvents.js';
+import type {
+  AxAgentSkillCostProfile,
+  AxAgentVerificationBudget,
+} from '../skillCost.js';
 
 export type AxAgentSkillResult = {
   /** Stable identifier — dedup key, prompt label, and usage telemetry key. */
@@ -7,6 +11,16 @@ export type AxAgentSkillResult = {
   name: string;
   /** Opaque markdown body (frontmatter, if any, is not parsed). */
   content: string;
+  /**
+   * Retrieval-time advisory for a downgraded skill. IN-MEMORY ONLY:
+   * `serializeSkillsPromptState` does not write it and `normalizeSkillEntry`
+   * does not read it, so the cross-language `AxAgentSkillsPromptState` shape is
+   * untouched. After a state restore the advisory is re-derived at render time
+   * from the catalog's provenance and the current authority snapshot — which is
+   * also what keeps `agent.setState()` from injecting free text into the Loaded
+   * Skills prompt section.
+   */
+  advisory?: string;
 };
 
 /**
@@ -25,6 +39,18 @@ export type AxAgentCatalogSkill = {
   description?: string;
   /** Full markdown body returned when the skill is loaded. */
   content: string;
+  /** `'kernel'` is always loaded within the token budget. Default `'indexed'`. */
+  tier?: import('../skillCatalog.js').AxAgentSkillTier;
+  /** Eligibility gating. An ineligible skill is hidden, with a diagnosis. */
+  requires?: import('../skillCatalog.js').AxAgentSkillRequirements;
+  /** Overrides the 4-chars-per-token estimate for kernel budgeting. */
+  tokenEstimate?: number;
+  /**
+   * Authority facts of the trajectory this skill was distilled from. Named to
+   * match `AxACEBulletEvidence.authorityProvenance` and
+   * `AxExecutableSkillArtifact.authorityProvenance` — one concept, one name.
+   */
+  authorityProvenance?: import('../../authority/skillProvenance.js').AxSkillProvenance;
 };
 
 export type AxAgentSkillsSearchFn = (
@@ -40,7 +66,46 @@ export type AxAgentUsedSkill = {
   reason?: string;
   /** Actor stage that declared this skill as used. */
   stage: AxAgentContextStage;
+  /**
+   * Equal-split attribution across the ids declared in the same run. This is
+   * attribution BY DECLARATION, not a causal measurement of what the skill
+   * cost. Present only when cost accounting is enabled.
+   */
+  tokensAttributed?: number;
+  wallMs?: number;
+  verificationRounds?: number;
 };
+
+/**
+ * One grouped option instead of eight loose ones on `AxAgentOptions`.
+ *
+ * `environment` is resolved ONCE at construction and held for the agent's
+ * lifetime: the `### Available Skills` index is built at signature-build time,
+ * and recomputing eligibility per run would churn the signature and therefore
+ * the prompt cache. A host whose environment changed constructs a new agent.
+ */
+export type AxAgentSkillPolicy = Readonly<{
+  environment?: Readonly<import('../skillCatalog.js').AxAgentSkillEnvironment>;
+  kernelTokenBudget?: number;
+  ranking?: Readonly<import('../skillCost.js').AxAgentSkillRankingWeights>;
+  costProfiles?: readonly Readonly<AxAgentSkillCostProfile>[];
+  precondition?: Readonly<
+    import('../../authority/skillProvenance.js').AxSkillPreconditionPolicy
+  >;
+  authoritySnapshot?: Readonly<
+    import('../../authority/skillProvenance.js').AxSkillAuthoritySnapshot
+  >;
+  verificationBudget?: Readonly<AxAgentVerificationBudget>;
+  /**
+   * Injected clock for cost accounting and for the retrieval-time re-check on
+   * this path. Defaults to the system clock.
+   */
+  now?: () => number;
+}>;
+
+export type AxAgentSkillCostCallback = (
+  profiles: readonly Readonly<AxAgentSkillCostProfile>[]
+) => void | Promise<void>;
 
 export type AxAgentUsedSkillsCallback = (
   usedSkills: readonly AxAgentUsedSkill[]

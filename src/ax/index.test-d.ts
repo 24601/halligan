@@ -1205,3 +1205,118 @@ type ReceiptBindingIsNotPublic =
 const receiptBindingIsNotPublic: ReceiptBindingIsNotPublic | undefined =
   undefined;
 void receiptBindingIsNotPublic;
+
+// === Track B4 skill provenance, visibility tiers, and skill cost ===
+// Same reason as Track B3 above: importing from './index.js' proves the
+// GENERATED barrel re-exports these, not merely that the modules compile.
+import {
+  type AxACEBulletVisibility,
+  type AxAgentCatalogSkill,
+  type AxAgentSkillCostProfile,
+  type AxAgentSkillRetrievalGate,
+  type AxAgentVerificationBudget,
+  type AxAgentVerifierRail,
+  type AxSkillPreconditionCheck,
+  type AxSkillProvenance,
+  axCheckSkillRequirements,
+  axExtractSkillProvenance,
+  axProjectActorPlaybook,
+  axRecheckSkillProvenance,
+  axRedactPlaybookForModel,
+  axSelectCatalogSkills,
+  axSkillRetrievalGate,
+  axSkillValueScore,
+} from './index.js';
+
+const skillProvenance: AxSkillProvenance = axExtractSkillProvenance({
+  receipts: [
+    {
+      version: 1,
+      receiptId: 'receipt-1',
+      requestId: 'request-1',
+      decision: 'allow',
+      operation: 'document.read',
+      resource: { type: 'document', id: 'doc-1' },
+      principalId: 'principal-1',
+      actor: { id: 'actor-1', kind: 'agent' },
+      grantIds: ['grant-1'],
+      leaseEpoch: 3,
+      authorizedAt: 10,
+    },
+  ],
+  leaseEpoch: 3,
+  capturedAt: '2026-01-01T00:00:00.000Z',
+});
+const skillPreconditionCheck: AxSkillPreconditionCheck =
+  axRecheckSkillProvenance(
+    skillProvenance,
+    { grantIds: ['grant-1'], leaseEpoch: 3 },
+    { grant_revoked: 'drop' },
+    '2026-01-01T00:00:00.000Z'
+  );
+void skillPreconditionCheck.outcome;
+
+const catalogSkill: AxAgentCatalogSkill = {
+  id: 'release-checklist',
+  name: 'Release checklist',
+  content: '1. Bump version',
+  tier: 'kernel',
+  requires: { bins: ['jq'], anyBins: ['gh', 'hub'], os: ['darwin'] },
+  authorityProvenance: skillProvenance,
+};
+void axCheckSkillRequirements(catalogSkill.requires, { bins: ['jq'] });
+const catalogSelection = axSelectCatalogSkills([catalogSkill], {
+  environment: { bins: ['jq'] },
+  authority: { grantIds: ['grant-1'], leaseEpoch: 3 },
+  now: '2026-01-01T00:00:00.000Z',
+});
+void catalogSelection.kernel.length;
+// The actor view is structurally sealed against optimizer-only fields: a
+// catalog skill carrying provenance is unassignable to it, so an optimizer
+// object cannot reach the Loaded Skills renderer by convention or by accident.
+// @ts-expect-error a catalog skill carries authorityProvenance
+const sealedActorView: import('./agent/skillCatalog.js').AxAgentActorSkillView =
+  catalogSkill;
+void sealedActorView;
+
+const skillRetrievalGate: AxAgentSkillRetrievalGate = axSkillRetrievalGate(
+  [catalogSkill],
+  { authority: { grantIds: [], leaseEpoch: 3 } }
+);
+void skillRetrievalGate.denied.has('release-checklist');
+void skillRetrievalGate.advisory('release-checklist');
+
+const skillCostProfile: AxAgentSkillCostProfile = {
+  id: 'release-checklist',
+  loads: 2,
+  uses: 1,
+  successes: 1,
+  tokensTotal: 900,
+  wallMsTotal: 40,
+  verificationRoundsTotal: 1,
+  updatedAt: '2026-01-01T00:00:00.000Z',
+};
+void axSkillValueScore(0.8, skillCostProfile);
+
+const verificationBudget: AxAgentVerificationBudget = {
+  maxRounds: 4,
+  verificationTools: ['utils.typecheck'],
+  railTimeoutMs: 2000,
+};
+void verificationBudget;
+const verifierRail: AxAgentVerifierRail = {
+  id: 'typecheck',
+  stage: 'afterToolCall',
+  verify: () => [],
+};
+void verifierRail;
+
+const optimizerTier: AxACEBulletVisibility = 'optimizer';
+void optimizerTier;
+// @ts-expect-error the tier is a closed union, not an arbitrary label
+const forgedTier: AxACEBulletVisibility = 'host-only';
+void forgedTier;
+
+declare const b4Playbook: import('./dsp/optimizers/aceTypes.js').AxACEPlaybook;
+void axProjectActorPlaybook(b4Playbook, { now: '2026-01-01T00:00:00.000Z' });
+void axRedactPlaybookForModel(b4Playbook);

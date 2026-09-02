@@ -209,6 +209,8 @@ import {
 } from './agent/agentInternal/sharedSession.js';
 import type {
   AxAgentCatalogSkill,
+  AxAgentSkillCostCallback,
+  AxAgentSkillPolicy,
   AxAgentSkillResult,
   AxAgentSkillsSearchFn,
   AxAgentUsedSkill,
@@ -397,6 +399,52 @@ import {
   type AxRuntimePrimitiveStage,
   axRuntimePrimitives,
 } from './agent/runtimePrimitives.js';
+import {
+  type AxAgentActorSkillView,
+  type AxAgentSkillEligibility,
+  type AxAgentSkillEnvironment,
+  type AxAgentSkillIndexEntry,
+  type AxAgentSkillRequirementFailure,
+  type AxAgentSkillRequirements,
+  type AxAgentSkillRetrievalGate,
+  type AxAgentSkillSelection,
+  type AxAgentSkillSelectionOptions,
+  type AxAgentSkillTier,
+  axActorSkillView,
+  axCheckSkillRequirements,
+  axDemoteSkill,
+  axEligibleCatalogSkills,
+  axEstimateSkillTokens,
+  axPromoteSkill,
+  axSelectCatalogSkills,
+  axSkillRetrievalGate,
+} from './agent/skillCatalog.js';
+import {
+  type AxAgentRailDiagnostic,
+  type AxAgentRailOutcome,
+  type AxAgentSkillCostProfile,
+  type AxAgentSkillCostSample,
+  type AxAgentSkillProvenanceAccumulator,
+  type AxAgentSkillRankingWeights,
+  type AxAgentVerificationBudget,
+  type AxAgentVerificationBudgetState,
+  type AxAgentVerifierRail,
+  type AxAgentVerifierRailBinding,
+  type AxAgentVerifierRailContext,
+  axApplyVerificationBudget,
+  axAttributeSkillCost,
+  axCountVerificationToolCall,
+  axCreateSkillProvenanceAccumulator,
+  axDedupeRailDiagnostics,
+  axDefaultSkillRankingWeights,
+  axFireVerifierRails,
+  axInitialVerificationBudgetState,
+  axRailAbortScope,
+  axRecordSkillLoad,
+  axRunVerifierRail,
+  axSkillValueScore,
+  axUpdateSkillCostProfile,
+} from './agent/skillCost.js';
 import {
   type AxStatePatch,
   type AxStatePatchApplyResult,
@@ -928,6 +976,29 @@ import {
   axIsEvidenceRequirement,
   axIsGuardPredicateFailure,
 } from './authority/evidence.js';
+import {
+  type AxSkillAuthoritySnapshot,
+  type AxSkillPreconditionCheck,
+  type AxSkillPreconditionFailure,
+  type AxSkillPreconditionFailureKind,
+  type AxSkillPreconditionOutcome,
+  type AxSkillPreconditionPolicy,
+  type AxSkillProvenance,
+  type AxSkillProvenanceAuthorization,
+  type AxSkillProvenanceEffectRef,
+  type AxSkillProvenanceSource,
+  type AxSkillVerifierDecision,
+  type AxSkillVerifierVerdict,
+  axExtractSkillProvenance,
+  axIsSkillAuthoritySnapshot,
+  axIsSkillPreconditionPolicy,
+  axIsSkillProvenance,
+  axRecheckSkillProvenance,
+  axSkillAdvisoryAnnotation,
+  axSkillPreconditionExecutableDefaults,
+  axSkillPreconditionGuidanceDefaults,
+  axSkillProvenanceDigest,
+} from './authority/skillProvenance.js';
 import type {
   AxActor,
   AxAuthorityClaim,
@@ -1051,15 +1122,21 @@ import {
   AxACEOptimizedProgram,
   type AxACEResult,
 } from './dsp/optimizers/ace.js';
-import type {
-  AxACEBulletChange,
-  AxACEPlaybookRenderOptions,
+import {
+  type AxACEBulletChange,
+  type AxACEPlaybookRenderOptions,
+  axPlaybookRequiresVisibilitySupport,
+  axProjectActorPlaybook,
+  axRedactPlaybookForModel,
+  axRenderActorPlaybook,
 } from './dsp/optimizers/acePlaybook.js';
 import type {
+  AxACEActorPlaybookView,
   AxACEApplicability,
   AxACEBullet,
   AxACEBulletEvidence,
   AxACEBulletLifecycle,
+  AxACEBulletVisibility,
   AxACECuratorOperation,
   AxACECuratorOperationType,
   AxACECuratorOutput,
@@ -1069,6 +1146,7 @@ import type {
   AxACEOptimizationArtifact,
   AxACEOptions,
   AxACEPlaybook,
+  AxACEPreconditionDecision,
   AxACEProvenance,
   AxACEReflectionOutput,
   AxACEVerificationResult,
@@ -2472,17 +2550,20 @@ export { axAIProviderProfileIds };
 export { axAIProviderProfiles };
 export { axAIWebLLMCreativeConfig };
 export { axAIWebLLMDefaultConfig };
+export { axActorSkillView };
 export { axAnalyzeChatPromptRequirements };
 export { axAnalyzeRequestRequirements };
 export { axApplyEventEffectTransition };
 export { axApplyMCPAuthentication };
 export { axApplyOpenAIChatAudioRequest };
 export { axApplyStatePatch };
+export { axApplyVerificationBudget };
 export { axAssertDigestStrength };
 export { axAssertHarnessStampFresh };
 export { axAssertPersistableValue };
 export { axAttachCausalCandidateEvidence };
 export { axAttenuateAuthority };
+export { axAttributeSkillCost };
 export { axAudioFormatFromMimeType };
 export { axAudioInputFilename };
 export { axAudioInputToBlob };
@@ -2498,6 +2579,7 @@ export { axBuildResponderDefinition };
 export { axBuildTrajectoryRollups };
 export { axCanonicalizeCausalCandidateEvidenceManifest };
 export { axCheckMetricsHealth };
+export { axCheckSkillRequirements };
 export { axClassifyAxServiceTermination };
 export { axClassifyTrajectory };
 export { axCloneCausalCandidateEvidenceManifest };
@@ -2507,6 +2589,7 @@ export { axCollectGrantRequirements };
 export { axCompareCodeUnits };
 export { axComputeInclusionProbabilities };
 export { axConcatBase64 };
+export { axCountVerificationToolCall };
 export { axCreateCausalCandidateEvidenceManifest };
 export { axCreateDefaultColorLogger };
 export { axCreateDefaultOptimizerColorLogger };
@@ -2523,8 +2606,10 @@ export { axCreateLearningReportRecord };
 export { axCreateOpenAIRealtimeApi };
 export { axCreateRuntimeAdmissionReceipt };
 export { axCreateRuntimeCapabilities };
+export { axCreateSkillProvenanceAccumulator };
 export { axCreateTaskStatTable };
 export { axDeclaresToolCapability };
+export { axDedupeRailDiagnostics };
 export { axDefaultFlowLogger };
 export { axDefaultMetricsConfig };
 export { axDefaultMindKernelTokenBudget };
@@ -2534,15 +2619,19 @@ export { axDefaultMindThinkerBudget };
 export { axDefaultMutationAnnotator };
 export { axDefaultOptimizerLogger };
 export { axDefaultOptimizerMetricsConfig };
+export { axDefaultSkillRankingWeights };
 export { axDefaultTrajectorySpillPolicy };
 export { axDefaultTrajectoryTermination };
 export { axDefaultTrajectoryTypes };
 export { axDemandEventObserver };
+export { axDemoteSkill };
 export { axDeserializeOptimizedProgram };
 export { axDeterministicTrajectorySummarizer };
 export { axDigestStrength };
+export { axEligibleCatalogSkills };
 export { axEmitUsageEvent };
 export { axErasePreferenceEvidence };
+export { axEstimateSkillTokens };
 export { axEvaluateGuards };
 export { axEventCanonicalDigest };
 export { axEventCanonicalJson };
@@ -2561,10 +2650,12 @@ export { axEventSizeBytes };
 export { axExceedsRunDiscardCeiling };
 export { axExecutableSkillRef };
 export { axExtendAxIRRuntimeCapabilities };
+export { axExtractSkillProvenance };
 export { axFailOpenSpan };
 export { axFetchJsonSpeech };
 export { axFetchMultipartTranscription };
 export { axFingerprintCausalEvidence };
+export { axFireVerifierRails };
 export { axFnv1a64Digest };
 export { axFrameSampler };
 export { axFreezeTrajectoryStep };
@@ -2586,6 +2677,7 @@ export { axHarnessStamp };
 export { axInMemoryLearningStore };
 export { axInferComponentClass };
 export { axInitialMindPacerState };
+export { axInitialVerificationBudgetState };
 export { axIpwPairedDifference };
 export { axIpwScore };
 export { axIsAgentPlaybookEvolveError };
@@ -2615,6 +2707,9 @@ export { axIsRejectedCandidateExpired };
 export { axIsRejectedCandidateLedgerError };
 export { axIsSha256Digest };
 export { axIsSha256Digest64 };
+export { axIsSkillAuthoritySnapshot };
+export { axIsSkillPreconditionPolicy };
+export { axIsSkillProvenance };
 export { axIsTaskDiscriminationError };
 export { axIsTrajectoryAppendError };
 export { axIsTrajectoryBlobError };
@@ -2709,6 +2804,7 @@ export { axOptimizableValidators };
 export { axPairedAdmittedIndices };
 export { axPatchClassOfType };
 export { axPlaybookFailureSection };
+export { axPlaybookRequiresVisibilitySupport };
 export { axPreferenceEvidenceLimits };
 export { axPreferenceEvidenceToMemories };
 export { axPrepareTrajectoryStep };
@@ -2716,14 +2812,21 @@ export { axProcessContentForProvider };
 export { axProgramSourceDefaultNodeResourceLimits };
 export { axProgramSourceRuntimeProtocol };
 export { axProgramSourceVersion };
+export { axProjectActorPlaybook };
 export { axProjectTrajectory };
+export { axPromoteSkill };
+export { axRailAbortScope };
 export { axReactCanonicalJSON };
 export { axReactSerializeHistory };
+export { axRecheckSkillProvenance };
 export { axRecordMindSalience };
+export { axRecordSkillLoad };
 export { axRecoverMindPacerState };
+export { axRedactPlaybookForModel };
 export { axRejectedCandidateDigest };
 export { axRejectedCandidateLedgerEntry };
 export { axRejectedCandidatePrior };
+export { axRenderActorPlaybook };
 export { axRenderTrajectoryProjection };
 export { axRenewPreferenceEvidence };
 export { axReplaceOptimizedProgramSnapshot };
@@ -2745,6 +2848,7 @@ export { axResolveTrajectoryStep };
 export { axResolveTrajectorySteps };
 export { axRetractPreferenceEvidence };
 export { axRunRejectedCandidateLedgerConformance };
+export { axRunVerifierRail };
 export { axRuntimeCapabilitiesToAxIR };
 export { axRuntimeCapabilitiesVersion };
 export { axRuntimeCapabilityRequirementsVersion };
@@ -2754,6 +2858,7 @@ export { axRuntimeProtocolFromToken };
 export { axSampleByInclusion };
 export { axScoreProvidersForRequest };
 export { axScoreWindowProcessor };
+export { axSelectCatalogSkills };
 export { axSelectCodeRuntime };
 export { axSelectExecutableSkills };
 export { axSelectMindSkills };
@@ -2766,6 +2871,12 @@ export { axShouldUseGeminiLiveAudio };
 export { axShouldUseGrokRealtime };
 export { axShouldUseOpenAIRealtime };
 export { axSignUCPRequest };
+export { axSkillAdvisoryAnnotation };
+export { axSkillPreconditionExecutableDefaults };
+export { axSkillPreconditionGuidanceDefaults };
+export { axSkillProvenanceDigest };
+export { axSkillRetrievalGate };
+export { axSkillValueScore };
 export { axSnapshotAuthority };
 export { axSpanAttributes };
 export { axSpanEvents };
@@ -2800,6 +2911,7 @@ export { axTrajectoryUtf8ByteLength };
 export { axUpdateBalancerRouteStats };
 export { axUpdateMetricsConfig };
 export { axUpdateOptimizerMetricsConfig };
+export { axUpdateSkillCostProfile };
 export { axValidateCandidateEffectDeclaration };
 export { axValidateCapabilityGrant };
 export { axValidateChatRequestMessage };
@@ -2837,11 +2949,13 @@ export { runAxTrajectoryStoreConformance };
 export { s };
 
 // Type exports
+export type { AxACEActorPlaybookView };
 export type { AxACEApplicability };
 export type { AxACEBullet };
 export type { AxACEBulletChange };
 export type { AxACEBulletEvidence };
 export type { AxACEBulletLifecycle };
+export type { AxACEBulletVisibility };
 export type { AxACECuratorOperation };
 export type { AxACECuratorOperationType };
 export type { AxACECuratorOutput };
@@ -2852,6 +2966,7 @@ export type { AxACEOptimizationArtifact };
 export type { AxACEOptions };
 export type { AxACEPlaybook };
 export type { AxACEPlaybookRenderOptions };
+export type { AxACEPreconditionDecision };
 export type { AxACEProvenance };
 export type { AxACEReflectionOutput };
 export type { AxACEResult };
@@ -3059,6 +3174,7 @@ export type { AxAPI };
 export type { AxAPIConfig };
 export type { AxAPIResponseMetadata };
 export type { AxActor };
+export type { AxAgentActorSkillView };
 export type { AxAgentActorTurnCallback };
 export type { AxAgentActorTurnCallbackArgs };
 export type { AxAgentAutoPromotionRecord };
@@ -3200,6 +3316,8 @@ export type { AxAgentPlaybookVarianceBandOptions };
 export type { AxAgentPlaybookVarianceBandReport };
 export type { AxAgentPlaybookVetoResult };
 export type { AxAgentPlaybookWeakness };
+export type { AxAgentRailDiagnostic };
+export type { AxAgentRailOutcome };
 export type { AxAgentRecursionOptions };
 export type { AxAgentRecursiveExpensiveNode };
 export type { AxAgentRecursiveFunctionCall };
@@ -3235,7 +3353,22 @@ export type { AxAgentSessionStatus };
 export type { AxAgentSessionStatusView };
 export type { AxAgentSessionStore };
 export type { AxAgentSessionUsage };
+export type { AxAgentSkillCostCallback };
+export type { AxAgentSkillCostProfile };
+export type { AxAgentSkillCostSample };
+export type { AxAgentSkillEligibility };
+export type { AxAgentSkillEnvironment };
+export type { AxAgentSkillIndexEntry };
+export type { AxAgentSkillPolicy };
+export type { AxAgentSkillProvenanceAccumulator };
+export type { AxAgentSkillRankingWeights };
+export type { AxAgentSkillRequirementFailure };
+export type { AxAgentSkillRequirements };
 export type { AxAgentSkillResult };
+export type { AxAgentSkillRetrievalGate };
+export type { AxAgentSkillSelection };
+export type { AxAgentSkillSelectionOptions };
+export type { AxAgentSkillTier };
 export type { AxAgentSkillsPromptState };
 export type { AxAgentSkillsSearchFn };
 export type { AxAgentStagePolicy };
@@ -3258,6 +3391,11 @@ export type { AxAgentUsedMemoriesCallback };
 export type { AxAgentUsedMemory };
 export type { AxAgentUsedSkill };
 export type { AxAgentUsedSkillsCallback };
+export type { AxAgentVerificationBudget };
+export type { AxAgentVerificationBudgetState };
+export type { AxAgentVerifierRail };
+export type { AxAgentVerifierRailBinding };
+export type { AxAgentVerifierRailContext };
 export type { AxAgentic };
 export type { AxAnyAgentic };
 export type { AxAppliedServiceTier };
@@ -4012,6 +4150,18 @@ export type { AxSha256Digest64 };
 export type { AxSharedSessionPhase };
 export type { AxSignatureConfig };
 export type { AxSignatureInput };
+export type { AxSkillAuthoritySnapshot };
+export type { AxSkillPreconditionCheck };
+export type { AxSkillPreconditionFailure };
+export type { AxSkillPreconditionFailureKind };
+export type { AxSkillPreconditionOutcome };
+export type { AxSkillPreconditionPolicy };
+export type { AxSkillProvenance };
+export type { AxSkillProvenanceAuthorization };
+export type { AxSkillProvenanceEffectRef };
+export type { AxSkillProvenanceSource };
+export type { AxSkillVerifierDecision };
+export type { AxSkillVerifierVerdict };
 export type { AxSpeechConfig };
 export type { AxSpeechRequest };
 export type { AxSpeechResponse };

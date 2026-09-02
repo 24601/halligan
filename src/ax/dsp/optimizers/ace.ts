@@ -19,15 +19,20 @@ import type { AxGenOut } from '../types.js';
 import {
   type AxACEPlaybookRenderOptions,
   applyCuratorOperations,
+  axProjectActorPlaybook,
+  axRedactPlaybookForModel,
+  axRenderActorPlaybook,
   clonePlaybook,
   createEmptyPlaybook,
   createExecutablePlaybookView,
   dedupePlaybookByContent,
   generateBulletId,
   renderPlaybook,
+  rollbackRejectedMutation,
   updateBulletFeedback,
 } from './acePlaybook.js';
 import type {
+  AxACEActorPlaybookView,
   AxACEApplicability,
   AxACEBullet,
   AxACECuratorOperation,
@@ -326,7 +331,9 @@ export class AxACEOptimizedProgram<
     const combinedInstruction = [
       originalDescription.trim(),
       '',
-      renderPlaybook(this.playbook, { includeInapplicable: true }),
+      axRenderActorPlaybook(
+        axProjectActorPlaybook(this.playbook, { includeInapplicable: true })
+      ),
     ]
       .filter((block) => block && block.trim().length > 0)
       .join('\n\n');
@@ -342,7 +349,10 @@ export class AxACEOptimizedProgram<
  */
 export class AxACE extends AxBaseOptimizer {
   private readonly aceConfig: Required<typeof DEFAULT_CONFIG> &
-    Pick<AxACEOptions, 'initialPlaybook' | 'sourceRunId'>;
+    Pick<
+      AxACEOptions,
+      'initialPlaybook' | 'sourceRunId' | 'defaultBulletVisibility'
+    >;
   private playbook: AxACEPlaybook;
   private baseInstruction?: string;
   private generatorHistory: AxACEFeedbackEvent[] = [];
@@ -605,6 +615,12 @@ export class AxACE extends AxBaseOptimizer {
                   source: 'compile',
                   ...(sourceRunId ? { sourceRunId } : {}),
                   feedbackIds: [feedbackId],
+                  ...(this.aceConfig.defaultBulletVisibility
+                    ? {
+                        defaultVisibility:
+                          this.aceConfig.defaultBulletVisibility,
+                      }
+                    : {}),
                 },
               }
             );
@@ -796,6 +812,9 @@ export class AxACE extends AxBaseOptimizer {
         enableAutoPrune: true,
         protectedBulletIds: protectedIds,
         hostEvidence: {
+          ...(this.aceConfig.defaultBulletVisibility
+            ? { defaultVisibility: this.aceConfig.defaultBulletVisibility }
+            : {}),
           ...args.evidence,
           source: args.evidence?.source ?? 'online',
           feedbackIds: [feedbackId, ...(args.evidence?.feedbackIds ?? [])],
@@ -880,6 +899,105 @@ export class AxACE extends AxBaseOptimizer {
     return result.updatedBulletIds;
   }
 
+  /**
+   * Asymmetric rollback: commit the evidence of a mutation that failed its
+   * held-out gate while the artifact itself reverts.
+   *
+   * Operations are applied with `visibility: 'optimizer'` forced and a
+   * `'rejected-retained'` verification result attached, so the next proposer
+   * round sees the failed attempt and the actor never does. The artifact then
+   * reverts wholesale to its pre-apply state (`rollbackRejectedMutation`) —
+   * a rejected `REMOVE` or a rejected superseding `ADD` must not be able to
+   * empty the actor playbook — while bullets the rejected operations created
+   * stay in the optimizer tier.
+   *
+   * `now` is required and is threaded into the apply path, which otherwise
+   * stamps `new Date()` and would make the retained timestamp nondeterministic.
+   */
+  public retainRejectedMutation(
+    args: Readonly<{
+      operations: readonly AxACECuratorOperation[];
+      verifierId: string;
+      now: string;
+      testId?: string;
+      summary?: string;
+      sourceRunId?: string;
+    }>
+  ): string[] {
+    if (!args.verifierId.trim()) {
+      throw new Error('AxACE: retainRejectedMutation requires a verifierId');
+    }
+    if (!args.now.trim()) {
+      throw new Error('AxACE: retainRejectedMutation requires a now timestamp');
+    }
+    if (args.operations.length === 0) {
+      return [];
+    }
+
+    const before = clonePlaybook(this.playbook);
+    const hostEvidence: AxACEHostEvidence = {
+      source: 'manual',
+      ...(args.sourceRunId ? { sourceRunId: args.sourceRunId } : {}),
+      visibility: 'optimizer',
+      verification: [
+        {
+          verifierId: args.verifierId,
+          ...(args.testId ? { testId: args.testId } : {}),
+          result: 'rejected-retained',
+          timestamp: args.now,
+          ...(args.summary ? { summary: args.summary } : {}),
+        },
+      ],
+    };
+
+    const result = applyCuratorOperations(this.playbook, args.operations, {
+      maxSectionSize: this.aceConfig.maxSectionSize,
+      allowDynamicSections: this.aceConfig.allowDynamicSections,
+      now: args.now,
+      hostEvidence,
+    });
+
+    // The rollback half. Every pre-existing bullet an operation named is
+    // retained, including the target of a rejected REMOVE and the target of a
+    // rejected supersession, which the previous in-place patch could not reach.
+    const touchedBulletIds = new Set(result.updatedBulletIds);
+    for (const operation of args.operations) {
+      if (operation.bulletId) {
+        touchedBulletIds.add(operation.bulletId);
+      }
+      for (const superseded of operation.supersedes ?? []) {
+        touchedBulletIds.add(superseded);
+      }
+    }
+    rollbackRejectedMutation(this.playbook, before, {
+      touchedBulletIds: [...touchedBulletIds],
+      hostEvidence,
+      now: args.now,
+      ...(this.aceConfig.maxSectionSize !== undefined
+        ? { maxSectionSize: this.aceConfig.maxSectionSize }
+        : {}),
+    });
+
+    if (result.updatedBulletIds.length) {
+      this.deltaHistory.push({
+        source: 'manual',
+        epoch: -1,
+        exampleIndex: -1,
+        operations: [...args.operations],
+        updatedBulletIds: result.updatedBulletIds,
+        changes: result.changes,
+      });
+    }
+    return result.updatedBulletIds;
+  }
+
+  /** The projected, actor-safe view of the current playbook. */
+  public getActorPlaybookView(
+    options?: Readonly<AxACEPlaybookRenderOptions>
+  ): AxACEActorPlaybookView {
+    return axProjectActorPlaybook(this.playbook, options);
+  }
+
   private composeInstruction(
     baseInstruction: string,
     playbook: AxACEPlaybook,
@@ -888,7 +1006,9 @@ export class AxACE extends AxBaseOptimizer {
     const instructionParts = [
       baseInstruction.trim(),
       '',
-      renderPlaybook(playbook, renderOptions),
+      // The actor projection, not `renderPlaybook`: this is the path that
+      // builds the generator's own instruction on every compile step.
+      axRenderActorPlaybook(axProjectActorPlaybook(playbook, renderOptions)),
     ].filter((part) => part.trim().length > 0);
 
     return instructionParts.join('\n\n');
@@ -1544,7 +1664,7 @@ export class AxACE extends AxBaseOptimizer {
           markdown: renderPlaybook(executablePlaybook, {
             includeInapplicable: true,
           }),
-          structured: executablePlaybook,
+          structured: axRedactPlaybookForModel(executablePlaybook),
         }),
         expected_answer:
           Object.keys(expectedAnswer).length > 0
@@ -1598,7 +1718,7 @@ export class AxACE extends AxBaseOptimizer {
           markdown: renderPlaybook(executablePlaybook, {
             includeInapplicable: true,
           }),
-          structured: executablePlaybook,
+          structured: axRedactPlaybookForModel(executablePlaybook),
         }),
         reflection: JSON.stringify(reflection),
         question_context: this.stringifyBounded(questionContext),

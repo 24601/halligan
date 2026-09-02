@@ -104,7 +104,7 @@
         "method.setState",
         "state.skillsPromptState"
       ],
-      "inventory_sha256": "4639c136ad51fd09ee8576f8919df84e6830abb469f3b09150d81430cc557295",
+      "inventory_sha256": "5a62d8d519a920190677d0b1cb5cc6b0b2bd76d84446d5c1ae9fabb8ee0e79d2",
       "classification": "target-specific",
       "rationale": "This public TypeScript surface is either a DSP-layer pass-through, an optimizer/coordinator-only surface, streaming-only behavior, host-owned authority tracked by the open AxIR authority backlog entry, or an observable whose generated-language API has a target-native shape. It is inventoried but is not claimed semantically identical by this AxAgent lifecycle enrollment.",
       "contract_id_prefix": "axagent.target",

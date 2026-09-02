@@ -15,6 +15,29 @@ import {
   buildInternalSummaryRequestOptions,
   formatStructuredRuntimeState,
 } from '../runtime.js';
+import type {
+  AxAgentSkillRetrievalGate,
+  AxAgentSkillSelectionOptions,
+} from '../skillCatalog.js';
+import {
+  AX_DEFAULT_KERNEL_TOKEN_BUDGET,
+  axSelectCatalogSkills,
+  axSkillRetrievalGate,
+} from '../skillCatalog.js';
+import type {
+  AxAgentSkillCostProfile,
+  AxAgentVerificationBudget,
+  AxAgentVerificationBudgetState,
+  AxAgentVerifierRail,
+  AxAgentVerifierRailBinding,
+} from '../skillCost.js';
+import {
+  AX_DEFAULT_VERIFICATION_MAX_ROUNDS,
+  axAttributeSkillCost,
+  axInitialVerificationBudgetState,
+  axRecordSkillLoad,
+  axUpdateSkillCostProfile,
+} from '../skillCost.js';
 import {
   buildRuntimeRestoreNotice,
   mergeRuntimeStateProvenance,
@@ -33,7 +56,7 @@ import { buildActorLoopSetup } from './actorLoopSetup.js';
 import { runActorTurn } from './actorLoopTurn.js';
 import type { AxAgentFailureReport } from './failureReport.js';
 import { buildFailureReport } from './failureReport.js';
-import { renderGuidanceLog } from './guidanceHelpers.js';
+import { appendGuidanceEntry, renderGuidanceLog } from './guidanceHelpers.js';
 import {
   mergeUsedMemoryResults,
   rankCatalogMemories,
@@ -46,6 +69,7 @@ import {
   mergeUsedSkillResults,
   rankCatalogSkills,
 } from './skillsHelpers.js';
+import type { AxAgentSkillPolicy } from './skillsTypes.js';
 import { resolveStagePolicy } from './stagePolicy.js';
 import type {
   AxAgentEvalFunctionCall,
@@ -161,6 +185,159 @@ export async function runActorLoop<IN extends AxGenIn>(
     s._workingStateClockNow = undefined;
   }
 
+  // Verifier rails and the verification budget. Both are opt-in: with no rails
+  // configured the binding is absent and every tool call runs exactly as it
+  // does today. The budget is counted here, in the runtime, and is never stated
+  // in a prompt — a test asserts the prompt bytes are unchanged when one is set.
+  const skillPolicy = s.skillPolicy as AxAgentSkillPolicy | undefined;
+  // Injected clock, defaulting to the system clock, so cost accounting is
+  // reproducible in tests and in the conformance fixtures.
+  const costClock: () => number = skillPolicy?.now ?? (() => Date.now());
+  const costTrackingEnabled =
+    typeof s.onSkillCost === 'function' && s.skillUsageTrackingEnabled === true;
+  const runStartedAtMs = costTrackingEnabled ? costClock() : 0;
+  const usageEntriesBefore = costTrackingEnabled
+    ? (s.actorProgram?.getUsage()?.length ?? 0)
+    : 0;
+  const configuredRails = (s.verifierRails ??
+    []) as readonly AxAgentVerifierRail[];
+  let budgetState = axInitialVerificationBudgetState();
+  const railSignaturesSeen = new Set<string>();
+  const configuredBudget = skillPolicy?.verificationBudget;
+  // Rails are an always-on `afterToolCall` lifecycle hook. Without a budget the
+  // counter never advances, `status` never leaves `'within'`, and a rail that
+  // emits a fresh signature per call is unbounded for the whole run — so a
+  // ceiling is applied even when the host named none.
+  const budget: AxAgentVerificationBudget | undefined =
+    configuredBudget ??
+    (configuredRails.length > 0
+      ? { maxRounds: AX_DEFAULT_VERIFICATION_MAX_ROUNDS }
+      : undefined);
+  if (configuredRails.length > 0 || budget !== undefined) {
+    s._verifierRailBinding = {
+      rails: configuredRails,
+      ...(budget ? { budget } : {}),
+      stage: contextStage,
+      getState: () => budgetState,
+      setState: (next: AxAgentVerificationBudgetState) => {
+        budgetState = next;
+      },
+      seen: railSignaturesSeen,
+      emit: (diagnostics) => {
+        for (const diagnostic of diagnostics) {
+          appendGuidanceEntry(guidanceState.entries, {
+            turn: actionLogEntries.length,
+            guidance: `[${diagnostic.severity}] ${diagnostic.message}`,
+            triggeredBy: `verifier-rail:${diagnostic.code}`,
+          });
+        }
+      },
+      onStateChange: (next: AxAgentVerificationBudgetState) => {
+        void emitContextEvent(s.onContextEvent, {
+          kind: 'verification_budget',
+          stage: contextStage,
+          rounds: next.rounds,
+          maxRounds: budget?.maxRounds ?? Number.POSITIVE_INFINITY,
+          status: next.status,
+          disabledRails: next.disabledRails,
+        });
+      },
+    } satisfies AxAgentVerifierRailBinding;
+  } else {
+    s._verifierRailBinding = undefined;
+  }
+
+  // Kernel tiering, eligibility gating, and the retrieval-time re-check for the
+  // catalog path. Computed once per run: the selection is deterministic for a
+  // fixed authority snapshot, and recomputing it per turn would churn the
+  // prompt for no new information.
+  s._skillAdvisoryResolver = undefined;
+  s._skillRetrievalGate = undefined;
+  let skillRetrievalGate: AxAgentSkillRetrievalGate | undefined;
+  if (Array.isArray(s.skillsCatalog) && s.skillsCatalog.length > 0) {
+    const selectionNow = skillPolicy?.now
+      ? new Date(skillPolicy.now()).toISOString()
+      : undefined;
+    const selectionOptions: AxAgentSkillSelectionOptions = {
+      ...(skillPolicy?.environment
+        ? { environment: skillPolicy.environment }
+        : {}),
+      ...(skillPolicy?.kernelTokenBudget !== undefined
+        ? { kernelTokenBudget: skillPolicy.kernelTokenBudget }
+        : {}),
+      ...(skillPolicy?.ranking ? { ranking: skillPolicy.ranking } : {}),
+      ...(skillPolicy?.costProfiles
+        ? { costProfiles: skillPolicy.costProfiles }
+        : {}),
+      ...(skillPolicy?.authoritySnapshot
+        ? { authority: skillPolicy.authoritySnapshot }
+        : {}),
+      ...(skillPolicy?.precondition
+        ? { precondition: skillPolicy.precondition }
+        : {}),
+      ...(selectionNow ? { now: selectionNow } : {}),
+    };
+    const selection = axSelectCatalogSkills(s.skillsCatalog, selectionOptions);
+    // Kernel skills are seeded into the skills prompt STATE, never straight
+    // into the rendered values: `used(<kernelId>)` resolves through that map,
+    // and a kernel skill injected past it could never be declared used, would
+    // never accrue a use, and would sit permanently at the 0.5 prior.
+    if (selection.kernel.length > 0) {
+      ingestSkillResults(
+        s.currentSkillsPromptState,
+        selection.kernel.map(({ id, name, content }) => ({
+          id,
+          name,
+          content,
+        }))
+      );
+    }
+    // Derived at render, never stored (see `renderSkillsPromptMarkdown`), and
+    // built over the WHOLE catalog rather than the kernel tier: an indexed
+    // skill loaded through `discover({ skills })` is the primary skills path
+    // and must carry the same advisory, while a parked or dropped one must not
+    // be retrievable there, in the index, or in the hint.
+    skillRetrievalGate = axSkillRetrievalGate(
+      s.skillsCatalog,
+      selectionOptions
+    );
+    s._skillRetrievalGate =
+      skillRetrievalGate.denied.size > 0 ||
+      skillRetrievalGate.advisories.size > 0
+        ? skillRetrievalGate
+        : undefined;
+    s._skillAdvisoryResolver =
+      skillRetrievalGate.advisories.size > 0
+        ? skillRetrievalGate.advisory
+        : undefined;
+    if (selection.hidden.length > 0 || selection.overflow.length > 0) {
+      await emitContextEvent(s.onContextEvent, {
+        kind: 'skill_eligibility',
+        stage: contextStage,
+        hidden: selection.hidden.map((entry) => ({
+          id: entry.id,
+          unmet: entry.unmet.flatMap((failure) => [...failure.missing]),
+        })),
+        kernelTokensUsed: selection.kernelTokensUsed,
+        kernelTokenBudget:
+          skillPolicy?.kernelTokenBudget ?? AX_DEFAULT_KERNEL_TOKEN_BUDGET,
+        overflow: selection.overflow.map((entry) => entry.id),
+      });
+    }
+    for (const decision of selection.decisions) {
+      await emitContextEvent(s.onContextEvent, {
+        kind: 'skill_precondition',
+        stage: contextStage,
+        skillId: decision.id,
+        outcome: decision.check.outcome,
+        failures: decision.check.failures.map((failure) => ({
+          kind: failure.kind,
+          count: failure.count,
+        })),
+      });
+    }
+  }
+
   // Forward-time preset skills are executor-ingested — except for a static
   // direct-respond agent, whose runs may end at the distiller: the distiller
   // ingests them there so respond-only runs still see call-time skills.
@@ -214,11 +391,18 @@ export async function runActorLoop<IN extends AxGenIn>(
       });
     }
     if (s.skillsHintEnabled) {
-      const rankedSkills = rankCatalogSkills(
-        rankTask,
-        s.skillsCatalog ?? [],
-        s.relevanceRankingOptions
-      );
+      const rankedSkills = rankCatalogSkills(rankTask, s.skillsCatalog ?? [], {
+        ...s.relevanceRankingOptions,
+        ...(skillPolicy?.environment
+          ? { environment: skillPolicy.environment }
+          : {}),
+        ...(skillPolicy?.costProfiles
+          ? { costProfiles: skillPolicy.costProfiles }
+          : {}),
+        ...(skillPolicy?.ranking ? { weights: skillPolicy.ranking } : {}),
+        // A parked or dropped skill is not hinted either.
+        ...(skillRetrievalGate ? { gate: skillRetrievalGate } : {}),
+      });
       s._relevanceHintsForTurn.skills = rankedSkills;
       await emitContextEvent(s.onContextEvent, {
         kind: 'relevance_ranking',
@@ -623,6 +807,62 @@ export async function runActorLoop<IN extends AxGenIn>(
     }
   }
 
+  // Cost accounting closes here, once, with the run's own totals. Attribution
+  // is BY DECLARATION: the turn's cost is split equally across the ids the
+  // actor declared used, which is not a causal measurement of what a skill
+  // cost, and a skill nobody declared accrues no cost rather than looking free.
+  if (costTrackingEnabled) {
+    const usage = (s.actorProgram?.getUsage()?.slice(usageEntriesBefore) ??
+      []) as readonly { tokens?: { totalTokens?: number } }[];
+    const tokens = usage.reduce(
+      (total, entry) => total + (entry.tokens?.totalTokens ?? 0),
+      0
+    );
+    const nowMs = costClock();
+    const nowIso = new Date(nowMs).toISOString();
+    const declaredUsed = mutableState.usedSkills.map((skill) => skill.id);
+    const samples = axAttributeSkillCost({
+      declaredUsed,
+      tokens,
+      wallMs: Math.max(0, nowMs - runStartedAtMs),
+      verificationRounds: budgetState.rounds,
+      success: completionState.payload?.type === 'final',
+    });
+    const sampleById = new Map(samples.map((sample) => [sample.id, sample]));
+    for (const skill of mutableState.usedSkills) {
+      const sample = sampleById.get(skill.id);
+      if (!sample) continue;
+      if (sample.tokensAttributed !== undefined)
+        skill.tokensAttributed = sample.tokensAttributed;
+      if (sample.wallMs !== undefined) skill.wallMs = sample.wallMs;
+      if (sample.verificationRounds !== undefined)
+        skill.verificationRounds = sample.verificationRounds;
+    }
+    const profiles = new Map<string, AxAgentSkillCostProfile>(
+      (skillPolicy?.costProfiles ?? []).map((profile) => [profile.id, profile])
+    );
+    // `loads` and `uses` stay separate numbers: a skill rendered and never
+    // declared is uninformative, not cheap.
+    for (const id of loadedSkillIdsForRun(s.currentSkillsPromptState)) {
+      profiles.set(id, axRecordSkillLoad(profiles.get(id), id, nowIso));
+    }
+    for (const sample of samples) {
+      profiles.set(
+        sample.id,
+        axUpdateSkillCostProfile(profiles.get(sample.id), sample, nowIso)
+      );
+    }
+    // Awaited, and a rejection propagates: `onSkillCost` is a durable-state
+    // write (the profiles feed the next run's ranking), so a run that resolved
+    // before the write landed — or swallowed its failure — would hand the host
+    // silently stale profiles.
+    await s.onSkillCost?.(
+      [...profiles.values()].sort((a, b) =>
+        a.id < b.id ? -1 : a.id > b.id ? 1 : 0
+      )
+    );
+  }
+
   const executorResult =
     completionState.payload && 'args' in completionState.payload
       ? completionState.payload
@@ -649,4 +889,11 @@ export async function runActorLoop<IN extends AxGenIn>(
     turnCount: actionLogEntries.length,
     failureReport: buildFailureReport(actionLogEntries, contextStage),
   };
+}
+
+/** Ids rendered into this run's Loaded Skills section, for the `loads` counter. */
+function loadedSkillIdsForRun(
+  state: Readonly<{ loaded?: ReadonlyMap<string, unknown> }> | undefined
+): readonly string[] {
+  return state?.loaded ? [...state.loaded.keys()] : [];
 }

@@ -1,4 +1,14 @@
 import type { AxAgentContextStage } from '../contextEvents.js';
+import type {
+  AxAgentSkillEnvironment,
+  AxAgentSkillRetrievalGate,
+} from '../skillCatalog.js';
+import { axEligibleCatalogSkills } from '../skillCatalog.js';
+import type {
+  AxAgentSkillCostProfile,
+  AxAgentSkillRankingWeights,
+} from '../skillCost.js';
+import { axSkillValueScore } from '../skillCost.js';
 import type { AxMutableSkillsPromptState } from './agentInternalTypes.js';
 import type { AxAgentSkillsPromptState } from './agentStateTypes.js';
 import { rankDocuments } from './relevanceRanker.js';
@@ -71,17 +81,26 @@ export function serializeSkillsPromptState(
   return { loaded };
 }
 
+/**
+ * `resolveAdvisory` is how a downgraded skill gets its annotation without the
+ * annotation ever being stored: it is recomputed here on every render from the
+ * catalog's provenance and the current authority snapshot, so it cannot arrive
+ * through `agent.setState()` and it does not change the serialized state shape.
+ */
 export function renderSkillsPromptMarkdown(
-  state: Readonly<AxMutableSkillsPromptState>
+  state: Readonly<AxMutableSkillsPromptState>,
+  resolveAdvisory?: (id: string) => string | undefined
 ): string | undefined {
   if (state.loaded.size === 0) {
     return undefined;
   }
   const blocks = [...state.loaded.values()]
     .sort((left, right) => left.id.localeCompare(right.id))
-    .map(
-      ({ id, name, content }) => `### ${name}\n\nID: \`${id}\`\n\n${content}`
-    );
+    .map(({ id, name, content }) => {
+      const advisory = resolveAdvisory?.(id);
+      const body = advisory ? `${advisory}\n\n${content}` : content;
+      return `### ${name}\n\nID: \`${id}\`\n\n${body}`;
+    });
   return blocks.join('\n\n');
 }
 
@@ -110,11 +129,23 @@ const SKILLS_CATALOG_RANK_CONTENT_CHARS = 600;
  * the closest matches, unlike the strictly-guarded advisory hint. Results flow
  * through the existing id-sorted `ingestSkillResults` render, so the cached
  * `loadedSkills` prompt field stays byte-stable for identical skill sets.
+ *
+ * `resolveGate` is read per search, not captured at construction, because the
+ * authority re-check depends on the run's snapshot and clock. This is the
+ * PRIMARY skills path: a parked or dropped skill must not be reachable here
+ * either, and a downgraded one carries its advisory onto the result so
+ * `onLoadedSkills` hosts see it too. The render derives the advisory again
+ * regardless, which is what keeps it out of the serialized state.
  */
 export function createCatalogSkillsSearch(
-  catalog: readonly AxAgentCatalogSkill[]
+  catalog: readonly AxAgentCatalogSkill[],
+  environment?: Readonly<AxAgentSkillEnvironment>,
+  resolveGate?: () => AxAgentSkillRetrievalGate | undefined
 ): AxAgentSkillsSearchFn {
-  const docs = catalog.map((skill) => ({
+  // An ineligible skill is hidden from `discover({ skills })` too, not only
+  // from the kernel and the Available Skills index.
+  const eligible = axEligibleCatalogSkills(catalog, environment);
+  const docs = eligible.map((skill) => ({
     id: skill.id,
     fields: [
       { text: skill.id, identifier: true },
@@ -123,7 +154,7 @@ export function createCatalogSkillsSearch(
       { text: skill.content.slice(0, SKILLS_CATALOG_RANK_CONTENT_CHARS) },
     ],
   }));
-  const byId = new Map(catalog.map((skill) => [skill.id, skill]));
+  const byId = new Map(eligible.map((skill) => [skill.id, skill]));
   return (searches: readonly string[]): AxAgentSkillResult[] => {
     const matchedIds: string[] = [];
     for (const search of searches) {
@@ -138,24 +169,54 @@ export function createCatalogSkillsSearch(
         }
       }
     }
+    const gate = resolveGate?.();
     return matchedIds
       .map((id) => byId.get(id))
       .filter((skill): skill is AxAgentCatalogSkill => skill !== undefined)
-      .map(({ id, name, content }) => ({ id, name, content }));
+      .filter((skill) => !gate?.denied.has(skill.id))
+      .map(({ id, name, content }) => {
+        const advisory = gate?.advisory(id);
+        return { id, name, content, ...(advisory ? { advisory } : {}) };
+      });
   };
 }
+
+/** Similarity shortlist widening when cost profiles are supplied — see below. */
+const SKILL_VALUE_SHORTLIST_FACTOR = 4;
+/** Mirrors `relevanceRanker`'s `DEFAULT_TOP_K`; the widening needs the number. */
+const DEFAULT_SKILL_HINT_TOP_K = 3;
 
 /**
  * Rank catalog skills against the task for the advisory relevance hint.
  * Uses the ranker's STRICT default guards (unlike `createCatalogSkillsSearch`)
  * so a low-confidence hint degrades to nothing.
+ *
+ * With cost profiles the similarity shortlist is widened before the value score
+ * is applied, then truncated back to the caller's `topK`. Scoring an already
+ * truncated list would let value-aware ranking reorder only inside the
+ * similarity top-K, so a cheap high-success skill ranked just below the cut
+ * could never be promoted — the mechanism would be a tiebreaker, not a ranker.
+ * Every ranker guard is unaffected: `minScore`, `marginRatio` and `minDocs` are
+ * evaluated against the top match and the whole catalog, not against `topK`.
  */
 export function rankCatalogSkills(
   task: string,
   catalog: readonly AxAgentCatalogSkill[],
-  opts?: Readonly<{ topK?: number; minScore?: number }>
+  opts?: Readonly<{
+    topK?: number;
+    minScore?: number;
+    environment?: Readonly<AxAgentSkillEnvironment>;
+    costProfiles?: readonly Readonly<AxAgentSkillCostProfile>[];
+    weights?: Readonly<AxAgentSkillRankingWeights>;
+    /** The run's authority re-check. A denied skill is never hinted. */
+    gate?: Readonly<AxAgentSkillRetrievalGate>;
+  }>
 ): { id: string; name: string; score: number }[] {
-  const docs = catalog.map((skill) => ({
+  const gate = opts?.gate;
+  const eligible = axEligibleCatalogSkills(catalog, opts?.environment).filter(
+    (skill) => !gate?.denied.has(skill.id)
+  );
+  const docs = eligible.map((skill) => ({
     id: skill.id,
     fields: [
       { text: skill.id, identifier: true },
@@ -164,12 +225,30 @@ export function rankCatalogSkills(
       { text: skill.content.slice(0, SKILLS_CATALOG_RANK_CONTENT_CHARS) },
     ],
   }));
-  const nameById = new Map(catalog.map((skill) => [skill.id, skill.name]));
-  return rankDocuments(task, docs, opts).map((r) => ({
+  const nameById = new Map(eligible.map((skill) => [skill.id, skill.name]));
+  const profiles = opts?.costProfiles
+    ? new Map(opts.costProfiles.map((profile) => [profile.id, profile]))
+    : undefined;
+  const topK = opts?.topK ?? DEFAULT_SKILL_HINT_TOP_K;
+  const shortlist = rankDocuments(
+    task,
+    docs,
+    profiles
+      ? { ...opts, topK: topK * SKILL_VALUE_SHORTLIST_FACTOR }
+      : (opts ?? {})
+  );
+  const ranked = shortlist.map((r) => ({
     id: r.id,
     name: nameById.get(r.id) ?? r.id,
-    score: r.score,
+    // With no profile the value score is a positive constant multiple of the
+    // similarity, so ranking order is provably unchanged.
+    score: profiles
+      ? axSkillValueScore(r.score, profiles.get(r.id), opts?.weights)
+      : r.score,
   }));
+  return profiles
+    ? ranked.sort((left, right) => right.score - left.score).slice(0, topK)
+    : ranked;
 }
 
 export function normalizeSkillsInput(input: unknown): string[] {

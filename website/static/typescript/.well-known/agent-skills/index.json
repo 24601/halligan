@@ -69,7 +69,7 @@
       "type": "skill-md",
       "description": "This skill helps an LLM generate correct AxAgent memory retrieval, context-map, and dynamic skill-loading code using @ax-llm/ax. Use when the user asks about contextMap, AxAgentContextMap, onMemoriesSearch, memoriesCatalog, recall(...), inputs.memories, onLoadedMemories, onUsedMemories, onSkillsSearch, skillsCatalog, AxAgentCatalogSkill, discover({ skills }), onLoadedSkills, onUsedSkills, preloaded skills, preloading memories at forward time, relevanceRanking hints, loaded memory/skill IDs, or carrying memories across forward() calls.",
       "url": "ax-agent-memory-skills/SKILL.md",
-      "digest": "sha256:f9b513860d76b08daf84dd1e91a92eccbad07daacaa8620dcd92056ac28cd6db"
+      "digest": "sha256:a994926bd6eb3592604694c7b36b839e3667e76138635b2bc890d6238ad95ed4"
     },
     {
       "name": "ax-agent-observability",
@@ -125,7 +125,7 @@
       "type": "skill-md",
       "description": "This skill helps an LLM generate correct playbook code using @ax-llm/ax. Use when the user asks about playbook(), AxPlaybook, context playbooks, evolving context, ACE / Agentic Context Engineering, agent.playbook(), or growing/applying task knowledge offline and online with evolve() and update().",
       "url": "ax-playbook/SKILL.md",
-      "digest": "sha256:7b5c09497696222f6477794c34308973b409f65a84d8c00c7059bcfee021ffa5"
+      "digest": "sha256:eb363d34b241ed9df156a842cb4f30b5b5260f781e4bdba1101424b896019111"
     },
     {
       "name": "ax-trajectory",

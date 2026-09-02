@@ -14,6 +14,33 @@ export {
   axIsGuardPredicateFailure,
 } from './evidence.js';
 export type {
+  AxSkillAuthoritySnapshot,
+  AxSkillPreconditionCheck,
+  AxSkillPreconditionFailure,
+  AxSkillPreconditionFailureKind,
+  AxSkillPreconditionOutcome,
+  AxSkillPreconditionPolicy,
+  AxSkillProvenance,
+  AxSkillProvenanceAuthorization,
+  AxSkillProvenanceEffectRef,
+  AxSkillProvenanceSource,
+  AxSkillVerifierDecision,
+  AxSkillVerifierVerdict,
+} from './skillProvenance.js';
+export {
+  AX_SKILL_PROVENANCE_MAX_AUTHORIZATIONS,
+  AX_SKILL_PROVENANCE_MAX_EFFECTS,
+  axExtractSkillProvenance,
+  axIsSkillAuthoritySnapshot,
+  axIsSkillPreconditionPolicy,
+  axIsSkillProvenance,
+  axRecheckSkillProvenance,
+  axSkillAdvisoryAnnotation,
+  axSkillPreconditionExecutableDefaults,
+  axSkillPreconditionGuidanceDefaults,
+  axSkillProvenanceDigest,
+} from './skillProvenance.js';
+export type {
   AxActor,
   AxAuthorityClaim,
   AxAuthorityContext,

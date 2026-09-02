@@ -98,10 +98,22 @@ export function initializeAgentInternal(
     ? options.skillsCatalog.slice()
     : undefined;
   s.skillsCatalog = skillsCatalog;
+  // Resolved ONCE and held for the agent's lifetime: the Available Skills index
+  // is built at signature-build time, and recomputing eligibility per run would
+  // churn the signature and therefore the prompt cache. A host whose
+  // environment changed constructs a new agent.
+  const skillEnvironment = options.skillPolicy?.environment;
   s.onSkillsSearch =
     options.onSkillsSearch ??
     (skillsCatalog && skillsCatalog.length > 0
-      ? createCatalogSkillsSearch(skillsCatalog)
+      ? createCatalogSkillsSearch(
+          skillsCatalog,
+          skillEnvironment,
+          // Read per search, not captured: the run's authority re-check is
+          // computed in `actorLoop` and a skill it parked or dropped must not
+          // come back through `discover({ skills })`.
+          () => s._skillRetrievalGate
+        )
       : undefined);
   s.skillsHintEnabled =
     relevanceRankingChoice &&
@@ -131,7 +143,17 @@ export function initializeAgentInternal(
     memoriesCatalog.length > 0;
   s.relevanceHintsEnabled =
     s.moduleHintEnabled || s.skillsHintEnabled || s.memoriesHintEnabled;
-  s.skillUsageTrackingEnabled = typeof options.onUsedSkills === 'function';
+  s.skillPolicy = options.skillPolicy;
+  s.verifierRails = Array.isArray(options.verifierRails)
+    ? options.verifierRails.slice()
+    : undefined;
+  s.onSkillCost = options.onSkillCost;
+  // `onSkillCost` alone must enable tracking: without it `noteUsed`'s skills
+  // branch returns early, every profile stays empty, and cost-aware ranking is
+  // silently inert.
+  s.skillUsageTrackingEnabled =
+    typeof options.onUsedSkills === 'function' ||
+    typeof options.onSkillCost === 'function';
   s.usageTrackingEnabled =
     s.memoryUsageTrackingEnabled || s.skillUsageTrackingEnabled;
   s.currentSkillsPromptState = createMutableSkillsPromptState();
@@ -217,6 +239,9 @@ export function initializeAgentInternal(
     onSkillsSearch: _oss,
     onLoadedSkills: _ols,
     onUsedSkills: _ous,
+    skillPolicy: _sp,
+    verifierRails: _vr,
+    onSkillCost: _osc,
     onMemoriesSearch: _oms,
     onLoadedMemories: _olm,
     onUsedMemories: _oum,

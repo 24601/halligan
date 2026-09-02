@@ -4,9 +4,11 @@ import type { AxGen } from './generate.js';
 import { AxACE } from './optimizers/ace.js';
 import {
   type AxACEPlaybookRenderOptions,
-  renderPlaybook,
+  axProjectActorPlaybook,
+  axRenderActorPlaybook,
 } from './optimizers/acePlaybook.js';
 import type {
+  AxACEActorPlaybookView,
   AxACEHostEvidence,
   AxACEOptimizationArtifact,
   AxACEPlaybook,
@@ -192,9 +194,19 @@ export class AxPlaybook<IN = any, OUT extends AxGenOut = AxGenOut> {
     this.inject();
   }
 
-  /** The current playbook rendered as a markdown block. */
+  /** The current playbook rendered as a markdown block for the actor. */
   public render(options?: Readonly<AxACEPlaybookRenderOptions>): string {
-    return renderPlaybook(this.engine.getPlaybook(), options);
+    return axRenderActorPlaybook(this.renderForActor(options));
+  }
+
+  /**
+   * The projected actor view behind {@link render}, including the
+   * retrieval-time precondition decisions the projection took.
+   */
+  public renderForActor(
+    options?: Readonly<AxACEPlaybookRenderOptions>
+  ): AxACEActorPlaybookView {
+    return axProjectActorPlaybook(this.engine.getPlaybook(), options);
   }
 
   /** Attach trusted host/evaluator evidence without invoking the LM. */

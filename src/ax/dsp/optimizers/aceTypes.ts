@@ -1,4 +1,22 @@
+import type {
+  AxSkillPreconditionCheck,
+  AxSkillProvenance,
+} from '../../authority/skillProvenance.js';
 import type { AxExample } from '../common_types.js';
+
+/**
+ * `'actor'` guidance may enter the actor prompt. `'optimizer'` guidance is
+ * diagnostic evidence for the reflector and curator and is structurally omitted
+ * from every actor render path. Absent means `'actor'`, so legacy playbooks
+ * render byte-identically.
+ *
+ * SCOPE, stated as a non-guarantee: this tier gates ARTIFACTS, not TEXT. The
+ * curator is deliberately shown optimizer-tier content and can emit a new
+ * bullet paraphrasing it. Verbatim copy, supersede-swap, and merge-survivor
+ * promotion are blocked; paraphrase cannot be. Do not describe this tier as
+ * information-flow control.
+ */
+export type AxACEBulletVisibility = 'actor' | 'optimizer';
 
 export type AxACEApplicability = {
   /** Conditions that must all be present before this guidance is rendered. */
@@ -18,7 +36,13 @@ export type AxACEProvenance = {
 export type AxACEVerificationResult = {
   verifierId: string;
   testId?: string;
-  result: 'passed' | 'failed' | 'unknown';
+  /**
+   * `'rejected-retained'`: the proposed mutation failed its gate and the
+   * artifact reverted, but this evidence is deliberately committed so the next
+   * proposer round does not re-propose it. Sticky: it is never overwritten by a
+   * later same-key entry.
+   */
+  result: 'passed' | 'failed' | 'unknown' | 'rejected-retained';
   timestamp?: string;
   /** Host/evaluator summary, trimmed to 500 characters on trusted updates. */
   summary?: string;
@@ -39,6 +63,13 @@ export type AxACEBulletEvidence = {
   provenance?: AxACEProvenance[];
   verification?: AxACEVerificationResult[];
   lifecycle?: AxACEBulletLifecycle;
+  /**
+   * Host-written. The authority facts this bullet's source trajectory used.
+   * HOST-ONLY: `axRedactPlaybookForModel` strips this before any model-facing
+   * serialization. It carries grant ids, receipt ids and request digests, and
+   * must never reach a provider.
+   */
+  authorityProvenance?: AxSkillProvenance;
 };
 
 /**
@@ -52,6 +83,27 @@ export type AxACEHostEvidence = {
   evidenceCount?: number;
   confidence?: number;
   verification?: readonly AxACEVerificationResult[];
+  /**
+   * Host-only promotion path, scoped to THIS call. The curator can never set it
+   * to `'actor'`: `AxACECuratorOperation.visibility` is typed `'optimizer'` and
+   * runtime-checked. It takes precedence over every inheritance rule, because
+   * the host owns promotion and is naming these operations explicitly.
+   *
+   * Never route an engine-wide default through this field. A default applies to
+   * every operation in the batch including a curator-chosen `UPDATE`, which
+   * would let the curator promote an existing optimizer-tier bullet by naming
+   * its id. That is what `defaultVisibility` is for.
+   */
+  visibility?: AxACEBulletVisibility;
+  /**
+   * Creation default. Applied ONLY to a bullet that has no tier yet, and only
+   * after the curator-downgrade, verbatim-content and supersede-swap
+   * inheritance rules have had their say — so it can never promote an existing
+   * `'optimizer'` bullet or launder optimizer-tier content into the actor tier.
+   */
+  defaultVisibility?: AxACEBulletVisibility;
+  /** Host-written authority facts for the bullets this operation writes. */
+  authorityProvenance?: AxSkillProvenance;
 };
 
 /**
@@ -76,6 +128,12 @@ export interface AxACEBullet extends Record<string, unknown> {
     supersedes?: string[];
   };
   evidence?: AxACEBulletEvidence;
+  /**
+   * Absent means actor-visible. Validated on every mutation: a value that is
+   * not exactly `'actor'` or `'optimizer'` throws, so a malformed tier fails
+   * closed rather than defaulting to actor-visible.
+   */
+  visibility?: AxACEBulletVisibility;
 }
 
 /**
@@ -139,6 +197,12 @@ export interface AxACECuratorOperation {
   >;
   /** Existing bullets made obsolete by this ADD/UPDATE. */
   supersedes?: string[];
+  /**
+   * Model-requestable downgrade only. The literal type makes promotion to
+   * `'actor'` unexpressible in TypeScript, and `assertCuratorOperation`
+   * enforces the same for parsed LLM JSON, which is a cast, not a parse.
+   */
+  visibility?: 'optimizer';
 }
 
 export interface AxACECuratorOutput extends Record<string, unknown> {
@@ -197,7 +261,36 @@ export interface AxACEOptions {
   maxSerializedFieldChars?: number;
   /** Optional host run identifier attached to compile-generated provenance. */
   sourceRunId?: string;
+  /**
+   * Stamped onto bullets this engine CREATES, as a creation default. It never
+   * promotes a bullet that already carries a tier and never overrides the
+   * verbatim-content or supersede-swap inheritance rules. Leave unset for
+   * legacy behaviour: no `visibility` field is written at all.
+   */
+  defaultBulletVisibility?: AxACEBulletVisibility;
 }
+
+/** One retrieval-time precondition decision recorded by the actor projection. */
+export type AxACEPreconditionDecision = Readonly<{
+  bulletId: string;
+  section: string;
+  check: AxSkillPreconditionCheck;
+}>;
+
+/**
+ * A playbook that has been projected for the actor.
+ *
+ * The `kind` field is a LABEL, not the enforcement — it is a public string
+ * literal and any caller can write it. The enforcement is a module-private
+ * brand registered by `axProjectActorPlaybook` and checked by
+ * `axRenderActorPlaybook`, exactly as authority snapshots are branded. An
+ * unbranded view — including one a host deserialized from JSON — throws.
+ */
+export type AxACEActorPlaybookView = Readonly<{
+  readonly kind: 'ax-ace-actor-playbook-view';
+  readonly playbook: AxACEPlaybook;
+  readonly decisions: readonly AxACEPreconditionDecision[];
+}>;
 
 /**
  * Serialized artifact saved after optimization for future reuse.

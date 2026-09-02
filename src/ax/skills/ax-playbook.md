@@ -177,6 +177,86 @@ authoritative count of independent evidence; one verified evolution can add an
 update observation and a later verifier-receipt observation. The durable JSON
 grows, even though filtered prompts can shrink.
 
+## Optimizer-only guidance and asymmetric rollback
+
+A bullet can be tiered. `visibility: 'optimizer'` keeps it as diagnostic evidence
+for the reflector and curator and out of every actor prompt. Absent means
+`'actor'`, so every existing playbook renders byte-identically.
+
+```ts
+const pb = playbook(program, { studentAI: ai });
+
+// The actor path. `render()` already routes through the projection.
+const markdown = pb.render({ now: new Date().toISOString() });
+
+// The projected view, with its retrieval-time decisions.
+const view = pb.renderForActor({
+  authority: { grantIds: currentGrantIds, leaseEpoch: 4 },
+});
+```
+
+- `renderPlaybook` is **unchanged** and stays the FULL renderer the reflector and
+  curator use. Filtering there would blind both stages.
+- `axProjectActorPlaybook` drops optimizer-tier bullets, applies the lifecycle
+  and applicability gates, and applies the precondition re-check when `authority`
+  is supplied. `axRenderActorPlaybook` is the only actor-facing renderer and
+  throws for any view it did not produce — the view's `kind` field is a label a
+  caller can forge, and a JSON round-trip drops the brand.
+- The curator may only **downgrade**. `visibility` on a curator operation is
+  typed `'optimizer'` and is runtime-checked, because parsed curator JSON reaches
+  the apply path through a cast. Promotion to `'actor'` is expressible only
+  through host evidence. An `ADD`/`UPDATE` with no `visibility` never clears an
+  existing `'optimizer'`.
+- A write that copies optimizer-tier content verbatim, or supersedes an
+  optimizer-tier bullet, inherits the tier; a merged duplicate pair takes the more
+  restrictive one.
+
+> The tier gates ARTIFACTS, not TEXT. Verbatim copy, supersede-swap and
+> merge-survivor promotion are blocked; paraphrase is not, and no exact-content
+> rule can block it. Do not describe this tier as information-flow control.
+
+Host-only `evidence.authorityProvenance` is stripped by
+`axRedactPlaybookForModel` before the reflector or curator payload is serialized,
+so grant ids, receipt ids, and request digests never reach a provider.
+
+### `rejected-retained` and `retainRejectedMutation`
+
+`AxACEVerificationResult.result` gains `'rejected-retained'`: the proposed
+mutation failed its gate and the artifact reverted, but the evidence is committed
+so the next proposer round does not re-propose it.
+
+```ts
+const ids = ace.retainRejectedMutation({
+  operations: rejectedOperations,
+  verifierId: 'held-out',
+  testId: 'split-3',
+  now: '2026-01-01T00:00:00.000Z', // required, and threaded into the apply path
+  summary: 'score regressed on the held-out split',
+});
+```
+
+Operations are applied with `visibility: 'optimizer'` forced and the result
+attached; bullets that already existed keep their prior content and tier, so only
+their evidence moved. The entry is sticky — the verification dedupe key includes
+`result`, and a retained rejection is never replaced by another result.
+
+### Version compatibility
+
+`AxACEPlaybook.version` is stamped `2` on the first write that creates a tiered
+bullet, and `AX_ACE_MAX_SUPPORTED_PLAYBOOK_VERSION` (currently `2`) is the read
+gate that refuses anything above it. It is a module constant, not a package
+export — the generated barrel carries `ax`/`Ax`-prefixed names only, so compare
+against the literal or use the exported
+`axPlaybookRequiresVisibilitySupport(playbook)`. Two residuals stand, deliberately:
+
+- an ax older than this release does not read `playbook.version` at all, so it
+  renders optimizer-tier bullets into the actor prompt. A version-2 playbook must
+  not be loaded by an older ax;
+- an older ax encountering `'rejected-retained'` hard-fails the optimizer run
+  rather than dropping a bullet.
+
+Full contract: `docs/SKILL_PROVENANCE.md`.
+
 ## Persist And Restore
 
 ```typescript

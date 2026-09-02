@@ -493,6 +493,99 @@ Rules:
 - `discover({ skills })` may be called multiple times across turns. Within one turn, batch all skill queries in a single call.
 - Child agents do not inherit `onSkillsSearch`; wire it explicitly per agent.
 
+### Skill tiers and eligibility gating
+
+`skillsCatalog` entries can declare a tier and host-checked requirements. Absent
+means `'indexed'` and eligible — exactly today's behaviour.
+
+```ts
+const a = agent('question:string -> answer:string', {
+  ai,
+  skillsCatalog: [
+    { id: 'runbook', name: 'Runbook', content: '...', tier: 'kernel', tokenEstimate: 400 },
+    { id: 'jq-tricks', name: 'jq tricks', content: '...', requires: { bins: ['jq'] } },
+  ],
+  skillPolicy: {
+    environment: { bins: ['rg'], os: 'darwin', env: ['HOME'], capabilities: [] },
+    kernelTokenBudget: 8000,
+  },
+});
+```
+
+- `tier: 'kernel'` is always loaded, within `kernelTokenBudget` (default 8000).
+  Kernel ordering is by value over cost with ties broken on id, so the prompt is
+  prefix-cache stable. A kernel member that does not fit is reported in
+  `overflow` and stays reachable through the index.
+- `requires: { env, bins, anyBins, os, capabilities }` gates eligibility.
+  `anyBins` needs one match; `os` matches exactly and case-sensitively.
+- **Ax never probes the environment.** `src/ax` is browser-compatible, so
+  `skillPolicy.environment` is host-supplied data.
+- `axCheckSkillRequirements(requires, environment)` is the `skills check`
+  diagnosis as a pure function: it names the exact missing tokens.
+- `axPromoteSkill` / `axDemoteSkill` are pure. A promotion that would exceed the
+  budget is refused with `accepted: false` rather than throwing.
+- An ineligible skill is hidden from the kernel, from the `### Available Skills`
+  index, and from `discover({ skills })` alike. It is visible only in the
+  `skill_eligibility` context event.
+- `skillPolicy.environment` is resolved **once at construction**: the index is
+  built at signature-build time, and recomputing eligibility per run would churn
+  the signature and the prompt cache. A host whose environment changed
+  constructs a new agent.
+
+### Per-skill cost accounting and verification budgets
+
+```ts
+const a = agent('question:string -> answer:string', {
+  ai,
+  skillsCatalog,
+  skillPolicy: {
+    costProfiles: savedProfiles,
+    ranking: { similarity: 1, success: 1, cost: 1, costFloorTokens: 1000 },
+    verificationBudget: { maxRounds: 5, railTimeoutMs: 5000 },
+  },
+  verifierRails: [
+    { id: 'lint', stage: 'afterToolCall', verify: (ctx) => inspect(ctx) },
+  ],
+  onSkillCost: (profiles) => persist(profiles),
+});
+```
+
+`AxAgentUsedSkill` gains `tokensAttributed`, `wallMs`, and
+`verificationRounds`. `AxAgentSkillCostProfile` accumulates them alongside
+`loads`, `uses`, and `successes`.
+
+Ranking is
+`similarity^wSim * successRate^wSuccess / normCost^wCost`, with a Laplace prior
+on the success rate and `costFloorTokens` normalizing cost. Defaults are
+`{ similarity: 1, success: 1, cost: 1, successPriorAlpha: 1, successPriorBeta: 1, costFloorTokens: 1000 }`.
+Setting `cost: 0` restores similarity-only ranking exactly.
+
+Two non-guarantees:
+
+> Cost is attributed by the actor's own `used(id)` declarations. It is not a
+> causal measurement of what a skill cost, and a skill that never declares
+> itself used accrues an uninformative prior, not a cheap one.
+
+> Cost accounting requires `onUsedSkills` or `onSkillCost`; with neither,
+> profiles stay empty and ranking is similarity-only.
+
+`verificationBudget` has one terminal status and is absorbing once exceeded. It
+is counted by the runtime and is **never stated in a prompt** — the executor
+prompt is byte-identical with and without one set. Handle the
+`verification_budget` context event to escalate.
+
+`verifierRails` fire after every tool call. The containment contract is enforced
+by the runtime, not by the rail: each is bounded by `railTimeoutMs`, a rail that
+throws or overruns is swallowed and disabled for the rest of the run and named
+in `disabledRails`, and no rail can change a tool call's result, error, or
+timing. Only novel diagnostic signatures are surfaced; the dedupe against the
+run's seen set is what stops an always-on rail repeating one fact, and a per-run
+cap of 32 distinct diagnostics at 400 chars each is what stops a rail whose
+signature changes every call. With rails set and no `verificationBudget` a
+default `maxRounds` of 32 applies, so the always-on configuration is bounded
+even when the host named no budget. `verificationTools` names tool calls that
+each cost one round, rails or no rails.
+
 ## Preloading Skills
 
 If the caller already knows which skills are relevant, pass them up front instead of round-tripping through `discover({ skills })`.
@@ -718,6 +811,68 @@ a statistically independent benchmark split. This fixture measures selector
 mechanics only,
 not model answer quality, function safety, verifier correctness, or real-world
 latency.
+
+## Authority provenance on learned artifacts
+
+A learned artifact is a distillation of a trajectory that ran under a specific
+authority. `AxSkillProvenance` records that authority; the retrieval-time
+re-check re-evaluates it against current host authority.
+
+```ts
+const provenance = axExtractSkillProvenance({
+  effects: ledgerSlice,          // AxEventEffect[]
+  receipts: authorizationReceipts,
+  environment: { sandbox: 'true' },
+  leaseEpoch: 4,
+  capturedAt: new Date().toISOString(),
+});
+
+// Executable artifacts: park by default.
+axSelectExecutableSkills(catalog, {
+  ...context,
+  authoritySnapshot: { grantIds: currentGrantIds, leaseEpoch: 4 },
+});
+
+// Catalog skills: downgrade to an annotated advisory by default.
+agent('question:string -> answer:string', {
+  ai,
+  skillsCatalog,
+  skillPolicy: { authoritySnapshot: { grantIds: currentGrantIds, leaseEpoch: 4 } },
+});
+```
+
+`axExtractSkillProvenance` is deterministic, synchronous, and model-free; it
+takes no `AxAIService` and never will. Over-cap input dedupes, drops oldest, and
+stamps `truncated: true`, which then contributes a `provenance_truncated` failure
+so a weaker record is visible.
+
+The two policy defaults differ deliberately.
+`axSkillPreconditionGuidanceDefaults` downgrades, because over-aggressive gating
+breaks working setups on every grant reshuffle and the failure being defended
+against is *silent* reuse, not reuse. `axSkillPreconditionExecutableDefaults`
+parks, because an executable artifact has no advisory mode; a `'downgrade'` entry
+is coerced to `'park'` there.
+
+The advisory is derived at render and never stored, so it cannot be injected
+through `agent.setState()` and the serialized skills-prompt state is unchanged.
+The cost is a prompt-cache miss whenever the authority snapshot changes.
+
+Three non-guarantees:
+
+> Provenance is an authority boundary and a deterministic identity digest, not a
+> cryptographic attestation. It records what the host authorized; it cannot prove
+> the artifact is safe, and re-checking it cannot detect an unsafe procedure that
+> never needed an effect.
+
+> `verifierDecisions` are caller-supplied, not derived — `AxAuthorizationReceipt`
+> carries no guard result.
+
+> The re-check runs on every static-catalog retrieval path — kernel tier,
+> `### Available Skills` index, `discover({ skills })` and the relevance hint —
+> and on the executable-artifact path. A host that supplies `onSkillsSearch` owns
+> retrieval and owns the re-check.
+
+Full contract: `docs/SKILL_PROVENANCE.md`.
 
 ## Advisory Relevance Hints (`relevanceRanking`)
 

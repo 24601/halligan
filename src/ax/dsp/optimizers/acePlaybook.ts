@@ -1,11 +1,23 @@
+import type {
+  AxSkillAuthoritySnapshot,
+  AxSkillPreconditionPolicy,
+} from '../../authority/skillProvenance.js';
+import {
+  axIsSkillProvenance,
+  axRecheckSkillProvenance,
+  axSkillPreconditionGuidanceDefaults,
+} from '../../authority/skillProvenance.js';
 import { getCrypto } from '../../util/crypto.js';
 import type {
+  AxACEActorPlaybookView,
   AxACEApplicability,
   AxACEBullet,
   AxACEBulletEvidence,
+  AxACEBulletVisibility,
   AxACECuratorOperation,
   AxACEHostEvidence,
   AxACEPlaybook,
+  AxACEPreconditionDecision,
   AxACEProvenance,
   AxACEVerificationResult,
 } from './aceTypes.js';
@@ -19,6 +31,11 @@ interface ApplyOperationsOptions {
   protectedBulletIds?: ReadonlySet<string>;
   /** Trusted caller evidence; never accepted from curator JSON. */
   hostEvidence?: Readonly<AxACEHostEvidence>;
+  /**
+   * Canonical ISO timestamp stamped on every bullet this call writes. Injected
+   * so a retained rejection and its conformance fixture are reproducible.
+   */
+  now?: string;
 }
 
 export type AxACEPlaybookRenderOptions = {
@@ -33,6 +50,13 @@ export type AxACEPlaybookRenderOptions = {
   includeInapplicable?: boolean;
   /** ISO timestamp used for deterministic expiry evaluation. Defaults to now. */
   now?: string;
+  /**
+   * Current host authority for the retrieval-time precondition re-check.
+   * Absent means no re-check, and the render is unchanged.
+   */
+  authority?: Readonly<AxSkillAuthoritySnapshot>;
+  /** Defaults to `axSkillPreconditionGuidanceDefaults` when `authority` is set. */
+  preconditionPolicy?: Readonly<AxSkillPreconditionPolicy>;
 };
 
 export type AxACEBulletChange = {
@@ -126,7 +150,7 @@ function applyCuratorOperationsInPlace(
     hostEvidence,
   } = options ?? {};
 
-  const now = new Date().toISOString();
+  const now = options?.now ?? new Date().toISOString();
 
   const protectedIds = protectedBulletIds ?? new Set<string>();
 
@@ -177,6 +201,15 @@ function applyCuratorOperationsInPlace(
         }
 
         const supersedes = normalizeSupersedes(op.supersedes);
+        const addedVisibility = resolveWrittenVisibility({
+          current: undefined,
+          playbook,
+          bulletId: id,
+          content,
+          supersedes,
+          operation: op,
+          hostEvidence,
+        });
         const bullet: AxACEBullet = {
           id,
           section: op.section,
@@ -189,6 +222,7 @@ function applyCuratorOperationsInPlace(
           revision: 1,
           lineage: supersedes.length ? { supersedes } : undefined,
           evidence: mergeBulletEvidence(undefined, op.evidence, hostEvidence),
+          ...(addedVisibility ? { visibility: addedVisibility } : {}),
         };
         section.push(bullet);
         updatedBullets.push(id);
@@ -226,6 +260,18 @@ function applyCuratorOperationsInPlace(
           op.evidence,
           hostEvidence
         );
+        const updatedVisibility = resolveWrittenVisibility({
+          current: bullet.visibility,
+          playbook,
+          bulletId: bullet.id,
+          content: bullet.content,
+          supersedes,
+          operation: op,
+          hostEvidence,
+        });
+        if (updatedVisibility) {
+          bullet.visibility = updatedVisibility;
+        }
         updatedBullets.push(bullet.id);
         applySupersession(playbook, supersedes, bullet.id, now, changes);
         changes.push({
@@ -254,8 +300,83 @@ function applyCuratorOperationsInPlace(
 
   recomputePlaybookStats(playbook);
   playbook.updatedAt = now;
+  if (axPlaybookRequiresVisibilitySupport(playbook)) {
+    playbook.version = Math.max(playbook.version ?? 1, 2);
+  }
 
   return { updatedBulletIds: updatedBullets, autoRemoved, changes };
+}
+
+/**
+ * Reinstate `before` as the live artifact while keeping the evidence a rejected
+ * apply produced. The asymmetric half of `retainRejectedMutation`.
+ *
+ * Patching `content` and `visibility` on the surviving bullets is NOT enough,
+ * and the two escapes are both silent:
+ * - `REMOVE` splices the bullet out, so an in-place loop over the applied
+ *   playbook never reaches it and the bullet is gone for good;
+ * - `applySupersession` stamps `evidence.lifecycle.status = 'superseded'` on
+ *   its target, which `isBulletApplicable` then filters out of EVERY render.
+ *
+ * Either one lets a proposal that failed its held-out gate empty the actor
+ * playbook. So the artifact reverts wholesale — content, revision, lineage,
+ * metadata, tags, applicability and lifecycle all come from `before` — and only
+ * two things move forward: the retained verification on the bullets the
+ * operations touched, and the bullets those operations created, which stay in
+ * the optimizer tier so the next proposer round sees the failed attempt and the
+ * actor never does.
+ */
+export function rollbackRejectedMutation(
+  playbook: AxACEPlaybook,
+  before: Readonly<AxACEPlaybook>,
+  options: Readonly<{
+    touchedBulletIds: readonly string[];
+    hostEvidence: Readonly<AxACEHostEvidence>;
+    maxSectionSize?: number;
+    now: string;
+  }>
+): void {
+  const applied = clonePlaybook(playbook);
+  const priorIds = new Set<string>();
+  for (const bullets of Object.values(before.sections)) {
+    for (const bullet of bullets) {
+      priorIds.add(bullet.id);
+    }
+  }
+  const touched = new Set(options.touchedBulletIds);
+  const restored = clonePlaybook(before);
+  for (const bullets of Object.values(restored.sections)) {
+    for (const bullet of bullets) {
+      if (!touched.has(bullet.id)) {
+        continue;
+      }
+      bullet.evidence = mergeBulletEvidence(
+        bullet.evidence,
+        undefined,
+        options.hostEvidence
+      );
+    }
+  }
+  const maxSectionSize = options.maxSectionSize ?? Number.POSITIVE_INFINITY;
+  for (const [sectionName, bullets] of Object.entries(applied.sections)) {
+    for (const bullet of bullets) {
+      if (priorIds.has(bullet.id)) {
+        continue;
+      }
+      restored.sections[sectionName] ??= [];
+      const target = restored.sections[sectionName]!;
+      if (target.length >= maxSectionSize) {
+        continue;
+      }
+      target.push(bullet);
+    }
+  }
+  recomputePlaybookStats(restored);
+  restored.updatedAt = options.now;
+  if (axPlaybookRequiresVisibilitySupport(restored)) {
+    restored.version = Math.max(restored.version ?? 1, 2);
+  }
+  replacePlaybook(playbook, restored);
 }
 
 /**
@@ -289,6 +410,7 @@ export function renderPlaybook(
   playbook: Readonly<AxACEPlaybook>,
   options?: Readonly<AxACEPlaybookRenderOptions>
 ): string {
+  assertSupportedPlaybookVersion(playbook, 'renderPlaybook');
   const visibleSections = Object.fromEntries(
     Object.entries(playbook.sections).map(([section, bullets]) => [
       section,
@@ -324,6 +446,162 @@ export function renderPlaybook(
     .join('\n\n');
 
   return `${header}\n${sections}`.trim();
+}
+
+/**
+ * The highest `AxACEPlaybook.version` this build understands. `renderPlaybook`,
+ * `axProjectActorPlaybook` and `assertPlaybookMutable` all refuse a playbook
+ * whose `version` exceeds it.
+ *
+ * Stamping `2` mitigates nothing on its own — no shipped build ever read
+ * `playbook.version`. This gate is what makes the stamp load-bearing, for the
+ * NEXT incompatibility rather than this one. A playbook written by this release
+ * must not be loaded by an older ax; that residual is documented, not fixed.
+ */
+export const AX_ACE_MAX_SUPPORTED_PLAYBOOK_VERSION = 2;
+
+/**
+ * True once any bullet carries a `visibility` tier. Called by the version stamp
+ * and by the read gate, so it is not an exported predicate with no consumer.
+ */
+export function axPlaybookRequiresVisibilitySupport(
+  playbook: Readonly<AxACEPlaybook>
+): boolean {
+  for (const bullets of Object.values(playbook.sections ?? {})) {
+    for (const bullet of bullets ?? []) {
+      if (bullet?.visibility !== undefined) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function assertSupportedPlaybookVersion(
+  playbook: unknown,
+  caller: string
+): void {
+  const version = (playbook as { version?: unknown } | null)?.version;
+  if (
+    typeof version === 'number' &&
+    Number.isFinite(version) &&
+    version > AX_ACE_MAX_SUPPORTED_PLAYBOOK_VERSION
+  ) {
+    throw new TypeError(
+      `AxACE: ${caller} does not support playbook version ${version} (max ${AX_ACE_MAX_SUPPORTED_PLAYBOOK_VERSION})`
+    );
+  }
+}
+
+/**
+ * Module-private brand. A public `kind` string is a label any caller can write;
+ * membership here is the enforcement, and it cannot survive JSON.
+ */
+const actorViewRenderOptions = new WeakMap<
+  object,
+  Readonly<AxACEPlaybookRenderOptions>
+>();
+
+/**
+ * Project a playbook for the actor: drop optimizer-tier bullets, then apply the
+ * existing lifecycle, expiry, and applicability gates. `renderPlaybook` is left
+ * alone as the FULL renderer the reflector and curator keep using; filtering
+ * there would blind both stages and delete the tier's whole purpose.
+ */
+export function axProjectActorPlaybook(
+  playbook: Readonly<AxACEPlaybook>,
+  options?: Readonly<AxACEPlaybookRenderOptions>
+): AxACEActorPlaybookView {
+  assertSupportedPlaybookVersion(playbook, 'axProjectActorPlaybook');
+  // Resolve the clock once so the projection and the render that follows it
+  // cannot straddle an expiry boundary.
+  const now = options?.now ?? new Date().toISOString();
+  const resolved: AxACEPlaybookRenderOptions = { ...(options ?? {}), now };
+  const authority = options?.authority;
+  const policy =
+    options?.preconditionPolicy ?? axSkillPreconditionGuidanceDefaults;
+  const decisions: AxACEPreconditionDecision[] = [];
+  const projected = clonePlaybook(playbook);
+  for (const [section, bullets] of Object.entries(projected.sections)) {
+    projected.sections[section] = bullets.filter((bullet) => {
+      if (bullet.visibility === 'optimizer') {
+        return false;
+      }
+      if (!isBulletApplicable(bullet, resolved)) {
+        return false;
+      }
+      if (!authority) {
+        return true;
+      }
+      const check = axRecheckSkillProvenance(
+        bullet.evidence?.authorityProvenance,
+        authority,
+        policy,
+        now
+      );
+      if (check.outcome === 'admit') {
+        return true;
+      }
+      // Every non-admit outcome is reported, so a drop is never silent.
+      decisions.push(Object.freeze({ bulletId: bullet.id, section, check }));
+      if (check.outcome !== 'downgrade') {
+        return false;
+      }
+      // Derived at render, never stored: the advisory cannot be injected
+      // through a restored snapshot because it is not part of one.
+      if (check.advisory) {
+        bullet.content = `${check.advisory}\n  ${bullet.content}`;
+      }
+      return true;
+    });
+  }
+  recomputePlaybookStats(projected);
+  const view: AxACEActorPlaybookView = Object.freeze({
+    kind: 'ax-ace-actor-playbook-view' as const,
+    playbook: projected,
+    decisions: Object.freeze(decisions),
+  });
+  actorViewRenderOptions.set(view, Object.freeze(resolved));
+  return view;
+}
+
+/**
+ * Render an already-projected view. The only actor-facing renderer.
+ */
+export function axRenderActorPlaybook(
+  view: Readonly<AxACEActorPlaybookView>
+): string {
+  const options = actorViewRenderOptions.get(view as object);
+  if (!options) {
+    throw new TypeError(
+      'AxACE: actor playbook view was not produced by axProjectActorPlaybook'
+    );
+  }
+  return renderPlaybook(view.playbook, options);
+}
+
+/**
+ * Strip every host-only evidence field from a playbook before it is serialized
+ * into a model prompt. Today that is `evidence.authorityProvenance`; this is the
+ * single place a future host-only field is added.
+ *
+ * Required because `createExecutablePlaybookView` is a clone plus an
+ * applicability filter that strips nothing, and the reflector and curator
+ * serialize that view straight to the provider.
+ */
+export function axRedactPlaybookForModel(
+  playbook: Readonly<AxACEPlaybook>
+): AxACEPlaybook {
+  const redacted = clonePlaybook(playbook);
+  for (const bullets of Object.values(redacted.sections)) {
+    for (const bullet of bullets) {
+      if (bullet.evidence?.authorityProvenance !== undefined) {
+        const { authorityProvenance: _hostOnly, ...rest } = bullet.evidence;
+        bullet.evidence = rest;
+      }
+    }
+  }
+  return redacted;
 }
 
 /** @internal Build the safe playbook view supplied to executable ACE stages. */
@@ -469,13 +747,21 @@ function isEvidenceStructurallyValid(value: unknown): boolean {
     return false;
   }
   if (
+    value.authorityProvenance !== undefined &&
+    !axIsSkillProvenance(value.authorityProvenance)
+  ) {
+    return false;
+  }
+  if (
     value.verification !== undefined &&
     (!Array.isArray(value.verification) ||
       value.verification.some(
         (entry) =>
           !isRecord(entry) ||
           typeof entry.verifierId !== 'string' ||
-          !['passed', 'failed', 'unknown'].includes(String(entry.result)) ||
+          !['passed', 'failed', 'unknown', 'rejected-retained'].includes(
+            String(entry.result)
+          ) ||
           (entry.testId !== undefined && typeof entry.testId !== 'string') ||
           (entry.timestamp !== undefined &&
             typeof entry.timestamp !== 'string') ||
@@ -528,6 +814,7 @@ function assertPlaybookMutable(
   if (!isRecord(playbook) || !isRecord(playbook.sections)) {
     throw new TypeError('AxACE: playbook sections must be an object');
   }
+  assertSupportedPlaybookVersion(playbook, 'applyCuratorOperations');
   for (const [section, bullets] of Object.entries(playbook.sections)) {
     if (!Array.isArray(bullets)) {
       throw new TypeError(
@@ -543,12 +830,151 @@ function assertPlaybookMutable(
         !isEvidenceStructurallyValid(bullet.evidence) ||
         (bullet.metadata !== undefined && !isRecord(bullet.metadata)) ||
         (bullet.tags !== undefined && conditionList(bullet.tags) === null) ||
-        !isLineageStructurallyValid(bullet.lineage)
+        !isLineageStructurallyValid(bullet.lineage) ||
+        !isVisibilityStructurallyValid(bullet.visibility)
       ) {
         throw new TypeError(`AxACE: bullet in section ${section} is malformed`);
       }
     }
   }
+}
+
+/**
+ * A tier that is present but not exactly `'actor'` or `'optimizer'` fails
+ * closed. Defaulting a malformed value to actor-visible would make a typo an
+ * exposure.
+ */
+function isVisibilityStructurallyValid(value: unknown): boolean {
+  return value === undefined || value === 'actor' || value === 'optimizer';
+}
+
+/** The dedupe key `dedupePlaybookByContent` uses, reused for laundering. */
+function contentKey(content: string): string {
+  return content.trim().toLowerCase();
+}
+
+/**
+ * True when some other bullet with the same normalized content already sits in
+ * the optimizer tier. The curator is shown optimizer-tier content by design and
+ * could otherwise re-emit it verbatim as a new, tier-absent — therefore
+ * actor-visible — bullet.
+ */
+function matchesOptimizerContent(
+  playbook: Readonly<AxACEPlaybook>,
+  content: string,
+  excludeBulletId: string | undefined
+): boolean {
+  const key = contentKey(content);
+  if (!key) {
+    return false;
+  }
+  for (const bullets of Object.values(playbook.sections)) {
+    for (const bullet of bullets) {
+      if (
+        bullet.visibility === 'optimizer' &&
+        bullet.id !== excludeBulletId &&
+        contentKey(bullet.content) === key
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * True when the write supersedes an optimizer-tier bullet. `dedupePlaybookByContent`
+ * installs the NEW bullet as the survivor of a replacement pair, so a supersede
+ * without this rule is a tier swap.
+ */
+function supersedesOptimizer(
+  playbook: Readonly<AxACEPlaybook>,
+  supersedes: readonly string[]
+): boolean {
+  if (supersedes.length === 0) {
+    return false;
+  }
+  const targets = new Set(supersedes);
+  for (const bullets of Object.values(playbook.sections)) {
+    for (const bullet of bullets) {
+      if (targets.has(bullet.id) && bullet.visibility === 'optimizer') {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Resolve the tier a written bullet carries.
+ *
+ * Precedence, and the order matters:
+ * 1. an explicit per-call `hostEvidence.visibility` wins, because the host owns
+ *    promotion and is naming these operations explicitly;
+ * 2. the curator may only downgrade, and an ADD or UPDATE that carries no
+ *    `visibility` never clears an existing `'optimizer'`
+ *    (`op.visibility ?? bullet.visibility` would let an absent field launder a
+ *    bullet back into the actor prompt);
+ * 3. a write that copies optimizer-tier content verbatim, or supersedes an
+ *    optimizer-tier bullet, inherits the tier;
+ * 4. only then does the engine-wide creation default apply, and only to a
+ *    bullet that has no tier yet.
+ *
+ * Step 4 is deliberately last. An engine-wide default routed through step 1
+ * applies to every operation in the batch, so a curator-chosen `UPDATE` on an
+ * existing optimizer-tier bullet would flip it to `'actor'` — a model-driven
+ * promotion through a host-owned knob, and the exact laundering steps 2-3 exist
+ * to stop.
+ *
+ * These rules block copy, supersede-swap and merge-survivor promotion. They do
+ * NOT block paraphrase, and no exact-content rule can. The tier gates artifacts,
+ * not text.
+ */
+function resolveWrittenVisibility(args: {
+  current: AxACEBulletVisibility | undefined;
+  playbook: Readonly<AxACEPlaybook>;
+  bulletId?: string;
+  content?: string;
+  supersedes: readonly string[];
+  operation: Readonly<AxACECuratorOperation>;
+  hostEvidence: Readonly<AxACEHostEvidence> | undefined;
+}): AxACEBulletVisibility | undefined {
+  if (args.hostEvidence?.visibility !== undefined) {
+    return args.hostEvidence.visibility;
+  }
+  if (
+    args.operation.visibility === 'optimizer' ||
+    args.current === 'optimizer'
+  ) {
+    return 'optimizer';
+  }
+  if (
+    args.content !== undefined &&
+    matchesOptimizerContent(args.playbook, args.content, args.bulletId)
+  ) {
+    return 'optimizer';
+  }
+  if (supersedesOptimizer(args.playbook, args.supersedes)) {
+    return 'optimizer';
+  }
+  if (
+    args.current === undefined &&
+    args.hostEvidence?.defaultVisibility !== undefined
+  ) {
+    return args.hostEvidence.defaultVisibility;
+  }
+  return args.current;
+}
+
+/** `optimizer` beats `actor` beats absent. Merging may only tighten. */
+function mostRestrictiveVisibility(
+  survivor: AxACEBulletVisibility | undefined,
+  duplicate: AxACEBulletVisibility | undefined
+): AxACEBulletVisibility | undefined {
+  if (survivor === 'optimizer' || duplicate === 'optimizer') {
+    return 'optimizer';
+  }
+  return survivor;
 }
 
 function isLineageStructurallyValid(value: unknown): boolean {
@@ -577,7 +1003,11 @@ function assertCuratorOperation(
       typeof operation.bulletId !== 'string') ||
     (operation.metadata !== undefined && !isRecord(operation.metadata)) ||
     !isEvidenceStructurallyValid(operation.evidence) ||
-    conditionList(operation.supersedes) === null
+    conditionList(operation.supersedes) === null ||
+    // Downgrade-only: promotion to `'actor'` is host-owned and is not
+    // expressible here, in TypeScript or at runtime. Curator JSON reaches this
+    // function through a cast, not a parse, so the runtime check is the gate.
+    (operation.visibility !== undefined && operation.visibility !== 'optimizer')
   ) {
     throw new TypeError('AxACE: curator operation is malformed');
   }
@@ -603,7 +1033,12 @@ function assertHostEvidence(value: unknown): void {
     (value.confidence !== undefined &&
       (typeof value.confidence !== 'number' ||
         !Number.isFinite(value.confidence))) ||
-    !isEvidenceStructurallyValid({ verification: value.verification })
+    !isVisibilityStructurallyValid(value.visibility) ||
+    !isVisibilityStructurallyValid(value.defaultVisibility) ||
+    !isEvidenceStructurallyValid({
+      verification: value.verification,
+      authorityProvenance: value.authorityProvenance,
+    })
   ) {
     throw new TypeError('AxACE: host evidence is malformed');
   }
@@ -740,6 +1175,15 @@ export function dedupePlaybookByContent(
       : undefined;
     survivor.helpfulCount += duplicate.helpfulCount;
     survivor.harmfulCount += duplicate.harmfulCount;
+    // Without this the survivor of a merge is whichever bullet happened to be
+    // seen first, so a duplicate pair could promote optimizer content.
+    const mergedVisibility = mostRestrictiveVisibility(
+      survivor.visibility,
+      duplicate.visibility
+    );
+    if (mergedVisibility) {
+      survivor.visibility = mergedVisibility;
+    }
     if (Date.parse(duplicate.updatedAt) > Date.parse(survivor.updatedAt)) {
       survivor.updatedAt = duplicate.updatedAt;
     }
@@ -925,7 +1369,9 @@ function normalizeVerification(
         value &&
         typeof value.verifierId === 'string' &&
         value.verifierId.trim().length > 0 &&
-        ['passed', 'failed', 'unknown'].includes(value.result)
+        ['passed', 'failed', 'unknown', 'rejected-retained'].includes(
+          value.result
+        )
     )
     .map((value) => ({
       verifierId: value.verifierId.trim(),
@@ -940,17 +1386,19 @@ function normalizeVerification(
           }
         : {}),
     }));
-  const unique = new Map(
-    normalized.map((value) => [
-      `${value.verifierId}\u0000${value.testId ?? ''}\u0000${value.timestamp ?? ''}`,
-      value,
-    ])
-  );
-  return [...unique.values()].sort((a, b) =>
-    `${a.verifierId}\u0000${a.testId ?? ''}\u0000${a.timestamp ?? ''}`.localeCompare(
-      `${b.verifierId}\u0000${b.testId ?? ''}\u0000${b.timestamp ?? ''}`
-    )
-  );
+  // `result` IS the stickiness, and it is the whole of it: with `result` in the
+  // key a later `passed` from the same verifier, test and timestamp lands on a
+  // different key and cannot overwrite a retained rejection — both survive.
+  // Without it the later write won and the asymmetric rollback became
+  // symmetric again. A same-key collision therefore implies an equal result,
+  // so last-write-wins is safe here.
+  const keyOf = (value: AxACEVerificationResult): string =>
+    `${value.verifierId}\u0000${value.testId ?? ''}\u0000${value.timestamp ?? ''}\u0000${value.result}`;
+  const unique = new Map<string, AxACEVerificationResult>();
+  for (const value of normalized) {
+    unique.set(keyOf(value), value);
+  }
+  return [...unique.values()].sort((a, b) => keyOf(a).localeCompare(keyOf(b)));
 }
 
 function mergeProvenance(
@@ -1005,6 +1453,8 @@ function mergeBulletEvidence(
       }
     : existing?.lifecycle;
   const provenance = mergeProvenance(existing?.provenance, host);
+  const authorityProvenance =
+    host?.authorityProvenance ?? existing?.authorityProvenance;
   const verification = normalizeVerification([
     ...(existing?.verification ?? []),
     ...(host?.verification ?? []),
@@ -1025,6 +1475,7 @@ function mergeBulletEvidence(
     !applicability &&
     !lifecycle &&
     !provenance &&
+    !authorityProvenance &&
     verification.length === 0 &&
     evidenceCount === 0
   ) {
@@ -1041,6 +1492,7 @@ function mergeBulletEvidence(
     ...(provenance ? { provenance } : {}),
     ...(verification.length ? { verification } : {}),
     ...(lifecycle ? { lifecycle } : {}),
+    ...(authorityProvenance ? { authorityProvenance } : {}),
   };
 }
 
@@ -1147,6 +1599,12 @@ function mergeStoredEvidence(
     ...(verification.length ? { verification } : {}),
     ...((incoming.lifecycle ?? existing.lifecycle)
       ? { lifecycle: incoming.lifecycle ?? existing.lifecycle }
+      : {}),
+    ...((incoming.authorityProvenance ?? existing.authorityProvenance)
+      ? {
+          authorityProvenance:
+            incoming.authorityProvenance ?? existing.authorityProvenance,
+        }
       : {}),
   };
 }

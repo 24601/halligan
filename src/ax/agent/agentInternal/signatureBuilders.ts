@@ -11,6 +11,11 @@ import {
   getRuntimePrimitiveOverrides,
 } from '../rlm.js';
 import { compareCanonicalDiscoveryStrings } from '../runtimeDiscovery.js';
+import type { AxAgentSkillRetrievalGate } from '../skillCatalog.js';
+import {
+  axEligibleCatalogSkills,
+  axSkillRetrievalGate,
+} from '../skillCatalog.js';
 import { type AxAgentStagePolicy, resolveStagePolicy } from './stagePolicy.js';
 import type {
   AxLlmQueryPromptMode,
@@ -310,6 +315,23 @@ export function buildSplitPrograms(self: any): void {
         : undefined;
   void effectiveMaxSubAgentCalls;
   void effectiveMaxTurns;
+  // Computed once per build, and from the construction-time policy, which is
+  // where `environment` already lives: the index is a signature input and must
+  // not churn the prompt cache per turn.
+  const skillRetrievalGate: AxAgentSkillRetrievalGate = axSkillRetrievalGate(
+    s.skillsCatalog ?? [],
+    {
+      ...(s.skillPolicy?.environment
+        ? { environment: s.skillPolicy.environment }
+        : {}),
+      ...(s.skillPolicy?.authoritySnapshot
+        ? { authority: s.skillPolicy.authoritySnapshot }
+        : {}),
+      ...(s.skillPolicy?.precondition
+        ? { precondition: s.skillPolicy.precondition }
+        : {}),
+    }
+  );
   const actorDefinitionBuildOptions: AxStageDefinitionBuildOptions = {
     runtimeUsageInstructions: s.runtimeUsageInstructions,
     runtimeLanguageName,
@@ -326,13 +348,21 @@ export function buildSplitPrograms(self: any): void {
     hasAgentStatusCallback: Boolean(s.agentStatusCallback),
     discoveryMode: s.functionDiscoveryEnabled,
     relevanceHintsMode: s.relevanceHintsEnabled === true,
-    skillsCatalog: (s.skillsCatalog ?? []).map(
-      (skill: { id: string; name: string; description?: string }) => ({
+    skillsCatalog: axEligibleCatalogSkills(
+      s.skillsCatalog ?? [],
+      s.skillPolicy?.environment
+    )
+      // `requires` is not the only gate: a skill whose recorded authority the
+      // re-check parked or dropped must not be advertised in the index either,
+      // or the model discovers a name it can never load.
+      .filter(
+        (skill: { id: string }) => !skillRetrievalGate.denied.has(skill.id)
+      )
+      .map((skill: { id: string; name: string; description?: string }) => ({
         id: skill.id,
         name: skill.name,
         ...(skill.description ? { description: skill.description } : {}),
-      })
-    ),
+      })),
     skillsMode:
       typeof s.onSkillsSearch === 'function' ||
       s.skillUsageTrackingEnabled === true ||
