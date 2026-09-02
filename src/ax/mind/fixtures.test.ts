@@ -403,10 +403,18 @@ describe('ir/conformance/axmind/dispatch-decisions.json', () => {
     expect(entered).toBe(1);
     expect(instance.health().thinkers[0]?.running).toBe(1);
 
+    // The fixture contract, said out loud: a `"harness": "mind"` row without an
+    // `append` block is a malformed fixture, not a TypeError three lines down.
+    const inbound = one.append;
+    if (!inbound) {
+      throw new Error(
+        `dispatch row ${one.row} ("${one.name}") runs the mind harness, so it must declare an "append" block`
+      );
+    }
     await instance.append({
       trajectoryId: '',
-      type: one.append!.type,
-      ...(one.append!.source ? { source: one.append!.source } : {}),
+      type: inbound.type,
+      ...(inbound.source ? { source: inbound.source } : {}),
       data: { from: 'ada', to: 'mind', content: 'while you are working' },
     });
     const injected = diagnostics.filter(

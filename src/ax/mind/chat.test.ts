@@ -1127,7 +1127,17 @@ describe('the ledger boundary', () => {
     // THE row: without per-effect attribution this is `monolith`, and an
     // append-only log then says forever that the wrong thinker spoke.
     expect(byRecipient.get('bo')?.source).toBe('responder');
-    expect(diagnostics).toEqual([
+    // ORDER-INDEPENDENT on purpose. `listEffects()` sorts by `createdAt` and
+    // breaks ties on a random UUID, and two sends inside one delivery land in
+    // the same millisecond routinely -- so asserting a fixed order here would
+    // be asserting a coin flip, not a contract. What IS the contract is that
+    // each settled effect produces exactly one diagnostic naming its own
+    // composer.
+    expect(
+      [...diagnostics].sort((a, b) =>
+        (a.thinker ?? '').localeCompare(b.thinker ?? '')
+      )
+    ).toEqual([
       { code: 'effect-step-reconciled', thinker: 'monolith' },
       { code: 'effect-step-reconciled', thinker: 'responder' },
     ]);
