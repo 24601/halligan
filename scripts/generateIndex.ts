@@ -30,6 +30,12 @@ const internalExportNames = new Set([
   'AxAIOpenAIResponsesReasoningEffort',
   'AxAIOpenAIResponsesImpl',
   'AxAgentInternalCompletionPayload',
+  // Internal: the shared promotion gate; reached through evolve()/axHarnessEvolve,
+  // not directly.
+  'AxAgentPromotionGateBatch',
+  'AxAgentPromotionGateInput',
+  'AxAgentPromotionGateVerdict',
+  'evaluateAgentPromotionGate',
   'AxAppliedProposal',
   // Playbook-evidence implementation plumbing. The evidence CONTRACT types
   // (receipts, reports, options, the error class and its guard) are public;

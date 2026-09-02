@@ -44,6 +44,7 @@ import type {
 import { runAgentEvalBatch } from './evalHarness.js';
 import { buildEvidenceReceipt } from './evidenceReceipt.js';
 import { clusterFailures } from './failureClusters.js';
+import { evaluateAgentPromotionGate } from './gate.js';
 import { evaluateGateChain, gateChainAccepts } from './gates.js';
 import type {
   AxAgentPlaybookComputeAccounting,
@@ -1135,20 +1136,31 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
           );
         }
       }
-      const revalComplete = retentionPolicy
-        ? revalTrain.complete &&
-          (revalHeldOutBatch?.complete ?? true) &&
-          candidateRetentionBatches.every(({ batch }) => batch.complete)
-        : requireHeldOut
-          ? revalTrain.complete && revalHeldOutBatch?.complete === true
-          : !revalTrain.exhausted && !revalHeldOutBatch?.exhausted;
-      const currentGain = revalTrain.mean - heldIn;
-      const gainOk = revalComplete && currentGain >= currentGainThreshold;
-      const heldOutOk =
-        revalHeldOut === undefined ||
-        heldOut === undefined ||
-        revalHeldOut - heldOut >= -epsilon;
+      const gateBase = {
+        heldIn,
+        revalTrain,
+        heldOut,
+        revalHeldOut,
+        revalHeldOutBatch,
+        epsilon,
+        currentGainThreshold,
+        requireHeldOut,
+        hasRetentionPolicy: retentionPolicy !== undefined,
+        retentionBatchesComplete: candidateRetentionBatches.every(
+          ({ batch }) => batch.complete
+        ),
+      } as const;
+      // `revalComplete`/`gainOk`/`heldOutOk` do not depend on retention, and
+      // the retention receipt needs all three before it can be assembled — so
+      // the pure gate runs once here and once again below with the measured
+      // retention verdict folded in.
+      const provisional = evaluateAgentPromotionGate({
+        ...gateBase,
+        retentionOk: true,
+      });
+      const { revalComplete, gainOk, heldOutOk, currentGain } = provisional;
       let retentionReceipt: AxAgentPlaybookRetentionReceipt | undefined;
+      let retentionLoss: { worst: number; mean: number } | undefined;
       let retentionOk = true;
       if (retentionPolicy && revalComplete) {
         const slices = retentionAnchors.map((anchor, index) => {
@@ -1175,6 +1187,10 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
         const worstHistoricalLoss = Math.max(...losses);
         const meanHistoricalLoss =
           losses.reduce((sum, loss) => sum + loss, 0) / losses.length;
+        retentionLoss = {
+          worst: worstHistoricalLoss,
+          mean: meanHistoricalLoss,
+        };
         retentionOk =
           atMostWithFloatingPointTolerance(
             worstHistoricalLoss,
@@ -1233,7 +1249,12 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
           accepted,
         });
       }
-      const legacyAccept = revalComplete && gainOk && heldOutOk && retentionOk;
+      const verdict = evaluateAgentPromotionGate({
+        ...gateBase,
+        retentionOk,
+        ...(retentionLoss ? { retentionLoss } : {}),
+      });
+      const legacyAccept = verdict.accept;
 
       // ---- Evidence conjuncts ----
       let evidence: AxAgentPlaybookEvidenceReceipt | undefined;
@@ -1547,27 +1568,7 @@ async function runEvolve<IN extends AxGenIn, OUT extends AxGenOut>(
         ...(evidence ? { evidence } : {}),
         status: accept ? 'accepted' : 'rejected',
         accepted: accept,
-        reason:
-          gateRejection ??
-          (requireHeldOut && !revalTrain.complete
-            ? 'held-in evaluation incomplete or errored'
-            : requireHeldOut && revalHeldOutBatch?.complete !== true
-              ? 'held-out evaluation incomplete or errored'
-              : !revalComplete
-                ? 'metric_budget exhausted during re-evaluation'
-                : accept
-                  ? retentionPolicy
-                    ? 'current task improved, historical retention thresholds satisfied'
-                    : heldOut === undefined
-                      ? 'held-in improved (no held-out set provided — consider one)'
-                      : 'held-in improved, held-out non-regressing'
-                  : !gainOk
-                    ? retentionPolicy
-                      ? `current-task gain ${currentGain.toFixed(3)} below ${currentGainThreshold}`
-                      : `held-in gain ${currentGain.toFixed(3)} below ${currentGainThreshold}`
-                    : !heldOutOk
-                      ? `held-out regressed ${((revalHeldOut ?? 0) - (heldOut ?? 0)).toFixed(3)}`
-                      : `historical loss exceeded retention threshold (worst ${retentionReceipt?.worstHistoricalLoss.toFixed(3)}, mean ${retentionReceipt?.meanHistoricalLoss.toFixed(3)})`),
+        reason: gateRejection ?? verdict.reason,
         heldIn: { before: heldIn, after: revalTrain.mean },
         ...(revalHeldOut !== undefined && heldOut !== undefined
           ? { heldOut: { before: heldOut, after: revalHeldOut } }
