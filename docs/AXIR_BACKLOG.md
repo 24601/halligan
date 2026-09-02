@@ -186,6 +186,13 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
   - TS paths: `src/ax/dsp/optimizers/aceTypes.ts`, `src/ax/dsp/optimizers/acePlaybook.ts`, `src/ax/dsp/optimizers/ace.ts`, `src/ax/dsp/playbook.ts`
   - Impact: Adds AxACEBulletVisibility with an actor-default for legacy bullets, a branded actor playbook projection that omits the optimizer tier while renderPlaybook stays the full renderer for the reflector and curator, a rejected-retained verification result that survives normalization and dedupe, redaction of host-only authority provenance from every model-facing serialization, and an optional retrieval-time precondition re-check on the render path. Legacy playbooks render byte-identically.
   - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+- `axir-2026-09-02-agent-learning-hook-opt-in-learning-config-receipts-via-learn-ru` [axagent] Agent learning hook: opt-in learning config, receipts via learn().run(), managed instruction and skills-catalog slots
+  - Status: open
+  - Source PR: #96
+  - Source commit: `67a519be8ae67845f1c8358e60684a1d0cc1ce1d`
+  - TS paths: `src/ax/agent/agentInternal/agentLearning.ts`
+  - Impact: AxAgentOptions gains an optional learning config; the coordinator gains learn(), getLearn(), setActorInstructionSlot(), getActorInstructionSlot(), setSkillsCatalogSlot(), getSkillsCatalogSlot() and hasContinuousPlaybookLearning(). Named instruction slots replace or clear by name and render after the anonymous addenda in slot-name order; named skills-catalog slots merge after the construction-time catalog and recompute the merged catalog, the search callback and both advisory hint flags, refusing an agent constructed with a host onSkillsSearch or without a catalog. Recording lives in AxAgentLearning.run(), outside the agent runtime scope; forward() and streamingForward() are unchanged and record nothing. A record's artifactRef is read from the live harness installation, never from the store head. Default-off: with no learning config, behaviour and cost are unchanged.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 - `axir-2026-09-02-agent-playbook-evolve-matched-budget-control-arm-neutral-artifac` [axagent] Agent playbook evolve: matched-budget control arm, neutral-artifact harness-term ablation, and the baseline/evolved snapshot state machine
   - Status: open
   - Source PR: #93
@@ -255,6 +262,13 @@ This ledger tracks portable TypeScript behavior that should be migrated into AxI
   - Source commit: `774efdb70f373efb343c3a76523bbe490d954f11`
   - TS paths: `src/ax/learn/types.ts`
   - Impact: New portable TS behaviour under a new src/ax/learn/ root: record and report schemas with fail-closed JSON-persistability validation, the train/wait/never eligibility reducer with named counted reasons and a stable-until-acknowledged batch, floor-not-ceiling report-schema validation, and a store port whose release chain moves by separate append-CAS and promote-CAS. Not yet expressible in AxIR; generated packages are unaffected until migrated. Harness tree, installer, release surface and axHarnessEvolve land in the follow-up PR.
+  - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
+- `axir-2026-09-02-learning-surface-part-2-harness-tree-admission-gate-installer-no` [axoptimize] Learning surface part 2: harness tree, admission gate, installer, nominate/promote release chain, failure manifest, axHarnessEvolve
+  - Status: open
+  - Source PR: #96
+  - Source commit: `67a519be8ae67845f1c8358e60684a1d0cc1ce1d`
+  - TS paths: `src/ax/learn/types.ts`
+  - Impact: New portable TS behaviour: a flat harness-tree entry list over instruction/playbookBullet/skill with sha256 content identity over the admitted entry list in tree order; a fail-closed admission gate (closed config allow-list per kind, a closed proposer-authored bullet field set, a two-rule credential tripwire over every field of every kind, path-only denial reporting); pure rendering as a function of (tree, now); three atomic mutation ops that re-admit their result; a content-addressed release chain with SEPARATE append-CAS and promote-CAS, rollback-as-new-release and monotonic step; normalized-cause failure fingerprints with new/persisting/fixed classification; and a verified evolution step that reuses the existing promotion gate, freezes split digests before proposing, interleaves paired episodes, ranks a crashed episode below every real score, and NOMINATES rather than promoting. Not yet expressible in AxIR; generated packages are unaffected until migrated.
   - Suggested AxIR work: Add or update the TS-derived conformance fixture.; Update AxIR/Core or descriptor data to match the portable TS behavior.; Run npm run axir:conformance:check and npm run test:axir.
 - `axir-2026-09-02-register-the-axmind-conformance-suite-with-the-axir-verifier-and` [runtime] Register the axmind conformance suite with the AxIR verifier and the five target runners
   - Status: open
