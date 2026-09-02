@@ -40,6 +40,12 @@ Stated first, because everything below is easier to misread than to read.
 - **`axHarnessEvolve` must not run concurrently with `forward()` on the same
   agent instance.** It swaps installations per episode. No type or runtime
   check enforces this.
+- **The agent's `learning: { … }` config does not configure the training
+  projection.** It configures recording only. `sampleFields`, `maxSampleBytes`
+  and `maxParkedReports` are options on `axCreateLearningEngineState`, because
+  the engine is the thing that turns records into a batch and the agent never
+  builds one. There is deliberately no agent-side alias: a projection option
+  declared where nothing reads it is a containment control that does nothing.
 
 ## Records
 

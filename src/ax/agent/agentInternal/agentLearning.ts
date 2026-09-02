@@ -31,7 +31,6 @@ import {
   type AxHarnessInstallTarget,
   type AxLearningAppendResult,
   type AxLearningArtifactRef,
-  type AxLearningInteractionPayload,
   type AxLearningReceipt,
   type AxLearningReportInput,
   AxLearningReportValidationError,
@@ -59,14 +58,25 @@ export interface AxLearningAgentConfig {
   readonly reportSchema?: AxReportSchema;
   /** Record a run that threw as an interaction with `failure`. Default false. */
   readonly recordFailures?: boolean;
-  /**
-   * Which payload fields reach a training sample, and therefore a model
-   * prompt. Default `['input', 'output', 'failure']` — `model`, `usage` and
-   * host `tags` are withheld unless asked for.
-   */
-  readonly sampleFields?: readonly (keyof AxLearningInteractionPayload)[];
-  /** Canonical-JSON byte cap over a batch's whole sample set. Default 65_536. */
-  readonly maxSampleBytes?: number;
+  //
+  // There is deliberately no `sampleFields` / `maxSampleBytes` here.
+  //
+  // Those are the projection and byte cap applied when records are turned into
+  // a training BATCH, and the agent never builds one: the engine is a pure
+  // reducer the host constructs and drives (`axCreateLearningEngineState`,
+  // §4.5). Declaring them on this config would ship a containment control that
+  // does nothing — a host narrowing `sampleFields` to keep `output` out of a
+  // proposer prompt would get no withholding at all, because the engine it
+  // separately builds keeps its own wider default. Configure them where they
+  // are read:
+  //
+  //   axCreateLearningEngineState({
+  //     scenario, processor,
+  //     sampleFields: ['input', 'failure'],
+  //     maxSampleBytes: 16_384,
+  //     maxParkedReports: 10_000,
+  //   })
+  //
   /**
    * Fired once per recorded run and AWAITED before `run()` resolves. A throw
    * rejects `run()` after the record is already durable, and is routed to

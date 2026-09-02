@@ -125,7 +125,7 @@
       "type": "skill-md",
       "description": "This skill helps an LLM generate correct learning-surface code using @ax-llm/ax. Use when the user asks about interaction receipts, agent.learn(), report(), AxLearningStore, harness trees, axHarnessEvolve, release chains, or self-improving agent patterns.",
       "url": "ax-learn/SKILL.md",
-      "digest": "sha256:778037e9bae2fba9856f044a6b0c4f4ade6189db5b803c46f000e0f81fb5f6aa"
+      "digest": "sha256:97e5737d00d1032483508e0ba2f19617d65ff9d83b701bf007c4596c3cef8a3b"
     },
     {
       "name": "ax-playbook",

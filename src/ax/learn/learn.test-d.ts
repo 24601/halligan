@@ -1,6 +1,7 @@
 // learn.test-d.ts — compile-time tests for the `src/ax/learn/` type surface,
 // enforced by `npm run test:type-tests` (tsc -p tsconfig.typetests.json).
 
+import type { AxLearningAgentConfig } from '../agent/index.js';
 import type {
   AxHarnessAdmissionReport,
   AxHarnessBulletConfig,
@@ -180,8 +181,24 @@ const state = axCreateLearningEngineState({
   scenario: 'support-triage',
   processor: axScoreWindowProcessor({ batchSize: 2 }),
   sampleFields: ['input', 'output'],
+  maxSampleBytes: 16_384,
+  maxParkedReports: 1_000,
 });
 void axLearningEngineIngest(state, someRecord);
+
+// The sample projection and the byte cap belong to the ENGINE, which the host
+// constructs and drives. They are not agent-config fields: a control declared
+// where nothing reads it is a containment control that does nothing.
+declare const someStore: AxLearningStore;
+declare const someSurface: AxLearningSurface;
+const learningConfig: AxLearningAgentConfig = {
+  scenario: 'support-triage',
+  store: someStore,
+  surface: someSurface,
+  // @ts-expect-error sampleFields is configured on the engine, not the agent
+  sampleFields: ['input'],
+};
+void learningConfig;
 
 // A field's value must be an `AxReportFieldSchema`; `3` is not one. The
 // `references` reservation itself is a RUNTIME check (`axReportSchema` throws),

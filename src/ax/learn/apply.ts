@@ -106,7 +106,7 @@ export const axApplyHarnessTree = async (
   if (!Number.isFinite(installedAt)) {
     throw new AxHarnessRenderError(
       'now',
-      'axApplyHarnessTree: `now` must be a parseable ISO timestamp string'
+      'axApplyHarnessTree: `now` must be an ISO timestamp string that Date.parse accepts'
     );
   }
 

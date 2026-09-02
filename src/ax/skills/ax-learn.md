@@ -297,6 +297,9 @@ held-out set and not a live-model improvement claim.
 - No second canonicalizer and no second digest register — reuse
   `axEventCanonicalJson` / `axEventCanonicalDigest`.
 - No `Date.now()` in library code. Every timestamp comes from an injected clock.
+- Do not look for `sampleFields` / `maxSampleBytes` on the agent's `learning`
+  config. The sample projection and the byte cap are options on
+  `axCreateLearningEngineState`, where the batch is actually built.
 - No `node:` imports under `src/ax/learn`.
 - Do not expect a bare `forward()` or `streamingForward()` to record.
 - Do not treat `contentId` as a confidentiality control.

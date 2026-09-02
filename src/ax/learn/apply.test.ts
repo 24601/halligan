@@ -452,7 +452,7 @@ describe('axApplyHarnessTree', () => {
     const target = new FakeTarget();
     await expect(
       install(target, [instruction('i1')], { now: 'yesterday' })
-    ).rejects.toThrow(/parseable ISO timestamp/);
+    ).rejects.toThrow(/Date\.parse accepts/);
     expect(target.instructionSlots.size).toBe(0);
     expect(axCurrentHarnessInstallation(target)).toBeUndefined();
   });
