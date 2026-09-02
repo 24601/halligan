@@ -125,6 +125,23 @@ function validateArtifactRef(ref: Readonly<AxLearningArtifactRef>): void {
       'AxLearningRecord: stale must be a boolean'
     );
   }
+  // I1b: `stale` is DERIVED — `contentId !== headContentId` — not an opinion.
+  // Taking a caller's word for it would let a serve under a superseded tree be
+  // stamped fresh, which is exactly the mismatch this record exists to expose.
+  // With no observed head there is nothing to compare against, so the claim is
+  // the producer's and is left alone.
+  if (ref.headContentId !== undefined) {
+    requireNonEmpty(ref.headContentId, 'artifactRef.headContentId');
+    const mismatched = ref.contentId !== ref.headContentId;
+    if (ref.stale !== mismatched) {
+      throw new AxLearningRecordValidationError(
+        'artifactRef.stale',
+        `AxLearningRecord: stale must be ${mismatched} when contentId ${
+          mismatched ? 'differs from' : 'equals'
+        } headContentId`
+      );
+    }
+  }
 }
 
 /**

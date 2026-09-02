@@ -159,6 +159,9 @@ const state = axCreateLearningEngineState({
 });
 void axLearningEngineIngest(state, someRecord);
 
-// @ts-expect-error `references` is a reserved schema field name at the type level too
+// A field's value must be an `AxReportFieldSchema`; `3` is not one. The
+// `references` reservation itself is a RUNTIME check (`axReportSchema` throws),
+// not a type-level one — `{ references: { type: 'string' } }` compiles.
+// @ts-expect-error 3 is not an AxReportFieldSchema
 void axReportSchema({ score: { type: 'number' }, references: 3 });
 void axReportSchema({ score: { type: 'number', min: 0, max: 1 } });

@@ -423,3 +423,22 @@ describe('AxInMemoryLearningStore lifecycle', () => {
     await expect(store.get(SCENARIO, 'a')).rejects.toThrow(/store is closed/);
   });
 });
+
+describe('AxInMemoryLearningStore consumed ids', () => {
+  it('still recognises a consumed id after the record itself is evicted', async () => {
+    const store = new AxInMemoryLearningStore({ maxRecordsPerScenario: 2 });
+    await store.append(interaction('a'));
+    await store.markConsumed(SCENARIO, ['a']);
+    await store.append(interaction('b'));
+    await store.append(interaction('c'));
+    // 'a' is gone from the log, but the consumed set outlives it: that set is
+    // the enforcement of I9, so it is unbounded by design (class doc).
+    expect(store.droppedRecords).toBe(1);
+    expect(await store.get(SCENARIO, 'a')).toBeUndefined();
+
+    const resent = await store.append(interaction('a'));
+    expect(resent.inserted).toBe(false);
+    expect(resent.reason).toBe('duplicate');
+    expect(await store.get(SCENARIO, 'a')).toBeUndefined();
+  });
+});

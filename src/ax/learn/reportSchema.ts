@@ -202,7 +202,16 @@ export const axReportSchema = (
       input: Readonly<AxLearningReportInput>
     ): Readonly<AxLearningReportInput> {
       for (const [name, schema] of Object.entries(frozen)) {
-        const value = name === 'score' ? input.score : input.metadata?.[name];
+        // `Object.hasOwn`, not a bare read: a declared field named
+        // `__proto__` or `constructor` would otherwise pick a value off the
+        // prototype chain and validate as if the caller had sent one.
+        const metadata = input.metadata;
+        const value =
+          name === 'score'
+            ? input.score
+            : metadata !== undefined && Object.hasOwn(metadata, name)
+              ? metadata[name]
+              : undefined;
         if (value === undefined) {
           if (schema.required) {
             fail(name, `field "${name}" is required`);

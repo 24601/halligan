@@ -290,3 +290,64 @@ describe('axLearningFailureFrom', () => {
     });
   });
 });
+
+describe('artifactRef staleness', () => {
+  it('refuses an artifactRef whose stale flag contradicts the observed head', () => {
+    expect(() =>
+      interaction({
+        artifactRef: {
+          releaseId: 'rel-1',
+          contentId: 'sha256:aaaa',
+          headContentId: 'sha256:bbbb',
+          stale: false,
+        },
+      })
+    ).toThrow(/stale must be true/);
+    expect(() =>
+      interaction({
+        artifactRef: {
+          releaseId: 'rel-1',
+          contentId: 'sha256:aaaa',
+          headContentId: 'sha256:aaaa',
+          stale: true,
+        },
+      })
+    ).toThrow(/stale must be false/);
+  });
+
+  it('accepts a ref whose stale flag matches, and one with no observed head', () => {
+    expect(
+      interaction({
+        artifactRef: {
+          releaseId: 'rel-1',
+          contentId: 'sha256:aaaa',
+          headContentId: 'sha256:aaaa',
+          stale: false,
+        },
+      }).artifactRef?.stale
+    ).toBe(false);
+    // No head observed: nothing to derive from, so the producer's claim stands.
+    expect(
+      interaction({
+        artifactRef: {
+          releaseId: 'rel-1',
+          contentId: 'sha256:aaaa',
+          stale: false,
+        },
+      }).artifactRef?.headContentId
+    ).toBeUndefined();
+  });
+
+  it('refuses an empty observed head', () => {
+    expect(() =>
+      interaction({
+        artifactRef: {
+          releaseId: 'rel-1',
+          contentId: 'sha256:aaaa',
+          headContentId: '   ',
+          stale: true,
+        },
+      })
+    ).toThrow(/artifactRef\.headContentId/);
+  });
+});

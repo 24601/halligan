@@ -159,3 +159,16 @@ describe('axReportSchema.validate', () => {
     ).not.toThrow();
   });
 });
+
+describe('axReportSchema prototype safety', () => {
+  it('treats a declared field inherited from the prototype as absent', () => {
+    const schema = axReportSchema({
+      constructor: { type: 'string', required: true },
+    });
+    // `metadata.constructor` exists on Object.prototype and is a function: a
+    // bare read would hand it to the validator as a present value.
+    expect(() =>
+      schema.validate({ references: ['rec-1'], metadata: {} })
+    ).toThrow(/field "constructor" is required/);
+  });
+});

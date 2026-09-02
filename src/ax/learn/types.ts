@@ -384,7 +384,11 @@ export class AxLearningRecordConflictError extends Error {
 /** Non-persistable or self-contradictory record content, rejected at construction. */
 export class AxLearningRecordValidationError extends Error {
   readonly code = 'learning_record_invalid';
-  /** JSON path inside the payload. Never the value. */
+  /**
+   * JSON path of the checked subtree inside the record — `payload.output`, not
+   * `payload.output.at[2]`. The message names the offending node exactly; this
+   * is the coarse field a caller routes on. Never the value.
+   */
   readonly path: string;
 
   constructor(path: string, message: string, options?: ErrorOptions) {

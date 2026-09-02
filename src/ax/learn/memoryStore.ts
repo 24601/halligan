@@ -9,6 +9,25 @@
  * There is no delete path. `markConsumed` marks; the only thing that ever
  * removes a record is the `maxRecordsPerScenario` cap, which drops the oldest
  * un-referenced interaction, never a report, and counts every drop.
+ *
+ * What the cap does NOT bound, said plainly so nobody reads it as a memory
+ * budget:
+ *
+ * - **report records**, and the interactions a stored report names (I12 —
+ *   dropping either would make an already graded exchange unresolvable). A
+ *   report-heavy scenario therefore exceeds the cap rather than breaking the
+ *   invariant, and `droppedRecords` stays at zero while it does;
+ * - **the reference counts** reports contribute. They are never decremented,
+ *   because nothing ever removes a report;
+ * - **the consumed id set**. It IS the enforcement of I9 — a consumed id can
+ *   never train again — so trimming it would let an exchange that has already
+ *   trained train a second time. It is unbounded by design and grows with
+ *   lifetime throughput rather than with the cap.
+ *
+ * That is the honest cost of an in-process store with no expiry semantics, and
+ * it is why this one is scoped to tests, local development, and processes with
+ * a bounded lifetime. A durable store owns its own retention policy and
+ * documents it there; ax schedules no cleanup for either.
  */
 
 import { type AxEventClock, AxSystemEventClock } from '../event/types.js';
@@ -32,7 +51,13 @@ const DEFAULT_PAGE_LIMIT = 100;
 
 export interface AxInMemoryLearningStoreOptions {
   readonly clock?: AxEventClock;
-  /** Cap on stored records per scenario. Default 10,000. */
+  /**
+   * Cap on stored records per scenario. Default 10,000.
+   *
+   * It bounds droppable interaction records only. Reports, live-referenced
+   * interactions, reference counts and the consumed id set are outside it —
+   * see the class doc for why each one has to be.
+   */
   readonly maxRecordsPerScenario?: number;
 }
 
@@ -419,6 +444,10 @@ export class AxInMemoryLearningStore implements AxLearningStore {
     }
     const promotedAt = this.clock.now();
     state.releases = state.releases.map((release, position) =>
+      // A demoted row keeps the `promotedAt` of the last time it WAS current:
+      // the chain is history, and erasing when a superseded release held the
+      // head would lose the only record of it. `current` is the currency flag;
+      // `promotedAt` is a timestamp on a row that may no longer be current.
       Object.freeze({
         ...release,
         current: position === index,
