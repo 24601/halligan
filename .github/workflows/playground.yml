@@ -1,0 +1,66 @@
+# Pry, the halligan playground. Deliberately a SEPARATE workflow: ci.yml owns
+# the library gates and is never edited by this lane, and `concurrency: pages`
+# means a Pages deploy queues behind any other rather than racing it.
+name: Playground
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'playground/**'
+      - 'src/ax/**'
+      - 'docs/**'
+      - '.github/workflows/playground.yml'
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 50
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build:index --workspace=@ax-llm/ax
+      - name: Typecheck the playground
+        run: npx vue-tsc --noEmit -p playground/tsconfig.json
+      - name: Build the playground
+        run: npm run build --workspace=@ax-llm/ax-playground
+        env:
+          PRY_BASE: /halligan/
+          PRY_COMMIT: ${{ github.sha }}
+      - name: Assert no node: specifier reached the bundle
+        run: |
+          if grep -rlE '(from|import)[[:space:]]*\(?[[:space:]]*["'"'"']node:' playground/dist/assets; then
+            echo "a node: specifier reached the emitted bundle" >&2
+            exit 1
+          fi
+          echo "no node: specifier in playground/dist/assets"
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: playground/dist
+
+  deploy:
+    needs: build
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

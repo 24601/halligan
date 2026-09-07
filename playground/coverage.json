@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "generated_note": "Hand-maintained skeleton. L6 owns the gate (playground/scripts/coverage-check.mjs) and the exemption list; L1 seeds it with D1 so the shape is fixed before the gate lands.",
+  "owner_lane": "L6",
+  "subsystems": {
+    "src/ax/mind": {
+      "demos": ["D1"],
+      "docs": ["docs/MIND.md"],
+      "skills": ["src/ax/skills/ax-mind.md"]
+    },
+    "src/ax/trajectory": {
+      "demos": ["D1"],
+      "docs": ["docs/TRAJECTORY.md"],
+      "skills": ["src/ax/skills/ax-trajectory.md"]
+    }
+  },
+  "docs": {
+    "docs/MIND.md": { "demos": ["D1"] },
+    "docs/TRAJECTORY.md": { "demos": ["D1"] }
+  },
+  "demos": {
+    "D1": {
+      "name": "Mind",
+      "lane": "L1",
+      "status": "live",
+      "runs": ["browser"],
+      "seed": 7,
+      "sliver": "slivers/d1.svg",
+      "symbols": [
+        "mind",
+        "AxMindDeterministicProgram",
+        "AxInMemoryTrajectoryStore",
+        "AxInMemoryEventStore",
+        "AxManualEventClock",
+        "axProjectTrajectory",
+        "axBuildTrajectoryRollups",
+        "AxInMemoryTrajectoryRollupStore",
+        "axDeterministicTrajectorySummarizer",
+        "axTrajectoryContextBudget",
+        "axTrajectoryRecentSize",
+        "axMindPaceDelay",
+        "axMindPacerFuse",
+        "axRecoverMindPacerState"
+      ]
+    }
+  },
+  "exempt": {}
+}

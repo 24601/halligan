@@ -117,6 +117,23 @@
   },
   "overrides": [
     {
+      // Vue SFCs: biome analyses the <script> block but not the <template>, so
+      // every component import and every handler referenced only from the
+      // template reads as unused. Same treatment as .astro below.
+      "includes": ["**/*.vue"],
+      "linter": {
+        "rules": {
+          "correctness": {
+            "noUnusedImports": "off",
+            "noUnusedVariables": "off"
+          },
+          "style": {
+            "useImportType": "off"
+          }
+        }
+      }
+    },
+    {
       "includes": ["**/*.astro"],
       "linter": {
         "rules": {
